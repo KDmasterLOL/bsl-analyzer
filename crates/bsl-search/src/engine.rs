@@ -3,7 +3,7 @@ use crate::embedder::{Embedder, EmbedderConfig};
 use crate::error::SearchError;
 use crate::index::VectorIndex;
 use crate::local_baseline::LocalStoreBaselineAdapter;
-use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+use crate::ports::{ModuleSnapshot, ModuleSnapshotSource, SnapshotCatalog, SnapshotContentStore};
 use crate::publish::EmbeddingExecutionPolicy;
 use crate::resolver::{InMemoryResolvedViewResolver, ResolvedView};
 use crate::store::Store;
@@ -146,6 +146,11 @@ pub struct SearchEngine {
     /// with their outbound graph context before embedding. `None` keeps embeddings
     /// graph-free.
     graph_context_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
+    /// Optional resident-host snapshot source (dependency-inverted via
+    /// [`crate::ports::ModuleSnapshotSource`]). When set, the overlay's incremental reindex
+    /// chunks the resident's shared parse instead of parsing the file itself. `None` keeps the
+    /// pure disk read+parse path.
+    module_snapshot_source: Option<Arc<dyn ModuleSnapshotSource>>,
 }
 
 /// Outcome of [`SearchEngine::refresh_dirty_contexts`]: how many context-dirty paths
@@ -185,6 +190,7 @@ impl SearchEngine {
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
             graph_context_provider: None,
+            module_snapshot_source: None,
         })
     }
 
@@ -275,6 +281,7 @@ impl SearchEngine {
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
             graph_context_provider: None,
+            module_snapshot_source: None,
         })
     }
 
@@ -301,6 +308,7 @@ impl SearchEngine {
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
             graph_context_provider: None,
+            module_snapshot_source: None,
         })
     }
 
@@ -329,6 +337,64 @@ impl SearchEngine {
             cache.set_graph_context_provider(provider.clone());
         }
         self.graph_context_provider = Some(provider);
+    }
+
+    /// Inject the resident-host snapshot source (dependency-inverted). Once set, the overlay's
+    /// incremental reindex prefers the resident's shared parse. Does not touch cached entries:
+    /// the source changes only HOW a file is read+parsed, never the chunk output.
+    pub fn set_module_snapshot_source(&mut self, source: Arc<dyn ModuleSnapshotSource>) {
+        self.module_snapshot_source = Some(source);
+    }
+
+    /// The injected resident-host snapshot source, cloned so the orchestrator can prefetch
+    /// snapshots OFF the engine lock (the resident read must never overlap the engine lock).
+    pub fn module_snapshot_source(&self) -> Option<Arc<dyn ModuleSnapshotSource>> {
+        self.module_snapshot_source.clone()
+    }
+
+    /// The overlay paths currently marked dirty, so the caller can prefetch resident snapshots
+    /// for them off-lock and feed them back through [`Self::reindex_dirty_from_snapshots`].
+    pub fn workspace_overlay_dirty_paths(&self) -> Result<Vec<String>, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.dirty_paths_list())
+    }
+
+    /// How many overlay entries have been built from a resident-provided shared parse since the
+    /// engine's workspace root was set. Observability for the resident-fed reindex (proves the
+    /// shared-parse path fired, e.g. in a regression test).
+    pub fn workspace_overlay_resident_fed_count(&self) -> Result<usize, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.resident_fed_count())
+    }
+
+    /// Reindex the dirty overlay paths using prefetched resident snapshots (shared parse) where
+    /// available, disk-reading the rest. The `snapshots` map is prefetched by the caller with no
+    /// engine lock held, so this method — which does take the engine's overlay-cache lock — never
+    /// touches the resident host, keeping the resident and engine locks strictly disjoint.
+    pub fn reindex_dirty_from_snapshots(
+        &self,
+        snapshots: &HashMap<String, ModuleSnapshot>,
+    ) -> Result<(), SearchError> {
+        let Some(workspace_root) = &self.workspace_root else {
+            return Ok(());
+        };
+        let mut cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        cache.reindex_dirty_from_snapshots(
+            workspace_root,
+            &self.store,
+            self.batch_size,
+            self.workspace_baseline_hash_mode,
+            snapshots,
+        )
     }
 
     pub fn index_directory(

@@ -123,6 +123,20 @@ impl Analysis {
         self.db.file_text(file_id).to_string()
     }
 
+    /// A file's source text as the shared `Arc<str>` the database holds, without a `String`
+    /// copy. Reads the disk-backed text under the same LRU/revision contract as any query.
+    pub fn file_text_arc(&self, file_id: FileId) -> Arc<str> {
+        use ide_db::base_db::SourceDatabase;
+        self.db.file_text(file_id)
+    }
+
+    /// The file's parsed syntax tree, memoized in the database. Shares the one parse the rest
+    /// of the analysis rides, so a consumer can chunk it without re-parsing the source.
+    pub fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
+        use ide_db::base_db::RootQueryDb;
+        self.db.parse(file_id)
+    }
+
     pub fn file_diagnostics_cached(
         &self,
         file_id: FileId,

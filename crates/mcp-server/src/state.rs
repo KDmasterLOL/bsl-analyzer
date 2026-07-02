@@ -21,6 +21,14 @@ use std::{
 /// (queueing) rather than bailing out on brief contention, not by widening the lock.
 pub(crate) type SharedSearchEngine = Arc<Mutex<Option<SearchEngine>>>;
 
+/// Per-query cap on how many dirty overlay paths [`SharedState::prefetch_resident_overlay`]
+/// resolves from the shared resident parse. A branch switch can dirty thousands of paths;
+/// prefetching them all on the query thread would be unbounded work. Paths beyond the cap stay
+/// dirty and are served by the query's own lazy disk refresh and by subsequent queries' prefetch
+/// passes, so nothing is lost — the cap is purely a per-query budget. 64 keeps the pre-pass cheap
+/// while covering the common "edit a handful of files, then search" case in one shot.
+const MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY: usize = 64;
+
 #[derive(Clone)]
 pub struct SharedState {
     workspace_root: Option<PathBuf>,
@@ -347,6 +355,17 @@ impl SharedState {
             .with_change_hub(change_hub.clone())
             .with_publish_hook(publish_hook);
 
+        // The `metadata` tool reads the resident diagnostics host (per-MDO substrate for
+        // `object`, Channel-2 `load_configuration` for `tree`/`info`); it is seeded and
+        // kept fresh by the resident's own drift poll, so no separate configuration
+        // snapshot is loaded here. The same resident serves the search overlay's incremental
+        // reindex through the snapshot-source adapter.
+        let diagnostics =
+            DiagnosticsState::for_workspace(source_dir.clone()).with_change_hub(change_hub.clone());
+        let snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource> = Arc::new(
+            crate::diagnostics_state::ResidentModuleSnapshotSource::new(diagnostics.clone()),
+        );
+
         Self::spawn_workspace_search_init(
             Arc::clone(&search_engine),
             Arc::clone(&index_progress),
@@ -358,6 +377,7 @@ impl SharedState {
             baseline_runtime.external_baseline.clone(),
             graph.clone(),
             Arc::clone(&embed_flight),
+            Arc::clone(&snapshot_source),
         );
 
         Self::spawn_search_sink(
@@ -367,13 +387,6 @@ impl SharedState {
             config_path.to_path_buf(),
             graph.clone(),
         );
-
-        // The `metadata` tool reads the resident diagnostics host (per-MDO substrate for
-        // `object`, Channel-2 `load_configuration` for `tree`/`info`); it is seeded and
-        // kept fresh by the resident's own drift poll, so no separate configuration
-        // snapshot is loaded here.
-        let diagnostics =
-            DiagnosticsState::for_workspace(source_dir.clone()).with_change_hub(change_hub.clone());
 
         Self {
             workspace_root: Some(source_dir),
@@ -438,6 +451,7 @@ impl SharedState {
         external_baseline: Option<Arc<ExternalBaselineService>>,
         graph: GraphState,
         embed_flight: Arc<EmbedFlight>,
+        snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource>,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
@@ -502,6 +516,12 @@ impl SharedState {
                 let has_leftover_marks =
                     init.engine.context_dirty_paths("code").map(|m| !m.is_empty()).unwrap_or(false);
                 let leftover_bound = init.engine.mark_seq_handle().load(Ordering::SeqCst);
+
+                // Wire the resident snapshot source so the overlay reindex can read text+parse
+                // from the shared resident host. Set before publish so the first query already
+                // sees it; the resident read itself is prefetched off the engine lock by
+                // `prefetch_resident_overlay`, so the two locks never nest.
+                init.engine.set_module_snapshot_source(snapshot_source);
 
                 if let Ok(mut guard) = search_engine.lock() {
                     *guard = Some(init.engine);
@@ -1497,6 +1517,9 @@ impl SharedState {
                 self.external_baseline.clone(),
                 self.graph.clone(),
                 Arc::clone(&self.embed_flight),
+                Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
+                    self.diagnostics.clone(),
+                )),
             );
         }
     }
@@ -1982,6 +2005,81 @@ impl SharedState {
                     Err(e) => tracing::warn!("search rescan reconcile failed: {e}"),
                 }
             }
+        }
+    }
+
+    /// Prefetch resident snapshots for the overlay's dirty paths and feed them into the
+    /// incremental reindex, so a following query serves chunks cut from the SHARED resident
+    /// parse instead of a second disk read+parse. Called at the top of a code-search request,
+    /// before the query acquires the engine lock.
+    ///
+    /// Bounded to [`MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY`] paths per call.
+    ///
+    /// Lock discipline: the resident read must never overlap the engine lock. So this
+    /// reads the dirty-path list and the source handle under a brief engine lock, RELEASES it,
+    /// fetches the snapshots with NO lock held, then applies them under a second brief engine
+    /// lock that only touches the overlay cache (never the resident). A resident that is
+    /// absent/loading, or a path it cannot serve, is simply missing from the map and the
+    /// reindex disk-reads it — so search never regresses when the resident is unavailable.
+    pub(crate) fn prefetch_resident_overlay(engine: &SharedSearchEngine) {
+        let (source, workspace_root, dirty) = {
+            let Ok(guard) = engine.lock() else { return };
+            let Some(engine) = guard.as_ref() else { return };
+            let Some(source) = engine.module_snapshot_source() else { return };
+            // The overlay keys dirty paths relative to THIS engine root (the project's — possibly
+            // nested — source root); resolving them for the resident needs the same root.
+            let Some(workspace_root) = engine.workspace_root().map(Path::to_path_buf) else {
+                return;
+            };
+            match engine.workspace_overlay_dirty_paths() {
+                Ok(dirty) => (source, workspace_root, dirty),
+                Err(e) => {
+                    tracing::debug!("overlay dirty-path read failed: {e}");
+                    return;
+                }
+            }
+        };
+        if dirty.is_empty() {
+            return;
+        }
+
+        // Search and diagnostics drain independent hub cursors and a query never polls drift on
+        // its own, so the resident is usually BEHIND disk on the just-edited files. Reconcile
+        // pending drift FIRST — off the engine lock, resident lock only (I3 holds) — so the
+        // snapshot text below matches disk and the byte-compare hits instead of falling back to a
+        // disk read. A resident rebuild in flight is skipped inside the drain, never blocking here.
+        source.catch_up();
+
+        // Resident reads run OFF the engine lock. The `!Send` parses stay in this local map on
+        // the calling thread and never cross a thread or an await boundary.
+        let mut snapshots: std::collections::HashMap<String, bsl_search::ModuleSnapshot> =
+            std::collections::HashMap::new();
+        // Cap the per-query resident prefetch: a branch switch can dirty thousands of paths, and
+        // fetching+reindexing them all on the query thread would be unbounded work. Serve at most
+        // this many from the shared parse per query; the remainder STAY dirty and are picked up by
+        // the query's own lazy disk refresh and by later queries' prefetches. The cap is the whole
+        // budget — no separate time budget needed.
+        for rel_path in dirty.iter().take(MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY) {
+            // Resolve the engine-relative dirty path to an ABSOLUTE path against the engine root
+            // before handing it to the resident: the resident is indexed under the OUTER workspace
+            // root, so a bare relative path would be re-joined against that root and silently miss
+            // on every nested config. The snapshot map stays keyed by the engine rel, which is
+            // what `reindex_dirty_from_snapshots` looks up.
+            let abs_path = workspace_root.join(rel_path);
+            if let bsl_search::SnapshotFetch::Fetched(snapshot) =
+                source.text_and_parse(&abs_path.to_string_lossy())
+            {
+                snapshots.insert(rel_path.clone(), snapshot);
+            }
+        }
+        if snapshots.is_empty() {
+            return;
+        }
+
+        let Ok(guard) = engine.lock() else { return };
+        let Some(engine) = guard.as_ref() else { return };
+        if let Err(e) = engine.reindex_dirty_from_snapshots(&snapshots) {
+            tracing::debug!("resident-fed overlay reindex failed: {e}");
         }
     }
 
@@ -3882,6 +3980,241 @@ mod tests {
             engine_arc.lock().unwrap().as_ref().unwrap().file_count().unwrap(),
             0,
             "a clean walk reconciles the deleted file out",
+        );
+    }
+
+    /// Write a common module (descriptor XML + `Ext/Module.bsl`) under `base`.
+    fn write_common_module_tree(base: &std::path::Path, name: &str, body: &str) {
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\">\n\
+             \t<CommonModule uuid=\"00000000-0000-0000-0000-000000000001\">\n\
+             \t\t<Properties><Name>{name}</Name><Server>true</Server></Properties>\n\
+             \t</CommonModule>\n\
+             </MetaDataObject>\n"
+        );
+        fs::create_dir_all(base.join("CommonModules").join(name).join("Ext")).unwrap();
+        fs::write(base.join("CommonModules").join(format!("{name}.xml")), xml).unwrap();
+        fs::write(base.join("CommonModules").join(name).join("Ext").join("Module.bsl"), body)
+            .unwrap();
+    }
+
+    /// The overlay keys dirty paths relative to the ENGINE root (the nested config source root),
+    /// while the resident is indexed under the OUTER workspace root. `prefetch_resident_overlay`
+    /// must resolve each dirty rel to an absolute path against the engine root before asking the
+    /// resident, so a nested config (every real workspace) actually gets a resident-fed reindex.
+    /// Reverting the absolute-join (passing the rel verbatim) leaves the resident-fed count at 0.
+    #[test]
+    fn prefetch_resident_overlay_feeds_nested_config_from_resident() {
+        use crate::diagnostics_state::{
+            DiagnosticsState, DiagnosticsStatus, ResidentModuleSnapshotSource,
+        };
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let outer = dir.path().to_path_buf();
+        let cf = outer.join("src").join("cf");
+        fs::create_dir_all(&cf).unwrap();
+        fs::write(
+            cf.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &cf,
+            "Сервер",
+            "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n",
+        );
+        let module = cf.join("CommonModules").join("Сервер").join("Ext").join("Module.bsl");
+
+        // Overlay engine rooted at the NESTED config root, so `source_path != outer`.
+        let mut engine = SearchEngine::fts_only(&outer.join("search.db")).unwrap();
+        engine.set_workspace_root(cf.clone());
+        engine.enable_workspace_watcher_mode();
+        engine.prime_workspace_overlay().unwrap();
+
+        // The file grows on disk so the reindex genuinely rebuilds it (fingerprint differs).
+        fs::write(
+            &module,
+            "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n\
+             Процедура Ещё() Экспорт КонецПроцедуры\n",
+        )
+        .unwrap();
+
+        // The resident is built against the OUTER root AFTER the edit, so it holds the new bytes.
+        let diagnostics = DiagnosticsState::for_workspace(outer.clone());
+        diagnostics.ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !matches!(diagnostics.status(), DiagnosticsStatus::Ready { .. }) {
+            assert!(Instant::now() < deadline, "the resident did not become ready");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let source: Arc<dyn bsl_search::ModuleSnapshotSource> =
+            Arc::new(ResidentModuleSnapshotSource::new(diagnostics.clone()));
+        engine.set_module_snapshot_source(source);
+        assert!(
+            engine.mark_workspace_path_dirty(&module).unwrap(),
+            "the nested module marks dirty"
+        );
+
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        SharedState::prefetch_resident_overlay(&engine_arc);
+
+        let fed = engine_arc
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .workspace_overlay_resident_fed_count()
+            .unwrap();
+        assert_eq!(
+            fed, 1,
+            "a nested-config dirty path must be served from the resident's shared parse",
+        );
+    }
+
+    /// Search and diagnostics drain independent hub cursors, so a just-edited file leaves the
+    /// resident BEHIND disk. `prefetch_resident_overlay` must catch the resident up on pending
+    /// drift FIRST, so the snapshot text matches disk and the reindex is resident-fed rather than
+    /// falling back to a disk read. Reverting the `catch_up` call leaves the resident stale, the
+    /// byte-compare misses, and the resident-fed count stays 0.
+    #[test]
+    fn prefetch_resident_overlay_catches_up_stale_resident_before_reading() {
+        use crate::change_hub::WorkspaceChangeHub;
+        use crate::diagnostics_state::{
+            DiagnosticsState, DiagnosticsStatus, ResidentModuleSnapshotSource,
+        };
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(
+            root.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &root,
+            "Сервер",
+            "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n",
+        );
+        let module = root.join("CommonModules").join("Сервер").join("Ext").join("Module.bsl");
+
+        let hub = WorkspaceChangeHub::start(vec![root.clone()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the hub must arm");
+        let mut observer = hub.subscribe();
+
+        let mut engine = SearchEngine::fts_only(&root.join("search.db")).unwrap();
+        engine.set_workspace_root(root.clone());
+        engine.enable_workspace_watcher_mode();
+        engine.prime_workspace_overlay().unwrap();
+
+        // Resident built at v1, wired to the SAME hub, but it never polls drift on its own.
+        let diagnostics =
+            DiagnosticsState::for_workspace(root.clone()).with_change_hub(hub.clone());
+        diagnostics.ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !matches!(diagnostics.status(), DiagnosticsStatus::Ready { .. }) {
+            assert!(Instant::now() < deadline, "the resident did not become ready");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let source: Arc<dyn bsl_search::ModuleSnapshotSource> =
+            Arc::new(ResidentModuleSnapshotSource::new(diagnostics.clone()));
+        engine.set_module_snapshot_source(source);
+
+        // Edit on disk (v2, longer): the resident's recorded revision is now stale.
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(
+            &module,
+            "&НаСервере\nФункция Ч() Экспорт Возврат 2; КонецФункции\n\
+             Процедура Ещё() Экспорт КонецПроцедуры\n",
+        )
+        .unwrap();
+        assert!(engine.mark_workspace_path_dirty(&module).unwrap());
+
+        // Wait until the hub delivered the edit, so the diagnostics cursor drains it in `catch_up`.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut delivered = false;
+        while Instant::now() < deadline {
+            let batch = hub.drain(observer);
+            observer = batch.cursor;
+            if batch.entries.iter().any(|e| e.raw.to_string_lossy().ends_with("Module.bsl")) {
+                delivered = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(delivered, "the hub delivered the edit");
+
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        SharedState::prefetch_resident_overlay(&engine_arc);
+
+        let fed = engine_arc
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .workspace_overlay_resident_fed_count()
+            .unwrap();
+        assert_eq!(
+            fed, 1,
+            "catch_up must reconcile the stale resident so the snapshot matches disk (fed reindex)",
+        );
+    }
+
+    /// The per-query prefetch is capped: marking N + k paths dirty serves exactly N from the
+    /// shared parse in one prefetch, and the remaining k stay dirty for the lazy disk path / a
+    /// later prefetch. This bounds the query-path work S2 adds.
+    #[test]
+    fn prefetch_resident_overlay_caps_paths_per_query() {
+        use super::MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY;
+        use bsl_search::{ModuleSnapshot, ModuleSnapshotSource, SnapshotFetch};
+
+        struct DiskFakeSource;
+        impl ModuleSnapshotSource for DiskFakeSource {
+            fn text_and_parse(&self, path: &str) -> SnapshotFetch {
+                match std::fs::read_to_string(path) {
+                    Ok(text) => {
+                        let root = parser::parse(&text).syntax_node();
+                        SnapshotFetch::Fetched(ModuleSnapshot { text: text.into(), root })
+                    }
+                    Err(_) => SnapshotFetch::Unavailable,
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let mut engine = SearchEngine::fts_only(&workspace.join("search.db")).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        engine.prime_workspace_overlay().unwrap();
+        engine.set_module_snapshot_source(Arc::new(DiskFakeSource));
+
+        let extra = 3usize;
+        let total = MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY + extra;
+        for i in 0..total {
+            let rel = format!("Module{i}.bsl");
+            fs::write(workspace.join(&rel), format!("Процедура П{i}()\nКонецПроцедуры\n")).unwrap();
+            assert!(engine.mark_workspace_path_dirty(workspace.join(&rel)).unwrap());
+        }
+
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        SharedState::prefetch_resident_overlay(&engine_arc);
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert_eq!(
+            engine.workspace_overlay_resident_fed_count().unwrap(),
+            MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY,
+            "exactly the per-query cap is served from the shared parse",
+        );
+        assert_eq!(
+            engine.workspace_overlay_dirty_paths().unwrap().len(),
+            extra,
+            "paths beyond the cap stay dirty for the lazy disk path / a later prefetch",
         );
     }
 }

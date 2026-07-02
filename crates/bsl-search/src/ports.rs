@@ -7,6 +7,48 @@ use crate::external_baseline::BaselineEmbeddingStats;
 use crate::resolver::ResolvedView;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+
+/// A resident-host-backed snapshot of one module's text and its already-computed syntax
+/// tree. `text` is the verbatim source (no BOM strip, no newline normalization — matching
+/// the disk read the overlay would otherwise perform) and `root` is the shared parse the
+/// resident already holds, so the overlay reindex chunks it via
+/// [`code_chunk::Chunker::chunk_parsed`] instead of parsing the file a second time.
+pub struct ModuleSnapshot {
+    pub text: Arc<str>,
+    pub root: syntax::SyntaxNode,
+}
+
+/// The result of a [`ModuleSnapshotSource`] lookup.
+pub enum SnapshotFetch {
+    /// The resident served the file: its verbatim text plus the shared parse.
+    Fetched(ModuleSnapshot),
+    /// The resident could not serve the file (absent, loading, evicted, or a read that
+    /// failed twice under drift). The caller falls back to its own disk read, so a missing
+    /// resident degrades to today's behavior rather than surfacing an error.
+    Unavailable,
+}
+
+/// Inverts the dependency from the search index (this crate, a lower layer) up to the
+/// resident salsa host: `bsl-search` must not depend on the host crates or `mcp-server`.
+/// An implementor resolves an absolute `.bsl` path to the resident file and hands back its
+/// text and shared parse, letting the overlay's incremental reindex share the one repository
+/// read+parse instead of doing its own.
+pub trait ModuleSnapshotSource: Send + Sync {
+    /// `path` is the file's ABSOLUTE path. The overlay keys dirty entries relative to its own
+    /// (possibly nested) workspace root, which need not match the resident's root, so the
+    /// caller resolves the rel to an absolute path before calling — a workspace-relative path
+    /// would be re-joined against the resident's root and silently miss. Returns
+    /// [`SnapshotFetch::Unavailable`] whenever the resident cannot serve the file.
+    fn text_and_parse(&self, path: &str) -> SnapshotFetch;
+
+    /// Reconcile any pending workspace drift before a batch of [`Self::text_and_parse`] calls,
+    /// so a file edited just before the query reads fresh instead of the resident's stale
+    /// pre-edit text. Default: a no-op for sources with no drift notion. An implementor must
+    /// take only its own lock (never a caller's), so the caller can invoke this with no other
+    /// lock held.
+    fn catch_up(&self) {}
+}
 
 pub trait EmbeddingGenerator {
     fn model_id(&self) -> &str;

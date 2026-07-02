@@ -2,7 +2,7 @@ use crate::domain::{BaselineRef, CorpusId, DocumentPath, IndexedDocument, Search
 use crate::embedder::Embedder;
 use crate::error::SearchError;
 use crate::lexical::lexical_hits_for_documents;
-use crate::ports::GraphContextProvider;
+use crate::ports::{GraphContextProvider, ModuleSnapshot};
 use crate::store::Store;
 use code_chunk::Chunker;
 use std::collections::{HashMap, HashSet};
@@ -131,13 +131,46 @@ pub struct WorkspaceOverlayCache {
     /// the watcher re-marked while the lock-free embed was in flight (same path, newer sequence).
     dirty_paths: HashMap<String, u64>,
     dirty_seq: u64,
+    /// Consecutive refresh-failure count per retained dirty path. A path whose stat/read fails is
+    /// re-marked dirty (so the next refresh retries) with its count bumped; after
+    /// [`MAX_DIRTY_REFRESH_FAILURES`] it is dropped from the dirty set with a warning rather than
+    /// retried forever. A fresh [`Self::mark_dirty_path`] (a new watcher event) clears the count,
+    /// and a successful refresh drops the entry, so the count is strictly consecutive.
+    dirty_failures: HashMap<String, u32>,
     watcher_mode: bool,
     initialized: bool,
+    /// How many overlay entries have been (re)built from a resident-provided shared parse, rather
+    /// than a self-parsed disk read. A cumulative observability counter — proves the resident-fed
+    /// path actually fires — reset only by [`Self::clear`].
+    resident_fed_count: usize,
     /// Optional graph-context provider (dependency-inverted). When set, overlay
     /// (uncommitted-edit) chunks are enriched with their call-graph context before
     /// embedding, matching the local index.
     graph_context_provider: Option<Arc<dyn GraphContextProvider>>,
 }
+
+/// The stored raw-bytes baseline for a dirty-path refresh: per-path stored hashes plus the recipe
+/// to recompute a file's hash. Bundled so [`WorkspaceOverlayCache::refresh_dirty_paths`] stays
+/// within the argument-count lint.
+struct RawBaseline<'a> {
+    files: &'a HashMap<String, Vec<u8>>,
+    hash_mode: BaselineHashMode,
+}
+
+/// The baseline a snapshot-fed dirty reindex resolves through the store before it touches the dirty
+/// set. Owning the loaded value (rather than dispatching inline) lets the fallible store reads run
+/// FIRST, so a store error propagates with every dirty flag still intact.
+enum DirtyBaseline {
+    Manifest(HashMap<String, String>),
+    Raw(HashMap<String, Vec<u8>>),
+}
+
+/// Consecutive stat/read failures tolerated for a retained dirty path before it is dropped from
+/// the dirty set (with a warning). Bounds the per-query retry of a permanently-unreadable path
+/// (a deleted file, a path shaped like a `.bsl` that is really a directory) to a fixed budget;
+/// strictly better than the pre-S2 behaviour, which silently dropped a path on its FIRST failure.
+/// A later watcher event for the same path re-marks it fresh and resets the count.
+const MAX_DIRTY_REFRESH_FAILURES: u32 = 3;
 
 impl std::fmt::Debug for WorkspaceOverlayCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -146,8 +179,10 @@ impl std::fmt::Debug for WorkspaceOverlayCache {
             .field("hidden_paths", &self.hidden_paths)
             .field("embedding_cache_len", &self.embedding_cache.len())
             .field("dirty_paths", &self.dirty_paths)
+            .field("dirty_failures", &self.dirty_failures)
             .field("watcher_mode", &self.watcher_mode)
             .field("initialized", &self.initialized)
+            .field("resident_fed_count", &self.resident_fed_count)
             .field("graph_context", &self.graph_context_provider.is_some())
             .finish()
     }
@@ -158,6 +193,8 @@ impl WorkspaceOverlayCache {
         self.entries.clear();
         self.hidden_paths.clear();
         self.dirty_paths.clear();
+        self.dirty_failures.clear();
+        self.resident_fed_count = 0;
         self.initialized = false;
     }
 
@@ -175,8 +212,107 @@ impl WorkspaceOverlayCache {
     }
 
     pub fn mark_dirty_path(&mut self, rel_path: impl Into<String>) {
+        let rel_path = rel_path.into();
+        // A fresh watcher event is a clean slate: clear any consecutive-failure count so a path
+        // that failed to refresh before, then genuinely changed, gets the full retry budget again.
+        self.dirty_failures.remove(&rel_path);
         self.dirty_seq += 1;
-        self.dirty_paths.insert(rel_path.into(), self.dirty_seq);
+        self.dirty_paths.insert(rel_path, self.dirty_seq);
+    }
+
+    /// Re-mark a path whose refresh failed (stat/read error), carrying its consecutive-failure
+    /// count. Past [`MAX_DIRTY_REFRESH_FAILURES`] the path is dropped from the dirty set with a
+    /// warning instead of retried forever; a later [`Self::mark_dirty_path`] resets it.
+    fn retain_dirty_after_failure(&mut self, rel_path: String, prior_failures: u32, reason: &str) {
+        let failures = prior_failures + 1;
+        if failures >= MAX_DIRTY_REFRESH_FAILURES {
+            tracing::warn!(
+                path = %rel_path,
+                reason,
+                failures,
+                "dropping overlay dirty path after repeated refresh failures; a later change \
+                 re-marks it fresh"
+            );
+            return;
+        }
+        self.dirty_failures.insert(rel_path.clone(), failures);
+        self.dirty_seq += 1;
+        self.dirty_paths.insert(rel_path, self.dirty_seq);
+    }
+
+    /// The paths currently marked dirty (awaiting reindex), for a caller that prefetches
+    /// resident snapshots off-lock before feeding them back via
+    /// [`Self::reindex_dirty_from_snapshots`].
+    pub fn dirty_paths_list(&self) -> Vec<String> {
+        self.dirty_paths.keys().cloned().collect()
+    }
+
+    /// Reindex the currently-dirty paths, chunking a resident-provided parse where the
+    /// snapshot's text matches disk and reading+parsing from disk otherwise. Runs with no
+    /// embedder (the interactive `ReuseOnly` discipline: lexical immediately, vectors from the
+    /// background pass) and never cold-scans. A no-op until the overlay has been initialized,
+    /// so a path marked before the first full refresh is left for that refresh to pick up.
+    pub fn reindex_dirty_from_snapshots(
+        &mut self,
+        workspace_root: &Path,
+        store: &Store,
+        batch_size: usize,
+        hash_mode: BaselineHashMode,
+        snapshots: &HashMap<String, ModuleSnapshot>,
+    ) -> Result<(), SearchError> {
+        if !self.initialized || self.dirty_paths.is_empty() {
+            return Ok(());
+        }
+        // Process ONLY the prefetched snapshot paths that are still dirty; every other dirty path
+        // stays in the set, served by the query's own lazy disk refresh and by later prefetches.
+        // The prefetch already capped how many snapshots it fetched, so this bounds the
+        // under-lock apply to that same per-query budget (no unbounded reindex here).
+        let paths: Vec<String> =
+            snapshots.keys().filter(|path| self.dirty_paths.contains_key(*path)).cloned().collect();
+        if paths.is_empty() {
+            return Ok(());
+        }
+        // Load the baseline through the fallible store reads BEFORE clearing any dirty flag. A
+        // store-wide error here (a schema/manifest read that fails) is NOT a per-path fault: it must
+        // leave every prefetched path dirty — with its consecutive-failure budget untouched — so a
+        // later prefetch retries it, rather than silently dropping stale overlay entries that no
+        // query would ever revisit. Removing the keys first (then hitting `?`) would strand them:
+        // neither reindexed nor dirty. The budget is reserved for genuine per-path stat/read
+        // failures inside the refresh body (see `retain_dirty_after_failure`); charging a transient
+        // store error to it would let a few store hiccups exhaust MAX_DIRTY_REFRESH_FAILURES and
+        // drop many healthy paths at once. So the keys leave the dirty set only once the baseline is
+        // in hand and each path's per-path refresh owns its outcome.
+        let baseline = match store.load_baseline_manifest_fingerprints("code")? {
+            Some(manifest_fingerprints) => DirtyBaseline::Manifest(manifest_fingerprints),
+            None => {
+                DirtyBaseline::Raw(store.all_files_in_collection("code")?.into_iter().collect())
+            }
+        };
+
+        for path in &paths {
+            self.dirty_paths.remove(path);
+        }
+
+        match baseline {
+            DirtyBaseline::Manifest(manifest_fingerprints) => self
+                .refresh_dirty_paths_from_manifest(
+                    paths,
+                    &manifest_fingerprints,
+                    workspace_root,
+                    None,
+                    batch_size,
+                    snapshots,
+                )?,
+            DirtyBaseline::Raw(baseline_files) => self.refresh_dirty_paths(
+                paths,
+                RawBaseline { files: &baseline_files, hash_mode },
+                workspace_root,
+                None,
+                batch_size,
+                snapshots,
+            )?,
+        }
+        Ok(())
     }
 
     /// `allow_cold_scan` gates the only expensive operation here: a cold full-tree scan + read +
@@ -204,11 +340,14 @@ impl WorkspaceOverlayCache {
                     store,
                 )?;
             } else if !self.dirty_paths.is_empty() {
+                let dirty: Vec<String> = self.dirty_paths.drain().map(|(path, _)| path).collect();
                 self.refresh_dirty_paths_from_manifest(
+                    dirty,
                     manifest_fingerprints,
                     workspace_root,
                     embedder,
                     batch_size,
+                    &HashMap::new(),
                 )?;
             }
             self.initialized = true;
@@ -217,11 +356,14 @@ impl WorkspaceOverlayCache {
             // watcher-marked dirty-path refresh, but a `!watcher_mode` (polling) cache must NOT
             // re-run the full scan. An uninitialized cache stays empty (and `initialized` stays
             // false) so the next warmup/watcher pass still builds it.
+            let dirty: Vec<String> = self.dirty_paths.drain().map(|(path, _)| path).collect();
             self.refresh_dirty_paths_from_manifest(
+                dirty,
                 manifest_fingerprints,
                 workspace_root,
                 embedder,
                 batch_size,
+                &HashMap::new(),
             )?;
         }
         Ok(())
@@ -252,12 +394,14 @@ impl WorkspaceOverlayCache {
                     hash_mode,
                 )?;
             } else if !self.dirty_paths.is_empty() {
+                let dirty: Vec<String> = self.dirty_paths.drain().map(|(path, _)| path).collect();
                 self.refresh_dirty_paths(
-                    &baseline_files,
+                    dirty,
+                    RawBaseline { files: &baseline_files, hash_mode },
                     workspace_root,
                     embedder,
                     batch_size,
-                    hash_mode,
+                    &HashMap::new(),
                 )?;
             }
             self.initialized = true;
@@ -267,12 +411,14 @@ impl WorkspaceOverlayCache {
             // uninitialized cache stays empty for the warmup/watcher to build later.
             let baseline_files: HashMap<String, Vec<u8>> =
                 store.all_files_in_collection("code")?.into_iter().collect();
+            let dirty: Vec<String> = self.dirty_paths.drain().map(|(path, _)| path).collect();
             self.refresh_dirty_paths(
-                &baseline_files,
+                dirty,
+                RawBaseline { files: &baseline_files, hash_mode },
                 workspace_root,
                 embedder,
                 batch_size,
-                hash_mode,
+                &HashMap::new(),
             )?;
         }
         Ok(())
@@ -344,6 +490,7 @@ impl WorkspaceOverlayCache {
                 batch_size,
                 &mut self.embedding_cache,
                 provider.as_deref(),
+                None,
             )?;
             if baseline_hash.is_some() {
                 hidden_paths.insert(file.rel_path.clone());
@@ -366,15 +513,23 @@ impl WorkspaceOverlayCache {
 
     fn refresh_dirty_paths(
         &mut self,
-        baseline_files: &HashMap<String, Vec<u8>>,
+        dirty_paths: Vec<String>,
+        baseline: RawBaseline<'_>,
         workspace_root: &Path,
         embedder: Option<&Embedder>,
         batch_size: usize,
-        hash_mode: BaselineHashMode,
+        snapshots: &HashMap<String, ModuleSnapshot>,
     ) -> Result<(), SearchError> {
-        let dirty_paths: Vec<String> = self.dirty_paths.drain().map(|(path, _)| path).collect();
+        let RawBaseline { files: baseline_files, hash_mode } = baseline;
+        // A path whose stat/read transiently fails is re-marked dirty (carrying its
+        // consecutive-failure count) so the next refresh retries it — bounded by
+        // [`MAX_DIRTY_REFRESH_FAILURES`] — rather than being silently dropped.
+        let mut retry: Vec<(String, u32, &'static str)> = Vec::new();
 
         for rel_path in dirty_paths {
+            // Removing the count here clears it on success (the common path) and hands the prior
+            // value to `retain_dirty_after_failure` on failure, keeping the streak consecutive.
+            let prior_failures = self.dirty_failures.remove(&rel_path).unwrap_or(0);
             let baseline_hash = baseline_files.get(&rel_path);
             let abs_path = workspace_root.join(&rel_path);
 
@@ -390,7 +545,10 @@ impl WorkspaceOverlayCache {
 
             let metadata = match std::fs::metadata(&abs_path) {
                 Ok(metadata) => metadata,
-                Err(_) => continue,
+                Err(_) => {
+                    retry.push((rel_path, prior_failures, "stat failed"));
+                    continue;
+                }
             };
             let fingerprint =
                 FileFingerprint { len: metadata.len(), modified: metadata.modified().ok() };
@@ -425,7 +583,10 @@ impl WorkspaceOverlayCache {
 
             let content = match std::fs::read_to_string(&abs_path) {
                 Ok(content) => content,
-                Err(_) => continue,
+                Err(_) => {
+                    retry.push((rel_path, prior_failures, "read failed"));
+                    continue;
+                }
             };
             let file_hash = compute_file_hash(&content, hash_mode);
             if baseline_hash.is_some_and(|stored_hash| stored_hash == &file_hash) {
@@ -435,6 +596,10 @@ impl WorkspaceOverlayCache {
             }
 
             let provider = self.graph_context_provider.clone();
+            let parse_root = resident_parse_root(snapshots, &rel_path, &content);
+            if parse_root.is_some() {
+                self.resident_fed_count += 1;
+            }
             let entry = build_overlay_entry(
                 &rel_path,
                 &content,
@@ -444,6 +609,7 @@ impl WorkspaceOverlayCache {
                 batch_size,
                 &mut self.embedding_cache,
                 provider.as_deref(),
+                parse_root,
             )?;
 
             if baseline_hash.is_some() {
@@ -454,6 +620,9 @@ impl WorkspaceOverlayCache {
             self.entries.insert(rel_path, entry);
         }
 
+        for (rel_path, prior_failures, reason) in retry {
+            self.retain_dirty_after_failure(rel_path, prior_failures, reason);
+        }
         Ok(())
     }
 
@@ -585,6 +754,7 @@ impl WorkspaceOverlayCache {
                 batch_size,
                 &mut self.embedding_cache,
                 provider.as_deref(),
+                None,
             )?;
             if baseline_fingerprint.is_some() {
                 hidden_paths.insert(file.rel_path.clone());
@@ -698,7 +868,7 @@ impl WorkspaceOverlayCache {
             }
 
             let (lexical_documents, embedding_inputs) =
-                build_overlay_documents(&file.rel_path, &content, graph_context);
+                build_overlay_documents(&file.rel_path, &content, graph_context, None);
             for input in &embedding_inputs {
                 let key = overlay_embedding_key(input);
                 if !warm_embeddings.contains_key(&key) {
@@ -827,14 +997,22 @@ impl WorkspaceOverlayCache {
 
     fn refresh_dirty_paths_from_manifest(
         &mut self,
+        dirty_paths: Vec<String>,
         manifest_fingerprints: &HashMap<String, String>,
         workspace_root: &Path,
         embedder: Option<&Embedder>,
         batch_size: usize,
+        snapshots: &HashMap<String, ModuleSnapshot>,
     ) -> Result<(), SearchError> {
-        let dirty_paths: Vec<String> = self.dirty_paths.drain().map(|(path, _)| path).collect();
+        // A path whose stat/read transiently fails is re-marked dirty (carrying its
+        // consecutive-failure count) so the next refresh retries it — bounded by
+        // [`MAX_DIRTY_REFRESH_FAILURES`] — rather than being silently dropped.
+        let mut retry: Vec<(String, u32, &'static str)> = Vec::new();
 
         for rel_path in dirty_paths {
+            // Removing the count here clears it on success (the common path) and hands the prior
+            // value to `retain_dirty_after_failure` on failure, keeping the streak consecutive.
+            let prior_failures = self.dirty_failures.remove(&rel_path).unwrap_or(0);
             let baseline_fingerprint = manifest_fingerprints.get(&rel_path);
             let abs_path = workspace_root.join(&rel_path);
 
@@ -850,7 +1028,10 @@ impl WorkspaceOverlayCache {
 
             let metadata = match std::fs::metadata(&abs_path) {
                 Ok(metadata) => metadata,
-                Err(_) => continue,
+                Err(_) => {
+                    retry.push((rel_path, prior_failures, "stat failed"));
+                    continue;
+                }
             };
             let fingerprint =
                 FileFingerprint { len: metadata.len(), modified: metadata.modified().ok() };
@@ -887,7 +1068,10 @@ impl WorkspaceOverlayCache {
 
             let content = match std::fs::read_to_string(&abs_path) {
                 Ok(content) => content,
-                Err(_) => continue,
+                Err(_) => {
+                    retry.push((rel_path, prior_failures, "read failed"));
+                    continue;
+                }
             };
             let file_hash = normalized_file_hash_for_content(&content);
             let local_fp = fingerprint_content(&content, &rel_path);
@@ -898,6 +1082,10 @@ impl WorkspaceOverlayCache {
             }
 
             let provider = self.graph_context_provider.clone();
+            let parse_root = resident_parse_root(snapshots, &rel_path, &content);
+            if parse_root.is_some() {
+                self.resident_fed_count += 1;
+            }
             let entry = build_overlay_entry(
                 &rel_path,
                 &content,
@@ -907,6 +1095,7 @@ impl WorkspaceOverlayCache {
                 batch_size,
                 &mut self.embedding_cache,
                 provider.as_deref(),
+                parse_root,
             )?;
 
             if baseline_fingerprint.is_some() {
@@ -917,7 +1106,24 @@ impl WorkspaceOverlayCache {
             self.entries.insert(rel_path, entry);
         }
 
+        for (rel_path, prior_failures, reason) in retry {
+            self.retain_dirty_after_failure(rel_path, prior_failures, reason);
+        }
         Ok(())
+    }
+
+    /// How many overlay entries have been built from a resident-provided shared parse (rather than
+    /// a self-parsed disk read) since the last [`Self::clear`]. Observability for the resident-fed
+    /// incremental reindex — a nonzero value proves the shared-parse path actually fired.
+    pub fn resident_fed_count(&self) -> usize {
+        self.resident_fed_count
+    }
+
+    /// The consecutive-failure count recorded for a dirty path, or `0` when none is tracked. Lets a
+    /// test assert that a store-wide error left a path's retry budget untouched.
+    #[cfg(test)]
+    fn dirty_failure_count(&self, rel_path: &str) -> u32 {
+        self.dirty_failures.get(rel_path).copied().unwrap_or(0)
     }
 
     pub fn snapshot(&self) -> WorkspaceOverlayIndex {
@@ -1049,9 +1255,10 @@ fn build_overlay_entry(
     batch_size: usize,
     embedding_cache: &mut HashMap<String, Vec<f32>>,
     graph_context: Option<&dyn GraphContextProvider>,
+    parse_root: Option<&syntax::SyntaxNode>,
 ) -> Result<OverlayFileEntry, SearchError> {
     let (lexical_documents, embedding_inputs) =
-        build_overlay_documents(rel_path, content, graph_context);
+        build_overlay_documents(rel_path, content, graph_context, parse_root);
     let vector_documents = build_overlay_vectors(
         embedder,
         batch_size,
@@ -1176,12 +1383,35 @@ fn overlay_embedding_key(embedding_input: &str) -> String {
     blake3::hash(embedding_input.as_bytes()).to_hex().to_string()
 }
 
+/// The shared syntax tree to chunk `content` with, when the resident snapshot for `rel_path`
+/// holds byte-identical text. A mismatch (the file changed on disk after the resident parsed
+/// it) falls back to `None` so the caller parses `content` itself, keeping chunk output and
+/// the stored hash pinned to the exact bytes on disk.
+fn resident_parse_root<'a>(
+    snapshots: &'a HashMap<String, ModuleSnapshot>,
+    rel_path: &str,
+    content: &str,
+) -> Option<&'a syntax::SyntaxNode> {
+    snapshots
+        .get(rel_path)
+        .filter(|snapshot| snapshot.text.as_ref() == content)
+        .map(|snapshot| &snapshot.root)
+}
+
 fn build_overlay_documents(
     rel_path: &str,
     content: &str,
     graph_context: Option<&dyn GraphContextProvider>,
+    parse_root: Option<&syntax::SyntaxNode>,
 ) -> (Vec<IndexedDocument>, Vec<String>) {
-    let chunks = Chunker::chunk(content);
+    // When the resident host already parsed this exact text, chunk its shared syntax tree
+    // instead of parsing `content` again (`chunk_parsed` is byte-parity-tested against
+    // `chunk`). `content` still drives every text/offset/hash decision, so the chunk output
+    // and the stored hash are identical to the pure-disk path.
+    let chunks = match parse_root {
+        Some(root) => Chunker::chunk_parsed(root, content),
+        None => Chunker::chunk(content),
+    };
     let mut lexical_documents = Vec::with_capacity(chunks.len());
     let mut embedding_inputs = Vec::with_capacity(chunks.len());
 
@@ -1317,13 +1547,203 @@ fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        fingerprint_content, lexical_hits, BaselineHashMode, WorkspaceOverlayCache,
-        WorkspaceOverlayStats,
+        build_overlay_documents, fingerprint_content, lexical_hits, BaselineHashMode,
+        WorkspaceOverlayCache, WorkspaceOverlayStats, MAX_DIRTY_REFRESH_FAILURES,
     };
     use crate::store::Store;
     use std::collections::HashMap;
     use std::fs;
     use tempfile::tempdir;
+
+    /// Chunk output through the resident-shared parse must be byte-identical to the pure
+    /// disk-read+parse path — for a UTF-8 BOM, CRLF line endings, and a method large enough
+    /// to cross the 32 KiB chunk-split threshold.
+    #[test]
+    fn snapshot_chunking_matches_disk_for_edge_cases() {
+        let large_body: String = (0..4000).map(|i| format!("    П = П + {i};\n")).collect();
+        let large = format!("Процедура Большая() Экспорт\n{large_body}КонецПроцедуры\n");
+        let cases = [
+            "\u{feff}Процедура СБом()\nКонецПроцедуры\n".to_owned(),
+            "Процедура СRLF()\r\nВозврат;\r\nКонецПроцедуры\r\n".to_owned(),
+            large,
+        ];
+        for content in &cases {
+            let root = parser::parse(content).syntax_node();
+            let (disk_docs, disk_inputs) = build_overlay_documents("M.bsl", content, None, None);
+            let (snap_docs, snap_inputs) =
+                build_overlay_documents("M.bsl", content, None, Some(&root));
+
+            assert!(!disk_docs.is_empty(), "fixture must produce at least one chunk");
+            assert_eq!(disk_docs.len(), snap_docs.len(), "chunk count must match");
+            for (disk, snap) in disk_docs.iter().zip(&snap_docs) {
+                assert_eq!(disk.symbol_name, snap.symbol_name);
+                assert_eq!(disk.kind, snap.kind);
+                assert_eq!(disk.line_start, snap.line_start);
+                assert_eq!(disk.line_end, snap.line_end);
+                assert_eq!(disk.text, snap.text);
+                assert_eq!(disk.content_hash, snap.content_hash);
+            }
+            assert_eq!(disk_inputs, snap_inputs, "embedding inputs must match");
+        }
+        // The large fixture genuinely crosses the split threshold, so parity is checked with
+        // more than one chunk in play.
+        assert!(
+            build_overlay_documents("M.bsl", &cases[2], None, None).0.len() > 1,
+            "the large fixture must exercise the 32 KiB split"
+        );
+    }
+
+    /// A dirty path whose read transiently fails (here a directory shaped like a `.bsl`, so
+    /// `metadata` succeeds but `read_to_string` errors) must stay in the dirty set for the next
+    /// refresh, rather than being silently dropped. Restoring the pre-fix `continue`-drop in
+    /// `refresh_dirty_paths_from_manifest` makes this assertion fail.
+    #[test]
+    fn dirty_path_survives_a_read_failure() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        let manifest: HashMap<String, String> = HashMap::new();
+        // A full refresh initializes the cache so the next refresh takes the incremental branch.
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, true).unwrap();
+
+        fs::create_dir(workspace.join("Broken.bsl")).unwrap();
+        cache.mark_dirty_path("Broken.bsl");
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, false).unwrap();
+
+        assert_eq!(
+            cache.stats().pending_dirty_paths,
+            1,
+            "a read-failed dirty path must be retained for the next refresh"
+        );
+    }
+
+    /// A path that fails to refresh on every attempt is retained for exactly
+    /// [`MAX_DIRTY_REFRESH_FAILURES`] attempts, then dropped from the dirty set (with a warning)
+    /// so it stops being retried forever. A fresh `mark_dirty_path` clears the streak, giving the
+    /// path the full retry budget again. Removing the bookkeeping (unconditionally re-marking)
+    /// makes the drop never happen; removing the reset makes the fresh mark not restore it.
+    #[test]
+    fn dirty_path_dropped_after_max_consecutive_failures_and_reset_by_fresh_mark() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        let manifest: HashMap<String, String> = HashMap::new();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, true).unwrap();
+
+        // A directory shaped like a `.bsl`: `metadata` succeeds, `read_to_string` always fails.
+        fs::create_dir(workspace.join("Broken.bsl")).unwrap();
+        cache.mark_dirty_path("Broken.bsl");
+
+        // The first K-1 refreshes keep retrying: the path stays dirty.
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES - 1) {
+            cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, false).unwrap();
+            assert_eq!(
+                cache.stats().pending_dirty_paths,
+                1,
+                "the path is retained while under the failure budget"
+            );
+        }
+        // The K-th consecutive failure drops it.
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, false).unwrap();
+        assert_eq!(
+            cache.stats().pending_dirty_paths,
+            0,
+            "the path is dropped after exactly MAX_DIRTY_REFRESH_FAILURES failures"
+        );
+
+        // A fresh watcher event resets the streak: the path survives the budget again.
+        cache.mark_dirty_path("Broken.bsl");
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES - 1) {
+            cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, false).unwrap();
+            assert_eq!(
+                cache.stats().pending_dirty_paths,
+                1,
+                "a fresh mark reset the consecutive-failure count"
+            );
+        }
+    }
+
+    /// A store-wide error while resolving the baseline for a snapshot-fed reindex must leave every
+    /// prefetched-but-unprocessed path dirty, with its per-path failure budget untouched — so a
+    /// later prefetch retries it instead of stranding stale overlay entries no query would revisit.
+    /// The pre-fix code cleared the dirty flags BEFORE the fallible store read, so on error the
+    /// paths were neither reindexed nor dirty; restoring that ordering makes the retained-count
+    /// assertion fail. Because the store error is not a per-path fault, it must NOT be charged to
+    /// `MAX_DIRTY_REFRESH_FAILURES` (else a few store hiccups would drop many healthy paths at once).
+    #[test]
+    fn store_error_during_reindex_keeps_paths_dirty_without_charging_failure_budget() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        let manifest: HashMap<String, String> = HashMap::new();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store, true).unwrap();
+
+        // A directory shaped like a `.bsl`: `metadata` succeeds, `read_to_string` always fails, so
+        // one healthy reindex records a genuine per-path failure (budget = 1). That seeded count is
+        // what the store-error reindex below must leave untouched.
+        fs::create_dir(workspace.join("Broken.bsl")).unwrap();
+        cache.mark_dirty_path("Broken.bsl");
+
+        let content = "Процедура П()\nКонецПроцедуры\n";
+        let root = parser::parse(content).syntax_node();
+        let mut snapshots = HashMap::new();
+        snapshots.insert(
+            "Broken.bsl".to_owned(),
+            crate::ports::ModuleSnapshot { text: std::sync::Arc::from(content), root },
+        );
+
+        cache
+            .reindex_dirty_from_snapshots(
+                workspace,
+                &store,
+                32,
+                BaselineHashMode::NormalizedChunks,
+                &snapshots,
+            )
+            .unwrap();
+        assert_eq!(cache.stats().pending_dirty_paths, 1, "the read-failed path stays dirty");
+        assert_eq!(cache.dirty_failure_count("Broken.bsl"), 1, "one genuine per-path failure");
+
+        // Drop the manifest tables through a second connection so the next reindex fails at the
+        // baseline read (`load_baseline_manifest_fingerprints`) before it processes any path.
+        {
+            let raw = rusqlite::Connection::open(store.db_path()).unwrap();
+            raw.execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 DROP TABLE IF EXISTS baseline_manifest_files;
+                 DROP TABLE IF EXISTS baseline_manifest;",
+            )
+            .unwrap();
+        }
+
+        let result = cache.reindex_dirty_from_snapshots(
+            workspace,
+            &store,
+            32,
+            BaselineHashMode::NormalizedChunks,
+            &snapshots,
+        );
+        assert!(result.is_err(), "the dropped baseline table must surface as a store error");
+        assert_eq!(
+            cache.stats().pending_dirty_paths,
+            1,
+            "a store-wide error must not strand the prefetched path (still dirty)"
+        );
+        assert_eq!(
+            cache.dirty_failure_count("Broken.bsl"),
+            1,
+            "a store-wide error must not consume the per-path retry budget"
+        );
+    }
 
     #[test]
     fn reuse_only_refresh_attaches_no_vectors_when_cache_is_empty() {

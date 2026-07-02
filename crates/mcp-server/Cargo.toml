@@ -22,6 +22,7 @@ sdbl-hir.workspace = true
 syntax.workspace = true
 ide.workspace = true
 base-db.workspace = true
+salsa.workspace = true
 vfs.workspace = true
 walkdir.workspace = true
 rayon.workspace = true
