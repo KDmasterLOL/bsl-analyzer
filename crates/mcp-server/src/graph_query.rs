@@ -40,6 +40,21 @@ struct StoredNode {
 const NODE_COLUMNS: &str =
     "id, kind, name, qualified, module, file, name_offset, sig_end, src_start, src_end, dispatch, is_export, addressable";
 
+/// Reverse lookup of the files whose methods read a given object or its attributes. A
+/// `UNION` of two single-predicate arms so each rides the `edges_to` index (see
+/// [`GraphDb::referencing_files`]); shared with the query-plan test so the plan assertion
+/// pins the exact executed SQL. `INDEXED BY edges_to` forces the driving table to be `edges`
+/// via that index on BOTH arms — without it the planner (which sees no table stats on a
+/// freshly opened build) flips the range arm to a full `nodes` scan + `edges_from` probe,
+/// i.e. O(nodes). The hint makes the O(inbound-edges) plan a guarantee, not a planner guess.
+/// Params: `?1` = the `mdo/…` node id, `?2`/`?3` = the half-open `attribute/…` id range bounds.
+const REFERENCING_FILES_SQL: &str = "\
+    SELECT n.file FROM edges e INDEXED BY edges_to JOIN nodes n ON e.from_id = n.id \
+     WHERE n.file IS NOT NULL AND e.to_id = ?1 \
+    UNION \
+    SELECT n.file FROM edges e INDEXED BY edges_to JOIN nodes n ON e.from_id = n.id \
+     WHERE n.file IS NOT NULL AND e.to_id >= ?2 AND e.to_id < ?3";
+
 fn row_to_stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNode> {
     Ok(StoredNode {
         id: row.get(0)?,
@@ -840,6 +855,37 @@ impl GraphDb {
         Ok(Some(ctx.render()))
     }
 
+    /// The distinct source files (`nodes.file`) of every method whose stored outbound
+    /// read edges target `mdo_id` or any of its attributes — i.e. the modules whose
+    /// rendered `graph_context` embeds a metadata read of this object (see
+    /// [`Self::graph_context`], which renders `mdo/…` and `attribute/…` reads). Those
+    /// stored contexts go stale when the object's `.xml` changes, so this is the reverse
+    /// lookup that finds the REFERENCING modules to re-context — owned modules resolve by
+    /// path convention, but a module that merely reads the object is only discoverable
+    /// through the persisted read edges.
+    ///
+    /// Index-backed on `edges_to`: a `UNION` of two arms, each constraining `edges.to_id`
+    /// with a SINGLE indexable predicate — an equality on the object node, and a half-open
+    /// range over its `attribute/<Type>/<Object>/…` ids — so each arm drives from the
+    /// `edges_to` index and the scan is O(inbound read edges), never a table scan. (A single
+    /// `to_id = ? OR to_id BETWEEN ? AND ?` defeats the planner: it flips to scanning
+    /// `nodes` instead.) The half-open upper bound bumps the trailing `/` (0x2F) to `0`
+    /// (0x30), the same trick [`method_id_range`] uses. `mdo_id` without the `mdo/` prefix
+    /// yields an empty set.
+    pub fn referencing_files(&self, mdo_id: &str) -> anyhow::Result<Vec<String>> {
+        let Some(object) = mdo_id.strip_prefix("mdo/") else { return Ok(Vec::new()) };
+        let attr_lo = format!("attribute/{object}/");
+        let mut attr_hi = attr_lo.clone();
+        let last = attr_hi.pop().expect("attribute prefix ends in '/'"); // ASCII '/'
+        attr_hi.push(((last as u8) + 1) as char);
+        let mut stmt = self.conn.prepare(REFERENCING_FILES_SQL)?;
+        let rows = stmt
+            .query_map(params![mdo_id, attr_lo, attr_hi], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting referencing files")?;
+        Ok(rows)
+    }
+
     /// Fetch method source for a set of ids, stopping once the rough output budget
     /// (`max_output_tokens`, ~4 chars/token) is reached.
     pub fn source(&self, ids: &[String], max_output_tokens: usize) -> anyhow::Result<SourceResult> {
@@ -1016,6 +1062,100 @@ mod tests {
                 .unwrap();
         }
         GraphDb { conn }
+    }
+
+    /// The reverse lookup must ride the `edges_to` index (equality + half-open range on
+    /// `to_id`), never a full table scan — a metadata edit on a hot object would otherwise
+    /// scan every edge in a 25k-module graph. `EXPLAIN QUERY PLAN` proves the planner uses
+    /// `edges_to` for the driving edge search.
+    #[test]
+    fn referencing_files_query_uses_the_edges_to_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE nodes (id TEXT NOT NULL, kind TEXT NOT NULL, file TEXT);\
+             CREATE TABLE edges (from_id TEXT NOT NULL, to_id TEXT NOT NULL, kind TEXT NOT NULL);\
+             CREATE INDEX edges_to ON edges(to_id);\
+             CREATE INDEX edges_from ON edges(from_id);",
+        )
+        .unwrap();
+        let db = GraphDb { conn };
+        let plan: Vec<String> = db
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", super::REFERENCING_FILES_SQL))
+            .unwrap()
+            .query_map(
+                params![
+                    "mdo/Catalog/Товары",
+                    "attribute/Catalog/Товары/",
+                    "attribute/Catalog/Товары0"
+                ],
+                |r| r.get::<_, String>(3),
+            )
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let plan_text = plan.join("\n");
+        // Both UNION arms drive from the edges_to index; neither full-scans a table.
+        assert_eq!(
+            plan_text.matches("edges_to").count(),
+            2,
+            "both inbound-edge arms must use the edges_to index: {plan_text}"
+        );
+        assert!(
+            !plan_text.contains("SCAN edges") && !plan_text.contains("SCAN nodes"),
+            "neither the edges nor the nodes table may be full-scanned: {plan_text}"
+        );
+    }
+
+    /// Real inbound read edges → the referencing methods' distinct files; a range over the
+    /// object's `attribute/…` ids is included, and an unrelated object's edges are excluded.
+    #[test]
+    fn referencing_files_returns_readers_of_mdo_and_its_attributes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE nodes (id TEXT NOT NULL, kind TEXT NOT NULL, file TEXT);\
+             CREATE TABLE edges (from_id TEXT NOT NULL, to_id TEXT NOT NULL, kind TEXT NOT NULL);\
+             CREATE INDEX edges_to ON edges(to_id);",
+        )
+        .unwrap();
+        let node = |id: &str, file: &str| {
+            conn.execute(
+                "INSERT INTO nodes (id, kind, file) VALUES (?1, 'method', ?2)",
+                params![id, file],
+            )
+            .unwrap();
+        };
+        node("method/common/Б/Ч", "CommonModules/Б/Ext/Module.bsl");
+        node("method/common/Г/Ч", "CommonModules/Г/Ext/Module.bsl");
+        node("method/common/В/Н", "CommonModules/В/Ext/Module.bsl");
+        let edge = |from: &str, to: &str, kind: &str| {
+            conn.execute(
+                "INSERT INTO edges (from_id, to_id, kind) VALUES (?1, ?2, ?3)",
+                params![from, to, kind],
+            )
+            .unwrap();
+        };
+        // Б reads the object directly; Г reads one of its attributes; В reads a DIFFERENT
+        // object entirely and must not surface.
+        edge("method/common/Б/Ч", "mdo/Catalog/Товары", "manager_access");
+        edge("method/common/Г/Ч", "attribute/Catalog/Товары/Код", "query_ref");
+        edge("method/common/В/Н", "mdo/Catalog/Другой", "manager_access");
+
+        let db = GraphDb { conn };
+        let mut files = db.referencing_files("mdo/Catalog/Товары").unwrap();
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                "CommonModules/Б/Ext/Module.bsl".to_owned(),
+                "CommonModules/Г/Ext/Module.bsl".to_owned(),
+            ],
+            "readers of the object and its attributes are returned; an unrelated object's reader is not"
+        );
+        assert!(
+            db.referencing_files("method/common/Б/Ч").unwrap().is_empty(),
+            "a non-mdo id yields nothing"
+        );
     }
 
     #[test]

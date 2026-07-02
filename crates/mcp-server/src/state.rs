@@ -1641,7 +1641,7 @@ impl SharedState {
         // so the marks would sit unresolved forever. The nudge is single-flight and never
         // blocks — it schedules a background rebuild whose publish fires the refresh hook.
         if !class.xml_paths.is_empty()
-            && Self::mark_xml_affected_context_dirty(engine, &class.xml_paths)
+            && Self::mark_xml_affected_context_dirty(engine, &class.xml_paths, graph)
         {
             graph.nudge_rebuild();
         }
@@ -1680,16 +1680,19 @@ impl SharedState {
     /// `<Dir>/<Name>/` subtree. Any `.xml` directly at the workspace root (a
     /// configuration-root descriptor, whose change can shift any module's context)
     /// conservatively marks the whole collection. REFERENCING modules (a module that
-    /// merely reads the changed MDO) are not resolved here: that reverse lookup rides the
-    /// persisted graph and lands with the resident-fed reindex path.
+    /// merely READS the changed MDO — its rendered `graph_context` embeds the object's
+    /// metadata reads) are additionally resolved through the persisted graph's inbound read
+    /// edges (see [`Self::resolve_referencing_module_rels`]).
     ///
-    /// The filesystem walk (owned-subtree resolution) runs OUTSIDE the engine lock; the
-    /// lock is taken only briefly for the store writes. Returns whether it marked at least
-    /// one path context-dirty (owned modules or a whole-collection mark), so the caller can
-    /// gate the graph catch-up nudge on real work having been queued.
+    /// The filesystem walk (owned-subtree resolution) and the graph db read (referencing
+    /// resolution) both run OUTSIDE the engine lock; the lock is taken only briefly for the
+    /// store writes. Returns whether it marked at least one path context-dirty (owned,
+    /// referencing, or a whole-collection mark), so the caller can gate the graph catch-up
+    /// nudge on real work having been queued.
     fn mark_xml_affected_context_dirty(
         engine: &SharedSearchEngine,
         xml_paths: &[crate::drift_classify::DriftPath],
+        graph: &GraphState,
     ) -> bool {
         // Read the workspace root once (brief lock), then resolve owned subtrees off-lock.
         let workspace_root = {
@@ -1709,7 +1712,13 @@ impl SharedState {
                 None => {}
             }
         }
-        if owned_modules.is_empty() && !mark_whole_collection {
+
+        // Referencing modules: resolved off any lock via the persisted graph, BEFORE the
+        // store-write lock below (the graph db read must never nest under the engine lock).
+        let referencing_rels =
+            Self::resolve_referencing_module_rels(graph, xml_paths, workspace_root.as_deref());
+
+        if owned_modules.is_empty() && referencing_rels.is_empty() && !mark_whole_collection {
             return false;
         }
 
@@ -1729,7 +1738,61 @@ impl SharedState {
                 Err(e) => tracing::warn!(path = ?bsl, "failed to mark context dirty: {e}"),
             }
         }
+        for rel in referencing_rels {
+            match engine.mark_workspace_path_context_dirty(&rel) {
+                Ok(did) => marked |= did,
+                Err(e) => {
+                    tracing::warn!(path = %rel, "failed to mark referencing context dirty: {e}")
+                }
+            }
+        }
         marked
+    }
+
+    /// Reverse-look-up the workspace modules that READ any changed MDO, returning their
+    /// workspace-relative `.bsl` keys (the spelling the `code` collection stores). A metadata
+    /// change alters the `graph_context` of every module that reads the object — not just its
+    /// owned modules — and the persisted graph is the only record of who reads what.
+    ///
+    /// Queries the CURRENTLY PUBLISHED graph via [`GraphState::snapshot`], which gates on a
+    /// published build and opens the read-only db off the graph's inner lock. Pre-drift edges
+    /// are exactly right here: the set of referencing modules is defined by OTHER modules'
+    /// bodies, which this `.xml` edit did not touch — the follow-up rebuild only re-renders the
+    /// contexts marked here, it never changes who references the object. No published graph yet
+    /// (or an `.xml` that maps to no MDO node — a form/command/config-root descriptor) → an
+    /// empty set, so referencing marks are simply skipped and the owned marks + nudge still fire;
+    /// a later publish consumes whatever marks then exist. Degrades, never blocks or errors.
+    ///
+    /// Off-lock throughout: opens the graph db once and runs one index-backed inbound-edge
+    /// query per resolved MDO node id, so a batch of N `.xml` edits does at most N indexed
+    /// queries, never a table scan.
+    fn resolve_referencing_module_rels(
+        graph: &GraphState,
+        xml_paths: &[crate::drift_classify::DriftPath],
+        workspace_root: Option<&Path>,
+    ) -> std::collections::HashSet<String> {
+        let mut rels = std::collections::HashSet::new();
+        let mdo_ids: Vec<String> =
+            xml_paths.iter().filter_map(|dp| xml_to_mdo_id(&dp.raw)).collect();
+        if mdo_ids.is_empty() {
+            return rels;
+        }
+        let Some(workspace_root) = workspace_root else { return rels };
+        let Some(snapshot) = graph.snapshot() else { return rels };
+        let source_prefix = canonical_source_prefix(workspace_root);
+        for mdo_id in mdo_ids {
+            match snapshot.graph.referencing_files(&mdo_id) {
+                Ok(files) => {
+                    for file in files {
+                        if let Some(rel) = graph_file_to_rel(&file, &source_prefix) {
+                            rels.insert(rel);
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(mdo = %mdo_id, "referencing-files lookup failed: {e}"),
+            }
+        }
+        rels
     }
 
     /// After the graph publishes a fresh build, re-render the stored graph context of any
@@ -2121,6 +2184,43 @@ fn walk_bsl_files(dir: &Path) -> Vec<PathBuf> {
         .map(|e| e.path().to_path_buf())
         .filter(|p| p.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
         .collect()
+}
+
+/// Map a metadata descriptor `.xml` at `<KindPlural>/<Name>.xml` to its graph MDO node id
+/// `mdo/<EnglishType>/<Name>` (the id the fused build encodes, verified against
+/// `ide::GraphRowEncoder`). `None` when the parent directory is not a known metadata-kind
+/// plural — a form/command descriptor, an `Ext/…` file, or a configuration-root descriptor —
+/// since those carry no `mdo/` node and thus no inbound read edges to reverse-look-up. The
+/// `<KindPlural>` → [`bsl_metadata::MdoType`] mapping reuses the canonical
+/// [`bsl_metadata::MdoType::from_plural`] table rather than duplicating a directory map.
+fn xml_to_mdo_id(xml: &Path) -> Option<String> {
+    let name = xml.file_stem()?.to_str()?;
+    let kind_dir = xml.parent()?.file_name()?.to_str()?;
+    let mdo_type = bsl_metadata::MdoType::from_plural(kind_dir)?;
+    Some(format!("mdo/{}/{name}", mdo_type.english_name()))
+}
+
+/// The canonical, `/`-normalised source prefix used to relativise a graph `nodes.file`
+/// (stored absolute + canonical by `enumerate_bsl_files`) into the `code` collection key,
+/// derived exactly as `FusedChunkWriter` derives its stored rel paths so the two agree.
+fn canonical_source_prefix(workspace_root: &Path) -> String {
+    workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Relativise an absolute, `/`-normalised graph `nodes.file` to the `code` collection key,
+/// mirroring `FusedChunkWriter`: strip the source prefix, require a path-separator boundary
+/// so a sibling root whose name merely starts with the prefix string is not mistaken for a
+/// child, then drop the leading `/`. `None` for a file outside the source root (an extension
+/// module the local index omits) or an empty remainder.
+fn graph_file_to_rel(file: &str, source_prefix: &str) -> Option<String> {
+    let prefix = source_prefix.trim_end_matches('/');
+    let rel =
+        file.strip_prefix(prefix).filter(|rest| rest.starts_with('/'))?.trim_start_matches('/');
+    (!rel.is_empty()).then(|| rel.to_owned())
 }
 
 /// Whether `xml` sits directly at the workspace root — any such descriptor
@@ -2692,6 +2792,157 @@ mod tests {
         // no whole-workspace walk ran.
         let snapshot = engine.workspace_overlay_dirty_paths_snapshot().unwrap();
         assert!(snapshot.is_empty(), "an xml edit marks no body dirty and triggers no walk");
+    }
+
+    /// A metadata `.xml` edit marks BOTH the object's owned modules (path convention) AND the
+    /// REFERENCING modules — those whose `graph_context` embeds a read of the object — resolved
+    /// through the persisted graph's inbound read edges. A module that references nothing about
+    /// the object is left untouched.
+    ///
+    /// Revert-proof: drop the `resolve_referencing_module_rels` call in
+    /// `mark_xml_affected_context_dirty` and the referencing module `Б` is no longer marked —
+    /// the referencing assertion fails.
+    #[test]
+    fn search_sink_xml_marks_owned_and_referencing_modules_context_dirty() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+
+        fs::write(workspace.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+        // Catalog Х with an OWNED object module (A), resolved by path convention.
+        let xml = workspace.join("Catalogs/Х.xml");
+        fs::create_dir_all(xml.parent().unwrap()).unwrap();
+        fs::write(
+            &xml,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>Х</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+        )
+        .unwrap();
+        let owned_a = workspace.join("Catalogs/Х/Ext/ObjectModule.bsl");
+        fs::create_dir_all(owned_a.parent().unwrap()).unwrap();
+        fs::write(&owned_a, "Процедура П() Экспорт\nКонецПроцедуры").unwrap();
+
+        // Referencing common module Б reads the catalog (manager access + query) → inbound
+        // read edges into `mdo/Catalog/Х`. Non-referencing module В reads nothing about it.
+        write_common_module(
+            &workspace,
+            "Б",
+            "&НаСервере\nПроцедура ЧитаетХ() Экспорт\nСправочники.Х.СоздатьЭлемент();\nЗапрос = \"ВЫБРАТЬ Код ИЗ Справочник.Х\";\nКонецПроцедуры",
+        );
+        write_common_module(
+            &workspace,
+            "В",
+            "&НаСервере\nПроцедура НичегоНеЧитает() Экспорт\nВозврат;\nКонецПроцедуры",
+        );
+
+        // Build + publish the graph so the reverse lookup has real inbound edges to read.
+        let out = crate::cache::graph_db_path(&workspace);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let summary = crate::graph_db::build_graph_database(
+            &workspace,
+            &out,
+            100,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files: 0,
+                built_at: "t".to_owned(),
+            },
+        )
+        .expect("graph builds");
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+        graph.adopt_prebuilt(1, 0, summary.modules);
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let entry = ChangeEntry {
+            canonical: xml.clone(),
+            raw: xml,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        SharedState::apply_search_drift(&engine_arc, &workspace, &[entry], false, &graph);
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        let dirty = engine.context_dirty_paths("code").unwrap();
+        assert!(
+            dirty.contains("Catalogs/Х/Ext/ObjectModule.bsl"),
+            "the owned module is marked context-dirty: {dirty:?}",
+        );
+        assert!(
+            dirty.contains("CommonModules/Б/Ext/Module.bsl"),
+            "the referencing module (reads the catalog) is marked context-dirty: {dirty:?}",
+        );
+        assert!(
+            !dirty.contains("CommonModules/В/Ext/Module.bsl"),
+            "a module that references nothing about the catalog is left untouched: {dirty:?}",
+        );
+    }
+
+    /// An `.xml` edit BEFORE any graph is published degrades: owned modules are still marked
+    /// (path convention needs no graph) and referencing resolution is silently skipped — no
+    /// error, no panic. The reverse lookup only rides a published graph.
+    #[test]
+    fn search_sink_xml_referencing_degrades_without_published_graph() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+
+        fs::write(workspace.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let xml = workspace.join("Catalogs/Х.xml");
+        fs::create_dir_all(xml.parent().unwrap()).unwrap();
+        fs::write(&xml, "<MetaDataObject/>").unwrap();
+        let owned_a = workspace.join("Catalogs/Х/Ext/ObjectModule.bsl");
+        fs::create_dir_all(owned_a.parent().unwrap()).unwrap();
+        fs::write(&owned_a, "Процедура П() Экспорт\nКонецПроцедуры").unwrap();
+        // A would-be referencing module exists on disk but there is NO published graph, so it
+        // is not discoverable and must not be marked.
+        write_common_module(
+            &workspace,
+            "Б",
+            "&НаСервере\nПроцедура ЧитаетХ() Экспорт\nСправочники.Х.СоздатьЭлемент();\nКонецПроцедуры",
+        );
+
+        // A workspace graph that has never been built → `snapshot()` returns None.
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let entry = ChangeEntry {
+            canonical: xml.clone(),
+            raw: xml,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        SharedState::apply_search_drift(&engine_arc, &workspace, &[entry], false, &graph);
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        let dirty = engine.context_dirty_paths("code").unwrap();
+        assert!(
+            dirty.contains("Catalogs/Х/Ext/ObjectModule.bsl"),
+            "the owned module is still marked without a published graph: {dirty:?}",
+        );
+        assert!(
+            !dirty.contains("CommonModules/Б/Ext/Module.bsl"),
+            "referencing resolution is skipped with no published graph: {dirty:?}",
+        );
     }
 
     /// ANY `.xml` directly at the workspace root (not only `Configuration.xml`), with no
