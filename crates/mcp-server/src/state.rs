@@ -55,6 +55,10 @@ pub struct SharedState {
     /// decremented by [`BackgroundWorkGuard`] on every exit path — including early `?`
     /// returns and panics — so it can never get stuck above zero.
     background_indexers: Arc<AtomicUsize>,
+    /// The ONE embed single-flight shared by the boot pass and the post-refresh re-embed kick,
+    /// held here so `init_search` reuses the same flight the publish hook does — otherwise the
+    /// two could race an index swap and last-writer-wins would install a stale index.
+    embed_flight: Arc<EmbedFlight>,
 }
 
 /// RAII counter for in-flight background indexing. Increments on construction and
@@ -74,6 +78,159 @@ impl Drop for BackgroundWorkGuard {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
+
+/// The ONE embed single-flight for the whole workspace. Both the boot pass (fills the initial
+/// NULL embeddings after a fused cold build) and the post-context-refresh re-embed kick funnel
+/// through it, so an older pass can never install a vector index over a newer one
+/// (last-writer-wins). A pass that loses the claim records `rerun_pending`; the winning owner
+/// loops while that flag is set, and both the "record a rerun" and the "release the claim"
+/// decisions happen under the same mutex — so a rerun request can never be lost between the
+/// owner deciding to stop and a late caller signalling more work.
+struct EmbedFlight {
+    state: Mutex<EmbedFlightState>,
+}
+
+#[derive(Default)]
+struct EmbedFlightState {
+    in_flight: bool,
+    rerun_pending: bool,
+}
+
+impl EmbedFlight {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { state: Mutex::new(EmbedFlightState::default()) })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, EmbedFlightState> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Try to claim the flight. `true` = THIS caller won and must run the pass; `false` = a
+    /// pass is already running and a rerun was recorded so it loops again for this caller's
+    /// (later-NULLed) chunks.
+    fn claim(&self) -> bool {
+        let mut st = self.lock();
+        if st.in_flight {
+            st.rerun_pending = true;
+            false
+        } else {
+            st.in_flight = true;
+            true
+        }
+    }
+
+    /// Start of a pass iteration: clear the rerun flag so a request arriving DURING this
+    /// iteration triggers another loop rather than being swallowed.
+    fn begin_pass(&self) {
+        self.lock().rerun_pending = false;
+    }
+
+    /// End of a pass iteration. `true` = a rerun was requested (keep the claim, loop again);
+    /// `false` = none, so the claim is released under the same lock (no wakeup can be lost).
+    fn finish_pass(&self) -> bool {
+        let mut st = self.lock();
+        if st.rerun_pending {
+            true
+        } else {
+            st.in_flight = false;
+            false
+        }
+    }
+
+    /// Force-release the claim on an abnormal exit (panic / embed error). A leftover rerun
+    /// request is harmless — the next owner clears it in `begin_pass` and runs anyway.
+    fn release(&self) {
+        self.lock().in_flight = false;
+    }
+
+    #[cfg(test)]
+    fn is_in_flight(&self) -> bool {
+        self.lock().in_flight
+    }
+
+    #[cfg(test)]
+    fn in_flight_for_test() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(EmbedFlightState { in_flight: true, rerun_pending: false }),
+        })
+    }
+}
+
+/// RAII release of the shared embed claim on an abnormal exit (panic / early return) while the
+/// owner still holds it, so a crashed pass never strands the flight `in_flight`. A clean exit
+/// calls [`Self::disarm`] first (the owner released the claim itself under the flight lock), so
+/// this does not stomp a later owner that already re-claimed.
+struct EmbedClaimGuard {
+    flight: Arc<EmbedFlight>,
+    armed: bool,
+}
+
+impl EmbedClaimGuard {
+    fn new(flight: Arc<EmbedFlight>) -> Self {
+        Self { flight, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for EmbedClaimGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.flight.release();
+        }
+    }
+}
+
+/// RAII restoration of the semantic runtime status for a background embed pass. The pass sets
+/// `Indexing` before it starts; this guarantees the status leaves `Indexing` even if the pass
+/// panics or returns early without an explicit terminal transition — otherwise a crashed pass
+/// would strand the runtime at `Indexing` forever. An explicit [`Self::finish`] on a clean
+/// success/failure suppresses the fallback.
+struct EmbedStatusGuard {
+    runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+    finished: bool,
+}
+
+impl EmbedStatusGuard {
+    fn new(runtime: Arc<Mutex<SemanticRuntimeStatus>>) -> Self {
+        Self { runtime, finished: false }
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for EmbedStatusGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            SharedState::set_semantic_runtime_status(
+                &self.runtime,
+                SemanticRuntimeStatus::Failed("embedding pass ended without completing".to_owned()),
+            );
+        }
+    }
+}
+
+/// Test seam: force the embed pass body to panic after its guards are in place, to verify the
+/// guards restore the flight claim and the runtime status (never leaving it stuck `Indexing`).
+#[cfg(test)]
+static FORCE_EMBED_PASS_PANIC: AtomicBool = AtomicBool::new(false);
+
+/// Test seam: a callback invoked once after the first embed iteration installs its index (and
+/// before `finish_pass`), so a test can create a NULL chunk mid-flight and signal a rerun,
+/// proving the owner loops and embeds it. Receives the store DB path.
+#[cfg(test)]
+type EmbedPostPassHook = Box<dyn FnMut(&Path) + Send>;
+#[cfg(test)]
+static EMBED_POST_PASS_HOOK: Mutex<Option<EmbedPostPassHook>> = Mutex::new(None);
+
+/// Test seam: force the rescan walk to count as errored, so a test can assert the reconcile is
+/// skipped (a partial walk must never be treated as authoritative and delete healthy files).
+#[cfg(test)]
+static FORCE_REWALK_WALK_ERROR: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceSearchMode {
@@ -171,8 +328,24 @@ impl SharedState {
         // this handle. A clone (cheap, shared `Arc`s) goes to the search thread; this
         // copy stays in `SharedState` for graph-tool serving and drift/reload. It carries
         // the hub so a graph freshness check invalidates its fingerprint cache on delivery.
-        let graph =
-            GraphState::for_workspace(source_dir.clone()).with_change_hub(change_hub.clone());
+        // On each graph publish/adopt (on the graph's own background thread) re-render the
+        // search chunks marked context-dirty by an `.xml` drift, now that the graph has
+        // caught up. Captures only shared handles; the closure never runs on a query path.
+        // ONE embed single-flight shared by the boot pass and the post-refresh re-embed kick,
+        // so overlapping passes collapse into one and the installed index is always built from
+        // the latest store state.
+        let embed_flight = EmbedFlight::new();
+        let publish_hook = Self::build_publish_hook(
+            Arc::clone(&search_engine),
+            source_dir.clone(),
+            Arc::clone(&semantic_runtime),
+            Arc::clone(&background_indexers),
+            Arc::clone(&index_progress),
+            Arc::clone(&embed_flight),
+        );
+        let graph = GraphState::for_workspace(source_dir.clone())
+            .with_change_hub(change_hub.clone())
+            .with_publish_hook(publish_hook);
 
         Self::spawn_workspace_search_init(
             Arc::clone(&search_engine),
@@ -184,6 +357,7 @@ impl SharedState {
             Arc::clone(&watcher_ready),
             baseline_runtime.external_baseline.clone(),
             graph.clone(),
+            Arc::clone(&embed_flight),
         );
 
         Self::spawn_search_sink(
@@ -191,6 +365,7 @@ impl SharedState {
             Arc::clone(&search_engine),
             Arc::clone(&watcher_ready),
             config_path.to_path_buf(),
+            graph.clone(),
         );
 
         // The `metadata` tool reads the resident diagnostics host (per-MDO substrate for
@@ -216,13 +391,41 @@ impl SharedState {
             diagnostics,
             change_hub: Some(change_hub),
             background_indexers,
+            embed_flight,
         }
     }
 
+    /// The production publish hook: after a graph publish it re-renders the search chunks
+    /// marked context-dirty by an `.xml` drift, then re-embeds them. Extracted so a test can
+    /// wire the SAME closure the daemon does rather than calling the refresh by hand. The
+    /// hook receives `(drift_pending, build_start_seq)`: `build_start_seq` bounds which marks
+    /// the refresh may clear (only drifts this build already reflects), while `drift_pending`
+    /// is a fast-path hint to skip a round when a fresher reload is imminent.
+    fn build_publish_hook(
+        search_engine: SharedSearchEngine,
+        workspace_root: PathBuf,
+        semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+        background_indexers: Arc<AtomicUsize>,
+        index_progress: Arc<IndexProgress>,
+        embed_flight: Arc<EmbedFlight>,
+    ) -> Arc<dyn Fn(crate::graph::GraphPublishSignal) + Send + Sync> {
+        Arc::new(move |signal| {
+            Self::refresh_search_contexts_after_graph(
+                &search_engine,
+                &workspace_root,
+                &semantic_runtime,
+                &background_indexers,
+                &index_progress,
+                &embed_flight,
+                signal,
+            );
+        })
+    }
+
     // Each argument is a distinct shared handle the spawned init thread must own (engine,
-    // progress, runtime status, indexer counter, roots, baseline, graph). Bundling them
-    // into a context struct would only move the same fields behind one name without
-    // clarifying anything, so the small over-arity is accepted here.
+    // progress, runtime status, indexer counter, roots, baseline, graph, embed flight).
+    // Bundling them into a context struct would only move the same fields behind one name
+    // without clarifying anything, so the small over-arity is accepted here.
     #[allow(clippy::too_many_arguments)]
     fn spawn_workspace_search_init(
         search_engine: SharedSearchEngine,
@@ -234,6 +437,7 @@ impl SharedState {
         watcher_ready: Arc<AtomicBool>,
         external_baseline: Option<Arc<ExternalBaselineService>>,
         graph: GraphState,
+        embed_flight: Arc<EmbedFlight>,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
@@ -280,8 +484,31 @@ impl SharedState {
                     None => Some(Self::semantic_runtime_status_for_mode(&init.engine, &init.mode)),
                 };
 
+                // Wire the graph's mark-seq source to the store's counter now that the engine
+                // exists (the graph was built before it). From here a build captures a bounded
+                // `build_start_seq`; publishes before this point (the fused/cached boot build)
+                // ran with the unwired `0` bound and cleared nothing.
+                graph.set_mark_seq_source(init.engine.mark_seq_handle());
+
+                // `context_dirty` persists across restarts, so a prior run may have left marks
+                // the boot build's (unwired) publish did not clear. Capture whether any survive
+                // AND the mark-seq high-water bound at THIS instant — both read off the engine
+                // BEFORE it moves into the shared handle. The captured bound is what the leftover
+                // consume clears against: it predates any drift the now-running search sink may
+                // stamp after this point, so those newer marks (higher seq) are excluded and left
+                // to their own nudge→publish cycle rather than cleared against the boot graph. The
+                // consume itself runs AFTER the move so the publish hook can read the published
+                // engine.
+                let has_leftover_marks =
+                    init.engine.context_dirty_paths("code").map(|m| !m.is_empty()).unwrap_or(false);
+                let leftover_bound = init.engine.mark_seq_handle().load(Ordering::SeqCst);
+
                 if let Ok(mut guard) = search_engine.lock() {
                     *guard = Some(init.engine);
+                }
+
+                if has_leftover_marks {
+                    graph.consume_leftover_marks(leftover_bound);
                 }
 
                 if let Some(status) = status_after_publish {
@@ -291,60 +518,18 @@ impl SharedState {
                 tracing::info!("search engine initialization complete");
 
                 if let Some(pending) = pending_embed {
-                    let search_engine = Arc::clone(&search_engine);
-                    let semantic_runtime = Arc::clone(&semantic_runtime);
-                    let index_progress = Arc::clone(&index_progress);
-                    // Take the hold BEFORE spawning so the count never dips to zero between
-                    // this init thread ending and the embed thread starting.
-                    let embed_guard = BackgroundWorkGuard::new(&background_indexers);
-                    std::thread::Builder::new()
-                        .name("bsl-search-embed".to_owned())
-                        .spawn(move || {
-                            let _embed_guard = embed_guard;
-                            tracing::info!("background embedding pass started");
-                            match SearchEngine::embed_pending_chunks_standalone(
-                                &pending.db_path,
-                                &pending.config,
-                                Some(&index_progress),
-                            ) {
-                                Ok(index) => {
-                                    let swapped = match search_engine.lock() {
-                                        Ok(mut guard) => match guard.as_mut() {
-                                            Some(engine) => {
-                                                engine.set_vector_index(index);
-                                                true
-                                            }
-                                            None => false,
-                                        },
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "background embedding: engine lock error: {e}"
-                                            );
-                                            false
-                                        }
-                                    };
-                                    if swapped {
-                                        Self::set_semantic_runtime_status(
-                                            &semantic_runtime,
-                                            SemanticRuntimeStatus::Ready,
-                                        );
-                                        tracing::info!(
-                                            "background embedding pass complete; semantic index live"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!("background embedding pass failed: {e}");
-                                    Self::set_semantic_runtime_status(
-                                        &semantic_runtime,
-                                        SemanticRuntimeStatus::Failed(format!(
-                                            "background embedding failed: {e}"
-                                        )),
-                                    );
-                                }
-                            }
-                        })
-                        .ok();
+                    // The boot pass shares the ONE embed single-flight with the post-refresh
+                    // kick, so a kick that lands while boot runs is absorbed (its NULL chunks
+                    // picked up by boot's rerun loop) instead of racing a second index swap.
+                    Self::spawn_embed_pass(
+                        Arc::clone(&search_engine),
+                        Arc::clone(&semantic_runtime),
+                        Arc::clone(&background_indexers),
+                        Arc::clone(&index_progress),
+                        Arc::clone(&embed_flight),
+                        pending.db_path,
+                        pending.config,
+                    );
                 }
 
                 if needs_overlay_warmup {
@@ -434,6 +619,7 @@ impl SharedState {
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
             background_indexers,
+            embed_flight: EmbedFlight::new(),
         }
     }
 
@@ -454,6 +640,7 @@ impl SharedState {
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
             background_indexers: Arc::new(AtomicUsize::new(0)),
+            embed_flight: EmbedFlight::new(),
         }
     }
 
@@ -1100,7 +1287,7 @@ impl SharedState {
                                 );
                             }
                         }
-                        if let Err(error) = engine.remove_file("platform://docs") {
+                        if let Err(error) = engine.remove_file("platform://docs", "platform") {
                             tracing::warn!("failed to clear local reference docs cache before external baseline mode: {error}");
                         }
                         Self::index_external_reference_docs(&mut engine, progress, snapshot);
@@ -1309,6 +1496,7 @@ impl SharedState {
                 watcher_ready,
                 self.external_baseline.clone(),
                 self.graph.clone(),
+                Arc::clone(&self.embed_flight),
             );
         }
     }
@@ -1330,15 +1518,17 @@ impl SharedState {
     }
 
     /// Drive the search overlay from the change hub. Search is one sink among
-    /// several: it drains its own cursor and marks only `.bsl` paths dirty, exactly
-    /// as the standalone overlay watcher did before the hub existed. The raw
-    /// (non-canonical) path is used so `mark_workspace_path_dirty`'s strip against
-    /// the configured source root still matches when that root has symlinks.
+    /// several: it drains its own cursor and applies the shared drift classification
+    /// (stateless policy) — `.bsl` bodies marked dirty, deleted `.bsl` removed from the
+    /// store, `.xml` metadata resolved to the affected documents' context. The raw
+    /// (non-canonical) path is used so the strip against the configured source root
+    /// still matches when that root has symlinks.
     fn spawn_search_sink(
         hub: WorkspaceChangeHub,
         engine: SharedSearchEngine,
         watcher_ready: Arc<AtomicBool>,
         watch_root: PathBuf,
+        graph: GraphState,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-overlay-watch".to_owned())
@@ -1372,34 +1562,425 @@ impl SharedState {
                     generation = hub.wait_for_change(generation, Duration::from_secs(30));
                     let batch = hub.drain(cursor);
                     cursor = batch.cursor;
-
-                    for entry in &batch.entries {
-                        Self::mark_search_path_dirty(&engine, &entry.raw);
-                    }
-
-                    // Overflow means the hub dropped detail: the exact changed paths
-                    // are lost. Restore parity with the old unbounded watcher (which
-                    // never lost a `.bsl`) by re-marking every workspace `.bsl` dirty,
-                    // so the overlay's incremental refresh reconsiders them all.
-                    if batch.rescan_required {
-                        tracing::warn!(
-                            "workspace change hub overflowed; re-marking all workspace .bsl paths dirty for the search overlay"
-                        );
-                        Self::rewalk_workspace_bsl_dirty(&engine, &watch_root);
-                    }
+                    Self::apply_search_drift(
+                        &engine,
+                        &watch_root,
+                        &batch.entries,
+                        batch.rescan_required,
+                        &graph,
+                    );
                 }
             })
             .ok();
     }
 
-    /// Re-mark every workspace `.bsl` dirty for the search overlay. Used when the
-    /// change hub overflowed and the exact changed paths are no longer known, so
-    /// the overlay's incremental refresh must reconsider the whole tree.
+    /// Apply one drained batch to the search overlay. Extracted from the sink loop so it
+    /// is unit-testable without driving the thread. On overflow (exact paths lost) it
+    /// re-walks the whole tree; otherwise it classifies (stateless policy) and applies
+    /// each bucket: `.bsl` bodies dirty, deleted `.bsl` removed, `.xml` → affected context.
+    fn apply_search_drift(
+        engine: &SharedSearchEngine,
+        watch_root: &Path,
+        entries: &[crate::change_hub::ChangeEntry],
+        rescan_required: bool,
+        graph: &GraphState,
+    ) {
+        // Overflow means the hub dropped detail: the exact changed paths are lost.
+        // Restore parity with the old unbounded watcher (which never lost a `.bsl`) by
+        // re-marking every workspace `.bsl` dirty, so the overlay's incremental refresh
+        // reconsiders them all.
+        if rescan_required {
+            tracing::warn!(
+                "workspace change hub overflowed; re-marking all workspace .bsl paths dirty for the search overlay"
+            );
+            Self::rewalk_workspace_bsl_dirty(engine, watch_root);
+            return;
+        }
+
+        // Search keeps no per-path baseline, so the stateless policy (no baseline, empty
+        // config set) buckets straight from on-disk truth.
+        let class =
+            crate::drift_classify::classify_drift(entries, &std::collections::HashSet::new(), None);
+
+        // Modified `.bsl` bodies: mark dirty for the overlay's incremental refresh.
+        for dp in &class.bsl_modified {
+            Self::mark_search_path_dirty(engine, &dp.raw);
+        }
+
+        // Deleted `.bsl`: drop from the store so it stops appearing in results.
+        if !class.bsl_removed.is_empty() {
+            Self::remove_search_paths(engine, class.bsl_removed.iter().map(|d| d.raw.as_path()));
+        }
+
+        // Changed `.xml` metadata: mark the affected documents' stored context stale, then
+        // nudge the graph to catch up. The context re-render only runs on a graph publish;
+        // without this nudge a user who only calls `search_code` never triggers a rebuild,
+        // so the marks would sit unresolved forever. The nudge is single-flight and never
+        // blocks — it schedules a background rebuild whose publish fires the refresh hook.
+        if !class.xml_paths.is_empty()
+            && Self::mark_xml_affected_context_dirty(engine, &class.xml_paths)
+        {
+            graph.nudge_rebuild();
+        }
+
+        // A subtree removal lost the descendant list → reconsider the whole tree.
+        if class.structural_rescan {
+            Self::rewalk_workspace_bsl_dirty(engine, watch_root);
+        }
+    }
+
+    /// Remove a batch of deleted `.bsl` files from the workspace store. Each removal
+    /// evicts exactly that file's vectors from the live index incrementally (no full
+    /// rebuild, no sidecar rewrite — the row deletion already invalidates the persisted
+    /// sidecar), so a large deletion no longer stalls under the engine lock. A path that
+    /// is not a workspace `.bsl` is skipped.
+    fn remove_search_paths<'a>(engine: &SharedSearchEngine, paths: impl Iterator<Item = &'a Path>) {
+        if let Ok(mut guard) = engine.lock() {
+            if let Some(engine) = guard.as_mut() {
+                for path in paths {
+                    match engine.remove_workspace_path(path) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(path = ?path, "failed to remove workspace file: {e}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve each changed `.xml` descriptor to the workspace documents it affects and
+    /// mark their stored graph context stale, so a later reindex/embed pass re-renders it
+    /// (marking only — the render is deferred, so it never races the graph's own drift
+    /// catch-up). OWNED modules resolve by path convention: an MDO / common-module /
+    /// service / form descriptor at `<Dir>/<Name>.xml` owns every `.bsl` under the sibling
+    /// `<Dir>/<Name>/` subtree. Any `.xml` directly at the workspace root (a
+    /// configuration-root descriptor, whose change can shift any module's context)
+    /// conservatively marks the whole collection. REFERENCING modules (a module that
+    /// merely reads the changed MDO) are not resolved here: that reverse lookup rides the
+    /// persisted graph and lands with the resident-fed reindex path.
+    ///
+    /// The filesystem walk (owned-subtree resolution) runs OUTSIDE the engine lock; the
+    /// lock is taken only briefly for the store writes. Returns whether it marked at least
+    /// one path context-dirty (owned modules or a whole-collection mark), so the caller can
+    /// gate the graph catch-up nudge on real work having been queued.
+    fn mark_xml_affected_context_dirty(
+        engine: &SharedSearchEngine,
+        xml_paths: &[crate::drift_classify::DriftPath],
+    ) -> bool {
+        // Read the workspace root once (brief lock), then resolve owned subtrees off-lock.
+        let workspace_root = {
+            let Ok(guard) = engine.lock() else { return false };
+            let Some(engine) = guard.as_ref() else { return false };
+            engine.workspace_root().map(Path::to_path_buf)
+        };
+
+        let mut owned_modules: Vec<PathBuf> = Vec::new();
+        let mut mark_whole_collection = false;
+        for dp in xml_paths {
+            match owned_module_subtree(&dp.raw) {
+                Some(subtree) => owned_modules.extend(walk_bsl_files(&subtree)),
+                None if is_workspace_root_xml(&dp.raw, workspace_root.as_deref()) => {
+                    mark_whole_collection = true;
+                }
+                None => {}
+            }
+        }
+        if owned_modules.is_empty() && !mark_whole_collection {
+            return false;
+        }
+
+        // Brief lock for the store writes only.
+        let Ok(guard) = engine.lock() else { return false };
+        let Some(engine) = guard.as_ref() else { return false };
+        let mut marked = false;
+        if mark_whole_collection {
+            match engine.mark_workspace_context_dirty() {
+                Ok(count) => marked |= count > 0,
+                Err(e) => tracing::warn!("failed to mark collection context dirty: {e}"),
+            }
+        }
+        for bsl in owned_modules {
+            match engine.mark_workspace_path_context_dirty(&bsl) {
+                Ok(did) => marked |= did,
+                Err(e) => tracing::warn!(path = ?bsl, "failed to mark context dirty: {e}"),
+            }
+        }
+        marked
+    }
+
+    /// After the graph publishes a fresh build, re-render the stored graph context of any
+    /// search chunk whose owning file was marked context-dirty by an `.xml` drift, so a
+    /// metadata edit becomes visible without waiting for the owning `.bsl` to change. This
+    /// runs on the graph's background publish thread — never on a query path — because the
+    /// freshly published graph is the "caught up" state a re-render must read. `build_start_seq`
+    /// (captured when this build STARTED) bounds the marks it may clear: only drifts this
+    /// build already reflects, never one stamped after it began, so a mark is never cleared
+    /// against a graph that predates its `.xml` change. Opens the just-published graph
+    /// database for the render; when the graph is unavailable nothing is cleared and the
+    /// marks persist for the next publish. Never touches the resident mutex.
+    fn refresh_search_contexts_after_graph(
+        engine: &SharedSearchEngine,
+        workspace_root: &Path,
+        semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+        background_indexers: &Arc<AtomicUsize>,
+        index_progress: &Arc<IndexProgress>,
+        embed_flight: &Arc<EmbedFlight>,
+        signal: crate::graph::GraphPublishSignal,
+    ) {
+        let crate::graph::GraphPublishSignal { drift_pending, build_start_seq } = signal;
+        // Fast-path skip (an optimization, not correctness): a follow-up reload is already
+        // catching up, so let ITS publish re-render against the fresher graph. Correctness
+        // does not depend on this — the `build_start_seq` bound below already prevents
+        // clearing a mark against a graph that predates its drift.
+        if drift_pending {
+            tracing::debug!(
+                "graph drift still pending; deferring search context refresh to the next publish"
+            );
+            return;
+        }
+        let graph_path = crate::cache::graph_db_path(workspace_root);
+        let graph_db = match crate::graph_query::GraphDb::open(&graph_path) {
+            Ok(db) => db,
+            Err(e) => {
+                tracing::debug!("graph unavailable for search context refresh: {e}");
+                return;
+            }
+        };
+        let provider = crate::graph_query::GraphDbContextProvider::new(graph_db);
+        let cleared_embeddings = {
+            let Ok(guard) = engine.lock() else { return };
+            let Some(engine) = guard.as_ref() else { return };
+            match engine.refresh_dirty_contexts(&provider, build_start_seq) {
+                Ok(stats) if stats.paths_cleared > 0 => {
+                    tracing::info!(
+                        paths = stats.paths_cleared,
+                        chunks = stats.chunks_updated,
+                        cleared_embeddings = stats.cleared_embeddings,
+                        "search graph context refreshed after graph publish"
+                    );
+                    stats.cleared_embeddings
+                }
+                Ok(_) => 0,
+                Err(e) => {
+                    tracing::warn!("search context refresh failed: {e}");
+                    0
+                }
+            }
+        };
+        // Re-rendered chunks had their live embedding NULLed; without a re-embed they serve
+        // the OLD vector in-process and vanish from semantic results after a restart until
+        // the boot pass. Kick the same background embed machinery workspace init uses.
+        if cleared_embeddings > 0 {
+            Self::kick_context_reembed(
+                engine,
+                semantic_runtime,
+                background_indexers,
+                index_progress,
+                embed_flight,
+            );
+        }
+    }
+
+    /// After a context refresh NULLed live embeddings, re-embed the pending chunks through the
+    /// shared embed single-flight — the same pass workspace boot uses, so the two never race an
+    /// index swap. When no embedder is configured the kick returns without claiming (lexical
+    /// results, already fresh from the refresh, are the whole story).
+    fn kick_context_reembed(
+        engine: &SharedSearchEngine,
+        semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+        background_indexers: &Arc<AtomicUsize>,
+        index_progress: &Arc<IndexProgress>,
+        embed_flight: &Arc<EmbedFlight>,
+    ) {
+        // A no-embedder engine has nothing to re-embed; resolve the DB path only if semantic
+        // is live so we never claim the flight for a pass that would do nothing.
+        let db_path = engine.lock().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .and_then(|engine| engine.has_semantic().then(|| engine.db_path().to_path_buf()))
+        });
+        let Some(db_path) = db_path else { return };
+        let Some(config) = Self::embedding_config() else { return };
+
+        Self::spawn_embed_pass(
+            Arc::clone(engine),
+            Arc::clone(semantic_runtime),
+            Arc::clone(background_indexers),
+            Arc::clone(index_progress),
+            Arc::clone(embed_flight),
+            db_path,
+            config,
+        );
+    }
+
+    /// The ONE background embed entry for the workspace: both boot (initial NULL embeddings)
+    /// and the post-refresh kick funnel through here so they share a single claim. The caller
+    /// that wins the claim runs the pass in a loop, re-running while a rerun was requested — so
+    /// a caller that lost the claim (its later-NULLed chunks absorbed) is guaranteed a later
+    /// iteration sees them.
+    ///
+    /// INVARIANT: because `embed_pending_chunks_standalone` re-selects NULL chunks from the
+    /// store on every iteration and the `set_vector_index` swap happens per iteration, the LAST
+    /// iteration installs an index reflecting the latest store state — an older caller can never
+    /// install a stale index over a newer one.
+    fn spawn_embed_pass(
+        engine: SharedSearchEngine,
+        semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+        background_indexers: Arc<AtomicUsize>,
+        index_progress: Arc<IndexProgress>,
+        embed_flight: Arc<EmbedFlight>,
+        db_path: PathBuf,
+        config: bsl_search::SearchConfig,
+    ) {
+        if !embed_flight.claim() {
+            // A pass is already running; it will loop again and absorb these NULL chunks.
+            return;
+        }
+
+        // Take the daemon-alive hold BEFORE spawning so the count never dips to zero.
+        let work_guard = BackgroundWorkGuard::new(&background_indexers);
+        Self::set_semantic_runtime_status(&semantic_runtime, SemanticRuntimeStatus::Indexing);
+        // Clone the handles the thread owns; the originals stay behind for the spawn-error path.
+        let engine = Arc::clone(&engine);
+        let runtime = Arc::clone(&semantic_runtime);
+        let flight = Arc::clone(&embed_flight);
+        let spawned =
+            std::thread::Builder::new().name("bsl-search-embed".to_owned()).spawn(move || {
+                let _work_guard = work_guard;
+                // Restore the flight claim on any abnormal exit; a clean release calls
+                // `disarm()` first so this never stomps a later owner that already re-claimed.
+                let mut claim_guard = EmbedClaimGuard::new(Arc::clone(&flight));
+                // Restore the runtime status on any abnormal exit so it never sticks `Indexing`.
+                let mut status_guard = EmbedStatusGuard::new(Arc::clone(&runtime));
+                tracing::info!("background embedding pass started");
+                loop {
+                    flight.begin_pass();
+                    #[cfg(test)]
+                    if FORCE_EMBED_PASS_PANIC.load(Ordering::SeqCst) {
+                        panic!("forced embedding pass panic");
+                    }
+                    match SearchEngine::embed_pending_chunks_standalone(
+                        &db_path,
+                        &config,
+                        Some(&index_progress),
+                    ) {
+                        Ok(index) => {
+                            let swapped = match engine.lock() {
+                                Ok(mut guard) => match guard.as_mut() {
+                                    Some(engine) => {
+                                        engine.set_vector_index(index);
+                                        true
+                                    }
+                                    None => false,
+                                },
+                                Err(e) => {
+                                    tracing::warn!("embedding pass: engine lock error: {e}");
+                                    false
+                                }
+                            };
+                            if !swapped {
+                                // The engine is gone (daemon shutting down); stop and let the
+                                // status guard record the pass did not complete.
+                                break;
+                            }
+                            #[cfg(test)]
+                            {
+                                let mut hook =
+                                    EMBED_POST_PASS_HOOK.lock().unwrap_or_else(|p| p.into_inner());
+                                if let Some(h) = hook.as_mut() {
+                                    h(&db_path);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("background embedding pass failed: {e}");
+                            Self::set_semantic_runtime_status(
+                                &runtime,
+                                SemanticRuntimeStatus::Failed(format!(
+                                    "background embedding failed: {e}"
+                                )),
+                            );
+                            status_guard.finish();
+                            return;
+                        }
+                    }
+                    if !flight.finish_pass() {
+                        // No rerun requested → the claim was released under the flight lock.
+                        claim_guard.disarm();
+                        Self::set_semantic_runtime_status(&runtime, SemanticRuntimeStatus::Ready);
+                        status_guard.finish();
+                        tracing::info!("background embedding pass complete; semantic index live");
+                        return;
+                    }
+                    // A rerun was requested during the pass; loop again for its NULL chunks.
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("failed to spawn embedding thread: {e}");
+            embed_flight.release();
+            Self::set_semantic_runtime_status(
+                &semantic_runtime,
+                SemanticRuntimeStatus::Failed(format!("could not spawn embedding thread: {e}")),
+            );
+        }
+    }
+
+    /// Re-mark every workspace `.bsl` dirty for the search overlay, then reconcile the
+    /// store against what is actually on disk. Used when the change hub overflowed or a
+    /// subtree was removed and the exact changed paths are no longer known, so the overlay
+    /// must reconsider the whole tree. Marking alone only covers files that STILL exist; a
+    /// file deleted during the lost window would keep its FTS rows and vectors forever, so
+    /// the reconcile diffs the walked (present) set against the stored set and removes the
+    /// gone paths. The walk runs OUTSIDE the engine lock; the reconcile takes the lock only
+    /// for its bounded O(stored) store writes.
     fn rewalk_workspace_bsl_dirty(engine: &SharedSearchEngine, watch_root: &Path) {
+        let mut present: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut walk_errors = 0usize;
         for file in walkdir::WalkDir::new(watch_root).follow_links(true) {
-            let Ok(file) = file else { continue };
+            let file = match file {
+                Ok(file) => file,
+                Err(e) => {
+                    walk_errors += 1;
+                    tracing::warn!("search rescan walk error: {e}");
+                    continue;
+                }
+            };
             if file.file_type().is_file() {
-                Self::mark_search_path_dirty(engine, file.path());
+                let path = file.path();
+                if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+                    present.insert(path.to_path_buf());
+                }
+                Self::mark_search_path_dirty(engine, path);
+            }
+        }
+        #[cfg(test)]
+        if FORCE_REWALK_WALK_ERROR.load(Ordering::SeqCst) {
+            walk_errors += 1;
+        }
+        // A partial walk (permission error, symlink loop, transient IO) is NOT authoritative:
+        // `present` is missing healthy files, so reconciling against it would delete them from
+        // the store. Only reconcile when the walk completed with zero errors; marking the found
+        // files dirty already happened above regardless.
+        if walk_errors > 0 {
+            tracing::warn!(
+                walk_errors,
+                "search rescan walk incomplete; skipping reconcile to avoid deleting healthy files"
+            );
+            return;
+        }
+        if let Ok(mut guard) = engine.lock() {
+            if let Some(engine) = guard.as_mut() {
+                match engine.reconcile_workspace_files(&present) {
+                    Ok(removed) if removed > 0 => {
+                        tracing::info!(
+                            removed,
+                            "search rescan reconciled deleted files out of the index"
+                        )
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("search rescan reconcile failed: {e}"),
+                }
             }
         }
     }
@@ -1417,6 +1998,43 @@ impl SharedState {
                 }
             }
         }
+    }
+}
+
+/// The owned-module subtree of a metadata descriptor `.xml`: `<Dir>/<Name>/` beside a
+/// `<Dir>/<Name>.xml`, when that directory exists. Every `.bsl` under it (object /
+/// manager / recordset / form / command modules, or a common-module / service body) is
+/// owned by the object the descriptor defines — so the path convention covers ordinary
+/// MDOs (which carry no substrate back-link) and common-modules/services alike, with no
+/// resident lookup and no resident/engine lock coupling.
+fn owned_module_subtree(xml: &Path) -> Option<PathBuf> {
+    let stem = xml.file_stem()?;
+    let subtree = xml.parent()?.join(stem);
+    subtree.is_dir().then_some(subtree)
+}
+
+/// Every `.bsl` file under `dir`.
+fn walk_bsl_files(dir: &Path) -> Vec<PathBuf> {
+    walkdir::WalkDir::new(dir)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.path().to_path_buf())
+        .filter(|p| p.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+        .collect()
+}
+
+/// Whether `xml` sits directly at the workspace root — any such descriptor
+/// (`Configuration.xml`, `ConfigDumpInfo.xml`, a plugin's root descriptor, …) can shift
+/// any module's context, so it is handled conservatively by marking the whole collection
+/// rather than a resolvable owned subtree. When the workspace root is unknown, fall back
+/// to the `Configuration.xml` name so the conservative branch still fires for the one
+/// descriptor guaranteed to live at the root.
+fn is_workspace_root_xml(xml: &Path, workspace_root: Option<&Path>) -> bool {
+    match workspace_root {
+        Some(root) => xml.parent() == Some(root),
+        None => xml.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Configuration.xml")),
     }
 }
 
@@ -1762,6 +2380,7 @@ mod tests {
             Arc::clone(&engine_arc),
             Arc::clone(&watcher_ready),
             workspace.clone(),
+            crate::graph::GraphState::disabled(),
         );
 
         // Wait deterministically for the sink to subscribe (observer + sink = 2
@@ -1854,6 +2473,1415 @@ mod tests {
         assert!(
             !snapshot.keys().any(|p| p.ends_with("Configuration.xml")),
             "non-.bsl paths are left alone",
+        );
+    }
+
+    /// A deleted `.bsl` is removed from the workspace store so it stops appearing in
+    /// results — closing the pre-existing gap where a deleted file lingered in FTS.
+    #[test]
+    fn search_sink_removes_deleted_bsl_from_results() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine
+            .sync_indexed_documents_in_collection(
+                "code",
+                &[IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "Removed.bsl".to_owned(),
+                    symbol_name: "УдаляемаяПроцедура".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 0,
+                    line_end: 1,
+                    text: "Процедура УдаляемаяПроцедура()\nКонецПроцедуры".to_owned(),
+                    content_hash: "h".to_owned(),
+                    graph_context: None,
+                }],
+                None,
+            )
+            .unwrap();
+        assert_eq!(engine.file_count().unwrap(), 1);
+        assert!(
+            !engine.text_search("УдаляемаяПроцедура", 10, Some("code")).unwrap().is_empty(),
+            "the indexed file is initially found",
+        );
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        // The file is gone from disk: classification re-stats it (stats are truth) → removed.
+        let removed = workspace.join("Removed.bsl");
+        let entry = ChangeEntry {
+            canonical: removed.clone(),
+            raw: removed,
+            kind: ChangeKind::MaybeRemoved,
+            seq: 1,
+        };
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &workspace,
+            &[entry],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert_eq!(engine.file_count().unwrap(), 0, "the deleted file is dropped from the store");
+        assert!(
+            engine.text_search("УдаляемаяПроцедура", 10, Some("code")).unwrap().is_empty(),
+            "the deleted file no longer appears in FTS results",
+        );
+    }
+
+    /// An `.xml` metadata edit marks only the owned modules (the sibling `<Dir>/<Name>/`
+    /// subtree) context-dirty via the store side table; unrelated modules are untouched
+    /// and nothing is marked dirty — proving the resolver walks the owned subtree only,
+    /// never the whole workspace.
+    #[test]
+    fn search_sink_xml_marks_only_owned_modules_context_dirty() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+
+        // An MDO descriptor with an owned module, plus an unrelated object elsewhere.
+        let owned = workspace.join("Catalogs/Товары/Ext/ObjectModule.bsl");
+        fs::create_dir_all(owned.parent().unwrap()).unwrap();
+        fs::write(&owned, "Процедура П()\nКонецПроцедуры").unwrap();
+        let unrelated = workspace.join("Catalogs/Другой/Ext/ObjectModule.bsl");
+        fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+        fs::write(&unrelated, "Процедура П()\nКонецПроцедуры").unwrap();
+        let xml = workspace.join("Catalogs/Товары.xml");
+        fs::write(&xml, "<MetaDataObject/>").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let entry = ChangeEntry {
+            canonical: xml.clone(),
+            raw: xml,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &workspace,
+            &[entry],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        let dirty = engine.context_dirty_paths("code").unwrap();
+        assert!(
+            dirty.contains("Catalogs/Товары/Ext/ObjectModule.bsl"),
+            "the owned module is marked context-dirty: {dirty:?}",
+        );
+        assert!(
+            !dirty.contains("Catalogs/Другой/Ext/ObjectModule.bsl"),
+            "an unrelated object's module is left untouched: {dirty:?}",
+        );
+        assert_eq!(dirty.len(), 1, "only the owned subtree is marked, not the whole tree");
+        // The xml path is metadata context, not a body edit: nothing is marked dirty and
+        // no whole-workspace walk ran.
+        let snapshot = engine.workspace_overlay_dirty_paths_snapshot().unwrap();
+        assert!(snapshot.is_empty(), "an xml edit marks no body dirty and triggers no walk");
+    }
+
+    /// ANY `.xml` directly at the workspace root (not only `Configuration.xml`), with no
+    /// owned-module subtree, conservatively marks the whole collection context-dirty — a
+    /// root descriptor change can shift any module's context.
+    #[test]
+    fn search_sink_root_xml_marks_whole_collection_context_dirty() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        let doc = |path: &str, sym: &str| IndexedDocument {
+            collection: "code".to_owned(),
+            path: path.to_owned(),
+            symbol_name: sym.to_owned(),
+            kind: "procedure".to_owned(),
+            line_start: 0,
+            line_end: 1,
+            text: format!("Процедура {sym}()\nКонецПроцедуры"),
+            content_hash: "h".to_owned(),
+            graph_context: None,
+        };
+        engine
+            .sync_indexed_documents_in_collection(
+                "code",
+                &[doc("A.bsl", "Ааа"), doc("B.bsl", "Ббб")],
+                None,
+            )
+            .unwrap();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        // A root `.xml` NOT named Configuration.xml, with no sibling `<stem>/` subtree.
+        let xml = workspace.join("SomePlugin.xml");
+        fs::write(&xml, "<Root/>").unwrap();
+        let entry = ChangeEntry {
+            canonical: xml.clone(),
+            raw: xml,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &workspace,
+            &[entry],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        let dirty = engine.context_dirty_paths("code").unwrap();
+        assert_eq!(dirty.len(), 2, "a root .xml marks every indexed file: {dirty:?}");
+        assert!(dirty.contains("A.bsl") && dirty.contains("B.bsl"));
+    }
+
+    /// First byte offset of `needle` in `haystack`, or `None`.
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// A minimal in-process HTTP embedding endpoint: answers `POST /v1/embeddings` with one
+    /// fixed vector per input, so the real `Embedder` produces deterministic vectors without
+    /// a live service. Returns the base URL; the detached server thread stops on process exit.
+    fn spawn_mock_embedding_server(vector: Vec<f32>) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                let mut header_end: Option<usize> = None;
+                let mut content_len = 0usize;
+                loop {
+                    let n = match stream.read(&mut tmp) {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    buf.extend_from_slice(&tmp[..n]);
+                    if header_end.is_none() {
+                        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                            header_end = Some(pos + 4);
+                            let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                            for line in headers.lines() {
+                                if let Some(v) = line.strip_prefix("content-length:") {
+                                    content_len = v.trim().parse().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                    if header_end.is_some_and(|he| buf.len() >= he + content_len) {
+                        break;
+                    }
+                }
+                let body = header_end.map(|he| &buf[he..]).unwrap_or(&[]);
+                let n_inputs = serde_json::from_slice::<serde_json::Value>(body)
+                    .ok()
+                    .and_then(|v| v.get("input").and_then(|i| i.as_array().map(|a| a.len())))
+                    .unwrap_or(1);
+                let data: Vec<serde_json::Value> = (0..n_inputs)
+                    .map(|i| serde_json::json!({ "index": i, "embedding": vector }))
+                    .collect();
+                let resp_body = serde_json::json!({ "data": data }).to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body,
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A semantic `SearchConfig` pointed at `base_url`, dim 3.
+    fn mock_semantic_config(base_url: &str) -> bsl_search::SearchConfig {
+        bsl_search::SearchConfig {
+            embedder: bsl_search::EmbedderConfig {
+                base_url: base_url.to_owned(),
+                model: "test-model".to_owned(),
+                dim: Some(3),
+                api_key: None,
+                provider: None,
+            },
+            execution: bsl_search::EmbeddingExecutionPolicy::default(),
+        }
+    }
+
+    /// Point `Self::embedding_config()` (env-driven) at the mock server for the duration of a
+    /// test. Returns the guards (kept alive by the caller) plus the shared env lock guard.
+    fn mock_embedding_env(base_url: &str) -> Vec<EnvVarGuard> {
+        vec![
+            EnvVarGuard::set("EMBEDDING_URL", base_url),
+            EnvVarGuard::set("EMBEDDING_MODEL", "test-model"),
+            EnvVarGuard::set("EMBEDDING_DIM", "3"),
+        ]
+    }
+
+    /// A minimal CommonModule descriptor + body under `root`, so the module is declared and
+    /// its method resolves to a durable graph id (`method/common/<name>/<method>`).
+    fn write_common_module(root: &std::path::Path, name: &str, body: &str) {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+	<CommonModule uuid="00000000-0000-0000-0000-0000000000{id:02}">
+		<Properties>
+			<Name>{name}</Name>
+			<Global>false</Global>
+			<ClientManagedApplication>false</ClientManagedApplication>
+			<Server>true</Server>
+			<ExternalConnection>false</ExternalConnection>
+			<ClientOrdinaryApplication>false</ClientOrdinaryApplication>
+			<ServerCall>false</ServerCall>
+			<Privileged>false</Privileged>
+			<ReturnValuesReuse>DontUse</ReturnValuesReuse>
+		</Properties>
+	</CommonModule>
+</MetaDataObject>"#,
+            id = name.len(),
+        );
+        let xml_path = root.join(format!("CommonModules/{name}.xml"));
+        fs::create_dir_all(xml_path.parent().unwrap()).unwrap();
+        fs::write(&xml_path, xml).unwrap();
+        let module_path = root.join(format!("CommonModules/{name}/Ext/Module.bsl"));
+        fs::create_dir_all(module_path.parent().unwrap()).unwrap();
+        fs::write(&module_path, body).unwrap();
+    }
+
+    /// An `.xml` drift whose owned module is marked context-dirty must NUDGE the graph to
+    /// catch up — otherwise a search-only user (who never triggers a `graph` tool freshness
+    /// check) leaves the marks unresolved forever. Asserting the graph left `Idle` with NO
+    /// graph tool call. Disable the `graph.nudge_rebuild()` call → the graph stays `Idle` and
+    /// this fails.
+    #[test]
+    fn search_sink_xml_drift_nudges_graph_to_catch_up() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+
+        // An MDO descriptor with an owned module so the xml resolves to a real dirty mark.
+        let owned = workspace.join("Catalogs/Товары/Ext/ObjectModule.bsl");
+        fs::create_dir_all(owned.parent().unwrap()).unwrap();
+        fs::write(&owned, "Процедура П()\nКонецПроцедуры").unwrap();
+        let xml = workspace.join("Catalogs/Товары.xml");
+        fs::write(&xml, "<MetaDataObject/>").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+        assert_eq!(graph.status(), crate::graph::GraphStatus::Idle, "graph starts idle");
+
+        let entry = ChangeEntry {
+            canonical: xml.clone(),
+            raw: xml,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        SharedState::apply_search_drift(&engine_arc, &workspace, &[entry], false, &graph);
+
+        assert_ne!(
+            graph.status(),
+            crate::graph::GraphStatus::Idle,
+            "the xml drift nudged the graph to catch up without any graph tool call",
+        );
+    }
+
+    /// The re-embed kick: after a context refresh NULLs a chunk's embedding, the kick's
+    /// background pass re-embeds it and swaps the fresh vector into the LIVE engine, so the
+    /// re-contexted chunk answers semantic queries in-process (not only after a restart).
+    /// Disable the spawn in `kick_context_reembed` → the live index stays empty and this fails.
+    #[test]
+    fn context_reembed_kick_fills_nulled_chunks_into_the_live_index() {
+        use bsl_search::{Chunk, ChunkKind, Store};
+        use std::time::{Duration, Instant};
+
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+        // A chunk with NO embedding (pending): the kick must fill it.
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    "Owned.bsl",
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Считать()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("контекст".to_owned())]),
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::new(&db_path, mock_semantic_config(&mock)).unwrap();
+        engine.set_workspace_root(dir.path());
+        assert!(engine.has_semantic());
+        // No vector is live yet: the query for the mock vector finds nothing.
+        assert!(
+            engine.search_with_embedding(&[1.0, 0.0, 0.0], 5, Some("code")).unwrap().is_empty(),
+            "no vector is live before the kick",
+        );
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let semantic_runtime = Arc::new(Mutex::new(super::SemanticRuntimeStatus::Indexing));
+        let background_indexers = Arc::new(super::AtomicUsize::new(0));
+        let index_progress = bsl_search::IndexProgress::new();
+        let embed_flight = super::EmbedFlight::new();
+
+        SharedState::kick_context_reembed(
+            &engine_arc,
+            &semantic_runtime,
+            &background_indexers,
+            &index_progress,
+            &embed_flight,
+        );
+
+        // Poll until the background pass swaps the fresh vector into the live engine.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut live = false;
+        while Instant::now() < deadline {
+            let hits = {
+                let guard = engine_arc.lock().unwrap();
+                guard
+                    .as_ref()
+                    .unwrap()
+                    .search_with_embedding(&[1.0, 0.0, 0.0], 5, Some("code"))
+                    .unwrap()
+            };
+            if hits.iter().any(|h| h.symbol_name == "Считать") {
+                live = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(live, "the re-embed kick made the NULLed chunk answer with its new live vector");
+    }
+
+    /// Single-flight: a kick arriving while a pass is already claimed is absorbed — it spawns
+    /// no second pass (the in-flight background count does not rise). Disable the
+    /// `compare_exchange` claim guard → the second kick proceeds and the count rises.
+    #[test]
+    fn context_reembed_kick_is_single_flight() {
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+        // A chunk that is already embedded (no pending), so a proceeding pass returns fast.
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    "Owned.bsl",
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Считать()\nКонецПроцедуры".to_owned(),
+                    }],
+                    Some(&[vec![1.0, 0.0, 0.0]]),
+                    Some(&[Some("контекст".to_owned())]),
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::new(&db_path, mock_semantic_config(&mock)).unwrap();
+        engine.set_workspace_root(dir.path());
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let semantic_runtime = Arc::new(Mutex::new(super::SemanticRuntimeStatus::Ready));
+        let background_indexers = Arc::new(super::AtomicUsize::new(0));
+        let index_progress = bsl_search::IndexProgress::new();
+        // A pass is already in flight: the kick must be absorbed, spawning nothing.
+        let embed_flight = super::EmbedFlight::in_flight_for_test();
+
+        let before = background_indexers.load(super::Ordering::SeqCst);
+        SharedState::kick_context_reembed(
+            &engine_arc,
+            &semantic_runtime,
+            &background_indexers,
+            &index_progress,
+            &embed_flight,
+        );
+        assert_eq!(
+            background_indexers.load(super::Ordering::SeqCst),
+            before,
+            "a kick while a pass is claimed spawns no second pass",
+        );
+        assert!(embed_flight.is_in_flight(), "the existing claim is untouched");
+    }
+
+    /// End-to-end lifecycle net through PRODUCTION wiring, using real components (real store,
+    /// real graph build, real hub types, the real publish hook built by `build_publish_hook`)
+    /// and faking only the embedder: an `.xml` drift → `apply_search_drift` marks the owned
+    /// module + nudges the graph → the graph builds and its REAL publish fires the hook → the
+    /// hook re-renders the stale context from the just-published graph, NULLs the embedding, and
+    /// the shared embed pass re-embeds it into the live index. The refresh runs off the graph's
+    /// own publish, not a hand-call, so the whole chain is exercised.
+    #[test]
+    fn xml_drift_lifecycle_refreshes_context_and_reembeds_into_live_index() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+        use std::time::{Duration, Instant};
+
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        // A real CommonModule so its method resolves to a graph id and the graph renders context.
+        write_common_module(&workspace, "Сервер", "Функция Считать() Экспорт КонецФункции");
+        let module_rel = "CommonModules/Сервер/Ext/Module.bsl";
+
+        // The search chunk starts with a STALE stored context and a live embedding, so the
+        // refresh detects a change, rewrites it, and NULLs the embedding.
+        let db_path = workspace.join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    module_rel,
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Function,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Функция Считать() Экспорт КонецФункции".to_owned(),
+                    }],
+                    Some(&[vec![0.0, 1.0, 0.0]]),
+                    Some(&[Some("СТАРЫЙ контекст".to_owned())]),
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::new(&db_path, mock_semantic_config(&mock)).unwrap();
+        engine.set_workspace_root(&workspace);
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        // Wire the SAME publish hook the daemon builds, so the graph's real publish — not a
+        // hand-call — drives the context refresh and re-embed.
+        let semantic_runtime = Arc::new(Mutex::new(super::SemanticRuntimeStatus::Ready));
+        let background_indexers = Arc::new(super::AtomicUsize::new(0));
+        let index_progress = bsl_search::IndexProgress::new();
+        let embed_flight = super::EmbedFlight::new();
+        let hook = SharedState::build_publish_hook(
+            Arc::clone(&engine_arc),
+            workspace.clone(),
+            Arc::clone(&semantic_runtime),
+            Arc::clone(&background_indexers),
+            Arc::clone(&index_progress),
+            Arc::clone(&embed_flight),
+        );
+        let graph =
+            crate::graph::GraphState::for_workspace(workspace.clone()).with_publish_hook(hook);
+        // Wire the mark-seq source as the daemon does at boot, so the nudged build captures a
+        // bound that covers the mark this drift stamps. An unwired build captures bound 0 and
+        // clears nothing.
+        graph.set_mark_seq_source(engine_arc.lock().unwrap().as_ref().unwrap().mark_seq_handle());
+
+        // The xml drift marks the owned module context-dirty and nudges the graph; the nudged
+        // build publishes and fires the hook automatically.
+        let xml = workspace.join("CommonModules/Сервер.xml");
+        let entry = ChangeEntry {
+            canonical: xml.clone(),
+            raw: xml,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        SharedState::apply_search_drift(&engine_arc, &workspace, &[entry], false, &graph);
+        {
+            let guard = engine_arc.lock().unwrap();
+            let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
+            assert!(
+                dirty.contains(module_rel),
+                "the owned module is marked context-dirty: {dirty:?}"
+            );
+        }
+        assert_ne!(graph.status(), crate::graph::GraphStatus::Idle, "the graph nudge fired");
+
+        // The stored context is re-rendered from the real graph (no longer the stale string),
+        // and the re-embed kick swaps the fresh vector into the live index.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut refreshed = false;
+        while Instant::now() < deadline {
+            let (ctx, hits) = {
+                let guard = engine_arc.lock().unwrap();
+                let engine = guard.as_ref().unwrap();
+                let docs = engine.load_indexed_documents(Some("code")).unwrap();
+                let ctx = docs
+                    .iter()
+                    .find(|d| d.symbol_name == "Считать")
+                    .and_then(|d| d.graph_context.clone());
+                let hits = engine.search_with_embedding(&[1.0, 0.0, 0.0], 5, Some("code")).unwrap();
+                (ctx, hits)
+            };
+            let ctx_fresh =
+                ctx.as_deref().is_some_and(|c| c != "СТАРЫЙ контекст" && c.contains("Signature"));
+            if ctx_fresh && hits.iter().any(|h| h.symbol_name == "Считать") {
+                refreshed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            refreshed,
+            "the xml drift re-rendered the module's graph context and re-embedded it into the live index",
+        );
+    }
+
+    /// While a graph drift is still being caught up (a follow-up reload is pending), the context
+    /// refresh must DEFER: consuming the marks against the pre-drift publish would clear them
+    /// against stale facts. Reverting the `drift_pending` guard makes the deferred call consume
+    /// the mark and the survival assertion fails.
+    #[test]
+    fn context_refresh_defers_marks_while_graph_drift_is_pending() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_common_module(&workspace, "Сервер", "Функция Считать() Экспорт КонецФункции");
+        let module_rel = "CommonModules/Сервер/Ext/Module.bsl";
+
+        // A chunk with a stale stored context and NO live embedding (so consumption needs no
+        // embedder — the mark, not the vector, is under test).
+        let db_path = workspace.join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    module_rel,
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Function,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Функция Считать() Экспорт КонецФункции".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("СТАРЫЙ контекст".to_owned())]),
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(&workspace);
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        // Mark the owned module context-dirty (disabled graph → the nudge is a no-op here).
+        let xml = workspace.join("CommonModules/Сервер.xml");
+        let entry = ChangeEntry {
+            canonical: xml.clone(),
+            raw: xml,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &workspace,
+            &[entry],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+        {
+            let g = engine_arc.lock().unwrap();
+            assert!(
+                g.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+                "the owned module is marked context-dirty",
+            );
+        }
+
+        // Build a real graph the refresh can read.
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+        graph.ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !matches!(graph.status(), crate::graph::GraphStatus::Ready { .. }) {
+            if Instant::now() > deadline {
+                panic!("graph did not build: {:?}", graph.status());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let semantic_runtime = Arc::new(Mutex::new(super::SemanticRuntimeStatus::Ready));
+        let background_indexers = Arc::new(super::AtomicUsize::new(0));
+        let index_progress = bsl_search::IndexProgress::new();
+        let embed_flight = super::EmbedFlight::new();
+
+        // drift_pending = true → defer: the mark SURVIVES for the follow-up reload's publish.
+        // An unbounded seq (i64::MAX) isolates the drift_pending skip from the seq bound.
+        SharedState::refresh_search_contexts_after_graph(
+            &engine_arc,
+            &workspace,
+            &semantic_runtime,
+            &background_indexers,
+            &index_progress,
+            &embed_flight,
+            crate::graph::GraphPublishSignal { drift_pending: true, build_start_seq: i64::MAX },
+        );
+        {
+            let g = engine_arc.lock().unwrap();
+            assert!(
+                g.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+                "a pending drift defers the refresh; the mark survives",
+            );
+        }
+
+        // drift_pending = false → consume: the mark is cleared against the fresh graph.
+        SharedState::refresh_search_contexts_after_graph(
+            &engine_arc,
+            &workspace,
+            &semantic_runtime,
+            &background_indexers,
+            &index_progress,
+            &embed_flight,
+            crate::graph::GraphPublishSignal { drift_pending: false, build_start_seq: i64::MAX },
+        );
+        {
+            let g = engine_arc.lock().unwrap();
+            assert!(
+                !g.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+                "with no pending drift the mark is consumed",
+            );
+        }
+    }
+
+    /// A graph whose mark-seq source is NOT yet wired (the boot window before
+    /// `set_mark_seq_source`) captures the unwired default bound (`0`), so its publish's
+    /// consume clears NOTHING — never a mark stamped before the source existed. Reverting the
+    /// unwired default from `0` back to `i64::MAX` makes the publish consume the mark and the
+    /// survival assertion fails.
+    #[test]
+    fn an_unwired_graph_publish_cannot_clear_context_marks() {
+        use bsl_search::{Chunk, ChunkKind, SearchEngine, Store};
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_common_module(&workspace, "Сервер", "Функция Считать() Экспорт КонецФункции");
+        let module_rel = "CommonModules/Сервер/Ext/Module.bsl";
+
+        let db_path = workspace.join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    module_rel,
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Function,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Функция Считать() Экспорт КонецФункции".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("СТАРЫЙ контекст".to_owned())]),
+                )
+                .unwrap();
+            // A mark left pending before any wired bound exists (seq 1).
+            store.mark_context_dirty("code", module_rel).unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(&workspace);
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let semantic_runtime = Arc::new(Mutex::new(super::SemanticRuntimeStatus::Ready));
+        let background_indexers = Arc::new(super::AtomicUsize::new(0));
+        let index_progress = bsl_search::IndexProgress::new();
+        let embed_flight = super::EmbedFlight::new();
+
+        // The real refresh, wrapped so the test can wait until the publish actually fired the
+        // hook (with bound 0 the consume has no observable side effect to poll on otherwise).
+        let fired = Arc::new(super::AtomicUsize::new(0));
+        let hook = {
+            let engine_arc = Arc::clone(&engine_arc);
+            let workspace = workspace.clone();
+            let semantic_runtime = Arc::clone(&semantic_runtime);
+            let background_indexers = Arc::clone(&background_indexers);
+            let index_progress = Arc::clone(&index_progress);
+            let embed_flight = Arc::clone(&embed_flight);
+            let fired = Arc::clone(&fired);
+            Arc::new(move |signal: crate::graph::GraphPublishSignal| {
+                SharedState::refresh_search_contexts_after_graph(
+                    &engine_arc,
+                    &workspace,
+                    &semantic_runtime,
+                    &background_indexers,
+                    &index_progress,
+                    &embed_flight,
+                    signal,
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) + Send + Sync>
+        };
+
+        // The graph is never wired to a mark-seq source: its build captures the unwired default.
+        let graph =
+            crate::graph::GraphState::for_workspace(workspace.clone()).with_publish_hook(hook);
+        graph.ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while fired.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(fired.load(Ordering::SeqCst) >= 1, "the build published and fired the hook");
+
+        let guard = engine_arc.lock().unwrap();
+        assert!(
+            guard.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+            "an unwired build's publish (bound 0) clears no marks; the mark survives",
+        );
+    }
+
+    /// Marks a PRIOR daemon run left in `context_dirty` survive the boot build's unwired publish
+    /// (as the test above shows), then are consumed by the explicit leftover pickup once the
+    /// mark-seq source is wired: a wired-bound consume against the already-fresh boot graph.
+    /// Removing the `consume_leftover_marks` call leaves the mark stranded and the final
+    /// assertion fails.
+    #[test]
+    fn leftover_marks_are_consumed_after_boot_wiring() {
+        use bsl_search::{Chunk, ChunkKind, SearchEngine, Store};
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_common_module(&workspace, "Сервер", "Функция Считать() Экспорт КонецФункции");
+        let module_rel = "CommonModules/Сервер/Ext/Module.bsl";
+
+        let db_path = workspace.join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    module_rel,
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Function,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Функция Считать() Экспорт КонецФункции".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("СТАРЫЙ контекст".to_owned())]),
+                )
+                .unwrap();
+            store.mark_context_dirty("code", module_rel).unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(&workspace);
+        engine.enable_workspace_watcher_mode();
+        let mark_seq = engine.mark_seq_handle();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let semantic_runtime = Arc::new(Mutex::new(super::SemanticRuntimeStatus::Ready));
+        let background_indexers = Arc::new(super::AtomicUsize::new(0));
+        let index_progress = bsl_search::IndexProgress::new();
+        let embed_flight = super::EmbedFlight::new();
+        let fired = Arc::new(super::AtomicUsize::new(0));
+        let hook = {
+            let engine_arc = Arc::clone(&engine_arc);
+            let workspace = workspace.clone();
+            let semantic_runtime = Arc::clone(&semantic_runtime);
+            let background_indexers = Arc::clone(&background_indexers);
+            let index_progress = Arc::clone(&index_progress);
+            let embed_flight = Arc::clone(&embed_flight);
+            let fired = Arc::clone(&fired);
+            Arc::new(move |signal: crate::graph::GraphPublishSignal| {
+                SharedState::refresh_search_contexts_after_graph(
+                    &engine_arc,
+                    &workspace,
+                    &semantic_runtime,
+                    &background_indexers,
+                    &index_progress,
+                    &embed_flight,
+                    signal,
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) + Send + Sync>
+        };
+
+        // Boot: the graph builds and publishes while UNWIRED, so the leftover mark survives.
+        let graph =
+            crate::graph::GraphState::for_workspace(workspace.clone()).with_publish_hook(hook);
+        graph.ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while fired.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(fired.load(Ordering::SeqCst) >= 1, "the boot build published and fired the hook");
+        assert!(
+            engine_arc
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .context_dirty_paths("code")
+                .unwrap()
+                .contains(module_rel),
+            "the leftover mark survives the unwired boot publish",
+        );
+
+        // Boot wiring, then the explicit pickup: a consume bounded by the seq captured at
+        // observation time clears the leftover mark synchronously (the graph is already `Ready`).
+        let leftover_bound = mark_seq.load(Ordering::SeqCst);
+        graph.set_mark_seq_source(mark_seq);
+        graph.consume_leftover_marks(leftover_bound);
+
+        assert!(
+            !engine_arc
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .context_dirty_paths("code")
+                .unwrap()
+                .contains(module_rel),
+            "the leftover pickup consumed the mark with the wired bound",
+        );
+    }
+
+    /// The leftover pickup must clear ONLY marks that existed when its bound was captured. A
+    /// drift the running search sink stamps AFTER the capture (a higher mark seq) must survive
+    /// the pickup — its own nudge→publish will resolve it against a graph that reflects it.
+    /// Reverting the direct (`Ready`) fire path to a LIVE `current_mark_seq()` read makes the
+    /// pickup clear the newer mark too, and the survival assertion fails.
+    #[test]
+    fn a_newer_mark_survives_the_leftover_pickups_captured_bound() {
+        use bsl_search::{Chunk, ChunkKind, SearchEngine, Store};
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_common_module(&workspace, "Сервер", "Функция Считать() Экспорт КонецФункции");
+        let leftover_rel = "CommonModules/Сервер/Ext/Module.bsl";
+        // A path the search sink will freshly mark AFTER the bound is captured; never indexed,
+        // it only needs to resolve to a workspace `.bsl` to receive a higher-seq mark.
+        let newer_rel = "CommonModules/Клиент/Ext/Module.bsl";
+
+        let db_path = workspace.join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    leftover_rel,
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Function,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Функция Считать() Экспорт КонецФункции".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("СТАРЫЙ контекст".to_owned())]),
+                )
+                .unwrap();
+            // The leftover mark a prior run left pending (seq 1).
+            store.mark_context_dirty("code", leftover_rel).unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(&workspace);
+        engine.enable_workspace_watcher_mode();
+        let mark_seq = engine.mark_seq_handle();
+        // The bound captured at observation time: the high-water at seq 1 (the leftover only).
+        let leftover_bound = mark_seq.load(Ordering::SeqCst);
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let semantic_runtime = Arc::new(Mutex::new(super::SemanticRuntimeStatus::Ready));
+        let background_indexers = Arc::new(super::AtomicUsize::new(0));
+        let index_progress = bsl_search::IndexProgress::new();
+        let embed_flight = super::EmbedFlight::new();
+        let fired = Arc::new(super::AtomicUsize::new(0));
+        let hook = {
+            let engine_arc = Arc::clone(&engine_arc);
+            let workspace = workspace.clone();
+            let semantic_runtime = Arc::clone(&semantic_runtime);
+            let background_indexers = Arc::clone(&background_indexers);
+            let index_progress = Arc::clone(&index_progress);
+            let embed_flight = Arc::clone(&embed_flight);
+            let fired = Arc::clone(&fired);
+            Arc::new(move |signal: crate::graph::GraphPublishSignal| {
+                SharedState::refresh_search_contexts_after_graph(
+                    &engine_arc,
+                    &workspace,
+                    &semantic_runtime,
+                    &background_indexers,
+                    &index_progress,
+                    &embed_flight,
+                    signal,
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) + Send + Sync>
+        };
+
+        // Boot: build+publish while UNWIRED, so the leftover mark survives, then wire the source.
+        let graph =
+            crate::graph::GraphState::for_workspace(workspace.clone()).with_publish_hook(hook);
+        graph.ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while fired.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(fired.load(Ordering::SeqCst) >= 1, "the boot build published and fired the hook");
+        graph.set_mark_seq_source(mark_seq);
+
+        // The search sink stamps a NEW drift (seq 2) after the bound was captured — as it would
+        // between publishing the engine and reaching its own nudge→publish.
+        {
+            let guard = engine_arc.lock().unwrap();
+            let engine = guard.as_ref().unwrap();
+            assert!(
+                engine.mark_workspace_path_context_dirty(workspace.join(newer_rel)).unwrap(),
+                "the newer path resolves to a workspace .bsl and receives a higher-seq mark",
+            );
+        }
+
+        // The explicit pickup fires on the already-`Ready` graph with the CAPTURED bound.
+        graph.consume_leftover_marks(leftover_bound);
+
+        let guard = engine_arc.lock().unwrap();
+        let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
+        assert!(!dirty.contains(leftover_rel), "the leftover mark is consumed by the pickup");
+        assert!(
+            dirty.contains(newer_rel),
+            "the newer mark (stamped after the captured bound) survives the pickup",
+        );
+    }
+
+    /// The deferred (`Loading`) pickup path: arming while the graph is not yet `Ready` stores the
+    /// captured bound, and the build's own publish re-fires the consume with THAT stored bound. A
+    /// newer mark stamped after the capture must still survive. Reverting the deferred fire in
+    /// `notify_published` to a live `current_mark_seq()` read (which on this unwired graph is `0`)
+    /// makes the deferred consume clear nothing, so the leftover-consumed assertion fails.
+    #[test]
+    fn a_newer_mark_survives_the_deferred_leftover_pickup() {
+        use bsl_search::{Chunk, ChunkKind, SearchEngine, Store};
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_common_module(&workspace, "Сервер", "Функция Считать() Экспорт КонецФункции");
+        let leftover_rel = "CommonModules/Сервер/Ext/Module.bsl";
+        let newer_rel = "CommonModules/Клиент/Ext/Module.bsl";
+
+        let db_path = workspace.join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    leftover_rel,
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Function,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Функция Считать() Экспорт КонецФункции".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("СТАРЫЙ контекст".to_owned())]),
+                )
+                .unwrap();
+            store.mark_context_dirty("code", leftover_rel).unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(&workspace);
+        engine.enable_workspace_watcher_mode();
+        // Capture the bound (seq 1) before stamping the newer mark.
+        let leftover_bound = engine.mark_seq_handle().load(Ordering::SeqCst);
+        // The newer drift (seq 2), stamped before the engine is shared.
+        assert!(
+            engine.mark_workspace_path_context_dirty(workspace.join(newer_rel)).unwrap(),
+            "the newer path resolves to a workspace .bsl and receives a higher-seq mark",
+        );
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let semantic_runtime = Arc::new(Mutex::new(super::SemanticRuntimeStatus::Ready));
+        let background_indexers = Arc::new(super::AtomicUsize::new(0));
+        let index_progress = bsl_search::IndexProgress::new();
+        let embed_flight = super::EmbedFlight::new();
+        let fired = Arc::new(super::AtomicUsize::new(0));
+        let hook = {
+            let engine_arc = Arc::clone(&engine_arc);
+            let workspace = workspace.clone();
+            let semantic_runtime = Arc::clone(&semantic_runtime);
+            let background_indexers = Arc::clone(&background_indexers);
+            let index_progress = Arc::clone(&index_progress);
+            let embed_flight = Arc::clone(&embed_flight);
+            let fired = Arc::clone(&fired);
+            Arc::new(move |signal: crate::graph::GraphPublishSignal| {
+                SharedState::refresh_search_contexts_after_graph(
+                    &engine_arc,
+                    &workspace,
+                    &semantic_runtime,
+                    &background_indexers,
+                    &index_progress,
+                    &embed_flight,
+                    signal,
+                );
+                fired.fetch_add(1, Ordering::SeqCst);
+            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) + Send + Sync>
+        };
+
+        // The graph is `Idle` (never wired): arming the pickup here stores the bound but cannot
+        // fire, so the build's own publish runs the deferred consume with the stored bound.
+        let graph =
+            crate::graph::GraphState::for_workspace(workspace.clone()).with_publish_hook(hook);
+        graph.consume_leftover_marks(leftover_bound);
+        graph.ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while fired.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(fired.load(Ordering::SeqCst) >= 1, "the build published and fired the hook");
+
+        let guard = engine_arc.lock().unwrap();
+        let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
+        assert!(
+            !dirty.contains(leftover_rel),
+            "the deferred pickup consumed the leftover mark with the stored bound",
+        );
+        assert!(
+            dirty.contains(newer_rel),
+            "the newer mark (stamped after the captured bound) survives the deferred pickup",
+        );
+    }
+
+    /// The shared embed single-flight: exactly one owner runs; a caller that loses the claim
+    /// records a rerun that makes the owner loop again. Reverting the loop (ignoring the rerun in
+    /// `finish_pass`) makes the first `finish_pass` return false and the assertion fails.
+    #[test]
+    fn embed_flight_is_single_flight_with_a_rerun_loop() {
+        let flight = super::EmbedFlight::new();
+        assert!(flight.claim(), "the first caller wins the claim");
+        flight.begin_pass();
+        assert!(!flight.claim(), "a concurrent caller loses and records a rerun");
+        assert!(flight.finish_pass(), "a rerun requested during the pass loops the owner again");
+        flight.begin_pass();
+        assert!(!flight.finish_pass(), "no rerun requested → the claim is released");
+        assert!(flight.claim(), "the released flight can be claimed again");
+    }
+
+    /// A NULL chunk created AFTER the pass has read the store still gets embedded, because the
+    /// owner loops on the recorded rerun and the final `set_vector_index` reflects the latest
+    /// store state. Reverting the rerun loop leaves the mid-flight chunk unembedded and it never
+    /// answers the query.
+    #[test]
+    fn embed_pass_rerun_loop_embeds_a_chunk_nulled_mid_flight() {
+        use bsl_search::{Chunk, ChunkKind, Store};
+        use std::time::{Duration, Instant};
+
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+        let chunk = |name: &str| Chunk {
+            kind: ChunkKind::Procedure,
+            name: name.to_owned(),
+            is_export: true,
+            annotations: vec![],
+            line_start: 0,
+            line_end: 1,
+            text: format!("Процедура {name}()\nКонецПроцедуры"),
+        };
+        // Chunk A is NULL at the start; chunk B is added mid-flight by the post-pass hook.
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    "A.bsl",
+                    b"ha",
+                    &[chunk("Альфа")],
+                    None,
+                    Some(&[Some("ctx".to_owned())]),
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::new(&db_path, mock_semantic_config(&mock)).unwrap();
+        engine.set_workspace_root(dir.path());
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let embed_flight = super::EmbedFlight::new();
+
+        // A one-shot hook fired after the first iteration installs its index: it creates a NULL
+        // chunk B and contends for the claim, recording a rerun so the owner loops for B.
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                *super::EMBED_POST_PASS_HOOK.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            }
+        }
+        let _reset = ResetHook;
+        {
+            let flight_for_hook = Arc::clone(&embed_flight);
+            let mut fired = false;
+            *super::EMBED_POST_PASS_HOOK.lock().unwrap() =
+                Some(Box::new(move |db: &std::path::Path| {
+                    if fired {
+                        return;
+                    }
+                    fired = true;
+                    let mut store = Store::open(db).unwrap();
+                    store
+                        .reindex_file_with_context(
+                            "B.bsl",
+                            b"hb",
+                            &[Chunk {
+                                kind: ChunkKind::Procedure,
+                                name: "Бета".to_owned(),
+                                is_export: true,
+                                annotations: vec![],
+                                line_start: 0,
+                                line_end: 1,
+                                text: "Процедура Бета()\nКонецПроцедуры".to_owned(),
+                            }],
+                            None,
+                            Some(&[Some("ctx".to_owned())]),
+                        )
+                        .unwrap();
+                    flight_for_hook.claim();
+                }));
+        }
+
+        let semantic_runtime = Arc::new(Mutex::new(super::SemanticRuntimeStatus::Indexing));
+        let background_indexers = Arc::new(super::AtomicUsize::new(0));
+        let index_progress = bsl_search::IndexProgress::new();
+        SharedState::spawn_embed_pass(
+            Arc::clone(&engine_arc),
+            semantic_runtime,
+            background_indexers,
+            index_progress,
+            Arc::clone(&embed_flight),
+            db_path.clone(),
+            mock_semantic_config(&mock),
+        );
+
+        // Both A and B must answer the query: A from iteration 1, B from the rerun iteration.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut both = false;
+        while Instant::now() < deadline {
+            let hits = {
+                let guard = engine_arc.lock().unwrap();
+                guard
+                    .as_ref()
+                    .unwrap()
+                    .search_with_embedding(&[1.0, 0.0, 0.0], 5, Some("code"))
+                    .unwrap()
+            };
+            let has_a = hits.iter().any(|h| h.symbol_name == "Альфа");
+            let has_b = hits.iter().any(|h| h.symbol_name == "Бета");
+            if has_a && has_b {
+                both = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(both, "the rerun loop embedded the chunk created after the pass started");
+    }
+
+    /// A panicking embed pass leaves the runtime `Failed`, never stuck `Indexing`, and releases
+    /// the shared flight claim (RAII guards fire on unwind). Reverting the status guard leaves the
+    /// runtime stuck `Indexing`.
+    #[test]
+    fn embed_pass_panic_leaves_status_failed_and_releases_flight() {
+        use bsl_search::{Chunk, ChunkKind, Store};
+        use std::time::{Duration, Instant};
+
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        struct ResetPanic;
+        impl Drop for ResetPanic {
+            fn drop(&mut self) {
+                super::FORCE_EMBED_PASS_PANIC.store(false, super::Ordering::SeqCst);
+            }
+        }
+        super::FORCE_EMBED_PASS_PANIC.store(true, super::Ordering::SeqCst);
+        let _reset = ResetPanic;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    "Owned.bsl",
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Считать()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("ctx".to_owned())]),
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::new(&db_path, mock_semantic_config(&mock)).unwrap();
+        engine.set_workspace_root(dir.path());
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let semantic_runtime = Arc::new(Mutex::new(super::SemanticRuntimeStatus::Indexing));
+        let background_indexers = Arc::new(super::AtomicUsize::new(0));
+        let index_progress = bsl_search::IndexProgress::new();
+        let embed_flight = super::EmbedFlight::new();
+        SharedState::kick_context_reembed(
+            &engine_arc,
+            &semantic_runtime,
+            &background_indexers,
+            &index_progress,
+            &embed_flight,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut failed = false;
+        while Instant::now() < deadline {
+            let status = semantic_runtime.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            if matches!(status, super::SemanticRuntimeStatus::Failed(_)) {
+                failed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(failed, "a panicking embed pass ends Failed, not stuck Indexing");
+        // Give the guards a beat to run on unwind, then assert the claim was released.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while embed_flight.is_in_flight() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!embed_flight.is_in_flight(), "the flight claim is released after the panic");
+    }
+
+    /// A partial rescan walk (an error mid-walk) must NOT reconcile: `present` is missing healthy
+    /// files, so deleting stored files against it would evict live data. Only a clean walk
+    /// reconciles. Reverting the walk-error guard deletes the stored file on the errored walk.
+    #[test]
+    fn rescan_walk_error_skips_reconcile_and_keeps_stored_files() {
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    "Gone.bsl",
+                    b"ha",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "П".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        assert_eq!(engine.file_count().unwrap(), 1, "the stored file is present");
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                super::FORCE_REWALK_WALK_ERROR.store(false, super::Ordering::SeqCst);
+            }
+        }
+
+        // Errored walk: reconcile is skipped, so the stored (disk-absent) file SURVIVES.
+        {
+            super::FORCE_REWALK_WALK_ERROR.store(true, super::Ordering::SeqCst);
+            let _reset = ResetWalkErr;
+            SharedState::rewalk_workspace_bsl_dirty(&engine_arc, &workspace);
+            assert_eq!(
+                engine_arc.lock().unwrap().as_ref().unwrap().file_count().unwrap(),
+                1,
+                "a partial walk must not reconcile healthy files out of the store",
+            );
+        }
+
+        // Clean walk: the stored-but-absent file is reconciled out.
+        SharedState::rewalk_workspace_bsl_dirty(&engine_arc, &workspace);
+        assert_eq!(
+            engine_arc.lock().unwrap().as_ref().unwrap().file_count().unwrap(),
+            0,
+            "a clean walk reconciles the deleted file out",
         );
     }
 }

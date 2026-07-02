@@ -4,11 +4,31 @@ use code_chunk::Chunk;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 pub struct Store {
     conn: Connection,
     path: PathBuf,
+    /// Monotonic sequence stamped on every `context_dirty` mark. Never resets while the
+    /// store is open (seeded from the persisted `MAX(seq)` so it stays above any surviving
+    /// row across restarts, then only ever increments). A graph build captures this value
+    /// at build start; its post-publish refresh then consumes ONLY marks whose `seq` is at
+    /// or below that captured bound, so a drift landing after the build started is never
+    /// cleared against the pre-drift graph. Shared as an `Arc` so the graph layer reads the
+    /// same counter the store increments.
+    ///
+    /// Single-writer invariant: exactly ONE live `Store` (the daemon's engine store) hands
+    /// out mark seqs for a given database. This counter is in-memory, seeded per open from
+    /// `MAX(seq)`; a second `Store` reopened on the same file would seed its OWN atomic from
+    /// the same `MAX(seq)` and issue seqs that collide with — or trail — the live store's,
+    /// breaking the monotonic bound the graph relies on. Reopened/standalone stores may READ
+    /// marks (status, reindex) but must never call the mark/next-seq APIs.
+    mark_seq: Arc<AtomicI64>,
 }
+
+/// One chunk's `(id, symbol_name, kind, graph_context)` as read for a context re-render.
+pub type ChunkContextRow = (i64, String, String, Option<String>);
 
 /// The embeddings the vector index is built from (`(chunk_id, vector)` rows) paired with the
 /// `embedding_generation` they were read at, as one consistent snapshot.
@@ -34,10 +54,11 @@ const SCHEMA_VERSION: i64 = 1;
 impl Store {
     pub fn open(path: &Path) -> Result<Self, SearchError> {
         let conn = Connection::open(path)?;
-        let store = Self { conn, path: path.to_path_buf() };
+        let store = Self { conn, path: path.to_path_buf(), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
         store.migrate_structural_schema()?;
         store.migrate_embed_text_version()?;
+        store.seed_mark_seq()?;
         Ok(store)
     }
 
@@ -187,9 +208,11 @@ impl Store {
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, SearchError> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn, path: PathBuf::from(":memory:") };
+        let store =
+            Self { conn, path: PathBuf::from(":memory:"), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
         store.migrate_structural_schema()?;
+        store.seed_mark_seq()?;
         Ok(store)
     }
 
@@ -324,6 +347,25 @@ impl Store {
                 dimension     INTEGER NOT NULL,
                 embedding     BLOB NOT NULL
             );
+
+            -- Context-dirty registry: workspace files whose stored graph_context (and
+            -- hence embedding) is stale because a metadata `.xml` they own or read
+            -- changed. Kept as a side table, NOT a `chunks` column, so marking never
+            -- fires the embedding-generation triggers and invalidates the vector
+            -- sidecar. A later reindex/embed pass re-renders the context and clears the
+            -- entry; a lost row (a schema wipe) is harmless — the next drift re-marks it.
+            -- `seq` is a monotonic mark stamp (see `Store::mark_seq`): a graph build's
+            -- post-publish refresh consumes only rows at or below the build's captured
+            -- start-seq, so a drift that lands after the build started is never cleared
+            -- against the pre-drift graph. Re-marking a row bumps its `seq`, so a clear
+            -- bounded by an older start-seq skips a row a fresher drift just re-stamped.
+            CREATE TABLE IF NOT EXISTS context_dirty (
+                path       TEXT    NOT NULL,
+                collection TEXT    NOT NULL DEFAULT 'code',
+                marked_at  INTEGER NOT NULL,
+                seq        INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (path, collection)
+            ) WITHOUT ROWID;
             ",
         )?;
 
@@ -437,21 +479,171 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn remove_file(&self, path: &str) -> Result<(), SearchError> {
-        self.conn.execute(
+    /// Remove one file (its `files` row, cascaded `chunks`, and the matching FTS rows)
+    /// from `collection`, atomically. The FTS delete and the `files` delete run in one
+    /// transaction so a failure between them cannot leave an orphaned FTS row or a
+    /// `files` row without its FTS. The delete is scoped to `collection` so a same-named
+    /// path in another collection is never touched.
+    pub fn remove_file(&self, path: &str, collection: &str) -> Result<(), SearchError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (
                  SELECT c.id FROM chunks c
                  JOIN files f ON f.id = c.file_id
-                 WHERE f.path = ?1
+                 WHERE f.path = ?1 AND f.collection = ?2
              )",
-            params![path],
+            params![path, collection],
         )?;
-        self.conn.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+        tx.execute(
+            "DELETE FROM files WHERE path = ?1 AND collection = ?2",
+            params![path, collection],
+        )?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// The row ids of every chunk owned by `path` in `collection`. Collected before a
+    /// [`Self::remove_file`] so the caller can evict exactly those vectors from the live
+    /// index incrementally, instead of rebuilding it from scratch.
+    pub fn chunk_ids_for_file(
+        &self,
+        collection: &str,
+        path: &str,
+    ) -> Result<Vec<i64>, SearchError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             WHERE f.path = ?1 AND f.collection = ?2",
+        )?;
+        let ids = stmt
+            .query_map(params![path, collection], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<i64>, _>>()?;
+        Ok(ids)
     }
 
     pub fn delete_chunks_for_file(&self, file_id: i64) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
+        Ok(())
+    }
+
+    /// A handle to the monotonic mark-seq counter (see [`Self::mark_seq`]). The graph
+    /// layer captures its value at build start to bound the marks its publish may consume.
+    pub fn mark_seq_handle(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.mark_seq)
+    }
+
+    /// Reserve the next monotonic mark sequence. `fetch_add` keeps it strictly increasing
+    /// even across concurrent marks and never rewinds when rows are cleared, so a value a
+    /// build captured earlier stays below every mark stamped afterward.
+    ///
+    /// Correct only under the single-writer invariant on [`Self::mark_seq`]: all marks for a
+    /// database must be stamped through the one live engine store. A second store issuing seqs
+    /// concurrently would duplicate or lower them and corrupt the graph's consume bound.
+    fn next_mark_seq(&self) -> i64 {
+        self.mark_seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Raise the in-memory counter above every persisted mark so freshly stamped rows keep
+    /// increasing across a restart (surviving rows from a prior run hold `seq <= MAX(seq)`).
+    fn seed_mark_seq(&self) -> Result<(), SearchError> {
+        let max: i64 =
+            self.conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM context_dirty", [], |row| {
+                row.get(0)
+            })?;
+        self.mark_seq.store(max, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Record that `path`'s stored `graph_context` is stale (a metadata `.xml` it owns
+    /// or reads changed), so a later reindex/embed pass re-renders it. A hint only: it
+    /// carries no foreign key, and re-marking an already-dirty path is a cheap upsert that
+    /// bumps the row's monotonic `seq`.
+    pub fn mark_context_dirty(&self, collection: &str, path: &str) -> Result<(), SearchError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let seq = self.next_mark_seq();
+        self.conn.execute(
+            "INSERT INTO context_dirty (path, collection, marked_at, seq)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?3, seq = ?4",
+            params![path, collection, now, seq],
+        )?;
+        Ok(())
+    }
+
+    /// Mark every indexed file in `collection` context-dirty (a configuration-root `.xml`
+    /// changed: conservatively assume any module's context could shift). Bounded by the
+    /// file count, one upsert per path, all stamped with a single mark `seq` (the whole
+    /// batch is one drift event). Returns the number of files marked.
+    pub fn mark_collection_context_dirty(&self, collection: &str) -> Result<usize, SearchError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let seq = self.next_mark_seq();
+        let count = self.conn.execute(
+            "INSERT INTO context_dirty (path, collection, marked_at, seq)
+             SELECT path, collection, ?2, ?3 FROM files WHERE collection = ?1
+             ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?2, seq = ?3",
+            params![collection, now, seq],
+        )?;
+        Ok(count)
+    }
+
+    /// The set of paths currently marked context-dirty in `collection`, regardless of
+    /// mark `seq`. Used for status/assertions; the consuming refresh uses the bounded
+    /// [`Self::context_dirty_paths_bounded`] variant.
+    pub fn context_dirty_paths(&self, collection: &str) -> Result<HashSet<String>, SearchError> {
+        let mut stmt = self.conn.prepare("SELECT path FROM context_dirty WHERE collection = ?1")?;
+        let rows = stmt
+            .query_map(params![collection], |row| row.get::<_, String>(0))?
+            .collect::<Result<HashSet<String>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The paths marked context-dirty in `collection` at or below `seq_bound` — the marks a
+    /// graph build that captured `seq_bound` at its start is allowed to consume. Marks
+    /// stamped after the build started (`seq > seq_bound`) are excluded and left for a later
+    /// build's publish.
+    pub fn context_dirty_paths_bounded(
+        &self,
+        collection: &str,
+        seq_bound: i64,
+    ) -> Result<HashSet<String>, SearchError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM context_dirty WHERE collection = ?1 AND seq <= ?2")?;
+        let rows = stmt
+            .query_map(params![collection, seq_bound], |row| row.get::<_, String>(0))?
+            .collect::<Result<HashSet<String>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Clear one path's context-dirty mark (a reindex/embed pass re-rendered it).
+    pub fn clear_context_dirty(&self, collection: &str, path: &str) -> Result<(), SearchError> {
+        self.conn.execute(
+            "DELETE FROM context_dirty WHERE collection = ?1 AND path = ?2",
+            params![collection, path],
+        )?;
+        Ok(())
+    }
+
+    /// Clear one path's context-dirty mark ONLY when it still sits at or below `seq_bound`.
+    /// If a fresher drift re-stamped the row after the build captured `seq_bound`, its `seq`
+    /// now exceeds the bound and the row survives — the newer mark is not lost to this
+    /// build's clear.
+    pub fn clear_context_dirty_bounded(
+        &self,
+        collection: &str,
+        path: &str,
+        seq_bound: i64,
+    ) -> Result<(), SearchError> {
+        self.conn.execute(
+            "DELETE FROM context_dirty WHERE collection = ?1 AND path = ?2 AND seq <= ?3",
+            params![collection, path, seq_bound],
+        )?;
         Ok(())
     }
 
@@ -1003,6 +1195,55 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Every chunk owned by `path` in `collection`, as `(id, symbol_name, kind,
+    /// graph_context)`. Powers the context re-render: the caller re-derives each chunk's
+    /// graph context from the freshly published graph and compares it against the stored
+    /// value here.
+    pub fn chunks_with_context_for_file(
+        &self,
+        collection: &str,
+        path: &str,
+    ) -> Result<Vec<ChunkContextRow>, SearchError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.symbol_name, c.kind, c.graph_context
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             WHERE f.path = ?1 AND f.collection = ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![path, collection], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Overwrite one chunk's stored `graph_context` by row id, leaving its embedding
+    /// untouched. This deliberately does NOT touch the `embedding` column, so the
+    /// `chunks_gen_upd` trigger (which fires only `AFTER UPDATE OF embedding`) does not
+    /// bump `embedding_generation` and the persisted vector sidecar stays valid — a
+    /// context re-render that produced the SAME string must invalidate nothing.
+    pub fn set_chunk_graph_context(
+        &self,
+        chunk_id: i64,
+        graph_context: Option<&str>,
+    ) -> Result<(), SearchError> {
+        self.conn.execute(
+            "UPDATE chunks SET graph_context = ?2 WHERE id = ?1",
+            params![chunk_id, graph_context],
+        )?;
+        Ok(())
+    }
+
+    /// Clear one chunk's embedding by row id (set it NULL), so the existing
+    /// NULL-embedding embed machinery re-embeds it. This DOES fire `chunks_gen_upd` and
+    /// bump `embedding_generation`, correctly invalidating the persisted vector sidecar
+    /// because the chunk's vector must be recomputed.
+    pub fn clear_chunk_embedding(&self, chunk_id: i64) -> Result<(), SearchError> {
+        self.conn.execute("UPDATE chunks SET embedding = NULL WHERE id = ?1", params![chunk_id])?;
+        Ok(())
     }
 
     /// Set one chunk's embedding by row id, leaving its text/FTS/context untouched —
@@ -1699,6 +1940,185 @@ mod tests {
     }
 
     #[test]
+    fn context_dirty_marks_are_recorded_cleared_and_do_not_touch_the_vector_generation() {
+        let mut store = Store::in_memory().unwrap();
+        let hash = blake3::hash(b"body");
+        store.reindex_file("Owned.bsl", hash.as_bytes(), &[sample_chunk("П")], None).unwrap();
+        store.reindex_file("Other.bsl", hash.as_bytes(), &[sample_chunk("Д")], None).unwrap();
+
+        let generation_before = store.embedding_generation().unwrap();
+
+        store.mark_context_dirty("code", "Owned.bsl").unwrap();
+        assert_eq!(
+            store.context_dirty_paths("code").unwrap(),
+            HashSet::from(["Owned.bsl".to_owned()]),
+        );
+        // The side table must not fire the chunk triggers, or every metadata edit would
+        // invalidate the persisted vector index for a mark that changes no embedding.
+        assert_eq!(
+            store.embedding_generation().unwrap(),
+            generation_before,
+            "marking context-dirty leaves the vector generation untouched",
+        );
+
+        // A configuration-root edit marks every indexed file.
+        let marked = store.mark_collection_context_dirty("code").unwrap();
+        assert_eq!(marked, 2);
+        assert_eq!(store.context_dirty_paths("code").unwrap().len(), 2);
+
+        store.clear_context_dirty("code", "Owned.bsl").unwrap();
+        assert_eq!(
+            store.context_dirty_paths("code").unwrap(),
+            HashSet::from(["Other.bsl".to_owned()]),
+        );
+    }
+
+    /// The bounded consume is stamped per mark: a re-mark that lands after a build captured
+    /// its start-seq bumps the row's `seq` above the bound, so the build's bounded clear
+    /// skips it and the newer mark survives (a lost update at row granularity is prevented).
+    /// Reverting the `seq <= ?` predicate on the clear (an unconditional delete) removes the
+    /// re-stamped row and this fails.
+    #[test]
+    fn a_remark_above_the_build_start_seq_survives_the_bounded_clear() {
+        let store = Store::in_memory().unwrap();
+
+        // Mark P (seq 1), then a build captures the current start-seq (1) and reads the set.
+        store.mark_context_dirty("code", "P.bsl").unwrap();
+        let build_start_seq = store.mark_seq_handle().load(Ordering::SeqCst);
+        assert_eq!(build_start_seq, 1);
+        let read_set = store.context_dirty_paths_bounded("code", build_start_seq).unwrap();
+        assert!(read_set.contains("P.bsl"), "P is in the build's read set");
+
+        // A fresher drift re-marks P (seq 2) while the build is processing its read set.
+        store.mark_context_dirty("code", "P.bsl").unwrap();
+        assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 2);
+
+        // The build clears P bounded by ITS start-seq (1); P's row now sits at seq 2, so the
+        // newer mark is not lost.
+        store.clear_context_dirty_bounded("code", "P.bsl", build_start_seq).unwrap();
+        assert!(
+            store.context_dirty_paths("code").unwrap().contains("P.bsl"),
+            "the re-mark stamped after the build started survives the bounded clear",
+        );
+
+        // The next build (start-seq 2) does consume it.
+        store.clear_context_dirty_bounded("code", "P.bsl", 2).unwrap();
+        assert!(
+            !store.context_dirty_paths("code").unwrap().contains("P.bsl"),
+            "a build whose start-seq covers the re-mark clears it",
+        );
+    }
+
+    /// The mark-seq counter is monotonic and survives a clear: after a marked-then-cleared
+    /// row the next mark still gets a strictly higher seq (an atomic counter, not `MAX+1`
+    /// over live rows), and a reopen seeds the counter above any persisted row. Without the
+    /// non-resetting counter, a cleared table would recycle low seqs and an old build's
+    /// bound could consume a brand-new mark.
+    #[test]
+    fn mark_seq_is_monotonic_across_clears_and_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("search.db");
+        {
+            let store = Store::open(&db).unwrap();
+            store.mark_context_dirty("code", "A.bsl").unwrap(); // seq 1
+            store.mark_context_dirty("code", "B.bsl").unwrap(); // seq 2
+            assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 2);
+            // Clear A: the live MAX(seq) drops to 1, but the counter must not rewind.
+            store.clear_context_dirty("code", "A.bsl").unwrap();
+            store.mark_context_dirty("code", "C.bsl").unwrap(); // seq 3, never reused
+            assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 3);
+        }
+        // Reopen: B (seq 2) and C (seq 3) persist; the counter seeds above the max.
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 3);
+        store.mark_context_dirty("code", "D.bsl").unwrap(); // seq 4
+        assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn context_write_does_not_bump_generation_but_clearing_embedding_does() {
+        let mut store = Store::in_memory().unwrap();
+        let hash = blake3::hash(b"body");
+        let vec = vec![1.0f32, 0.0, 0.0];
+        store
+            .reindex_file_with_context(
+                "F.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("П")],
+                Some(std::slice::from_ref(&vec)),
+                Some(&[Some("старый контекст".to_owned())]),
+            )
+            .unwrap();
+        let chunk_id = store.chunk_ids_for_file("code", "F.bsl").unwrap()[0];
+
+        let gen0 = store.embedding_generation().unwrap();
+        // Rewriting only graph_context must NOT bump the vector generation — the
+        // `chunks_gen_upd` trigger fires only `AFTER UPDATE OF embedding`.
+        store.set_chunk_graph_context(chunk_id, Some("новый контекст")).unwrap();
+        assert_eq!(
+            store.embedding_generation().unwrap(),
+            gen0,
+            "a graph_context-only write leaves the vector generation untouched",
+        );
+        // Clearing the embedding DOES bump it — the persisted vector sidecar must
+        // invalidate when a vector is dropped for re-embed.
+        store.clear_chunk_embedding(chunk_id).unwrap();
+        assert!(
+            store.embedding_generation().unwrap() > gen0,
+            "clearing an embedding bumps the vector generation",
+        );
+    }
+
+    #[test]
+    fn remove_file_is_atomic_all_or_nothing() {
+        let mut store = Store::in_memory().unwrap();
+        let hash = blake3::hash(b"body");
+        store.reindex_file("t.bsl", hash.as_bytes(), &[sample_chunk("П")], None).unwrap();
+        assert_eq!(store.fts_count().unwrap(), 1);
+
+        // Force the second statement (the `files` delete) to abort, so the whole
+        // transaction must roll back. Without the transaction the first statement (the
+        // FTS delete) would have committed on its own and left an orphaned state.
+        store
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER block_files_delete BEFORE DELETE ON files
+                 BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+            )
+            .unwrap();
+
+        assert!(
+            store.remove_file("t.bsl", "code").is_err(),
+            "the aborted delete surfaces an error"
+        );
+        // The FTS delete rolled back with the aborted files delete — nothing was lost.
+        assert_eq!(store.fts_count().unwrap(), 1, "the FTS rows survive a rolled-back removal");
+        assert_eq!(store.file_count().unwrap(), 1, "the files row survives too");
+
+        store.conn.execute_batch("DROP TRIGGER block_files_delete;").unwrap();
+        // With the block lifted the removal now succeeds and clears both together.
+        store.remove_file("t.bsl", "code").unwrap();
+        assert_eq!(store.fts_count().unwrap(), 0);
+        assert_eq!(store.file_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn remove_file_is_scoped_to_the_callers_collection() {
+        let mut store = Store::in_memory().unwrap();
+        let hash = blake3::hash(b"body");
+        store.reindex_file("only.bsl", hash.as_bytes(), &[sample_chunk("П")], None).unwrap();
+        assert_eq!(store.file_count().unwrap(), 1);
+
+        // A removal scoped to a different collection must not touch this file.
+        store.remove_file("only.bsl", "platform").unwrap();
+        assert_eq!(store.file_count().unwrap(), 1, "a mismatched collection removes nothing");
+
+        // The correctly-scoped removal clears it.
+        store.remove_file("only.bsl", "code").unwrap();
+        assert_eq!(store.file_count().unwrap(), 0);
+    }
+
+    #[test]
     fn embedding_generation_advances_on_indexed_set_changes() {
         let mut store = Store::in_memory().unwrap();
         // Pin the conservative pragma: the cascade bump must hold even with recursive triggers off.
@@ -1733,7 +2153,7 @@ mod tests {
 
         // File removal cascades to chunks; `files_gen_del` guarantees an advance regardless of
         // whether the cascade fires the chunk delete trigger.
-        store.remove_file("m.bsl").unwrap();
+        store.remove_file("m.bsl", "code").unwrap();
         assert!(
             store.embedding_generation().unwrap() > g_after_update,
             "file removal (cascade delete) must advance the generation"
@@ -2021,7 +2441,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.chunk_count().unwrap(), 2);
 
-        store.remove_file("test.bsl").unwrap();
+        store.remove_file("test.bsl", "code").unwrap();
         assert_eq!(store.file_count().unwrap(), 0);
         assert_eq!(store.chunk_count().unwrap(), 0);
     }
@@ -2129,7 +2549,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 1);
 
-        store.remove_file("test.bsl").unwrap();
+        store.remove_file("test.bsl", "code").unwrap();
         assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 0);
     }
 

@@ -942,12 +942,30 @@ impl GraphDbContextProvider {
 }
 
 impl bsl_search::GraphContextProvider for GraphDbContextProvider {
-    fn graph_context(&self, rel_path: &str, symbol_name: &str, _kind: &str) -> Option<String> {
+    fn graph_context(&self, rel_path: &str, symbol_name: &str, kind: &str) -> Option<String> {
+        self.try_graph_context(rel_path, symbol_name, kind).ok().flatten()
+    }
+
+    fn try_graph_context(
+        &self,
+        rel_path: &str,
+        symbol_name: &str,
+        _kind: &str,
+    ) -> Result<Option<String>, bsl_search::GraphContextError> {
         // Methods in metadata-keyed modules resolve to a durable id; form/command
-        // modules (path-fallback ids) are not enriched here.
-        let id = ide::method_id_for_path(rel_path, symbol_name)?;
-        let db = self.db.lock().ok()?;
-        db.graph_context(&id).ok().flatten()
+        // modules (path-fallback ids) are not enriched here — a legitimate `None`, not a
+        // failure.
+        let Some(id) = ide::method_id_for_path(rel_path, symbol_name) else {
+            return Ok(None);
+        };
+        // A poisoned lock or a graph-DB read error is a transient FAILURE: surface it as
+        // `Err` so the context refresh keeps the dirty mark and retries on the next
+        // publish, rather than clearing the mark against a render that never ran.
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| bsl_search::GraphContextError(format!("graph db lock poisoned: {e}")))?;
+        db.graph_context(&id).map_err(|e| bsl_search::GraphContextError(e.to_string()))
     }
 }
 

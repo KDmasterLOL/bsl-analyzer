@@ -3,6 +3,7 @@ pub mod broker;
 mod cache;
 mod change_hub;
 mod diagnostics_state;
+mod drift_classify;
 mod graph;
 mod graph_db;
 mod graph_query;

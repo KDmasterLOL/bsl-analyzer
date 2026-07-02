@@ -29,7 +29,35 @@ pub trait GraphContextProvider: Send + Sync {
     /// `rel_path` is the chunk's workspace-relative file path, `symbol_name` the
     /// method name, `kind` the chunk kind label (`procedure` / `function` / `header`).
     fn graph_context(&self, rel_path: &str, symbol_name: &str, kind: &str) -> Option<String>;
+
+    /// Fallible variant that distinguishes a transient render FAILURE (e.g. the graph
+    /// database could not be read) from a legitimate `None` (the chunk has no graph
+    /// presence). [`crate::SearchEngine::refresh_dirty_contexts`] keeps a path's dirty
+    /// mark on `Err` so the next publish retries the render, but clears it on `Ok(None)`
+    /// (a file with no graph facts must not stay dirty forever). The default treats
+    /// every result as successful, preserving the infallible contract for providers
+    /// (like the test stubs) that cannot fail.
+    fn try_graph_context(
+        &self,
+        rel_path: &str,
+        symbol_name: &str,
+        kind: &str,
+    ) -> Result<Option<String>, GraphContextError> {
+        Ok(self.graph_context(rel_path, symbol_name, kind))
+    }
 }
+
+/// A transient failure rendering graph context. The message is opaque to this crate.
+#[derive(Debug)]
+pub struct GraphContextError(pub String);
+
+impl std::fmt::Display for GraphContextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for GraphContextError {}
 
 pub trait EmbeddingStore {
     fn load_embeddings(

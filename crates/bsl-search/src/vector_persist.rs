@@ -336,7 +336,7 @@ mod tests {
 
         // Deleting the file cascades to its chunks; `files_gen_del` advances the generation so the
         // index built over the now-deleted vectors is rejected.
-        store.remove_file("f.bsl").unwrap();
+        store.remove_file("f.bsl", "code").unwrap();
         assert!(try_load(&store, &key(&store)).is_none());
     }
 

@@ -35,10 +35,10 @@ use std::time::{Duration, Instant};
 use ide::{Analysis, RootDatabaseImpl};
 use vfs::{FileId, Vfs, VfsPath};
 
-use crate::change_hub::{ChangeEntry, ChangeKind, Health, SinkCursor, WorkspaceChangeHub};
+use crate::change_hub::{ChangeEntry, Health, SinkCursor, WorkspaceChangeHub};
 use crate::graph::{
-    build_source_root, classify_changes, db_for_files_lazy, enumerate_bsl_files, file_fingerprint,
-    scan_file_stats, FileStat, WorkspaceDiff,
+    build_source_root, classify_changes, db_for_files_lazy, enumerate_bsl_files, scan_file_stats,
+    FileStat, WorkspaceDiff,
 };
 
 /// Minimum time between on-disk drift scans, mirroring the graph's throttle. A scan
@@ -777,78 +777,21 @@ impl DiagnosticsState {
         // scan path, which fingerprints only `root.join(name)`).
         let config_paths = self.config_file_paths();
 
-        let mut xml_paths: Vec<PathBuf> = Vec::new();
-        let mut modified_bsl: Vec<String> = Vec::new();
-        let mut removed_keys: Vec<String> = Vec::new();
-        let mut new_fp: HashMap<String, u64> = HashMap::new();
-        let mut structural = false;
-        let mut config_changed = false;
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let class = crate::drift_classify::classify_drift(entries, &config_paths, Some(&baseline));
 
-        for entry in entries {
-            // A vanished directory subtree expands into removed descendants the drain
-            // could not enumerate — structural, so let a full scan/rebuild sort it out.
-            if entry.kind == ChangeKind::SubtreeRemoved {
-                structural = true;
-                continue;
-            }
-            if config_paths.contains(&entry.canonical) {
-                config_changed = true;
-                continue;
-            }
-            // `canonical` already carries the scan-universe key spelling.
-            let key = entry.canonical.to_string_lossy().into_owned();
-            if !seen.insert(key.clone()) {
-                continue;
-            }
-            let is_xml = key.ends_with(".xml");
-            let is_bsl = key.ends_with(".bsl");
-            if !is_xml && !is_bsl {
-                continue;
-            }
-            match file_fingerprint(&entry.canonical) {
-                Some(fp) => match baseline.get(&key) {
-                    Some(&old) if old == fp => {}
-                    Some(_) => {
-                        if is_xml {
-                            xml_paths.push(PathBuf::from(&key));
-                        } else {
-                            modified_bsl.push(key.clone());
-                        }
-                        new_fp.insert(key, fp);
-                    }
-                    None => {
-                        // A brand-new `.xml` is a substrate re-discovery; a brand-new `.bsl`
-                        // moves the file universe → structural.
-                        if is_xml {
-                            xml_paths.push(PathBuf::from(&key));
-                            new_fp.insert(key, fp);
-                        } else {
-                            structural = true;
-                        }
-                    }
-                },
-                None => {
-                    if baseline.contains_key(&key) {
-                        if is_xml {
-                            xml_paths.push(PathBuf::from(&key));
-                            removed_keys.push(key);
-                        } else {
-                            structural = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        if config_changed || structural {
+        // A config edit or a structural change (a subtree removal, a new `.bsl`, or a
+        // removed resident `.bsl`) is not expressible as a substrate point-refresh.
+        if class.config_changed || class.structural_rescan {
             self.kick_full_reload();
             return;
         }
-        if xml_paths.is_empty() && modified_bsl.is_empty() {
+        if class.xml_paths.is_empty() && class.bsl_modified.is_empty() {
             return;
         }
-        self.apply_drained_resident(&xml_paths, &modified_bsl, &removed_keys, &new_fp);
+        let xml_paths: Vec<PathBuf> =
+            class.xml_paths.iter().map(|d| PathBuf::from(&d.key)).collect();
+        let modified_bsl: Vec<String> = class.bsl_modified.iter().map(|d| d.key.clone()).collect();
+        self.apply_drained_resident(&xml_paths, &modified_bsl, &class.removed_keys, &class.new_fp);
     }
 
     /// Apply already-classified event-driven drift to the resident and advance the drift
@@ -1516,6 +1459,7 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::change_hub::ChangeKind;
     use ide::DiagnosticsConfig;
     use std::fs;
 

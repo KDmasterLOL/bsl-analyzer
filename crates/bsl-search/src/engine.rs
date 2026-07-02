@@ -18,7 +18,7 @@ use crate::{
 use code_chunk::Chunker;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
@@ -146,6 +146,20 @@ pub struct SearchEngine {
     /// with their outbound graph context before embedding. `None` keeps embeddings
     /// graph-free.
     graph_context_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
+}
+
+/// Outcome of [`SearchEngine::refresh_dirty_contexts`]: how many context-dirty paths
+/// were processed (marks cleared) and how many chunks had their context re-rendered
+/// (and embedding cleared) as a result.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ContextRefreshStats {
+    pub paths_cleared: usize,
+    pub chunks_updated: usize,
+    /// Chunks whose live embedding was cleared (set NULL) as part of the re-render, so
+    /// the caller knows a background re-embed pass is warranted. Equal to
+    /// `chunks_updated` today (every re-render clears the embedding), tracked separately
+    /// so the "kick the embed pass" decision reads an explicit signal, not a coincidence.
+    pub cleared_embeddings: usize,
 }
 
 impl SearchEngine {
@@ -994,6 +1008,181 @@ impl SearchEngine {
         Ok(true)
     }
 
+    /// Strip `path` to a workspace-relative `.bsl` path (the spelling the `code`
+    /// collection is keyed by), or `None` when it is not an absolute path under the
+    /// workspace root or not a `.bsl`. Shared by the workspace point-update entry points.
+    fn workspace_rel_bsl(&self, path: &Path) -> Option<String> {
+        let workspace_root = self.workspace_root.as_ref()?;
+        let rel_path =
+            if path.is_absolute() { path.strip_prefix(workspace_root).ok()? } else { path };
+        if !rel_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+            return None;
+        }
+        Some(rel_path.to_string_lossy().to_string())
+    }
+
+    /// Mark one workspace `.bsl` file's stored graph context stale, so a later
+    /// reindex/embed pass re-renders it. Cheap metadata write (a side-table upsert, no
+    /// chunk mutation, so the vector sidecar is not invalidated). Returns whether the
+    /// path was a workspace `.bsl`.
+    pub fn mark_workspace_path_context_dirty(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<bool, SearchError> {
+        let Some(rel) = self.workspace_rel_bsl(path.as_ref()) else {
+            return Ok(false);
+        };
+        self.store.mark_context_dirty("code", &rel)?;
+        Ok(true)
+    }
+
+    /// Mark every indexed workspace file context-dirty (a configuration-root descriptor
+    /// changed: conservatively assume any module's context could shift). Returns the
+    /// number of files marked.
+    pub fn mark_workspace_context_dirty(&self) -> Result<usize, SearchError> {
+        self.store.mark_collection_context_dirty("code")
+    }
+
+    /// The set of paths currently marked context-dirty in `collection`.
+    pub fn context_dirty_paths(&self, collection: &str) -> Result<HashSet<String>, SearchError> {
+        self.store.context_dirty_paths(collection)
+    }
+
+    /// A handle to the store's monotonic context-dirty mark counter. The graph layer reads
+    /// it at build start to bound which marks that build's publish may consume; the store
+    /// increments it on every mark. See [`Store::mark_seq_handle`].
+    pub fn mark_seq_handle(&self) -> Arc<AtomicI64> {
+        self.store.mark_seq_handle()
+    }
+
+    /// Remove one workspace `.bsl` file after a local deletion, closing every path a
+    /// stale hit could survive:
+    /// - drops its `files` row and cascaded `chunks`/FTS rows from the store;
+    /// - writes an overlay tombstone so a baseline (Postgres-mode) hit for the same path
+    ///   cannot resurrect it;
+    /// - marks the path dirty in the in-memory overlay cache so a cached entry stops
+    ///   serving stale hits on the next refresh (`refresh_dirty_paths` hides a gone file);
+    /// - evicts exactly the deleted chunks' vectors from the live index incrementally.
+    ///
+    /// The store deletion bumps `embedding_generation` (via the delete triggers), so the
+    /// persisted vector sidecar already invalidates and a cold start rebuilds — this path
+    /// deliberately does NOT reload every embedding or re-persist the sidecar. Returns
+    /// whether the path was a workspace `.bsl`.
+    pub fn remove_workspace_path(&mut self, path: impl AsRef<Path>) -> Result<bool, SearchError> {
+        let Some(rel) = self.workspace_rel_bsl(path.as_ref()) else {
+            return Ok(false);
+        };
+        // Collect the chunk ids before deleting the rows so the exact vectors can be
+        // evicted from the live index without a full reload.
+        let chunk_ids = self.store.chunk_ids_for_file("code", &rel)?;
+        self.store.remove_file(&rel, "code")?;
+        self.store.insert_overlay_tombstone(&rel, "code")?;
+        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
+            cache.enable_watcher_mode();
+            cache.mark_dirty_path(rel.clone());
+        }
+        for id in chunk_ids {
+            if let Err(e) = self.index.remove(id) {
+                tracing::debug!(id, "vector index removal skipped: {e}");
+            }
+        }
+        Ok(true)
+    }
+
+    /// Reconcile the workspace `code` collection against the set of `.bsl` files actually
+    /// present on disk (`present_abs`, absolute paths from a fresh walk): every stored path
+    /// no longer present is removed via [`Self::remove_workspace_path`] (tombstone + overlay
+    /// dirty + incremental vector eviction). This closes the gap where a file deleted during
+    /// a lost watch window (change-hub overflow or a structural subtree rescan) keeps its FTS
+    /// rows and vectors forever, because the ordinary drift path only marks files that still
+    /// exist. Bounded O(stored files) and driven only on the rare rescan branch; the caller
+    /// walks the tree OUTSIDE the engine lock and passes the result here. Returns the number
+    /// of removed paths.
+    pub fn reconcile_workspace_files(
+        &mut self,
+        present_abs: &HashSet<std::path::PathBuf>,
+    ) -> Result<usize, SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok(0);
+        }
+        // Rel spellings of the present files, matching the `code` collection's keying.
+        let present_rel: HashSet<String> =
+            present_abs.iter().filter_map(|p| self.workspace_rel_bsl(p)).collect();
+        let stored: Vec<String> = self
+            .store
+            .all_files_in_collection("code")?
+            .into_iter()
+            .map(|(path, _hash)| path)
+            .collect();
+        let mut removed = 0;
+        for path in stored {
+            if !present_rel.contains(&path) && self.remove_workspace_path(&path)? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Re-render the stored `graph_context` of every chunk whose owning file was marked
+    /// context-dirty (a metadata `.xml` it owns changed), using the freshly published
+    /// graph. Only chunks whose context actually changed are rewritten, and only those
+    /// have their embedding cleared (NULL) so the existing NULL-embedding embed machinery
+    /// re-embeds them; an unchanged context clears the mark and touches nothing. The mark
+    /// is cleared for a successfully processed path (an orphan mark for a file no longer in
+    /// the store clears too), but a path whose render FAILED keeps its mark so the next
+    /// publish retries it. Callers pass the provider built from the just-published graph;
+    /// with no graph there is no provider and nothing is called, so marks simply persist.
+    ///
+    /// `seq_bound` is the mark sequence captured when the publishing build STARTED (see
+    /// [`Store::mark_seq_handle`]): only marks at or below it are read and cleared. A drift
+    /// that landed after the build started carries a higher `seq` and is left untouched —
+    /// its mark is not cleared against a graph that predates it, and a re-mark of an
+    /// in-flight path survives the bounded clear. Pass [`i64::MAX`] to consume every mark
+    /// (an unbounded caller, e.g. a graph with no wired mark-seq source).
+    pub fn refresh_dirty_contexts(
+        &self,
+        provider: &dyn crate::ports::GraphContextProvider,
+        seq_bound: i64,
+    ) -> Result<ContextRefreshStats, SearchError> {
+        let mut stats = ContextRefreshStats::default();
+        for path in self.store.context_dirty_paths_bounded("code", seq_bound)? {
+            // A render error for ANY method of this path keeps the mark: the failure is
+            // transient (the graph DB could not be read), so the next publish must retry
+            // the whole path rather than clearing it against a half-failed render. A
+            // legitimate `Ok(None)` (a method with no graph presence, or a file entirely
+            // gone from the graph) is not an error and clears normally.
+            let mut render_failed = false;
+            for (id, symbol_name, kind, stored) in
+                self.store.chunks_with_context_for_file("code", &path)?
+            {
+                match provider.try_graph_context(&path, &symbol_name, &kind) {
+                    Ok(rendered) => {
+                        if rendered.as_deref() != stored.as_deref() {
+                            self.store.set_chunk_graph_context(id, rendered.as_deref())?;
+                            self.store.clear_chunk_embedding(id)?;
+                            stats.chunks_updated += 1;
+                            stats.cleared_embeddings += 1;
+                        }
+                    }
+                    Err(e) => {
+                        render_failed = true;
+                        tracing::warn!(
+                            path = %path,
+                            method = %symbol_name,
+                            "graph context render failed; keeping dirty mark for retry: {e}"
+                        );
+                    }
+                }
+            }
+            if render_failed {
+                continue;
+            }
+            self.store.clear_context_dirty_bounded("code", &path, seq_bound)?;
+            stats.paths_cleared += 1;
+        }
+        Ok(stats)
+    }
+
     pub fn workspace_overlay_stats(&self) -> Result<Option<WorkspaceOverlayStats>, SearchError> {
         let Some(workspace_root) = &self.workspace_root else {
             return Ok(None);
@@ -1617,7 +1806,7 @@ impl SearchEngine {
         let desired_paths: HashSet<&str> = grouped.keys().map(String::as_str).collect();
         for (existing_path, _) in self.store.all_files_in_collection(collection)? {
             if !desired_paths.contains(existing_path.as_str()) {
-                self.store.remove_file(&existing_path)?;
+                self.store.remove_file(&existing_path, collection)?;
             }
         }
 
@@ -1739,8 +1928,8 @@ impl SearchEngine {
         self.store.clear_file_hashes_without_embeddings(collection)
     }
 
-    pub fn remove_file(&mut self, rel_path: &str) -> Result<(), SearchError> {
-        self.store.remove_file(rel_path)?;
+    pub fn remove_file(&mut self, rel_path: &str, collection: &str) -> Result<(), SearchError> {
+        self.store.remove_file(rel_path, collection)?;
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(())
     }
@@ -2225,5 +2414,413 @@ mod tests {
             started.elapsed() < Duration::from_secs(10),
             "ReuseOnly query must not block on inline overlay embedding"
         );
+    }
+
+    /// The consumer for the context-dirty marks: `refresh_dirty_contexts` re-renders each
+    /// dirty file's chunks against the provider, rewrites only those whose context
+    /// changed (clearing their embedding so the embed machinery re-embeds), leaves
+    /// unchanged ones alone, and clears every processed mark. Without this consumer the
+    /// marks are write-only and `.xml` edits re-render nothing.
+    #[test]
+    fn refresh_dirty_contexts_rerenders_changed_context_and_clears_marks() {
+        use crate::{Chunk, ChunkKind, Store};
+
+        struct Stub;
+        impl crate::ports::GraphContextProvider for Stub {
+            fn graph_context(&self, _rel: &str, symbol_name: &str, _kind: &str) -> Option<String> {
+                match symbol_name {
+                    "Изменённая" => Some("новый контекст".to_owned()),
+                    "Стабильная" => Some("тот же контекст".to_owned()),
+                    _ => None,
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("bsl-search.db");
+        let chunk = |name: &str| Chunk {
+            kind: ChunkKind::Procedure,
+            name: name.to_owned(),
+            is_export: true,
+            annotations: vec![],
+            line_start: 0,
+            line_end: 1,
+            text: format!("Процедура {name}()\nКонецПроцедуры"),
+        };
+        let vec = vec![1.0f32, 0.0, 0.0];
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    "Owned.bsl",
+                    b"h1",
+                    &[chunk("Изменённая")],
+                    Some(std::slice::from_ref(&vec)),
+                    Some(&[Some("старый контекст".to_owned())]),
+                )
+                .unwrap();
+            store
+                .reindex_file_with_context(
+                    "Stable.bsl",
+                    b"h2",
+                    &[chunk("Стабильная")],
+                    Some(std::slice::from_ref(&vec)),
+                    Some(&[Some("тот же контекст".to_owned())]),
+                )
+                .unwrap();
+        }
+
+        let engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.store().mark_context_dirty("code", "Owned.bsl").unwrap();
+        engine.store().mark_context_dirty("code", "Stable.bsl").unwrap();
+        let gen_before = engine.store().embedding_generation().unwrap();
+
+        let stats = engine.refresh_dirty_contexts(&Stub, i64::MAX).unwrap();
+        assert_eq!(stats.paths_cleared, 2, "both marked paths are processed");
+        assert_eq!(stats.chunks_updated, 1, "only the file whose context changed is rewritten");
+        assert_eq!(stats.cleared_embeddings, 1, "the one rewritten chunk had its embedding NULLed");
+
+        // Every mark is cleared.
+        assert!(engine.context_dirty_paths("code").unwrap().is_empty());
+
+        // The changed context is rewritten; the stable one is untouched.
+        let docs = engine.store().load_indexed_documents(Some("code")).unwrap();
+        let changed = docs.iter().find(|d| d.symbol_name == "Изменённая").unwrap();
+        assert_eq!(changed.graph_context.as_deref(), Some("новый контекст"));
+        let stable = docs.iter().find(|d| d.symbol_name == "Стабильная").unwrap();
+        assert_eq!(stable.graph_context.as_deref(), Some("тот же контекст"));
+
+        // Only the changed chunk had its embedding cleared (→ pending re-embed), which
+        // bumped the vector generation; the stable chunk kept its vector.
+        assert!(engine.store().embedding_generation().unwrap() > gen_before);
+        let pending = engine.store().load_pending_embedding_documents("code").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1.symbol_name, "Изменённая");
+    }
+
+    /// A render FAILURE (transient — the graph DB could not be read) must NOT clear the
+    /// path's dirty mark: the next graph publish has to retry it. A legitimate `Ok(None)`
+    /// still clears. Without keeping the mark, a one-off graph-read error would silently
+    /// drop the `.xml` edit's re-render forever.
+    #[test]
+    fn refresh_dirty_contexts_keeps_the_mark_when_render_fails() {
+        use crate::{Chunk, ChunkKind, Store};
+
+        struct Failing;
+        impl crate::ports::GraphContextProvider for Failing {
+            fn graph_context(&self, _rel: &str, _sym: &str, _kind: &str) -> Option<String> {
+                None
+            }
+            fn try_graph_context(
+                &self,
+                _rel: &str,
+                _sym: &str,
+                _kind: &str,
+            ) -> Result<Option<String>, crate::GraphContextError> {
+                Err(crate::GraphContextError("graph db unreadable".to_owned()))
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("bsl-search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    "Owned.bsl",
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "П".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("старый контекст".to_owned())]),
+                )
+                .unwrap();
+        }
+
+        let engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.store().mark_context_dirty("code", "Owned.bsl").unwrap();
+
+        let stats = engine.refresh_dirty_contexts(&Failing, i64::MAX).unwrap();
+        assert_eq!(stats.paths_cleared, 0, "a failed render clears no path");
+        assert_eq!(stats.chunks_updated, 0);
+        assert_eq!(stats.cleared_embeddings, 0);
+        assert!(
+            engine.context_dirty_paths("code").unwrap().contains("Owned.bsl"),
+            "the mark survives a render failure so the next publish retries it",
+        );
+    }
+
+    /// A mark stamped AFTER a build captured its start-seq is not consumed by that build's
+    /// publish (its seq exceeds the bound) and IS consumed by the next build (whose start-seq
+    /// covers it). This is the race a stale `.xml` drift lands in: it must not be cleared
+    /// against a graph that predates it. Reverting the `seq <= seq_bound` bound on the read
+    /// (consuming every mark) makes the later mark vanish in the first round and this fails.
+    #[test]
+    fn refresh_bounded_by_start_seq_excludes_later_marks_and_consumes_them_next_round() {
+        struct NoContext;
+        impl crate::ports::GraphContextProvider for NoContext {
+            fn graph_context(&self, _rel: &str, _sym: &str, _kind: &str) -> Option<String> {
+                None
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("bsl-search.db");
+        let engine = SearchEngine::fts_only(&db_path).unwrap();
+
+        // A build captures its start-seq AFTER the first drift marked A, but BEFORE a second
+        // drift marks B (as if B's `.xml` landed while this build was already reading disk).
+        engine.store().mark_context_dirty("code", "A.bsl").unwrap();
+        let build_start_seq = engine.mark_seq_handle().load(std::sync::atomic::Ordering::SeqCst);
+        engine.store().mark_context_dirty("code", "B.bsl").unwrap();
+        let next_build_seq = engine.mark_seq_handle().load(std::sync::atomic::Ordering::SeqCst);
+        assert!(next_build_seq > build_start_seq, "the later mark got a higher seq");
+
+        // The build's publish consumes only A (seq <= its start-seq); B is left for a later
+        // build so it is never cleared against this pre-drift graph.
+        let stats = engine.refresh_dirty_contexts(&NoContext, build_start_seq).unwrap();
+        assert_eq!(stats.paths_cleared, 1, "only the mark at or below the bound is consumed");
+        let dirty = engine.context_dirty_paths("code").unwrap();
+        assert!(!dirty.contains("A.bsl"), "A was within the bound and is cleared");
+        assert!(dirty.contains("B.bsl"), "B was stamped after build start and survives");
+
+        // The next build's start-seq covers B, so its publish consumes it.
+        let stats = engine.refresh_dirty_contexts(&NoContext, next_build_seq).unwrap();
+        assert_eq!(stats.paths_cleared, 1, "the follow-up build consumes the deferred mark");
+        assert!(
+            engine.context_dirty_paths("code").unwrap().is_empty(),
+            "every mark is consumed once a build's start-seq covers it",
+        );
+    }
+
+    /// A structural rescan reconciles the store against disk: a file deleted during a lost
+    /// watch window (hub overflow / subtree removal) — absent from the freshly walked set —
+    /// is removed (FTS rows dropped, live vector evicted, tombstone written); a file still
+    /// present is untouched. Without this, a deleted file lingers in the index forever.
+    #[test]
+    fn reconcile_workspace_files_removes_stored_but_gone_files() {
+        use crate::embedder::EmbedderConfig;
+        use crate::{Chunk, ChunkKind, Store};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let chunk = |name: &str| Chunk {
+            kind: ChunkKind::Procedure,
+            name: name.to_owned(),
+            is_export: true,
+            annotations: vec![],
+            line_start: 0,
+            line_end: 1,
+            text: format!("Процедура {name}()\nКонецПроцедуры"),
+        };
+        let vec_a = vec![1.0f32, 0.0, 0.0];
+        let vec_b = vec![0.0f32, 1.0, 0.0];
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    "Gone.bsl",
+                    b"ha",
+                    &[chunk("Ушедшая")],
+                    Some(std::slice::from_ref(&vec_a)),
+                )
+                .unwrap();
+            store
+                .reindex_file(
+                    "Kept.bsl",
+                    b"hb",
+                    &[chunk("Оставшаяся")],
+                    Some(std::slice::from_ref(&vec_b)),
+                )
+                .unwrap();
+        }
+
+        let config = crate::SearchConfig {
+            embedder: EmbedderConfig {
+                base_url: "http://127.0.0.1:1".to_owned(),
+                model: "test-model".to_owned(),
+                dim: Some(3),
+                api_key: None,
+                provider: None,
+            },
+            execution: crate::EmbeddingExecutionPolicy::default(),
+        };
+        let mut engine = SearchEngine::new(&db_path, config).unwrap();
+        engine.set_workspace_root(workspace);
+        assert_eq!(engine.file_count().unwrap(), 2, "both files indexed");
+
+        // The rescan walked only the surviving file; `Gone.bsl` is absent from disk.
+        let mut present = std::collections::HashSet::new();
+        present.insert(workspace.join("Kept.bsl"));
+
+        let removed = engine.reconcile_workspace_files(&present).unwrap();
+        assert_eq!(removed, 1, "exactly the stored-but-gone file is reconciled out");
+
+        assert_eq!(engine.file_count().unwrap(), 1, "only the surviving file remains");
+        assert!(
+            engine.text_search("Ушедшая", 10, Some("code")).unwrap().is_empty(),
+            "the gone file no longer appears in FTS results",
+        );
+        assert!(
+            !engine.text_search("Оставшаяся", 10, Some("code")).unwrap().is_empty(),
+            "the surviving file is intact",
+        );
+        assert!(
+            engine.store().overlay_tombstone_paths("code").unwrap().contains("Gone.bsl"),
+            "a tombstone blocks a baseline hit from resurrecting the gone file",
+        );
+        // The gone file's vector answers nothing; the survivor's still does.
+        let hits = engine.search_with_embedding(&vec_a, 5, None).unwrap();
+        assert!(
+            hits.iter().all(|h| h.symbol_name != "Ушедшая"),
+            "the reconciled file's vector is evicted from the live index: {hits:?}",
+        );
+    }
+
+    /// A workspace removal writes an overlay tombstone so a baseline (Postgres-mode) hit
+    /// for the same path cannot resurrect the locally-deleted file.
+    #[test]
+    fn remove_workspace_path_tombstones_so_a_baseline_hit_cannot_resurrect() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .sync_indexed_documents_in_collection(
+                "code",
+                &[IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "Removed.bsl".to_owned(),
+                    symbol_name: "П".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 0,
+                    line_end: 1,
+                    text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                    content_hash: "h".to_owned(),
+                    graph_context: None,
+                }],
+                None,
+            )
+            .unwrap();
+
+        assert!(engine.remove_workspace_path(workspace.join("Removed.bsl")).unwrap());
+
+        let tombstones = engine.store().overlay_tombstone_paths("code").unwrap();
+        assert!(
+            tombstones.contains("Removed.bsl"),
+            "the deleted path is tombstoned so a baseline hit stays hidden: {tombstones:?}",
+        );
+    }
+
+    /// A workspace removal marks the path dirty in the in-memory overlay cache, so a
+    /// cached overlay entry for the deleted file stops serving stale hits on the next
+    /// query's refresh.
+    #[test]
+    fn remove_workspace_path_drops_the_cached_overlay_entry() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Ext.bsl");
+        fs::write(&file, "Процедура Живая()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.enable_workspace_watcher_mode();
+        engine.prime_workspace_overlay().unwrap();
+
+        // Edit the file so the overlay caches an entry for it, then confirm it serves.
+        fs::write(&file, "Процедура ЖиваяПравка()\nКонецПроцедуры").unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        assert_eq!(
+            engine.text_search("ЖиваяПравка", 10, Some("code")).unwrap().len(),
+            1,
+            "the edited file is served from the overlay cache",
+        );
+
+        // Delete the file and drive the removal branch.
+        fs::remove_file(&file).unwrap();
+        assert!(engine.remove_workspace_path(&file).unwrap());
+
+        // The removal marked the path dirty; the next query's overlay refresh sees it gone
+        // and drops the cached entry, so the stale hit disappears.
+        assert!(
+            engine.text_search("ЖиваяПравка", 10, Some("code")).unwrap().is_empty(),
+            "the removed file no longer serves a stale overlay hit",
+        );
+    }
+
+    /// A workspace removal evicts exactly the deleted chunks' vectors from the live index
+    /// incrementally — it does NOT reload every embedding and rebuild the index. The live
+    /// index keeps its count (a tombstone); a full reload would have shrunk it to the one
+    /// surviving vector.
+    #[test]
+    fn remove_workspace_path_evicts_vectors_incrementally_without_full_reload() {
+        use crate::embedder::EmbedderConfig;
+        use crate::{Chunk, ChunkKind, Store};
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("bsl-search.db");
+        let chunk = |name: &str| Chunk {
+            kind: ChunkKind::Procedure,
+            name: name.to_owned(),
+            is_export: true,
+            annotations: vec![],
+            line_start: 0,
+            line_end: 1,
+            text: format!("Процедура {name}()\nКонецПроцедуры"),
+        };
+        let vec_a = vec![1.0f32, 0.0, 0.0];
+        let vec_b = vec![0.0f32, 1.0, 0.0];
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file("a.bsl", b"ha", &[chunk("Альфа")], Some(std::slice::from_ref(&vec_a)))
+                .unwrap();
+            store
+                .reindex_file("b.bsl", b"hb", &[chunk("Бета")], Some(std::slice::from_ref(&vec_b)))
+                .unwrap();
+        }
+
+        let config = crate::SearchConfig {
+            embedder: EmbedderConfig {
+                base_url: "http://127.0.0.1:1".to_owned(),
+                model: "test-model".to_owned(),
+                dim: Some(3),
+                api_key: None,
+                provider: None,
+            },
+            execution: crate::EmbeddingExecutionPolicy::default(),
+        };
+        let mut engine = SearchEngine::new(&db_path, config).unwrap();
+        engine.set_workspace_root(dir.path());
+        assert_eq!(engine.index.len(), 2, "both vectors load at construction");
+
+        assert!(engine.remove_workspace_path(dir.path().join("a.bsl")).unwrap());
+
+        // Incremental eviction keeps the live count (tombstone); a full reload would have
+        // rebuilt the index to exactly the one surviving vector.
+        assert_eq!(
+            engine.index.len(),
+            2,
+            "removal evicts incrementally; it does not reload every embedding",
+        );
+        // The evicted vector no longer answers even its own query; the survivor still does.
+        let hits_a = engine.search_with_embedding(&vec_a, 5, None).unwrap();
+        assert!(
+            hits_a.iter().all(|h| h.symbol_name != "Альфа"),
+            "the removed file's vector is gone from the live index: {hits_a:?}",
+        );
+        let hits_b = engine.search_with_embedding(&vec_b, 5, None).unwrap();
+        assert_eq!(hits_b.first().map(|h| h.symbol_name.as_str()), Some("Бета"));
     }
 }
