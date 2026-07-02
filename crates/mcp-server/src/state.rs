@@ -1,14 +1,13 @@
 use crate::baseline::{BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineService};
+use crate::change_hub::WorkspaceChangeHub;
 use crate::diagnostics_state::DiagnosticsState;
 use crate::graph::GraphState;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
-use notify::{
-    Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
-};
 use onec_client::Client as OnecClient;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::{
     env,
     path::{Path, PathBuf},
@@ -42,6 +41,14 @@ pub struct SharedState {
     configured_baseline: Option<ConfiguredBaselineStatus>,
     graph: GraphState,
     diagnostics: DiagnosticsState,
+    /// Daemon-owned filesystem change hub. Created before any consumer subscribes
+    /// so its lifecycle is independent of the search engine's (which starts later,
+    /// in a background init thread). `None` for the reference/shared profiles,
+    /// which have no workspace tree to watch. Held so additional sinks (diagnostics
+    /// drain-on-read, graph invalidation) can subscribe once they land; the search
+    /// sink already runs off a clone taken at construction.
+    #[allow(dead_code)]
+    change_hub: Option<WorkspaceChangeHub>,
     /// Number of background index/embedding tasks currently in flight. The broker
     /// backend keeps itself alive while this is non-zero so it never idle-exits (and
     /// kills) a long embedding pass. Incremented at the start of each such task and
@@ -167,17 +174,17 @@ impl SharedState {
             graph.clone(),
         );
 
-        {
-            let engine_arc = Arc::clone(&search_engine);
-            let watch_root = config_path.to_path_buf();
-            let watcher_ready = Arc::clone(&watcher_ready);
-            std::thread::Builder::new()
-                .name("bsl-search-overlay-watch".to_owned())
-                .spawn(move || {
-                    Self::run_workspace_overlay_watcher(engine_arc, watch_root, watcher_ready);
-                })
-                .ok();
-        }
+        // The change hub owns the one recursive workspace watcher and starts before
+        // any consumer subscribes: the search engine is built on a background thread
+        // and must not gate the watcher's lifecycle. Search subscribes as a sink and
+        // preserves its prior behavior (mark only `.bsl` paths dirty).
+        let change_hub = WorkspaceChangeHub::start(config_path.to_path_buf());
+        Self::spawn_search_sink(
+            change_hub.clone(),
+            Arc::clone(&search_engine),
+            Arc::clone(&watcher_ready),
+            config_path.to_path_buf(),
+        );
 
         // The `metadata` tool reads the resident diagnostics host (per-MDO substrate for
         // `object`, Channel-2 `load_configuration` for `tree`/`info`); it is seeded and
@@ -199,6 +206,7 @@ impl SharedState {
             configured_baseline: Some(baseline_runtime.configured_baseline),
             graph,
             diagnostics,
+            change_hub: Some(change_hub),
             background_indexers,
         }
     }
@@ -416,6 +424,7 @@ impl SharedState {
             configured_baseline: Some(baseline_runtime.configured_baseline),
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
+            change_hub: None,
             background_indexers,
         }
     }
@@ -435,6 +444,7 @@ impl SharedState {
             configured_baseline: None,
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
+            change_hub: None,
             background_indexers: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -445,6 +455,13 @@ impl SharedState {
 
     pub(crate) fn diagnostics(&self) -> &DiagnosticsState {
         &self.diagnostics
+    }
+
+    // Consumed by the diagnostics/graph sinks once they subscribe; exposed now so
+    // the hub the daemon owns is reachable from the tool layer.
+    #[allow(dead_code)]
+    pub(crate) fn change_hub(&self) -> Option<&WorkspaceChangeHub> {
+        self.change_hub.as_ref()
     }
 
     pub fn set_onec_client(&mut self, client: OnecClient) {
@@ -1304,62 +1321,91 @@ impl SharedState {
         None
     }
 
-    fn run_workspace_overlay_watcher(
+    /// Drive the search overlay from the change hub. Search is one sink among
+    /// several: it drains its own cursor and marks only `.bsl` paths dirty, exactly
+    /// as the standalone overlay watcher did before the hub existed. The raw
+    /// (non-canonical) path is used so `mark_workspace_path_dirty`'s strip against
+    /// the configured source root still matches when that root has symlinks.
+    fn spawn_search_sink(
+        hub: WorkspaceChangeHub,
         engine: SharedSearchEngine,
-        watch_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
+        watch_root: PathBuf,
     ) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher = match RecommendedWatcher::new(
-            move |event| {
-                let _ = tx.send(event);
-            },
-            NotifyConfig::default(),
-        ) {
-            Ok(watcher) => watcher,
-            Err(e) => {
-                tracing::warn!(?watch_root, "failed to create workspace watcher: {e}");
-                return;
-            }
-        };
+        std::thread::Builder::new()
+            .name("bsl-search-overlay-watch".to_owned())
+            .spawn(move || {
+                // Setup is asynchronous, so wait for it to settle rather than racing
+                // a bare `is_watching` check that would bail before the watch arms.
+                if !hub.wait_until_watching(Duration::from_secs(60)) {
+                    tracing::warn!(
+                        "workspace change hub is not watching; search overlay stays in scan mode"
+                    );
+                    return;
+                }
 
-        if let Err(e) = watcher.watch(&watch_root, RecursiveMode::Recursive) {
-            tracing::warn!(?watch_root, "failed to watch workspace for overlay updates: {e}");
-            return;
-        }
+                // Publish readiness before the engine may exist: the engine's own
+                // configuration step checks this flag and enables watcher mode when
+                // it finishes initializing. Enabling here too covers a warm engine
+                // that is already published.
+                watcher_ready.store(true, Ordering::SeqCst);
+                if let Ok(mut guard) = engine.lock() {
+                    if let Some(engine) = guard.as_mut() {
+                        engine.enable_workspace_watcher_mode();
+                    }
+                }
+                tracing::info!("search overlay sink subscribed to workspace change hub");
 
-        watcher_ready.store(true, Ordering::SeqCst);
-        if let Ok(mut guard) = engine.lock() {
-            if let Some(engine) = guard.as_mut() {
-                engine.enable_workspace_watcher_mode();
-            }
-        }
-        tracing::info!(?watch_root, "workspace overlay watcher started");
+                let mut cursor = hub.subscribe();
+                let mut generation = 0u64;
+                loop {
+                    // Wake on new drift; the timeout only bounds how long a shutdown
+                    // takes to be noticed (the daemon detaches this thread).
+                    generation = hub.wait_for_change(generation, Duration::from_secs(30));
+                    let batch = hub.drain(cursor);
+                    cursor = batch.cursor;
 
-        while let Ok(event) = rx.recv() {
-            match event {
-                Ok(event) => Self::handle_workspace_watch_event(&engine, &event),
-                Err(e) => tracing::warn!(?watch_root, "workspace watch event error: {e}"),
+                    for entry in &batch.entries {
+                        Self::mark_search_path_dirty(&engine, &entry.raw);
+                    }
+
+                    // Overflow means the hub dropped detail: the exact changed paths
+                    // are lost. Restore parity with the old unbounded watcher (which
+                    // never lost a `.bsl`) by re-marking every workspace `.bsl` dirty,
+                    // so the overlay's incremental refresh reconsiders them all.
+                    if batch.rescan_required {
+                        tracing::warn!(
+                            "workspace change hub overflowed; re-marking all workspace .bsl paths dirty for the search overlay"
+                        );
+                        Self::rewalk_workspace_bsl_dirty(&engine, &watch_root);
+                    }
+                }
+            })
+            .ok();
+    }
+
+    /// Re-mark every workspace `.bsl` dirty for the search overlay. Used when the
+    /// change hub overflowed and the exact changed paths are no longer known, so
+    /// the overlay's incremental refresh must reconsider the whole tree.
+    fn rewalk_workspace_bsl_dirty(engine: &SharedSearchEngine, watch_root: &Path) {
+        for file in walkdir::WalkDir::new(watch_root).follow_links(true) {
+            let Ok(file) = file else { continue };
+            if file.file_type().is_file() {
+                Self::mark_search_path_dirty(engine, file.path());
             }
         }
     }
 
-    fn handle_workspace_watch_event(engine: &SharedSearchEngine, event: &Event) {
-        if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))
-        {
+    /// Mark one path dirty in the search overlay if it is a `.bsl` file. Filtering
+    /// on the consumer side keeps the hub itself extension-agnostic.
+    fn mark_search_path_dirty(engine: &SharedSearchEngine, path: &Path) {
+        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
             return;
         }
-
-        for path in &event.paths {
-            if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
-                continue;
-            }
-
-            if let Ok(guard) = engine.lock() {
-                if let Some(engine) = guard.as_ref() {
-                    if let Err(e) = engine.mark_workspace_path_dirty(path) {
-                        tracing::warn!(?path, "failed to mark workspace file dirty: {e}");
-                    }
+        if let Ok(guard) = engine.lock() {
+            if let Some(engine) = guard.as_ref() {
+                if let Err(e) = engine.mark_workspace_path_dirty(path) {
+                    tracing::warn!(path = ?path, "failed to mark workspace file dirty: {e}");
                 }
             }
         }
@@ -1677,5 +1723,129 @@ mod tests {
         let result = result.expect("metadata form must resolve under the nested config root");
         let text = result.content[0].raw.as_text().expect("text content").text.clone();
         assert!(text.contains("ФормаСписка"), "form listing resolves under src/cf: {text}");
+    }
+
+    /// The search overlay sink preserves the pre-hub watcher behavior: a `.bsl`
+    /// change lands in the engine's dirty set, while a non-`.bsl` change reaches
+    /// the hub accumulator (any consumer can see it) but is not marked dirty for
+    /// search.
+    #[test]
+    fn search_sink_marks_only_bsl_paths_dirty() {
+        use crate::change_hub::WorkspaceChangeHub;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let hub = WorkspaceChangeHub::start(workspace.clone());
+        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the watch must arm");
+        // A second cursor observes the raw accumulator independently of the sink.
+        let observer = hub.subscribe();
+
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+        SharedState::spawn_search_sink(
+            hub.clone(),
+            Arc::clone(&engine_arc),
+            Arc::clone(&watcher_ready),
+            workspace.clone(),
+        );
+
+        // Wait deterministically for the sink to subscribe (observer + sink = 2
+        // cursors) before mutating the tree, so its cursor covers the changes below.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while hub.active_cursor_count() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(hub.active_cursor_count(), 2, "the sink subscribed its cursor");
+
+        let bsl = workspace.join("Module.bsl");
+        std::fs::write(&bsl, "Процедура П()\nКонецПроцедуры").unwrap();
+        let xml = workspace.join("Configuration.xml");
+        std::fs::write(&xml, "<Configuration/>").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut dirty_has_bsl = false;
+        while Instant::now() < deadline {
+            let snapshot = {
+                let guard = engine_arc.lock().unwrap();
+                guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
+            };
+            if snapshot.keys().any(|p| p.ends_with("Module.bsl")) {
+                dirty_has_bsl = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(dirty_has_bsl, "the .bsl change is marked dirty for the search overlay");
+
+        let snapshot = {
+            let guard = engine_arc.lock().unwrap();
+            guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
+        };
+        assert!(
+            !snapshot.keys().any(|p| p.ends_with("Configuration.xml")),
+            "search ignores non-.bsl paths",
+        );
+        assert!(watcher_ready.load(Ordering::SeqCst), "the sink publishes watcher readiness");
+
+        // The hub itself accepted the .xml change; only the consumer filtered it.
+        // The event is asynchronous, so poll the observer cursor until it lands.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observer = observer;
+        let mut saw_xml = false;
+        while Instant::now() < deadline {
+            let batch = hub.drain(observer);
+            observer = batch.cursor;
+            if batch.entries.iter().any(|e| e.raw.ends_with("Configuration.xml")) {
+                saw_xml = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(saw_xml, "the accumulator carries the .xml change for other consumers");
+    }
+
+    /// On a hub overflow the exact changed paths are lost, so the sink re-walks the
+    /// workspace and marks every `.bsl` dirty (and nothing else), restoring the
+    /// old unbounded watcher's guarantee that no `.bsl` change is dropped.
+    #[test]
+    fn search_sink_rewalks_all_bsl_on_overflow() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        // Watcher mode makes `mark_workspace_path_dirty` record into the dirty set.
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        // A nested tree of `.bsl` plus a non-`.bsl` file that must NOT be marked.
+        let nested = workspace.join("CommonModules").join("Модуль");
+        fs::create_dir_all(&nested).unwrap();
+        let a = workspace.join("A.bsl");
+        let b = nested.join("B.bsl");
+        fs::write(&a, "Процедура П()\nКонецПроцедуры").unwrap();
+        fs::write(&b, "Процедура П()\nКонецПроцедуры").unwrap();
+        fs::write(workspace.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+        SharedState::rewalk_workspace_bsl_dirty(&engine_arc, &workspace);
+
+        let snapshot = {
+            let guard = engine_arc.lock().unwrap();
+            guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
+        };
+        assert!(snapshot.keys().any(|p| p.ends_with("A.bsl")), "top-level .bsl re-marked");
+        assert!(snapshot.keys().any(|p| p.ends_with("B.bsl")), "nested .bsl re-marked");
+        assert!(
+            !snapshot.keys().any(|p| p.ends_with("Configuration.xml")),
+            "non-.bsl paths are left alone",
+        );
     }
 }

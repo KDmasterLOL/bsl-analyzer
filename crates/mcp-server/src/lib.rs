@@ -1,6 +1,7 @@
 mod baseline;
 pub mod broker;
 mod cache;
+mod change_hub;
 mod diagnostics_state;
 mod graph;
 mod graph_db;
