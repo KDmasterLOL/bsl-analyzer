@@ -414,7 +414,7 @@ impl Configuration {
             if let Some(base) = self
                 .subsystems
                 .iter_mut()
-                .find(|s| s.name().eq_ignore_ascii_case(ext_subsystem.name()))
+                .find(|s| s.name().fold_lower() == ext_subsystem.name().fold_lower())
             {
                 // An extension can add objects/child subsystems to an existing subsystem.
                 base.merge_from(ext_subsystem);
@@ -852,6 +852,44 @@ mod tests {
         let mut also_with_subsystem = base.clone();
         also_with_subsystem.add_subsystem(crate::subsystem::Subsystem::new("Продажи"));
         assert_eq!(with_subsystem, also_with_subsystem);
+    }
+
+    #[test]
+    fn merge_extension_overlay_merges_subsystem_content_and_children() {
+        let mut base = Configuration::new("Base");
+        base.add_subsystem(
+            crate::subsystem::Subsystem::new("Продажи")
+                .with_content(vec![(MdoType::Catalog, "Номенклатура".to_string())])
+                .with_child_subsystems(vec!["Договоры".to_string()]),
+        );
+
+        let mut extension = Configuration::new("Extension");
+        extension.add_subsystem(
+            crate::subsystem::Subsystem::new("продажи")
+                .with_content(vec![(MdoType::Document, "ЗаказПокупателя".to_string())])
+                .with_child_subsystems(vec!["договоры".to_string(), "Отчеты".to_string()]),
+        );
+        extension.add_subsystem(crate::subsystem::Subsystem::new("Сервис"));
+
+        let merged = base.merged_with_extension(&extension);
+        let sales = merged
+            .subsystems()
+            .iter()
+            .find(|subsystem| subsystem.name().fold_lower() == "Продажи".fold_lower())
+            .expect("merged subsystem");
+
+        assert_eq!(
+            sales.content(),
+            &[
+                (MdoType::Catalog, "Номенклатура".to_string()),
+                (MdoType::Document, "ЗаказПокупателя".to_string()),
+            ]
+        );
+        assert_eq!(sales.child_subsystems(), &["Договоры".to_string(), "Отчеты".to_string()]);
+        assert!(merged
+            .subsystems()
+            .iter()
+            .any(|subsystem| subsystem.name().fold_lower() == "Сервис".fold_lower()));
     }
 
     #[test]

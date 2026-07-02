@@ -8,7 +8,7 @@ use bsl_metadata::{resolve_defined_type_terminal, MdoType, MetadataResolver};
 use bsl_platform::PlatformData;
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::{MetadataKind, TypeId, TypeKind};
+use bsl_types::kind::{MetadataKind, MetadataReferenceKind, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
 use hir_def::path::QualifiedName;
 use hir_def::type_ref::TypeRef;
@@ -76,6 +76,10 @@ impl<'a> TyLoweringContext<'a> {
             if mdo.manager_type_prefix().is_some() {
                 return db.manager_collection(mdo);
             }
+        }
+
+        if let Some(kind) = MetadataReferenceKind::from_plural(raw) {
+            return db.metadata_reference_collection(kind);
         }
 
         // A bare metadata-kind name with no specific object (e.g.

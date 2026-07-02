@@ -42,6 +42,7 @@ pub enum HirFieldOrigin {
     RegisterDimension,
     RegisterResource,
     RegisterAttribute,
+    MetadataReference,
     PlatformProperty,
 }
 
@@ -57,6 +58,7 @@ impl From<FieldOrigin> for HirFieldOrigin {
             FieldOrigin::RegisterDimension => Self::RegisterDimension,
             FieldOrigin::RegisterResource => Self::RegisterResource,
             FieldOrigin::RegisterAttribute => Self::RegisterAttribute,
+            FieldOrigin::MetadataReference => Self::MetadataReference,
             FieldOrigin::PlatformProperty => Self::PlatformProperty,
         }
     }

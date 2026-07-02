@@ -152,6 +152,64 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.resolve_common_module(file_id, name)
     }
 
+    fn resolve_event_subscription(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::EventSubscription>> {
+        self.db.resolve_event_subscription(file_id, name)
+    }
+
+    fn resolve_role(&self, file_id: FileId, name: &str) -> Option<Arc<bsl_metadata::Role>> {
+        self.db.resolve_role(file_id, name)
+    }
+
+    fn main_event_subscriptions(
+        &self,
+        file_id: FileId,
+    ) -> Vec<Arc<bsl_metadata::EventSubscription>> {
+        self.db
+            .event_subscription_names(file_id)
+            .into_iter()
+            .filter_map(|name| self.db.resolve_event_subscription(file_id, &name))
+            .collect()
+    }
+
+    fn main_roles(&self, file_id: FileId) -> Vec<Arc<bsl_metadata::Role>> {
+        if self.db.all_config_paths().is_empty() {
+            return self
+                .visible_configurations(file_id)
+                .into_iter()
+                .find(|visible| visible.config.name.is_none())
+                .map(|visible| {
+                    visible.config.configuration.roles().iter().cloned().map(Arc::new).collect()
+                })
+                .unwrap_or_default();
+        }
+
+        self.db
+            .role_names(file_id)
+            .into_iter()
+            .filter_map(|name| self.db.resolve_role(file_id, &name))
+            .collect()
+    }
+
+    fn resolve_scheduled_job(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::ScheduledJob>> {
+        self.db.resolve_scheduled_job(file_id, name)
+    }
+
+    fn main_scheduled_jobs(&self, file_id: FileId) -> Vec<Arc<bsl_metadata::ScheduledJob>> {
+        self.db
+            .scheduled_job_names(file_id)
+            .into_iter()
+            .filter_map(|name| self.db.resolve_scheduled_job(file_id, &name))
+            .collect()
+    }
+
     fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
         self.db.resolve_common_module_files(file_id, name)
     }

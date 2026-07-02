@@ -3,7 +3,9 @@ use stdx::case::CaseExt;
 
 use bsl_config::VisibleConfig;
 use bsl_metadata::{AttributeType, MdoType, MetadataObject, MetadataResolver, Register};
+use bsl_types::kind::MetadataReferenceKind;
 use hir_def::ConfigsDatabase;
+use hir_def::Name;
 use vfs::FileId;
 
 /// Per-MDO metadata resolution surface threaded into the type-lookup helpers
@@ -19,6 +21,10 @@ pub trait ObjectResolver {
         -> Option<Arc<MetadataObject>>;
 
     fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>>;
+
+    fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name>;
+
+    fn metadata_reference_members(&self, kind: MetadataReferenceKind) -> Vec<Name>;
 
     /// The documents that record into the register `(parent, register_name)` — a
     /// cross-MDO reverse relation (every document writing to the register), so it
@@ -67,6 +73,70 @@ impl<D: ConfigsDatabase + ?Sized> ObjectResolver for DbObjectResolver<'_, D> {
 
     fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>> {
         self.db.resolve_register(self.file_id, mdo_type, name)
+    }
+
+    fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name> {
+        match kind {
+            MetadataReferenceKind::Subsystem => {
+                self.db.resolve_subsystem(self.file_id, name).map(|item| Name::new(item.name()))
+            }
+            MetadataReferenceKind::Role => {
+                self.db.resolve_role(self.file_id, name).map(|role| Name::new(role.name()))
+            }
+            MetadataReferenceKind::EventSubscription => self
+                .db
+                .resolve_event_subscription(self.file_id, name)
+                .map(|subscription| Name::new(subscription.name())),
+            MetadataReferenceKind::ScheduledJob => {
+                self.db.resolve_scheduled_job(self.file_id, name).map(|job| Name::new(job.name()))
+            }
+            MetadataReferenceKind::HttpService => self
+                .db
+                .resolve_http_service(self.file_id, name)
+                .map(|service| Name::new(service.name())),
+            MetadataReferenceKind::WebService => self
+                .db
+                .resolve_web_service(self.file_id, name)
+                .map(|service| Name::new(service.name())),
+        }
+    }
+
+    fn metadata_reference_members(&self, kind: MetadataReferenceKind) -> Vec<Name> {
+        match kind {
+            MetadataReferenceKind::Subsystem => self
+                .db
+                .subsystem_names(self.file_id)
+                .into_iter()
+                .map(|name| Name::new(&name))
+                .collect(),
+            MetadataReferenceKind::Role => {
+                self.db.role_names(self.file_id).into_iter().map(|name| Name::new(&name)).collect()
+            }
+            MetadataReferenceKind::EventSubscription => self
+                .db
+                .event_subscription_names(self.file_id)
+                .into_iter()
+                .map(|name| Name::new(&name))
+                .collect(),
+            MetadataReferenceKind::ScheduledJob => self
+                .db
+                .scheduled_job_names(self.file_id)
+                .into_iter()
+                .map(|name| Name::new(&name))
+                .collect(),
+            MetadataReferenceKind::HttpService => self
+                .db
+                .http_service_names(self.file_id)
+                .into_iter()
+                .map(|name| Name::new(&name))
+                .collect(),
+            MetadataReferenceKind::WebService => self
+                .db
+                .web_service_names(self.file_id)
+                .into_iter()
+                .map(|name| Name::new(&name))
+                .collect(),
+        }
     }
 
     fn recorders_for_register(&self, parent: MdoType, register_name: &str) -> Vec<String> {
@@ -135,6 +205,26 @@ impl ObjectResolver for ConfigsObjectResolver<'_> {
         merged.map(Arc::new)
     }
 
+    fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name> {
+        self.0
+            .iter()
+            .rev()
+            .find_map(|cfg| metadata_reference_name(cfg.configuration.as_ref(), kind, name))
+    }
+
+    fn metadata_reference_members(&self, kind: MetadataReferenceKind) -> Vec<Name> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for cfg in self.0 {
+            for name in metadata_reference_names(cfg.configuration.as_ref(), kind) {
+                if seen.insert(name.as_str().fold_lower()) {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
+
     fn recorders_for_register(&self, parent: MdoType, register_name: &str) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
@@ -147,5 +237,61 @@ impl ObjectResolver for ConfigsObjectResolver<'_> {
             }
         }
         out
+    }
+}
+
+fn metadata_reference_name(
+    config: &bsl_metadata::Configuration,
+    kind: MetadataReferenceKind,
+    name: &str,
+) -> Option<Name> {
+    match kind {
+        MetadataReferenceKind::Role => config.find_role(name).map(|item| Name::new(item.name())),
+        MetadataReferenceKind::EventSubscription => {
+            config.find_event_subscription(name).map(|item| Name::new(item.name()))
+        }
+        MetadataReferenceKind::ScheduledJob => {
+            config.find_scheduled_job(name).map(|item| Name::new(item.name()))
+        }
+        MetadataReferenceKind::HttpService => {
+            config.find_http_service(name).map(|item| Name::new(item.name()))
+        }
+        MetadataReferenceKind::WebService => {
+            config.find_web_service(name).map(|item| Name::new(item.name()))
+        }
+        MetadataReferenceKind::Subsystem => {
+            let name_lower = name.fold_lower();
+            config
+                .subsystems()
+                .iter()
+                .find(|item| item.name().fold_lower() == name_lower)
+                .map(|item| Name::new(item.name()))
+        }
+    }
+}
+
+fn metadata_reference_names(
+    config: &bsl_metadata::Configuration,
+    kind: MetadataReferenceKind,
+) -> Vec<Name> {
+    match kind {
+        MetadataReferenceKind::Role => {
+            config.roles().iter().map(|item| Name::new(item.name())).collect()
+        }
+        MetadataReferenceKind::EventSubscription => {
+            config.event_subscriptions().iter().map(|item| Name::new(item.name())).collect()
+        }
+        MetadataReferenceKind::ScheduledJob => {
+            config.scheduled_jobs().iter().map(|item| Name::new(item.name())).collect()
+        }
+        MetadataReferenceKind::HttpService => {
+            config.http_services().iter().map(|item| Name::new(item.name())).collect()
+        }
+        MetadataReferenceKind::WebService => {
+            config.web_services().iter().map(|item| Name::new(item.name())).collect()
+        }
+        MetadataReferenceKind::Subsystem => {
+            config.subsystems().iter().map(|item| Name::new(item.name())).collect()
+        }
     }
 }

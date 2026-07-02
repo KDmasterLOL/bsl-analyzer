@@ -139,8 +139,6 @@ fn get_mdo_type_russian(mdo_type: &bsl_metadata::MdoType) -> &'static str {
         MdoType::Report => "Отчет",
         MdoType::CommonModule => "ОбщийМодуль",
         MdoType::ExternalDataSource => "ВнешнийИсточникДанных",
-        MdoType::Cube => "Куб",
-        MdoType::DimensionTable => "ТаблицаИзмерения",
         MdoType::EventSubscription => "ПодпискаНаСобытие",
         MdoType::Subsystem => "Подсистема",
         MdoType::Role => "Роль",

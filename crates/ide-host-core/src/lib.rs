@@ -6,10 +6,12 @@
 //! the host once benefits LSP, MCP, and CLI alike.
 
 mod load;
+mod metadata;
 
 pub use load::{
     build_source_root, register_files_disk_backed, set_file_text_source, FileTextSource,
 };
+pub use metadata::{bootstrap_metadata_substrate, refresh_metadata_substrate, VfsWrite};
 
 use ide::{Analysis, RootDatabaseImpl};
 use salsa::Database as _;

@@ -31,16 +31,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let configuration = match ctx.main_configuration() {
-        Some(config) => config,
-        None => return Vec::new(),
-    };
-
     let allowed_roles = get_allowed_roles(ctx);
 
     let mut diagnostics = Vec::new();
 
-    for role in configuration.roles() {
+    for role in ctx.main_roles() {
         if role.data().set_for_new_objects() && !allowed_roles.contains(role.name()) {
             diagnostics.push(create_diagnostic(ctx, role.name(), code));
         }
@@ -137,6 +132,105 @@ mod tests {
         (diagnostics, code.to_string())
     }
 
+    fn check_diagnostic_with_listed_role_substrate(
+        code: &str,
+        fixtures_dir: &str,
+    ) -> (Vec<Diagnostic>, String) {
+        use ide_db::metadata::{MetadataListingData, RoleEntry};
+
+        let mut db = RootDatabaseImpl::new();
+
+        let workspace_root = PathBuf::from(fixtures_dir);
+
+        let mut file_set = FileSet::default();
+
+        let file_id = FileId(0);
+        let module_path =
+            VfsPath::new(format!("{}/Ext/ManagedApplicationModule.bsl", fixtures_dir));
+        file_set.insert(file_id, module_path);
+
+        let source_root_id = SourceRootId(0);
+        let source_root = SourceRoot::new_local(file_set);
+
+        db.set_source_root(source_root_id, source_root);
+        db.set_file_source_root(file_id, source_root_id);
+        db.set_file_text(file_id, code);
+
+        let role_main = FileId(1);
+        let role_rights = FileId(2);
+        let mut metadata_file_set = FileSet::default();
+        metadata_file_set
+            .insert(role_main, VfsPath::new(format!("{}/Roles/Роль1.xml", fixtures_dir)));
+        metadata_file_set.insert(
+            role_rights,
+            VfsPath::new(format!("{}/Roles/Роль1/Ext/Rights.xml", fixtures_dir)),
+        );
+        db.set_source_root(SourceRootId(1), SourceRoot::new_local(metadata_file_set));
+        db.set_file_source_root(role_main, SourceRootId(1));
+        db.set_file_source_root(role_rights, SourceRootId(1));
+        db.set_file_text(
+            role_main,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000091">
+        <Properties>
+            <Name>Роль1</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#,
+        );
+        db.set_file_text(
+            role_rights,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>true</setForNewObjects>
+    <object>
+        <name>Catalog.Контрагенты</name>
+        <right>
+            <name>Read</name>
+            <value>true</value>
+        </right>
+    </object>
+</Rights>"#,
+        );
+
+        db.set_all_config_paths(vec![(None, workspace_root.clone())]);
+        db.set_metadata_listing(
+            &workspace_root.to_string_lossy(),
+            MetadataListingData {
+                entries: Vec::new(),
+                defined_types: Vec::new(),
+                common_modules: Vec::new(),
+                event_subscriptions: Vec::new(),
+                scheduled_jobs: Vec::new(),
+                roles: vec![RoleEntry {
+                    name: "Роль1".to_string(),
+                    main: role_main,
+                    rights: Some(role_rights),
+                }],
+                http_services: Vec::new(),
+                web_services: Vec::new(),
+                integration_services: Vec::new(),
+                subsystems: Vec::new(),
+            },
+        );
+
+        let configuration_path_input = ide_db::metadata::ConfigurationPathInput::new(
+            &db,
+            workspace_root.to_string_lossy().to_string(),
+            0,
+        );
+
+        let provider = ide_db::SalsaProvider::new(&db, Some(configuration_path_input));
+        let config = DiagnosticsConfig::default();
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
+
+        let diagnostics = check(&ctx);
+        (diagnostics, code.to_string())
+    }
+
     #[test]
     fn test_set_permissions_for_new_objects() {
         let fixtures_dir =
@@ -144,6 +238,21 @@ mod tests {
 
         let code = "//test - ManagedApplicationModule";
         let (diagnostics, file_content) = check_diagnostic(code, fixtures_dir);
+
+        expect![[r#"
+            SetPermissionsForNewObjects @ 1:1..1:10
+              message: У роли "Роль1" не должен быть установлен флаг "Устанавливать права для новых объектов"
+              severity: Critical"#]].assert_eq(&format_diags(&file_content, &diagnostics));
+    }
+
+    #[test]
+    fn test_set_permissions_for_new_objects_with_listed_role_substrate() {
+        let fixtures_dir =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/set_permissions_for_new_objects");
+
+        let code = "//test - ManagedApplicationModule";
+        let (diagnostics, file_content) =
+            check_diagnostic_with_listed_role_substrate(code, fixtures_dir);
 
         expect![[r#"
             SetPermissionsForNewObjects @ 1:1..1:10

@@ -153,30 +153,44 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
 ) -> Option<Vec<CompletionItem>> {
     let effective = coerce_to_metadata_ref_id(db, receiver).unwrap_or(receiver);
 
-    let (is_manager, is_metadata_ref, is_union_with_metadata_ref, is_form_data_with_underlying) =
-        match db.lookup_type(effective) {
-            TypeKind::ObjectManager(_) | TypeKind::ManagerCollection(_) => {
-                (true, false, false, false)
-            }
-            TypeKind::MetadataRef(_) | TypeKind::MetadataObject(_) => (false, true, false, false),
-            TypeKind::Union(arms) => {
-                let has_ref = arms.iter().any(|a| {
-                    matches!(
-                        db.lookup_type(*a),
-                        TypeKind::MetadataRef(_) | TypeKind::MetadataObject(_)
-                    )
-                });
-                (false, false, has_ref, false)
-            }
-            TypeKind::FormData { underlying: Some(_), .. } => (false, false, false, true),
-            _ => (false, false, false, false),
-        };
+    let (
+        is_manager,
+        is_metadata_ref,
+        is_metadata_ref_collection,
+        is_union_with_metadata_ref,
+        is_form_data_with_underlying,
+    ) = match db.lookup_type(effective) {
+        TypeKind::ObjectManager(_) | TypeKind::ManagerCollection(_) => {
+            (true, false, false, false, false)
+        }
+        TypeKind::MetadataRef(_) | TypeKind::MetadataObject(_) => {
+            (false, true, false, false, false)
+        }
+        TypeKind::MetadataReferenceCollection(_) => (false, false, true, false, false),
+        TypeKind::Union(arms) => {
+            let has_ref = arms.iter().any(|a| {
+                matches!(
+                    db.lookup_type(*a),
+                    TypeKind::MetadataRef(_)
+                        | TypeKind::MetadataObject(_)
+                        | TypeKind::MetadataReferenceCollection(_)
+                )
+            });
+            (false, false, false, has_ref, false)
+        }
+        TypeKind::FormData { underlying: Some(_), .. } => (false, false, false, false, true),
+        _ => (false, false, false, false, false),
+    };
 
     if is_manager {
         return collect_platform_items_or_none(db, effective, locale);
     }
 
-    if !is_metadata_ref && !is_union_with_metadata_ref && !is_form_data_with_underlying {
+    if !is_metadata_ref
+        && !is_metadata_ref_collection
+        && !is_union_with_metadata_ref
+        && !is_form_data_with_underlying
+    {
         return None;
     }
 
@@ -386,20 +400,21 @@ fn find_receiver_expr(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
     None
 }
 
+/// A common-module name qualifies only when the whole receiver is a *bare*
+/// identifier. A call/field/index chain such as `Module.Method().` or `Foo.Bar`
+/// shares the same leading ident token, but its value is the chain's result, not
+/// the module — those must resolve by type, so this returns `None` for them.
 fn extract_receiver_ident(node: &SyntaxNode) -> Option<String> {
-    match node.kind() {
-        SyntaxKind::IDENT | SyntaxKind::EXPR => {
-            let token = node.first_token()?;
-            if token.kind() == SyntaxKind::IDENT {
-                return Some(token.text().to_string());
-            }
-            None
-        }
-        _ => {
-            let token = node.first_token().filter(|t| t.kind() == SyntaxKind::IDENT)?;
-            Some(token.text().to_string())
+    let mut ident: Option<String> = None;
+    for element in node.descendants_with_tokens() {
+        let Some(token) = element.as_token() else { continue };
+        match token.kind() {
+            SyntaxKind::WHITESPACE => continue,
+            SyntaxKind::IDENT if ident.is_none() => ident = Some(token.text().to_string()),
+            _ => return None,
         }
     }
+    ident
 }
 
 fn complete_common_module_methods(
@@ -729,6 +744,7 @@ fn sort_key_for_origin(origin: HirFieldOrigin) -> &'static str {
         HirFieldOrigin::RegisterDimension
         | HirFieldOrigin::RegisterResource
         | HirFieldOrigin::RegisterAttribute => "50_",
+        HirFieldOrigin::MetadataReference => "55_",
         HirFieldOrigin::PlatformProperty => "60_",
     }
 }

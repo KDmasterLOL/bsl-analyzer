@@ -30,14 +30,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let configuration = match ctx.main_configuration() {
-        Some(config) => config,
-        None => return Vec::new(),
-    };
-
     let mut diagnostics = Vec::new();
-    for event_sub in configuration.event_subscriptions() {
-        check_event_subscription(ctx, event_sub, code, &mut diagnostics);
+    for event_sub in ctx.main_event_subscriptions() {
+        check_event_subscription(ctx, &event_sub, code, &mut diagnostics);
     }
 
     diagnostics

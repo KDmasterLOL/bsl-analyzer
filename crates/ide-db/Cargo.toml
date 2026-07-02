@@ -34,6 +34,7 @@ rayon.workspace = true
 [dev-dependencies]
 expect-test.workspace = true
 criterion.workspace = true
+hir-ty.workspace = true
 tempfile.workspace = true
 rayon.workspace = true
 

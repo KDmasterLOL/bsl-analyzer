@@ -181,6 +181,89 @@ pub struct CommonModuleEntry {
     pub module_file: Option<vfs::FileId>,
 }
 
+/// One discovered event subscription in a config root's *structure* listing: its
+/// name and the [`vfs::FileId`] of its main XML. Event subscriptions are global
+/// flat metadata objects, keyed by name, so they ride a dedicated listing field.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EventSubscriptionEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+}
+
+/// One discovered scheduled job in a config root's *structure* listing: its name
+/// and the [`vfs::FileId`] of its main XML (`ScheduledJobs/<Name>.xml`). Scheduled
+/// jobs are global flat metadata objects, keyed by name, so they ride a dedicated
+/// listing field — the scheduled-job counterpart of [`EventSubscriptionEntry`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ScheduledJobEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+}
+
+/// One discovered role in a config root's *structure* listing: its name, main
+/// XML (`Roles/<Name>.xml`), and optional rights sidecar
+/// (`Roles/<Name>/Ext/Rights.xml`). Roles are flat metadata keyed by name, but
+/// parsing needs both files when the sidecar exists.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RoleEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+    pub rights: Option<vfs::FileId>,
+}
+
+/// One discovered HTTP service in a config root's *structure* listing: its main
+/// XML and optional module body (`HTTPServices/<Name>/Ext/Module.bsl`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct HTTPServiceEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+    pub module_file: Option<vfs::FileId>,
+}
+
+/// One discovered Web service in a config root's *structure* listing: its main
+/// XML and optional module body (`WebServices/<Name>/Ext/Module.bsl`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WebServiceEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+    pub module_file: Option<vfs::FileId>,
+}
+
+/// One discovered integration service in a config root's *structure* listing: its
+/// main XML and optional module body (`IntegrationServices/<Name>/Ext/Module.bsl`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct IntegrationServiceEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+    pub module_file: Option<vfs::FileId>,
+}
+
+/// One discovered subsystem in a config root's *structure* listing: its name and
+/// the [`vfs::FileId`] of its main XML (`Subsystems/<Name>.xml`). Subsystems are
+/// global flat metadata objects, keyed by name, so they ride a dedicated listing
+/// field — the subsystem counterpart of [`ScheduledJobEntry`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SubsystemEntry {
+    pub name: String,
+    pub main: vfs::FileId,
+}
+
+/// One config root's discovered metadata listing, grouped for the database setter
+/// while keeping each metadata family typed separately.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct MetadataListingData {
+    pub entries: Vec<MdoEntry>,
+    pub defined_types: Vec<DefinedTypeEntry>,
+    pub common_modules: Vec<CommonModuleEntry>,
+    pub event_subscriptions: Vec<EventSubscriptionEntry>,
+    pub scheduled_jobs: Vec<ScheduledJobEntry>,
+    pub roles: Vec<RoleEntry>,
+    pub http_services: Vec<HTTPServiceEntry>,
+    pub web_services: Vec<WebServiceEntry>,
+    pub integration_services: Vec<IntegrationServiceEntry>,
+    pub subsystems: Vec<SubsystemEntry>,
+}
+
 /// The per-config-root *structure* input: the MDOs and defined types that exist in
 /// one config root (base config or one extension). Set out-of-query by the
 /// bootstrap; re-set only when the directory structure changes. Keeping it per-root
@@ -194,6 +277,13 @@ pub struct MetadataListingInput {
     pub entries: Arc<Vec<MdoEntry>>,
     pub defined_types: Arc<Vec<DefinedTypeEntry>>,
     pub common_modules: Arc<Vec<CommonModuleEntry>>,
+    pub event_subscriptions: Arc<Vec<EventSubscriptionEntry>>,
+    pub scheduled_jobs: Arc<Vec<ScheduledJobEntry>>,
+    pub roles: Arc<Vec<RoleEntry>>,
+    pub http_services: Arc<Vec<HTTPServiceEntry>>,
+    pub web_services: Arc<Vec<WebServiceEntry>>,
+    pub integration_services: Arc<Vec<IntegrationServiceEntry>>,
+    pub subsystems: Arc<Vec<SubsystemEntry>>,
 }
 
 /// The composing-file identities for one MDO, as held in a [`ConfigIndex`].
@@ -519,6 +609,559 @@ pub fn resolve_common_module_by_file(
     let main = index.lookup(name)?;
     let file = CommonModuleFile::new(db, main);
     parse_common_module_query(db, file)
+}
+
+fn service_name_from_main_file(db: &dyn crate::RootDatabase, main: vfs::FileId) -> String {
+    crate::vfs_helpers::get_file_path(db, main)
+        .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+        .unwrap_or_default()
+}
+
+#[salsa::interned(debug)]
+pub struct HTTPServiceFile<'db> {
+    pub main: vfs::FileId,
+}
+
+#[salsa::tracked(lru = 8192)]
+pub fn parse_http_service_query(
+    db: &dyn crate::RootDatabase,
+    file: HTTPServiceFile<'_>,
+) -> Option<Arc<bsl_metadata::HTTPService>> {
+    let _span = tracing::info_span!("parse_http_service").entered();
+
+    let main = file.main(db);
+    let main_text = db.file_text(main);
+    let name = service_name_from_main_file(db, main);
+    bsl_metadata::parse_http_service_from_text(&main_text, &name).map(Arc::new)
+}
+
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct HTTPServiceIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+    by_module_file: std::collections::HashMap<vfs::FileId, String>,
+    module_file_by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl HTTPServiceIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.fold_lower()).copied()
+    }
+
+    pub fn lookup_module_file(&self, name: &str) -> Option<vfs::FileId> {
+        self.module_file_by_name.get(&name.fold_lower()).copied()
+    }
+
+    pub fn name_for_module_file(&self, module_file: vfs::FileId) -> Option<&str> {
+        self.by_module_file.get(&module_file).map(String::as_str)
+    }
+}
+
+#[salsa::tracked]
+pub fn http_service_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<HTTPServiceIndex> {
+    let _span = tracing::info_span!("http_service_index").entered();
+
+    let entries = listing.http_services(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    let mut by_module_file = std::collections::HashMap::new();
+    let mut module_file_by_name = std::collections::HashMap::new();
+    for entry in entries.iter() {
+        by_name.insert(entry.name.fold_lower(), entry.main);
+        if let Some(module_file) = entry.module_file {
+            by_module_file.insert(module_file, entry.name.fold_lower());
+            module_file_by_name.insert(entry.name.fold_lower(), module_file);
+        }
+    }
+    Arc::new(HTTPServiceIndex { by_name, by_module_file, module_file_by_name })
+}
+
+#[salsa::tracked]
+pub fn resolve_http_service(
+    db: &dyn crate::RootDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::HTTPService>> {
+    let _span = tracing::info_span!("resolve_http_service").entered();
+
+    let index = http_service_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = HTTPServiceFile::new(db, main);
+    parse_http_service_query(db, file)
+}
+
+#[salsa::tracked]
+pub fn resolve_http_service_by_file(
+    db: &dyn crate::RootDatabase,
+    listing: MetadataListingInput,
+    module_file: vfs::FileId,
+) -> Option<Arc<bsl_metadata::HTTPService>> {
+    let _span = tracing::info_span!("resolve_http_service_by_file").entered();
+
+    let index = http_service_index(db, listing);
+    let name = index.name_for_module_file(module_file)?;
+    let main = index.lookup(name)?;
+    let file = HTTPServiceFile::new(db, main);
+    parse_http_service_query(db, file)
+}
+
+#[salsa::interned(debug)]
+pub struct WebServiceFile<'db> {
+    pub main: vfs::FileId,
+}
+
+#[salsa::tracked(lru = 8192)]
+pub fn parse_web_service_query(
+    db: &dyn crate::RootDatabase,
+    file: WebServiceFile<'_>,
+) -> Option<Arc<bsl_metadata::WebService>> {
+    let _span = tracing::info_span!("parse_web_service").entered();
+
+    let main = file.main(db);
+    let main_text = db.file_text(main);
+    let name = service_name_from_main_file(db, main);
+    bsl_metadata::parse_web_service_from_text(&main_text, &name).map(Arc::new)
+}
+
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct WebServiceIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+    by_module_file: std::collections::HashMap<vfs::FileId, String>,
+    module_file_by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl WebServiceIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.fold_lower()).copied()
+    }
+
+    pub fn lookup_module_file(&self, name: &str) -> Option<vfs::FileId> {
+        self.module_file_by_name.get(&name.fold_lower()).copied()
+    }
+
+    pub fn name_for_module_file(&self, module_file: vfs::FileId) -> Option<&str> {
+        self.by_module_file.get(&module_file).map(String::as_str)
+    }
+}
+
+#[salsa::tracked]
+pub fn web_service_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<WebServiceIndex> {
+    let _span = tracing::info_span!("web_service_index").entered();
+
+    let entries = listing.web_services(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    let mut by_module_file = std::collections::HashMap::new();
+    let mut module_file_by_name = std::collections::HashMap::new();
+    for entry in entries.iter() {
+        by_name.insert(entry.name.fold_lower(), entry.main);
+        if let Some(module_file) = entry.module_file {
+            by_module_file.insert(module_file, entry.name.fold_lower());
+            module_file_by_name.insert(entry.name.fold_lower(), module_file);
+        }
+    }
+    Arc::new(WebServiceIndex { by_name, by_module_file, module_file_by_name })
+}
+
+#[salsa::tracked]
+pub fn resolve_web_service(
+    db: &dyn crate::RootDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::WebService>> {
+    let _span = tracing::info_span!("resolve_web_service").entered();
+
+    let index = web_service_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = WebServiceFile::new(db, main);
+    parse_web_service_query(db, file)
+}
+
+#[salsa::tracked]
+pub fn resolve_web_service_by_file(
+    db: &dyn crate::RootDatabase,
+    listing: MetadataListingInput,
+    module_file: vfs::FileId,
+) -> Option<Arc<bsl_metadata::WebService>> {
+    let _span = tracing::info_span!("resolve_web_service_by_file").entered();
+
+    let index = web_service_index(db, listing);
+    let name = index.name_for_module_file(module_file)?;
+    let main = index.lookup(name)?;
+    let file = WebServiceFile::new(db, main);
+    parse_web_service_query(db, file)
+}
+
+#[salsa::interned(debug)]
+pub struct IntegrationServiceFile<'db> {
+    pub main: vfs::FileId,
+}
+
+#[salsa::tracked(lru = 8192)]
+pub fn parse_integration_service_query(
+    db: &dyn crate::RootDatabase,
+    file: IntegrationServiceFile<'_>,
+) -> Option<Arc<bsl_metadata::IntegrationService>> {
+    let _span = tracing::info_span!("parse_integration_service").entered();
+
+    let main = file.main(db);
+    let main_text = db.file_text(main);
+    let name = service_name_from_main_file(db, main);
+    bsl_metadata::parse_integration_service_from_text(&main_text, &name).map(Arc::new)
+}
+
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct IntegrationServiceIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+    by_module_file: std::collections::HashMap<vfs::FileId, String>,
+    module_file_by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl IntegrationServiceIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.fold_lower()).copied()
+    }
+
+    pub fn lookup_module_file(&self, name: &str) -> Option<vfs::FileId> {
+        self.module_file_by_name.get(&name.fold_lower()).copied()
+    }
+
+    pub fn name_for_module_file(&self, module_file: vfs::FileId) -> Option<&str> {
+        self.by_module_file.get(&module_file).map(String::as_str)
+    }
+}
+
+#[salsa::tracked]
+pub fn integration_service_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<IntegrationServiceIndex> {
+    let _span = tracing::info_span!("integration_service_index").entered();
+
+    let entries = listing.integration_services(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    let mut by_module_file = std::collections::HashMap::new();
+    let mut module_file_by_name = std::collections::HashMap::new();
+    for entry in entries.iter() {
+        by_name.insert(entry.name.fold_lower(), entry.main);
+        if let Some(module_file) = entry.module_file {
+            by_module_file.insert(module_file, entry.name.fold_lower());
+            module_file_by_name.insert(entry.name.fold_lower(), module_file);
+        }
+    }
+    Arc::new(IntegrationServiceIndex { by_name, by_module_file, module_file_by_name })
+}
+
+#[salsa::tracked]
+pub fn resolve_integration_service(
+    db: &dyn crate::RootDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::IntegrationService>> {
+    let _span = tracing::info_span!("resolve_integration_service").entered();
+
+    let index = integration_service_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = IntegrationServiceFile::new(db, main);
+    parse_integration_service_query(db, file)
+}
+
+#[salsa::tracked]
+pub fn resolve_integration_service_by_file(
+    db: &dyn crate::RootDatabase,
+    listing: MetadataListingInput,
+    module_file: vfs::FileId,
+) -> Option<Arc<bsl_metadata::IntegrationService>> {
+    let _span = tracing::info_span!("resolve_integration_service_by_file").entered();
+
+    let index = integration_service_index(db, listing);
+    let name = index.name_for_module_file(module_file)?;
+    let main = index.lookup(name)?;
+    let file = IntegrationServiceFile::new(db, main);
+    parse_integration_service_query(db, file)
+}
+
+/// The main XML file of a single event subscription, interned so
+/// [`parse_event_subscription_query`] keys on the file identity; its content
+/// revision drives invalidation, so editing one subscription re-parses only it.
+#[salsa::interned(debug)]
+pub struct EventSubscriptionFile<'db> {
+    pub main: vfs::FileId,
+}
+
+/// Parse one event subscription from its main XML, read through the versioned VFS.
+/// Backdates on unchanged metadata.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_event_subscription_query(
+    db: &dyn base_db::SourceDatabase,
+    file: EventSubscriptionFile<'_>,
+) -> Option<Arc<bsl_metadata::EventSubscription>> {
+    let _span = tracing::info_span!("parse_event_subscription").entered();
+
+    let main_text = db.file_text(file.main(db));
+    bsl_metadata::parse_event_subscription_from_text(&main_text).map(Arc::new)
+}
+
+/// A config root's event-subscription lookup, derived from its
+/// [`MetadataListingInput`]'s `event_subscriptions` field. Tracked on that field
+/// alone, so a content edit leaves it memoised and unrelated MDO structure changes
+/// do not invalidate it.
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct EventSubscriptionIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl EventSubscriptionIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.fold_lower()).copied()
+    }
+}
+
+/// Build a config root's event-subscription name lookup from its structure listing.
+#[salsa::tracked]
+pub fn event_subscription_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<EventSubscriptionIndex> {
+    let _span = tracing::info_span!("event_subscription_index").entered();
+
+    let entries = listing.event_subscriptions(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    for entry in entries.iter() {
+        by_name.insert(entry.name.fold_lower(), entry.main);
+    }
+    Arc::new(EventSubscriptionIndex { by_name })
+}
+
+/// Resolve a single event subscription's metadata by name within one config root,
+/// at per-event-subscription Salsa granularity. Extension overlay across roots is
+/// composed by callers (an extension replaces the subscription wholesale).
+#[salsa::tracked]
+pub fn resolve_event_subscription(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::EventSubscription>> {
+    let _span = tracing::info_span!("resolve_event_subscription").entered();
+
+    let index = event_subscription_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = EventSubscriptionFile::new(db, main);
+    parse_event_subscription_query(db, file)
+}
+
+/// The main XML file of a single scheduled job, interned so
+/// [`parse_scheduled_job_query`] keys on the file identity; its content revision
+/// drives invalidation, so editing one scheduled job re-parses only it.
+#[salsa::interned(debug)]
+pub struct ScheduledJobFile<'db> {
+    pub main: vfs::FileId,
+}
+
+/// Parse one scheduled job from its main XML, read through the versioned VFS. The
+/// scheduled-job counterpart of [`parse_event_subscription_query`]; backdates on
+/// unchanged metadata.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_scheduled_job_query(
+    db: &dyn base_db::SourceDatabase,
+    file: ScheduledJobFile<'_>,
+) -> Option<Arc<bsl_metadata::ScheduledJob>> {
+    let _span = tracing::info_span!("parse_scheduled_job").entered();
+
+    let main_text = db.file_text(file.main(db));
+    bsl_metadata::parse_scheduled_job_from_text(&main_text).map(Arc::new)
+}
+
+/// A config root's scheduled-job lookup, derived from its
+/// [`MetadataListingInput`]'s `scheduled_jobs` field. Tracked on that field alone,
+/// so a content edit leaves it memoised and unrelated MDO structure changes do
+/// not invalidate it.
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct ScheduledJobIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl ScheduledJobIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.fold_lower()).copied()
+    }
+}
+
+/// Build a config root's scheduled-job name lookup from its structure listing.
+#[salsa::tracked]
+pub fn scheduled_job_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<ScheduledJobIndex> {
+    let _span = tracing::info_span!("scheduled_job_index").entered();
+
+    let entries = listing.scheduled_jobs(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    for entry in entries.iter() {
+        by_name.insert(entry.name.fold_lower(), entry.main);
+    }
+    Arc::new(ScheduledJobIndex { by_name })
+}
+
+/// Resolve a single scheduled job's metadata by name within one config root, at
+/// per-scheduled-job Salsa granularity. The scheduled-job counterpart of
+/// [`resolve_event_subscription`]; extension overlay across roots is composed by
+/// callers (an extension replaces the job wholesale).
+#[salsa::tracked]
+pub fn resolve_scheduled_job(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::ScheduledJob>> {
+    let _span = tracing::info_span!("resolve_scheduled_job").entered();
+
+    let index = scheduled_job_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = ScheduledJobFile::new(db, main);
+    parse_scheduled_job_query(db, file)
+}
+
+#[salsa::interned(debug)]
+pub struct RoleFiles<'db> {
+    pub main: vfs::FileId,
+    pub rights: Option<vfs::FileId>,
+}
+
+#[salsa::tracked(lru = 8192)]
+pub fn parse_role_query(
+    db: &dyn base_db::SourceDatabase,
+    files: RoleFiles<'_>,
+) -> Option<Arc<bsl_metadata::Role>> {
+    let _span = tracing::info_span!("parse_role").entered();
+
+    let main_text = db.file_text(files.main(db));
+    let rights_text = files.rights(db).map(|fid| db.file_text(fid));
+    bsl_metadata::parse_role_from_texts(&main_text, rights_text.as_deref()).map(Arc::new)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RoleFileIds {
+    pub main: vfs::FileId,
+    pub rights: Option<vfs::FileId>,
+}
+
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct RoleIndex {
+    by_name: std::collections::HashMap<String, RoleFileIds>,
+}
+
+impl RoleIndex {
+    pub fn lookup(&self, name: &str) -> Option<RoleFileIds> {
+        self.by_name.get(&name.fold_lower()).copied()
+    }
+}
+
+#[salsa::tracked]
+pub fn role_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<RoleIndex> {
+    let _span = tracing::info_span!("role_index").entered();
+
+    let entries = listing.roles(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    for entry in entries.iter() {
+        by_name.insert(
+            entry.name.fold_lower(),
+            RoleFileIds { main: entry.main, rights: entry.rights },
+        );
+    }
+    Arc::new(RoleIndex { by_name })
+}
+
+#[salsa::tracked]
+pub fn resolve_role(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::Role>> {
+    let _span = tracing::info_span!("resolve_role").entered();
+
+    let index = role_index(db, listing);
+    let ids = index.lookup(&name)?;
+    let files = RoleFiles::new(db, ids.main, ids.rights);
+    parse_role_query(db, files)
+}
+
+/// The main XML file of a single subsystem, interned so
+/// [`parse_subsystem_query`] keys on the file identity; its content revision
+/// drives invalidation, so editing one subsystem re-parses only it. The
+/// subsystem counterpart of [`ScheduledJobFile`].
+#[salsa::interned(debug)]
+pub struct SubsystemFile<'db> {
+    pub main: vfs::FileId,
+}
+
+/// Parse one subsystem from its main XML, read through the versioned VFS. The
+/// subsystem counterpart of [`parse_scheduled_job_query`]; backdates on
+/// unchanged metadata.
+#[salsa::tracked(lru = 8192)]
+pub fn parse_subsystem_query(
+    db: &dyn base_db::SourceDatabase,
+    file: SubsystemFile<'_>,
+) -> Option<Arc<bsl_metadata::Subsystem>> {
+    let _span = tracing::info_span!("parse_subsystem").entered();
+
+    let main_text = db.file_text(file.main(db));
+    bsl_metadata::parse_subsystem_from_text(&main_text).map(Arc::new)
+}
+
+/// A config root's subsystem lookup, derived from its [`MetadataListingInput`]'s
+/// `subsystems` field. Tracked on that field alone, so a content edit leaves it
+/// memoised and unrelated MDO structure changes do not invalidate it. The
+/// subsystem counterpart of [`ScheduledJobIndex`].
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct SubsystemIndex {
+    by_name: std::collections::HashMap<String, vfs::FileId>,
+}
+
+impl SubsystemIndex {
+    pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
+        self.by_name.get(&name.fold_lower()).copied()
+    }
+}
+
+/// Build a config root's subsystem name lookup from its structure listing.
+#[salsa::tracked]
+pub fn subsystem_index(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+) -> Arc<SubsystemIndex> {
+    let _span = tracing::info_span!("subsystem_index").entered();
+
+    let entries = listing.subsystems(db);
+    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    for entry in entries.iter() {
+        by_name.insert(entry.name.fold_lower(), entry.main);
+    }
+    Arc::new(SubsystemIndex { by_name })
+}
+
+/// Resolve a single subsystem's metadata by name within one config root, at
+/// per-subsystem Salsa granularity. The subsystem counterpart of
+/// [`resolve_scheduled_job`]; extension overlay across roots is composed by
+/// callers (an extension adds to a same-name base via
+/// [`bsl_metadata::Subsystem::merge_from`]).
+#[salsa::tracked]
+pub fn resolve_subsystem(
+    db: &dyn base_db::SourceDatabase,
+    listing: MetadataListingInput,
+    name: String,
+) -> Option<Arc<bsl_metadata::Subsystem>> {
+    let _span = tracing::info_span!("resolve_subsystem").entered();
+
+    let index = subsystem_index(db, listing);
+    let main = index.lookup(&name)?;
+    let file = SubsystemFile::new(db, main);
+    parse_subsystem_query(db, file)
 }
 
 #[salsa::db]

@@ -6,13 +6,23 @@ use crate::facet::{
     StringFacet, StructureFacet, TableFacet,
 };
 use crate::intern::TypeKernelDb;
-use crate::kind::{MetadataKind, Projection, TypeId, TypeKind};
+use crate::kind::{MetadataKind, MetadataReferenceKind, Projection, TypeId, TypeKind};
 use bsl_metadata::MdoType;
 
 fn manager_collection_label(mdo: MdoType, locale: Locale) -> &'static str {
     match locale {
         Locale::Ru => mdo.manager_type_prefix_ru().unwrap_or("МенеджерКоллекция"),
         Locale::En => mdo.manager_type_prefix().unwrap_or("ManagerCollection"),
+    }
+}
+
+fn metadata_reference_collection_label(
+    kind: MetadataReferenceKind,
+    locale: Locale,
+) -> &'static str {
+    match locale {
+        Locale::Ru => kind.russian_plural(),
+        Locale::En => kind.english_plural(),
     }
 }
 
@@ -127,6 +137,18 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
             Some(kind) => buf.push_str(kind.display_label(ctx.locale())),
             None => buf.push_str(manager_collection_label(*mdo_type, ctx.locale())),
         },
+        TypeKind::MetadataReferenceCollection(kind) => {
+            buf.push_str(metadata_reference_collection_label(*kind, ctx.locale()));
+        }
+        TypeKind::MetadataReference { kind, name } => {
+            let kind_label = match ctx.locale() {
+                Locale::Ru => kind.russian_singular(),
+                Locale::En => kind.english_singular(),
+            };
+            buf.push_str(kind_label);
+            buf.push('.');
+            buf.push_str(name);
+        }
         TypeKind::AnyRef => buf.push_str(match ctx.locale() {
             Locale::Ru => "ЛюбаяСсылка",
             Locale::En => "AnyRef",

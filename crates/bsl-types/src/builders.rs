@@ -10,8 +10,8 @@ use crate::facet::{
 };
 use crate::intern::TypeKernelDb;
 use crate::kind::{
-    ConfigId, MetadataKind, Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin,
-    TypeId, TypeKind, TypeOrigin,
+    ConfigId, MetadataKind, MetadataReferenceKind, Projection, ProjectionField,
+    ProjectionFieldSource, ProjectionOrigin, TypeId, TypeKind, TypeOrigin,
 };
 
 pub trait ConfigCtx {
@@ -125,6 +125,14 @@ pub trait Builders: TypeKernelDb {
 
     fn any_metadata_ref(&self, mdo_type: bsl_metadata::MdoType) -> TypeId {
         self.intern_type(TypeKind::AnyMetadataRef { mdo_type })
+    }
+
+    fn metadata_reference_collection(&self, kind: MetadataReferenceKind) -> TypeId {
+        self.intern_type(TypeKind::MetadataReferenceCollection(kind))
+    }
+
+    fn metadata_reference(&self, kind: MetadataReferenceKind, name: Name) -> TypeId {
+        self.intern_type(TypeKind::MetadataReference { kind, name })
     }
 
     fn any_ref(&self) -> TypeId {

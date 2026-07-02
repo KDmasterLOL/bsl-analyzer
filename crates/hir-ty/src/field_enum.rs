@@ -8,7 +8,7 @@ use bsl_platform::{
 use bsl_types::builders::Builders;
 use bsl_types::facet::DateComponent;
 use bsl_types::intern::TypeKernelDb;
-use bsl_types::kind::{ConfigId, TypeId, TypeKind};
+use bsl_types::kind::{ConfigId, MetadataReferenceKind, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
 use hir_def::ty::MetadataKind;
 use hir_def::type_ref::TypeRef;
@@ -29,6 +29,7 @@ pub enum FieldOrigin {
     RegisterDimension,
     RegisterResource,
     RegisterAttribute,
+    MetadataReference,
     PlatformProperty,
 }
 
@@ -67,6 +68,7 @@ pub(crate) fn enumerate_fields_inner(
     enum Shape {
         Union(Vec<TypeId>),
         MetadataRef { kind: MetadataKind, name: Name, config_id: ConfigId },
+        MetadataReferenceCollection(MetadataReferenceKind),
         Other,
     }
     let shape = match db.lookup_type(ty) {
@@ -81,6 +83,7 @@ pub(crate) fn enumerate_fields_inner(
             name: Name::new(facet.name.as_str()),
             config_id: facet.config_id.clone(),
         },
+        TypeKind::MetadataReferenceCollection(kind) => Shape::MetadataReferenceCollection(*kind),
         _ => Shape::Other,
     };
 
@@ -122,8 +125,30 @@ pub(crate) fn enumerate_fields_inner(
             }
             Vec::new()
         }
+        Shape::MetadataReferenceCollection(kind) => {
+            enumerate_metadata_reference_collection(db, resolver, kind)
+        }
         Shape::Other => Vec::new(),
     }
+}
+
+fn enumerate_metadata_reference_collection(
+    db: &dyn TypeKernelDb,
+    resolver: &dyn MetadataResolution,
+    kind: MetadataReferenceKind,
+) -> Vec<FieldInfo> {
+    resolver
+        .metadata_reference_members(kind)
+        .into_iter()
+        .map(|name| FieldInfo {
+            ty: db.metadata_reference(kind, name.as_str().to_string()),
+            name,
+            name_en: None,
+            value_ty: None,
+            is_readonly: true,
+            origin: FieldOrigin::MetadataReference,
+        })
+        .collect()
 }
 
 fn enumerate_projection_fields(db: &dyn TypeKernelDb, ty: TypeId) -> Option<Vec<FieldInfo>> {

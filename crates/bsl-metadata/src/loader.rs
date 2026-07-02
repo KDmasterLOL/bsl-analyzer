@@ -752,6 +752,36 @@ pub struct DiscoveredDefinedType {
     pub main: PathBuf,
 }
 
+/// One discovered event subscription in a config root's *structure* listing: its
+/// name and the main XML path. Event subscriptions are flat loose XML files under
+/// `EventSubscriptions/`, so they get a dedicated one-file discovery struct rather
+/// than riding [`DiscoveredMdo`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredEventSubscription {
+    pub name: String,
+    pub main: PathBuf,
+}
+
+/// One discovered scheduled job in a config root's *structure* listing: its name
+/// and its main XML path. Scheduled jobs are stored as loose `<name>.xml` files under
+/// `ScheduledJobs/`, so they get their own discovery + parse query while sharing the
+/// per-config-root structure listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredScheduledJob {
+    pub name: String,
+    pub main: PathBuf,
+}
+
+/// One discovered role in a config root's *structure* listing: its name, main XML
+/// path, and optional `Ext/Rights.xml` sidecar. Roles are stored as loose
+/// `Roles/<name>.xml` files, with the rights sidecar under a same-named directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredRole {
+    pub name: String,
+    pub main: PathBuf,
+    pub rights: Option<PathBuf>,
+}
+
 /// Walk one config root and list its defined types by structure only (name + main
 /// XML path), the defined-type counterpart of [`discover_register_structure`].
 /// Defined types are stored as loose `<name>.xml` under `DefinedTypes/` and parsed
@@ -779,6 +809,84 @@ pub fn discover_defined_type_structure(root: &Path) -> Vec<DiscoveredDefinedType
     out
 }
 
+/// Walk one config root and list its event subscriptions by structure only (name +
+/// main XML path), the event-subscription counterpart of
+/// [`discover_defined_type_structure`].
+pub fn discover_event_subscription_structure(root: &Path) -> Vec<DiscoveredEventSubscription> {
+    let dir = root.join("EventSubscriptions");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        out.push(DiscoveredEventSubscription { name: stem.to_string(), main: path });
+    }
+    out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
+    out
+}
+
+/// Walk one config root and list its scheduled jobs by structure only (name + main
+/// XML path), the scheduled-job counterpart of
+/// [`discover_event_subscription_structure`].
+pub fn discover_scheduled_job_structure(root: &Path) -> Vec<DiscoveredScheduledJob> {
+    let dir = root.join("ScheduledJobs");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        out.push(DiscoveredScheduledJob { name: stem.to_string(), main: path });
+    }
+    out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
+    out
+}
+
+pub fn discover_subsystem_structure(root: &Path) -> Vec<DiscoveredSubsystem> {
+    let mut out = Vec::new();
+    collect_subsystem_structure(&root.join("Subsystems"), &mut out);
+    out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
+    out
+}
+
+fn collect_subsystem_structure(dir: &Path, out: &mut Vec<DiscoveredSubsystem>) {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.filter_map(|e| e.ok()) {
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("xml") {
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+                out.push(DiscoveredSubsystem { name: stem.to_string(), main: path });
+            } else if file_type.is_dir() {
+                stack.push(path.join("Subsystems"));
+            }
+        }
+    }
+}
+
 /// One discovered common module in a config root's *structure* listing: its name,
 /// its metadata XML path, and the path of its `Ext/Module.bsl` if present. Common
 /// modules carry only metadata (flags + name), so they get a dedicated discovery
@@ -787,6 +895,33 @@ pub fn discover_defined_type_structure(root: &Path) -> Vec<DiscoveredDefinedType
 /// alone cannot answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredCommonModule {
+    pub name: String,
+    pub main: PathBuf,
+    pub module_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredSubsystem {
+    pub name: String,
+    pub main: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredHTTPService {
+    pub name: String,
+    pub main: PathBuf,
+    pub module_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredWebService {
+    pub name: String,
+    pub main: PathBuf,
+    pub module_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredIntegrationService {
     pub name: String,
     pub main: PathBuf,
     pub module_file: Option<PathBuf>,
@@ -825,6 +960,78 @@ pub fn discover_common_module_structure(root: &Path) -> Vec<DiscoveredCommonModu
     out
 }
 
+pub fn discover_http_service_structure(root: &Path) -> Vec<DiscoveredHTTPService> {
+    let dir = root.join("HTTPServices");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let main = entry.path();
+        if main.extension().and_then(|e| e.to_str()) != Some("xml") {
+            continue;
+        }
+
+        let Some(name) = main.file_stem().and_then(|n| n.to_str()) else { continue };
+        let module_bsl = dir.join(name).join("Ext/Module.bsl");
+        let module_file = module_bsl.exists().then_some(module_bsl);
+        out.push(DiscoveredHTTPService { name: name.to_string(), main, module_file });
+    }
+
+    out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
+    out
+}
+
+pub fn discover_web_service_structure(root: &Path) -> Vec<DiscoveredWebService> {
+    let dir = root.join("WebServices");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let main = entry.path();
+        if main.extension().and_then(|e| e.to_str()) != Some("xml") {
+            continue;
+        }
+
+        let Some(name) = main.file_stem().and_then(|n| n.to_str()) else { continue };
+        let module_bsl = dir.join(name).join("Ext/Module.bsl");
+        let module_file = module_bsl.exists().then_some(module_bsl);
+        out.push(DiscoveredWebService { name: name.to_string(), main, module_file });
+    }
+
+    out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
+    out
+}
+
+pub fn discover_integration_service_structure(root: &Path) -> Vec<DiscoveredIntegrationService> {
+    let dir = root.join("IntegrationServices");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let main = entry.path();
+        if main.extension().and_then(|e| e.to_str()) != Some("xml") {
+            continue;
+        }
+
+        let Some(name) = main.file_stem().and_then(|n| n.to_str()) else { continue };
+        let module_bsl = dir.join(name).join("Ext/Module.bsl");
+        let module_file = module_bsl.exists().then_some(module_bsl);
+        out.push(DiscoveredIntegrationService { name: name.to_string(), main, module_file });
+    }
+
+    out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
+    out
+}
+
 /// Parse one common module from its main XML text. The common-module counterpart of
 /// [`parse_defined_type_from_text`]; the per-common-module Salsa query calls it after
 /// reading the text through the versioned VFS. Only metadata (flags + name) is read;
@@ -838,6 +1045,96 @@ pub fn parse_common_module_from_text(main_xml: &str) -> Option<crate::common_mod
 /// reading the text through the versioned VFS.
 pub fn parse_defined_type_from_text(main_xml: &str) -> Option<crate::defined_type::DefinedType> {
     xml_parser::parse_defined_type_xml(main_xml).ok()
+}
+
+/// Parse one event subscription from its main XML text. The event-subscription
+/// counterpart of [`parse_defined_type_from_text`]; the per-event-subscription Salsa
+/// query calls it after reading the text through the versioned VFS.
+pub fn parse_event_subscription_from_text(
+    main_xml: &str,
+) -> Option<crate::event_subscription::EventSubscription> {
+    xml_parser::parse_event_subscription_xml(main_xml).ok()
+}
+
+/// Parse one scheduled job from its main XML text. The scheduled-job counterpart of
+/// [`parse_event_subscription_from_text`]; the per-scheduled-job Salsa query calls it
+/// after reading the text through the versioned VFS.
+pub fn parse_scheduled_job_from_text(main_xml: &str) -> Option<crate::scheduled_job::ScheduledJob> {
+    xml_parser::parse_scheduled_job_xml(main_xml).ok()
+}
+
+pub fn parse_subsystem_from_text(main_xml: &str) -> Option<crate::subsystem::Subsystem> {
+    xml_parser::parse_subsystem_xml(main_xml).ok()
+}
+
+pub fn parse_http_service_from_text(
+    main_xml: &str,
+    name: &str,
+) -> Option<crate::http_service::HTTPService> {
+    xml_parser::parse_http_service_xml(main_xml, name).ok()
+}
+
+pub fn parse_web_service_from_text(
+    main_xml: &str,
+    name: &str,
+) -> Option<crate::web_service::WebService> {
+    xml_parser::parse_web_service_xml(main_xml, name).ok()
+}
+
+pub fn parse_integration_service_from_text(
+    main_xml: &str,
+    name: &str,
+) -> Option<crate::integration_service::IntegrationService> {
+    xml_parser::parse_integration_service_xml(main_xml, name).ok()
+}
+
+/// Parse one role from its main XML text plus an optional rights XML text. The role
+/// counterpart of [`parse_scheduled_job_from_text`]; the per-role Salsa query calls it
+/// after reading the main `<name>.xml` and optional `Ext/Rights.xml` through the
+/// versioned VFS.
+pub fn parse_role_from_texts(
+    main_xml: &str,
+    rights_xml: Option<&str>,
+) -> Option<crate::role::Role> {
+    let role = xml_parser::parse_role_xml(main_xml).ok()?;
+
+    match rights_xml.and_then(|rights_xml| xml_parser::parse_rights_xml(rights_xml).ok()) {
+        Some(rights_data) => {
+            Some(crate::role::Role::with_data(*role.uuid(), role.name().to_string(), rights_data))
+        }
+        None => Some(role),
+    }
+}
+
+/// Walk one config root and list its roles by structure only (name + main XML path +
+/// optional rights sidecar), the role counterpart of
+/// [`discover_scheduled_job_structure`]. Roles are stored as loose `Roles/<name>.xml`
+/// files, with optional rights under `Roles/<name>/Ext/Rights.xml`.
+pub fn discover_role_structure(root: &Path) -> Vec<DiscoveredRole> {
+    let dir = root.join("Roles");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            continue;
+        }
+
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let rights = {
+            let rights_path = dir.join(stem).join("Ext").join("Rights.xml");
+            rights_path.is_file().then_some(rights_path)
+        };
+
+        out.push(DiscoveredRole { name: stem.to_string(), main: path, rights });
+    }
+
+    out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
+    out
 }
 
 fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
@@ -1225,6 +1522,114 @@ mod tests {
     }
 
     #[test]
+    fn discover_subsystem_structure_is_deterministic_and_matches_directory_load_set() {
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_subsystems_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let subsystems_dir = root.join("Subsystems");
+        let parent_dir = subsystems_dir.join("Группа").join("Subsystems");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+
+        let subsystem_xml = |name: &str, child: Option<&str>| {
+            let child_block = child
+                .map(|child| format!("<ChildObjects><Subsystem>{child}</Subsystem></ChildObjects>"))
+                .unwrap_or_default();
+            format!(
+                concat!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                    "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.10\">",
+                    "  <Subsystem uuid=\"00000000-0000-0000-0000-000000000041\">",
+                    "    <Properties><Name>{}</Name></Properties>",
+                    "    {}",
+                    "  </Subsystem>",
+                    "</MetaDataObject>"
+                ),
+                name, child_block,
+            )
+        };
+
+        std::fs::write(
+            subsystems_dir.join("Группа.xml"),
+            subsystem_xml("Группа", Some("Дочерняя")),
+        )
+        .unwrap();
+        std::fs::write(parent_dir.join("Дочерняя.xml"), subsystem_xml("Дочерняя", None)).unwrap();
+        std::fs::write(subsystems_dir.join("Бета.xml"), subsystem_xml("Бета", None)).unwrap();
+        std::fs::write(subsystems_dir.join("Альфа.xml"), subsystem_xml("Альфа", None)).unwrap();
+
+        let discovered = discover_subsystem_structure(&root);
+        let discovered_names: Vec<_> =
+            discovered.iter().map(|subsystem| subsystem.name.clone()).collect();
+
+        assert_eq!(
+            discovered_names,
+            ["Альфа", "Бета", "Группа", "Дочерняя"],
+            "typed subsystem discovery should be stable across recursive directory walks"
+        );
+
+        let config = load_from_directory(&root).unwrap();
+        let discovered_set: std::collections::BTreeSet<_> =
+            discovered.iter().map(|subsystem| subsystem.name.clone()).collect();
+        let loaded_set: std::collections::BTreeSet<_> =
+            config.subsystems().iter().map(|subsystem| subsystem.name().to_string()).collect();
+        assert_eq!(discovered_set, loaded_set, "typed discovery should keep load parity by set");
+
+        let parent = discovered
+            .iter()
+            .find(|subsystem| subsystem.name == "Группа")
+            .expect("parent subsystem");
+        let child = discovered
+            .iter()
+            .find(|subsystem| subsystem.name == "Дочерняя")
+            .expect("child subsystem");
+        assert!(parent.main.ends_with("Subsystems/Группа.xml"));
+        assert!(child.main.ends_with("Subsystems/Группа/Subsystems/Дочерняя.xml"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_subsystem_structure_ignores_symlink_directory_cycles() {
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_subsystems_symlink_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let subsystems_dir = root.join("Subsystems");
+        let child_dir = subsystems_dir.join("Группа").join("Subsystems");
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        let subsystem_xml = |name: &str| {
+            format!(
+                concat!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                    "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.10\">",
+                    "  <Subsystem uuid=\"00000000-0000-0000-0000-000000000041\">",
+                    "    <Properties><Name>{}</Name></Properties>",
+                    "  </Subsystem>",
+                    "</MetaDataObject>"
+                ),
+                name,
+            )
+        };
+
+        std::fs::write(subsystems_dir.join("Альфа.xml"), subsystem_xml("Альфа")).unwrap();
+        std::fs::write(child_dir.join("Дочерняя.xml"), subsystem_xml("Дочерняя")).unwrap();
+        std::os::unix::fs::symlink(&subsystems_dir, child_dir.join("Subsystems")).unwrap();
+
+        let discovered = discover_subsystem_structure(&root);
+        let discovered_names: Vec<_> =
+            discovered.into_iter().map(|subsystem| subsystem.name).collect();
+
+        assert_eq!(discovered_names, ["Альфа", "Дочерняя"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn discover_register_structure_matches_directory_load() {
         use std::collections::BTreeSet;
 
@@ -1279,6 +1684,334 @@ mod tests {
         assert!(discovered.contains("ДенежнаяСумма"), "fixture sanity");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discover_event_subscription_structure_finds_loose_xml_stably() {
+        use std::collections::BTreeSet;
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_event_subscription_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let dir = root.join("EventSubscriptions");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let xml = |name: &str, event: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <EventSubscription uuid="00000000-0000-0000-0000-000000000041">
+        <Properties>
+            <Name>{name}</Name>
+            <Source><Type>CatalogRef.Номенклатура</Type></Source>
+            <Event>{event}</Event>
+            <Handler>CommonModule.ПодпискиНаСобытия.Обработать</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#
+            )
+        };
+
+        std::fs::write(dir.join("ПослеЗаписи.xml"), xml("ПослеЗаписи", "AfterWrite")).unwrap();
+        std::fs::write(dir.join("ПередЗаписью.xml"), xml("ПередЗаписью", "BeforeWrite")).unwrap();
+
+        let first = discover_event_subscription_structure(&root);
+        let second = discover_event_subscription_structure(&root);
+
+        assert_eq!(first, second, "event-subscription discovery order must be stable");
+        assert!(
+            first.iter().all(|subscription| subscription.main.starts_with(&dir)),
+            "discovery must point at loose EventSubscriptions/*.xml files"
+        );
+
+        let discovered: BTreeSet<String> = first.into_iter().map(|d| d.name).collect();
+        let config = load_from_directory(&root).unwrap();
+        let from_load: BTreeSet<String> = config
+            .event_subscriptions()
+            .iter()
+            .map(|subscription| subscription.name().to_string())
+            .collect();
+
+        assert_eq!(
+            discovered, from_load,
+            "event-subscription discovery must match the directory loader"
+        );
+        assert!(discovered.contains("ПередЗаписью"), "fixture sanity");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discover_scheduled_job_structure_finds_loose_xml_stably() {
+        use std::collections::BTreeSet;
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_scheduled_job_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let dir = root.join("ScheduledJobs");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let xml = |name: &str, method_name: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <ScheduledJob uuid="00000000-0000-0000-0000-000000000042">
+        <Properties>
+            <Name>{name}</Name>
+            <MethodName>{method_name}</MethodName>
+            <Predefined>false</Predefined>
+            <Use>true</Use>
+        </Properties>
+    </ScheduledJob>
+</MetaDataObject>"#
+            )
+        };
+
+        std::fs::write(dir.join("ПослеЗаписи.xml"), xml("ПослеЗаписи", "CommonModule.Job.OnWrite"))
+            .unwrap();
+        std::fs::write(
+            dir.join("ПередЗаписью.xml"),
+            xml("ПередЗаписью", "CommonModule.Job.BeforeWrite"),
+        )
+        .unwrap();
+
+        let first = discover_scheduled_job_structure(&root);
+        let second = discover_scheduled_job_structure(&root);
+
+        assert_eq!(first, second, "scheduled-job discovery order must be stable");
+        assert!(
+            first.iter().all(|job| job.main.starts_with(&dir)),
+            "discovery must point at loose ScheduledJobs/*.xml files"
+        );
+
+        let discovered: BTreeSet<String> = first.into_iter().map(|d| d.name).collect();
+        let config = load_from_directory(&root).unwrap();
+        let from_load: BTreeSet<String> =
+            config.scheduled_jobs().iter().map(|job| job.name().to_string()).collect();
+
+        assert_eq!(
+            discovered, from_load,
+            "scheduled-job discovery must match the directory loader"
+        );
+        assert!(discovered.contains("ПередЗаписью"), "fixture sanity");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn parse_scheduled_job_from_text_uses_xml_parser() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <ScheduledJob uuid="00000000-0000-0000-0000-000000000042">
+        <Properties>
+            <Name>Планировщик</Name>
+            <MethodName>CommonModule.Job.Run</MethodName>
+            <Predefined>false</Predefined>
+            <Use>true</Use>
+        </Properties>
+    </ScheduledJob>
+</MetaDataObject>"#;
+
+        let job = parse_scheduled_job_from_text(xml).expect("scheduled job should parse");
+
+        assert_eq!(job.name(), "Планировщик");
+        assert_eq!(job.method_name(), "CommonModule.Job.Run");
+    }
+
+    #[test]
+    fn discover_role_structure_finds_main_and_optional_rights_stably() {
+        use std::collections::BTreeSet;
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_role_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let roles_dir = root.join("Roles");
+        std::fs::create_dir_all(roles_dir.join("Alpha/Ext")).unwrap();
+        std::fs::create_dir_all(roles_dir.join("alpha/Ext")).unwrap();
+
+        let role_xml = |name: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000043">
+        <Properties>
+            <Name>{name}</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#
+            )
+        };
+
+        std::fs::write(roles_dir.join("Alpha.xml"), role_xml("Alpha")).unwrap();
+        std::fs::write(roles_dir.join("alpha.xml"), role_xml("alpha")).unwrap();
+        std::fs::write(roles_dir.join("Beta.xml"), role_xml("Beta")).unwrap();
+        std::fs::write(roles_dir.join("Alpha/Ext/Rights.xml"), "<Rights/>").unwrap();
+        std::fs::write(roles_dir.join("alpha/Ext/Rights.txt"), "not xml").unwrap();
+        std::fs::write(roles_dir.join("ignored.txt"), "ignored").unwrap();
+
+        let first = discover_role_structure(&root);
+        let second = discover_role_structure(&root);
+
+        assert_eq!(first, second, "role discovery order must be stable");
+        assert!(first.iter().all(|role| role.main.starts_with(&roles_dir)));
+        assert!(first
+            .iter()
+            .all(|role| role.main.extension().and_then(|ext| ext.to_str()) == Some("xml")));
+
+        let discovered: BTreeSet<String> = first.iter().map(|d| d.name.clone()).collect();
+        assert_eq!(
+            first[0].name, "Alpha",
+            "roles with the same folded name should sort by main path"
+        );
+        assert_eq!(first[0].rights, Some(roles_dir.join("Alpha/Ext/Rights.xml")));
+        assert_eq!(first[1].name, "alpha");
+        assert_eq!(first[1].rights, None);
+        assert!(discovered.contains("Beta"), "fixture sanity");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discover_role_structure_matches_directory_load() {
+        use std::collections::BTreeSet;
+
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_role_load_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let roles_dir = root.join("Roles");
+        std::fs::create_dir_all(roles_dir.join("Alpha/Ext")).unwrap();
+
+        let role_xml = |name: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000044">
+        <Properties>
+            <Name>{name}</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#
+            )
+        };
+
+        std::fs::write(roles_dir.join("Alpha.xml"), role_xml("Alpha")).unwrap();
+        std::fs::write(roles_dir.join("Alpha/Ext/Rights.xml"), "<Rights/>").unwrap();
+        std::fs::write(roles_dir.join("Beta.xml"), role_xml("Beta")).unwrap();
+
+        let discovered: BTreeSet<String> =
+            discover_role_structure(&root).into_iter().map(|d| d.name).collect();
+        let config = load_from_directory(&root).unwrap();
+        let from_load: BTreeSet<String> =
+            config.roles().iter().map(|role| role.name().to_string()).collect();
+
+        assert_eq!(discovered, from_load, "role discovery must match the directory loader");
+        assert!(discovered.contains("Alpha"), "fixture sanity");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn parse_role_from_texts_combines_main_and_rights() {
+        let main_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000045">
+        <Properties>
+            <Name>Alpha</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#;
+        let rights_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Rights xmlns="http://v8.1c.ru/8.2/roles" version="2.10">
+    <setForNewObjects>true</setForNewObjects>
+    <setForAttributesByDefault>false</setForAttributesByDefault>
+    <independentRightsOfChildObjects>true</independentRightsOfChildObjects>
+    <object>
+        <name>Catalog.Контрагенты</name>
+        <right>
+            <name>Read</name>
+            <value>true</value>
+            <restrictionByCondition>
+                <condition>Контрагенты.Организация = &amp;Организация</condition>
+            </restrictionByCondition>
+            <restrictionByCondition>
+                <condition>Контрагенты.Удален = Ложь</condition>
+            </restrictionByCondition>
+        </right>
+    </object>
+</Rights>"#;
+
+        let role = parse_role_from_texts(main_xml, Some(rights_xml)).expect("role should parse");
+
+        assert_eq!(role.name(), "Alpha");
+        assert!(role.data().set_for_new_objects());
+        assert_eq!(role.objects().len(), 1);
+        assert_eq!(role.objects()[0].mdo_type, MdoType::Catalog);
+        assert_eq!(role.objects()[0].name, "Контрагенты");
+        assert_eq!(
+            role.objects()[0].restrictions,
+            vec![
+                "Контрагенты.Организация = &Организация".to_string(),
+                "Контрагенты.Удален = Ложь".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_role_from_texts_without_rights_preserves_identity() {
+        let main_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000046">
+        <Properties>
+            <Name>Beta</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#;
+
+        let role = parse_role_from_texts(main_xml, None).expect("role should parse without rights");
+
+        assert_eq!(role.name(), "Beta");
+        assert_eq!(role.uuid().to_string(), "00000000-0000-0000-0000-000000000046");
+        assert!(!role.data().set_for_new_objects());
+        assert!(role.objects().is_empty());
+    }
+
+    #[test]
+    fn parse_role_from_texts_with_malformed_rights_preserves_main_role() {
+        let main_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000047">
+        <Properties>
+            <Name>Gamma</Name>
+            <Synonym/>
+            <Comment/>
+        </Properties>
+    </Role>
+</MetaDataObject>"#;
+
+        let role = parse_role_from_texts(main_xml, Some("<Rights>")).expect(
+            "malformed optional rights XML must match load_roles_parallel and keep the main role",
+        );
+
+        assert_eq!(role.name(), "Gamma");
+        assert_eq!(role.uuid().to_string(), "00000000-0000-0000-0000-000000000047");
+        assert!(!role.data().set_for_new_objects());
+        assert!(role.objects().is_empty());
     }
 
     #[test]
@@ -1386,6 +2119,367 @@ mod tests {
         assert_eq!(service.channels().len(), 2);
         let handlers: Vec<_> = service.receive_handlers().collect();
         assert_eq!(handlers, vec!["ОбработатьСообщениеОбычныйПриоритет"]);
+    }
+
+    #[test]
+    fn discover_http_service_structure_finds_dir_xml_and_module_stably() {
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_http_service_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let services_dir = root.join("HTTPServices");
+        std::fs::create_dir_all(services_dir.join("Alpha/Ext")).unwrap();
+        std::fs::create_dir_all(services_dir.join("alpha/Ext")).unwrap();
+        std::fs::create_dir_all(services_dir.join("Beta/Ext")).unwrap();
+
+        std::fs::write(services_dir.join("Alpha.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(services_dir.join("alpha.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(services_dir.join("Beta.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(services_dir.join("Alpha/Ext/Module.bsl"), "// alpha module").unwrap();
+        std::fs::write(services_dir.join("alpha/Ext/Module.txt"), "ignored").unwrap();
+        std::fs::write(services_dir.join("Beta/Ext/Module.bsl"), "// beta module").unwrap();
+        std::fs::write(services_dir.join("sidecar.json"), "ignored").unwrap();
+
+        let first = discover_http_service_structure(&root);
+        let second = discover_http_service_structure(&root);
+
+        let first_view: Vec<_> = first
+            .iter()
+            .map(|service| {
+                (service.name.clone(), service.main.clone(), service.module_file.clone())
+            })
+            .collect();
+        let second_view: Vec<_> = second
+            .iter()
+            .map(|service| {
+                (service.name.clone(), service.main.clone(), service.module_file.clone())
+            })
+            .collect();
+
+        assert_eq!(first_view, second_view, "HTTP service discovery order must be stable");
+        assert_eq!(first_view[0].0, "Alpha");
+        assert_eq!(first_view[0].1, services_dir.join("Alpha.xml"));
+        assert_eq!(first_view[0].2, Some(services_dir.join("Alpha/Ext/Module.bsl")));
+        assert_eq!(first_view[1].0, "alpha");
+        assert_eq!(first_view[1].1, services_dir.join("alpha.xml"));
+        assert_eq!(first_view[1].2, None);
+        assert_eq!(first_view[2].0, "Beta");
+        assert_eq!(first_view[2].1, services_dir.join("Beta.xml"));
+        assert_eq!(first_view[2].2, Some(services_dir.join("Beta/Ext/Module.bsl")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discover_web_service_structure_finds_dir_xml_and_module_stably() {
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_web_service_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let services_dir = root.join("WebServices");
+        std::fs::create_dir_all(services_dir.join("Alpha/Ext")).unwrap();
+        std::fs::create_dir_all(services_dir.join("alpha/Ext")).unwrap();
+        std::fs::create_dir_all(services_dir.join("Beta/Ext")).unwrap();
+
+        std::fs::write(services_dir.join("Alpha.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(services_dir.join("alpha.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(services_dir.join("Beta.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(services_dir.join("Alpha/Ext/Module.bsl"), "// alpha module").unwrap();
+        std::fs::write(services_dir.join("alpha/Ext/Module.txt"), "ignored").unwrap();
+        std::fs::write(services_dir.join("Beta/Ext/Module.bsl"), "// beta module").unwrap();
+        std::fs::write(services_dir.join("sidecar.json"), "ignored").unwrap();
+
+        let first = discover_web_service_structure(&root);
+        let second = discover_web_service_structure(&root);
+
+        let first_view: Vec<_> = first
+            .iter()
+            .map(|service| {
+                (service.name.clone(), service.main.clone(), service.module_file.clone())
+            })
+            .collect();
+        let second_view: Vec<_> = second
+            .iter()
+            .map(|service| {
+                (service.name.clone(), service.main.clone(), service.module_file.clone())
+            })
+            .collect();
+
+        assert_eq!(first_view, second_view, "Web service discovery order must be stable");
+        assert_eq!(first_view[0].0, "Alpha");
+        assert_eq!(first_view[0].1, services_dir.join("Alpha.xml"));
+        assert_eq!(first_view[0].2, Some(services_dir.join("Alpha/Ext/Module.bsl")));
+        assert_eq!(first_view[1].0, "alpha");
+        assert_eq!(first_view[1].1, services_dir.join("alpha.xml"));
+        assert_eq!(first_view[1].2, None);
+        assert_eq!(first_view[2].0, "Beta");
+        assert_eq!(first_view[2].1, services_dir.join("Beta.xml"));
+        assert_eq!(first_view[2].2, Some(services_dir.join("Beta/Ext/Module.bsl")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discover_integration_service_structure_finds_dir_xml_and_module_stably() {
+        let root = std::env::temp_dir().join(format!(
+            "bsl_discover_integration_service_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let services_dir = root.join("IntegrationServices");
+        std::fs::create_dir_all(services_dir.join("Alpha/Ext")).unwrap();
+        std::fs::create_dir_all(services_dir.join("alpha/Ext")).unwrap();
+        std::fs::create_dir_all(services_dir.join("Beta/Ext")).unwrap();
+
+        std::fs::write(services_dir.join("Alpha.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(services_dir.join("alpha.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(services_dir.join("Beta.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(services_dir.join("Alpha/Ext/Module.bsl"), "// alpha module").unwrap();
+        std::fs::write(services_dir.join("alpha/Ext/Module.txt"), "ignored").unwrap();
+        std::fs::write(services_dir.join("Beta/Ext/Module.bsl"), "// beta module").unwrap();
+        std::fs::write(services_dir.join("sidecar.json"), "ignored").unwrap();
+
+        let first = discover_integration_service_structure(&root);
+        let second = discover_integration_service_structure(&root);
+
+        let first_view: Vec<_> = first
+            .iter()
+            .map(|service| {
+                (service.name.clone(), service.main.clone(), service.module_file.clone())
+            })
+            .collect();
+        let second_view: Vec<_> = second
+            .iter()
+            .map(|service| {
+                (service.name.clone(), service.main.clone(), service.module_file.clone())
+            })
+            .collect();
+
+        assert_eq!(first_view, second_view, "integration service discovery order must be stable");
+        assert_eq!(first_view[0].0, "Alpha");
+        assert_eq!(first_view[0].1, services_dir.join("Alpha.xml"));
+        assert_eq!(first_view[0].2, Some(services_dir.join("Alpha/Ext/Module.bsl")));
+        assert_eq!(first_view[1].0, "alpha");
+        assert_eq!(first_view[1].1, services_dir.join("alpha.xml"));
+        assert_eq!(first_view[1].2, None);
+        assert_eq!(first_view[2].0, "Beta");
+        assert_eq!(first_view[2].1, services_dir.join("Beta.xml"));
+        assert_eq!(first_view[2].2, Some(services_dir.join("Beta/Ext/Module.bsl")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discover_http_service_structure_matches_directory_load() {
+        use std::collections::BTreeSet;
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+
+        let discovered: BTreeSet<String> = discover_http_service_structure(Path::new(root))
+            .into_iter()
+            .map(|service| service.name)
+            .collect();
+
+        let config = load_from_directory(root).unwrap();
+        let from_load: BTreeSet<String> =
+            config.http_services().iter().map(|service| service.name().to_string()).collect();
+
+        assert_eq!(discovered, from_load, "HTTP service discovery must match the directory loader");
+    }
+
+    #[test]
+    fn discover_web_service_structure_matches_directory_load() {
+        use std::collections::BTreeSet;
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+
+        let discovered: BTreeSet<String> = discover_web_service_structure(Path::new(root))
+            .into_iter()
+            .map(|service| service.name)
+            .collect();
+
+        let config = load_from_directory(root).unwrap();
+        let from_load: BTreeSet<String> =
+            config.web_services().iter().map(|service| service.name().to_string()).collect();
+
+        assert_eq!(discovered, from_load, "Web service discovery must match the directory loader");
+    }
+
+    #[test]
+    fn discover_integration_service_structure_matches_directory_load() {
+        use std::collections::BTreeSet;
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+
+        let discovered: BTreeSet<String> = discover_integration_service_structure(Path::new(root))
+            .into_iter()
+            .map(|service| service.name)
+            .collect();
+
+        let config = load_from_directory(root).unwrap();
+        let from_load: BTreeSet<String> = config
+            .integration_services()
+            .iter()
+            .map(|service| service.name().to_string())
+            .collect();
+
+        assert_eq!(
+            discovered, from_load,
+            "integration service discovery must match the directory loader"
+        );
+    }
+
+    #[test]
+    fn parse_http_service_from_text_preserves_nested_url_template_methods() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <HTTPService uuid="4797cd39-952d-4e4d-9685-014e4d5a8e25">
+        <Properties>
+            <Name>HTTPСервис1</Name>
+            <RootURL>http</RootURL>
+        </Properties>
+        <ChildObjects>
+            <URLTemplate uuid="7124b2c7-d38e-40b9-a934-e6eb9de99340">
+                <Properties>
+                    <Name>URLTemplate1</Name>
+                    <Template>/storage/{Storage}/{ID}</Template>
+                </Properties>
+                <ChildObjects>
+                    <Method uuid="605f52a9-e95b-4900-9e41-449d7da01348">
+                        <Properties>
+                            <Name>GET</Name>
+                            <HTTPMethod>GET</HTTPMethod>
+                            <Handler>URLTemplate1GET</Handler>
+                        </Properties>
+                    </Method>
+                    <Method uuid="462355c3-a1d9-488b-91ea-979f880f910f">
+                        <Properties>
+                            <Name>POST</Name>
+                            <HTTPMethod>POST</HTTPMethod>
+                            <Handler>URLTemplate1POST</Handler>
+                        </Properties>
+                    </Method>
+                </ChildObjects>
+            </URLTemplate>
+        </ChildObjects>
+    </HTTPService>
+</MetaDataObject>"#;
+
+        let service =
+            parse_http_service_from_text(xml, "HTTPСервис1").expect("HTTP service should parse");
+
+        assert_eq!(service.name(), "HTTPСервис1");
+        assert_eq!(service.root_url(), "http");
+        assert_eq!(service.url_templates().len(), 1);
+
+        let template = &service.url_templates()[0];
+        assert_eq!(template.name(), "URLTemplate1");
+        assert_eq!(template.template(), "/storage/{Storage}/{ID}");
+        assert_eq!(template.methods().len(), 2);
+
+        assert_eq!(template.methods()[0].name(), "GET");
+        assert_eq!(template.methods()[0].handler(), "URLTemplate1GET");
+        assert_eq!(template.methods()[1].name(), "POST");
+        assert_eq!(template.methods()[1].handler(), "URLTemplate1POST");
+    }
+
+    #[test]
+    fn parse_web_service_from_text_preserves_operation_handlers() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <WebService uuid="0b4a4c9c-76e9-455c-9471-249051a8301d">
+        <Properties>
+            <Name>WebСервис1</Name>
+            <Namespace>test.com</Namespace>
+        </Properties>
+        <ChildObjects>
+            <Operation uuid="bc99d837-aee6-40ee-8940-3a81dddf477c">
+                <Properties>
+                    <Name>Операция1</Name>
+                    <ProcedureName>Операция1</ProcedureName>
+                </Properties>
+                <ChildObjects/>
+            </Operation>
+            <Operation uuid="bc09d837-aee6-40ee-8940-3a81dddf477c">
+                <Properties>
+                    <Name>ОперацияБезОбработчика</Name>
+                    <ProcedureName/>
+                </Properties>
+                <ChildObjects/>
+            </Operation>
+        </ChildObjects>
+    </WebService>
+</MetaDataObject>"#;
+
+        let service =
+            parse_web_service_from_text(xml, "WebСервис1").expect("web service should parse");
+
+        assert_eq!(service.name(), "WebСервис1");
+        assert_eq!(service.namespace(), "test.com");
+        assert_eq!(service.operations().len(), 2);
+
+        let operation = &service.operations()[0];
+        assert_eq!(operation.name(), "Операция1");
+        assert_eq!(operation.procedure_name(), "Операция1");
+
+        let empty_operation = &service.operations()[1];
+        assert_eq!(empty_operation.name(), "ОперацияБезОбработчика");
+        assert_eq!(empty_operation.procedure_name(), "");
+    }
+
+    #[test]
+    fn parse_integration_service_from_text_preserves_channel_handlers() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <IntegrationService uuid="c512a1cd-1240-4e46-8bad-8b7b27c5c25a">
+        <Properties>
+            <Name>ОбменСообщениями</Name>
+        </Properties>
+        <ChildObjects>
+            <IntegrationServiceChannel uuid="1ef0581c-b1d8-4115-87f1-7856f6c06bb6">
+                <Properties>
+                    <Name>input_from_SM_normal_priority</Name>
+                    <MessageDirection>Receive</MessageDirection>
+                    <ReceiveMessageProcessing>ОбработатьСообщениеОбычныйПриоритет</ReceiveMessageProcessing>
+                </Properties>
+            </IntegrationServiceChannel>
+            <IntegrationServiceChannel uuid="b017ac62-a4a2-47bd-b963-50e0764a7d4e">
+                <Properties>
+                    <Name>output_to_SM_high_priority</Name>
+                    <MessageDirection>Send</MessageDirection>
+                    <ReceiveMessageProcessing/>
+                </Properties>
+            </IntegrationServiceChannel>
+            <IntegrationServiceChannel uuid="c017ac62-a4a2-47bd-b963-50e0764a7d4e">
+                <Properties>
+                    <Name>input_from_SM_empty_handler</Name>
+                    <MessageDirection>Receive</MessageDirection>
+                    <ReceiveMessageProcessing/>
+                </Properties>
+            </IntegrationServiceChannel>
+        </ChildObjects>
+    </IntegrationService>
+</MetaDataObject>"#;
+
+        let service = parse_integration_service_from_text(xml, "ОбменСообщениями")
+            .expect("integration service should parse");
+
+        assert_eq!(service.name(), "ОбменСообщениями");
+        assert_eq!(service.channels().len(), 3);
+
+        let handlers: Vec<_> = service.receive_handlers().collect();
+        assert_eq!(handlers, vec!["ОбработатьСообщениеОбычныйПриоритет"]);
+        assert_eq!(service.channels()[0].name(), "input_from_SM_normal_priority");
+        assert_eq!(
+            service.channels()[0].receive_message_processing(),
+            "ОбработатьСообщениеОбычныйПриоритет"
+        );
+        assert_eq!(service.channels()[1].name(), "output_to_SM_high_priority");
+        assert_eq!(service.channels()[1].receive_message_processing(), "");
+        assert_eq!(service.channels()[2].name(), "input_from_SM_empty_handler");
+        assert_eq!(service.channels()[2].receive_message_processing(), "");
     }
 
     #[test]

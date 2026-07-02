@@ -1,6 +1,8 @@
 use bsl_metadata::MdoType;
-use bsl_platform::{manager_methods_query, TypeNameInput};
-use hir::{ManagerType, Name};
+use bsl_platform::{
+    manager_methods_query, type_methods_query, type_properties_query, TypeNameInput,
+};
+use hir::{ManagerType, MetadataReferenceKind, Name, Semantics, TypeKind};
 use ide_db::RootDatabase;
 use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -22,13 +24,38 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
     tracing::debug!(?context, "MDO completion context detected");
 
     match context {
-        MdoContext::CollectionDot { mdo_type } => {
+        MdoContext::MetadataRoot { metadata_expr } => {
+            if !metadata_root_is_available(db, position.file_id, &metadata_expr) {
+                return None;
+            }
+            let items = complete_metadata_root_collections(db, position.locale);
+            if !items.is_empty() {
+                return Some(items);
+            }
+        }
+        MdoContext::MetadataCollection { metadata_expr, collection } => {
+            if !metadata_root_is_available(db, position.file_id, &metadata_expr) {
+                return None;
+            }
+            let items = match collection {
+                MetadataCollectionKind::Manager(mdo_type) => {
+                    complete_mdo_objects(db, position.file_id, mdo_type)
+                }
+                MetadataCollectionKind::Reference(kind) => {
+                    complete_metadata_reference_objects(db, position.file_id, kind)
+                }
+            };
+            if !items.is_empty() {
+                return Some(items);
+            }
+        }
+        MdoContext::Collection { mdo_type } => {
             let items = complete_mdo_objects(db, position.file_id, mdo_type);
             if !items.is_empty() {
                 return Some(items);
             }
         }
-        MdoContext::ObjectDot { mdo_type, object_name } => {
+        MdoContext::Object { mdo_type, object_name } => {
             let mut items = Vec::new();
 
             if let Some(prefix) = mdo_type.manager_type_prefix() {
@@ -55,8 +82,16 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
 
 #[derive(Debug)]
 enum MdoContext {
-    CollectionDot { mdo_type: MdoType },
-    ObjectDot { mdo_type: MdoType, object_name: String },
+    MetadataRoot { metadata_expr: SyntaxNode },
+    MetadataCollection { metadata_expr: SyntaxNode, collection: MetadataCollectionKind },
+    Collection { mdo_type: MdoType },
+    Object { mdo_type: MdoType, object_name: String },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MetadataCollectionKind {
+    Manager(MdoType),
+    Reference(MetadataReferenceKind),
 }
 
 fn detect_mdo_context(token: &SyntaxToken) -> Option<MdoContext> {
@@ -75,15 +110,26 @@ fn detect_from_dot(dot_token: &SyntaxToken) -> Option<MdoContext> {
     let receiver = find_receiver_before_dot(dot_token)?;
 
     if let Some(ident_text) = get_single_ident(&receiver) {
+        if is_metadata_root_name(&ident_text) {
+            return Some(MdoContext::MetadataRoot { metadata_expr: receiver });
+        }
         if let Some(mdo_type) = MdoType::from_plural(&ident_text) {
-            return Some(MdoContext::CollectionDot { mdo_type });
+            return Some(MdoContext::Collection { mdo_type });
         }
     }
 
     if receiver.kind() == SyntaxKind::FIELD_EXPR {
-        if let Some((base_text, object_name)) = get_field_expr_parts(&receiver) {
+        if let Some((base, base_text, object_name)) = get_field_expr_parts(&receiver) {
+            if is_metadata_root_name(&base_text) {
+                if let Some(collection) = metadata_collection_from_plural(&object_name) {
+                    return Some(MdoContext::MetadataCollection {
+                        metadata_expr: base,
+                        collection,
+                    });
+                }
+            }
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-                return Some(MdoContext::ObjectDot { mdo_type, object_name });
+                return Some(MdoContext::Object { mdo_type, object_name });
             }
         }
     }
@@ -110,15 +156,26 @@ fn detect_from_ident_after_dot(ident_token: &SyntaxToken) -> Option<MdoContext> 
     let base = field_expr.children().next()?;
 
     if let Some(base_text) = get_single_ident(&base) {
+        if is_metadata_root_name(&base_text) {
+            return Some(MdoContext::MetadataRoot { metadata_expr: base });
+        }
         if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-            return Some(MdoContext::CollectionDot { mdo_type });
+            return Some(MdoContext::Collection { mdo_type });
         }
     }
 
     if base.kind() == SyntaxKind::FIELD_EXPR {
-        if let Some((base_text, object_name)) = get_field_expr_parts(&base) {
+        if let Some((metadata_base, base_text, object_name)) = get_field_expr_parts(&base) {
+            if is_metadata_root_name(&base_text) {
+                if let Some(collection) = metadata_collection_from_plural(&object_name) {
+                    return Some(MdoContext::MetadataCollection {
+                        metadata_expr: metadata_base,
+                        collection,
+                    });
+                }
+            }
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-                return Some(MdoContext::ObjectDot { mdo_type, object_name });
+                return Some(MdoContext::Object { mdo_type, object_name });
             }
         }
     }
@@ -161,7 +218,7 @@ fn get_single_ident(node: &SyntaxNode) -> Option<String> {
     }
 }
 
-fn get_field_expr_parts(node: &SyntaxNode) -> Option<(String, String)> {
+fn get_field_expr_parts(node: &SyntaxNode) -> Option<(SyntaxNode, String, String)> {
     let base = node.children().next()?;
     let base_text = get_single_ident(&base)?;
 
@@ -171,7 +228,32 @@ fn get_field_expr_parts(node: &SyntaxNode) -> Option<(String, String)> {
         .filter(|t| t.kind().is_name_token())
         .last()?;
 
-    Some((base_text, field_token.text().to_string()))
+    Some((base, base_text, field_token.text().to_string()))
+}
+
+fn is_metadata_root_name(text: &str) -> bool {
+    matches!(text.fold_lower().as_str(), "метаданные" | "metadata")
+}
+
+fn metadata_collection_from_plural(text: &str) -> Option<MetadataCollectionKind> {
+    if let Some(kind) = MetadataReferenceKind::from_plural(text) {
+        return Some(MetadataCollectionKind::Reference(kind));
+    }
+    let mdo_type = MdoType::from_plural(text)?;
+    mdo_type.manager_type_prefix().map(|_| MetadataCollectionKind::Manager(mdo_type))
+}
+
+fn metadata_root_is_available<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    metadata_expr: &SyntaxNode,
+) -> bool {
+    let sema = Semantics::new(db);
+    let ty = sema.type_of_expr(file_id, metadata_expr);
+    let TypeKind::PlatformObject(facet) = db.lookup_type(ty) else {
+        return false;
+    };
+    matches!(facet.name.as_str(), "ОбъектМетаданныхКонфигурация" | "ConfigurationMetadataObject")
 }
 
 fn complete_mdo_objects<DB: RootDatabase>(
@@ -218,6 +300,102 @@ fn complete_mdo_objects<DB: RootDatabase>(
 
     tracing::debug!(count = items.len(), "MDO objects found");
     items
+}
+
+fn complete_metadata_root_collections<DB: RootDatabase>(
+    db: &DB,
+    locale: ide_db::base_db::Locale,
+) -> Vec<CompletionItem> {
+    let type_name = "ОбъектМетаданныхКонфигурация";
+    let methods_input = TypeNameInput::new(db, type_name.to_string());
+    let mut items: Vec<CompletionItem> = type_methods_query(db, methods_input)
+        .iter()
+        .map(super::platform_completion::render_platform_method)
+        .collect();
+    let props_input = TypeNameInput::new(db, type_name.to_string());
+    items.extend(type_properties_query(db, props_input).iter().map(|prop| {
+        if let Some(kind) = MetadataReferenceKind::from_plural(prop.name.as_str())
+            .or_else(|| MetadataReferenceKind::from_plural(prop.english_name.as_str()))
+        {
+            render_metadata_reference_collection(kind, Some(prop))
+        } else if let Some(mdo_type) = MdoType::from_plural(prop.name.as_str())
+            .or_else(|| MdoType::from_plural(prop.english_name.as_str()))
+            .filter(|mdo_type| mdo_type.manager_type_prefix().is_some())
+        {
+            render_manager_collection(mdo_type, Some(prop))
+        } else {
+            super::platform_completion::render_platform_property(prop, locale)
+        }
+    }));
+    items
+}
+
+fn render_manager_collection(
+    mdo_type: MdoType,
+    prop: Option<&bsl_platform::PlatformProperty>,
+) -> CompletionItem {
+    let label =
+        prop.map_or_else(|| mdo_type.russian_name().to_string(), |prop| prop.name.to_string());
+    let filter_text = prop.map(|prop| format!("{} {}", prop.name, prop.english_name));
+    CompletionItem {
+        label: label.clone(),
+        detail: Some(format!("Коллекция метаданных ({})", mdo_type.russian_name())),
+        kind: CompletionItemKind::MdoType,
+        insert_text: label,
+        documentation: None,
+        sort_text: None,
+        filter_text,
+        source: None,
+    }
+}
+
+fn render_metadata_reference_collection(
+    kind: MetadataReferenceKind,
+    prop: Option<&bsl_platform::PlatformProperty>,
+) -> CompletionItem {
+    let label =
+        prop.map_or_else(|| kind.russian_plural().to_string(), |prop| prop.name.to_string());
+    let filter_text = prop
+        .map(|prop| format!("{} {}", prop.name, prop.english_name))
+        .or_else(|| Some(format!("{} {}", kind.russian_plural(), kind.english_plural())));
+    CompletionItem {
+        label: label.clone(),
+        detail: Some(format!("Коллекция метаданных ({})", kind.russian_singular())),
+        kind: CompletionItemKind::MdoType,
+        insert_text: label,
+        documentation: None,
+        sort_text: None,
+        filter_text,
+        source: None,
+    }
+}
+
+fn complete_metadata_reference_objects<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    kind: MetadataReferenceKind,
+) -> Vec<CompletionItem> {
+    let names = match kind {
+        MetadataReferenceKind::Role => db.role_names(file_id),
+        MetadataReferenceKind::EventSubscription => db.event_subscription_names(file_id),
+        MetadataReferenceKind::ScheduledJob => db.scheduled_job_names(file_id),
+        MetadataReferenceKind::HttpService => db.http_service_names(file_id),
+        MetadataReferenceKind::WebService => db.web_service_names(file_id),
+        MetadataReferenceKind::Subsystem => db.subsystem_names(file_id),
+    };
+    names
+        .into_iter()
+        .map(|name| CompletionItem {
+            label: name.clone(),
+            detail: Some(kind.russian_singular().to_string()),
+            kind: CompletionItemKind::MdoObject,
+            insert_text: name,
+            documentation: None,
+            sort_text: None,
+            filter_text: None,
+            source: None,
+        })
+        .collect()
 }
 
 fn complete_manager_methods<DB: RootDatabase>(
@@ -325,4 +503,82 @@ fn complete_predefined_items<DB: RootDatabase>(
     }
 
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ide_db::{
+        base_db::{SourceDatabase, SourceRoot, SourceRootId},
+        metadata::{MetadataListingData, SubsystemEntry},
+        RootDatabaseImpl,
+    };
+    use vfs::{file_set::FileSet, FileId, VfsPath};
+
+    fn subsystem_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <Subsystem uuid="00000000-0000-0000-0000-000000000094">
+        <Properties>
+            <Name>{name}</Name>
+            <Content/>
+        </Properties>
+        <ChildObjects/>
+    </Subsystem>
+</MetaDataObject>"#
+        )
+    }
+
+    #[test]
+    fn complete_metadata_reference_subsystems_use_listed_substrate() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cf");
+        let subsystem_path = root.join("Subsystems/МояПодсистема.xml");
+        std::fs::create_dir_all(subsystem_path.parent().unwrap()).unwrap();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+
+        let subsystem_file = FileId(20);
+        let consumer_file = FileId(21);
+        let consumer_path = root.join("CompletionConsumer.bsl");
+
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        file_set.insert(subsystem_file, VfsPath::new(subsystem_path.to_string_lossy().as_ref()));
+        file_set.insert(consumer_file, VfsPath::new(consumer_path.to_string_lossy().as_ref()));
+        db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+        db.set_file_source_root(subsystem_file, SourceRootId(1));
+        db.set_file_source_root(consumer_file, SourceRootId(1));
+        db.set_file_text(subsystem_file, &subsystem_xml("МояПодсистема"));
+        db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+        db.set_all_config_paths(vec![(None, root.clone())]);
+        db.set_metadata_listing(
+            &root.to_string_lossy(),
+            MetadataListingData {
+                entries: Vec::new(),
+                defined_types: Vec::new(),
+                common_modules: Vec::new(),
+                event_subscriptions: Vec::new(),
+                scheduled_jobs: Vec::new(),
+                roles: Vec::new(),
+                http_services: Vec::new(),
+                web_services: Vec::new(),
+                integration_services: Vec::new(),
+                subsystems: vec![SubsystemEntry {
+                    name: "МояПодсистема".to_string(),
+                    main: subsystem_file,
+                }],
+            },
+        );
+
+        let items = complete_metadata_reference_objects(
+            &db,
+            consumer_file,
+            MetadataReferenceKind::Subsystem,
+        );
+        let labels: Vec<String> = items.into_iter().map(|item| item.label).collect();
+
+        assert_eq!(labels, vec!["МояПодсистема".to_string()]);
+    }
 }

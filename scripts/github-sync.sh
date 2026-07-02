@@ -10,6 +10,7 @@ EXCLUDE_PATTERNS=(
     ".gitlab-ci.yml"
     ".cargo/config.toml"
     "scripts/ci-status.sh"
+    "scripts/*sonar-triage*"
     "docs/diagnostics-audit/"
     "docs/legal/"
     ".omc/"

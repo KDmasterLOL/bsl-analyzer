@@ -53,6 +53,33 @@ impl<'a> DiagnosticsContext<'a> {
         self.provider.resolve_common_module(self.file_id, name)
     }
 
+    /// Resolve one EventSubscription visible to this file through the provider's
+    /// single-name API. Salsa providers route this through the typed substrate.
+    pub fn resolve_event_subscription(
+        &self,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::EventSubscription>> {
+        self.provider.resolve_event_subscription(self.file_id, name)
+    }
+
+    /// Main-configuration EventSubscription enumeration for diagnostics that need
+    /// to scan declared subscriptions while preserving previous main-only behavior.
+    pub fn main_event_subscriptions(&self) -> Vec<Arc<bsl_metadata::EventSubscription>> {
+        self.provider.main_event_subscriptions(self.file_id)
+    }
+
+    /// Main-configuration Role enumeration for diagnostics that need to scan
+    /// declared roles while preserving previous main-only behavior.
+    pub fn main_roles(&self) -> Vec<Arc<bsl_metadata::Role>> {
+        self.provider.main_roles(self.file_id)
+    }
+
+    /// Main-configuration ScheduledJob enumeration for diagnostics that need to
+    /// scan declared jobs while preserving previous main-only behavior.
+    pub fn main_scheduled_jobs(&self) -> Vec<Arc<bsl_metadata::ScheduledJob>> {
+        self.provider.main_scheduled_jobs(self.file_id)
+    }
+
     pub fn is_common_module_anywhere(&self, name: &str) -> bool {
         self.resolve_common_module(name).is_some()
     }

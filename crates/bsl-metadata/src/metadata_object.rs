@@ -23,8 +23,6 @@ pub enum MdoType {
     Enum,
     ExchangePlan,
     ExternalDataSource,
-    Cube,
-    DimensionTable,
     Constant,
     DataProcessor,
     Report,
@@ -81,8 +79,6 @@ impl FromStr for MdoType {
             "внешнийисточникданных" | "externaldatasource" => {
                 Ok(Self::ExternalDataSource)
             }
-            "куб" | "cube" => Ok(Self::Cube),
-            "таблицаизмерения" | "dimensiontable" => Ok(Self::DimensionTable),
             "константа" | "constant" => Ok(Self::Constant),
             "обработка" | "dataprocessor" => Ok(Self::DataProcessor),
             "отчет" | "report" => Ok(Self::Report),
@@ -127,8 +123,6 @@ impl MdoType {
             Self::Enum => "Перечисление",
             Self::ExchangePlan => "ПланОбмена",
             Self::ExternalDataSource => "ВнешнийИсточникДанных",
-            Self::Cube => "Куб",
-            Self::DimensionTable => "ТаблицаИзмерения",
             Self::Constant => "Константа",
             Self::DataProcessor => "Обработка",
             Self::Report => "Отчет",
@@ -155,8 +149,6 @@ impl MdoType {
             Self::Enum => "Enum",
             Self::ExchangePlan => "ExchangePlan",
             Self::ExternalDataSource => "ExternalDataSource",
-            Self::Cube => "Cube",
-            Self::DimensionTable => "DimensionTable",
             Self::Constant => "Constant",
             Self::DataProcessor => "DataProcessor",
             Self::Report => "Report",
@@ -189,8 +181,6 @@ impl MdoType {
             Self::Enum,
             Self::ExchangePlan,
             Self::ExternalDataSource,
-            Self::Cube,
-            Self::DimensionTable,
             Self::Constant,
             Self::DataProcessor,
             Self::Report,
@@ -228,8 +218,6 @@ impl MdoType {
             "внешниеисточникиданных" | "externaldatasources" => {
                 Some(Self::ExternalDataSource)
             }
-            "кубы" | "cubes" => Some(Self::Cube),
-            "таблицыизмерения" | "dimensiontables" => Some(Self::DimensionTable),
             "константы" | "constants" => Some(Self::Constant),
             "обработки" | "dataprocessors" => Some(Self::DataProcessor),
             "отчеты" | "reports" => Some(Self::Report),
@@ -281,12 +269,7 @@ impl MdoType {
             Self::Constant => Some("ConstantManager"),
             Self::DataProcessor => Some("DataProcessorManager"),
             Self::Report => Some("ReportManager"),
-            Self::Cube
-            | Self::DimensionTable
-            | Self::CommonModule
-            | Self::EventSubscription
-            | Self::Subsystem
-            | Self::Role => None,
+            Self::CommonModule | Self::EventSubscription | Self::Subsystem | Self::Role => None,
         }
     }
 
@@ -309,12 +292,7 @@ impl MdoType {
             Self::Constant => Some("КонстантаМенеджер"),
             Self::DataProcessor => Some("ОбработкаМенеджер"),
             Self::Report => Some("ОтчетМенеджер"),
-            Self::Cube
-            | Self::DimensionTable
-            | Self::CommonModule
-            | Self::EventSubscription
-            | Self::Subsystem
-            | Self::Role => None,
+            Self::CommonModule | Self::EventSubscription | Self::Subsystem | Self::Role => None,
         }
     }
 
@@ -351,10 +329,6 @@ impl MdoType {
             set.insert("exchangeplans".to_string());
             set.insert("внешниеисточникиданных".to_string());
             set.insert("externaldatasources".to_string());
-            set.insert("кубы".to_string());
-            set.insert("cubes".to_string());
-            set.insert("таблицыизмерения".to_string());
-            set.insert("dimensiontables".to_string());
             set.insert("константы".to_string());
             set.insert("constants".to_string());
             set.insert("обработки".to_string());

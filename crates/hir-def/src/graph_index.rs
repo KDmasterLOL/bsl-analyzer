@@ -1153,18 +1153,16 @@ pub fn project_workspace_subscription_edges<DB: ConfigsDatabase>(
     // Collect (subscription, handler module, handler method) deterministically so the
     // shared canonicalization sees a load-order-independent first-seen spelling.
     let mut subs: Vec<(String, crate::name::Name, crate::name::Name)> = Vec::new();
-    for visible in db.configurations(representative) {
-        for sub in visible.configuration.event_subscriptions() {
-            let Some(handler) = sub.parse_handler() else { continue };
-            if handler.method_name.is_empty() {
-                continue;
-            }
-            subs.push((
-                sub.name().to_string(),
-                crate::name::Name::new(&handler.module_name),
-                crate::name::Name::new(&handler.method_name),
-            ));
+    for sub in db.enumerate_event_subscriptions(representative) {
+        let Some(handler) = sub.parse_handler() else { continue };
+        if handler.method_name.is_empty() {
+            continue;
         }
+        subs.push((
+            sub.name().to_string(),
+            crate::name::Name::new(&handler.module_name),
+            crate::name::Name::new(&handler.method_name),
+        ));
     }
     subs.sort();
     subs.dedup();
@@ -1208,14 +1206,12 @@ pub fn project_workspace_subsystem_edges<DB: ConfigsDatabase>(
     // first-seen spelling.
     let mut members: Vec<(String, MdoType, String)> = Vec::new();
     let mut children: Vec<(String, String)> = Vec::new();
-    for visible in db.configurations(representative) {
-        for subsystem in visible.configuration.subsystems() {
-            for (mdo_type, member_name) in subsystem.content() {
-                members.push((subsystem.name().to_string(), *mdo_type, member_name.clone()));
-            }
-            for child in subsystem.child_subsystems() {
-                children.push((subsystem.name().to_string(), child.clone()));
-            }
+    for subsystem in db.enumerate_subsystems(representative) {
+        for (mdo_type, member_name) in subsystem.content() {
+            members.push((subsystem.name().to_string(), *mdo_type, member_name.clone()));
+        }
+        for child in subsystem.child_subsystems() {
+            children.push((subsystem.name().to_string(), child.clone()));
         }
     }
     members.sort();
@@ -1348,18 +1344,16 @@ pub fn project_workspace_role_edges<DB: ConfigsDatabase>(
     let mut direct: Vec<(String, MdoType, String)> = Vec::new();
     // (role_name, parent_type, parent_name, condition)
     let mut rls: Vec<(String, MdoType, String, String)> = Vec::new();
-    for visible in db.configurations(representative) {
-        for role in visible.configuration.roles() {
-            for obj in role.objects() {
-                direct.push((role.name().to_string(), obj.mdo_type, obj.name.clone()));
-                for condition in &obj.restrictions {
-                    rls.push((
-                        role.name().to_string(),
-                        obj.mdo_type,
-                        obj.name.clone(),
-                        condition.clone(),
-                    ));
-                }
+    for role in db.enumerate_roles(representative) {
+        for obj in role.objects() {
+            direct.push((role.name().to_string(), obj.mdo_type, obj.name.clone()));
+            for condition in &obj.restrictions {
+                rls.push((
+                    role.name().to_string(),
+                    obj.mdo_type,
+                    obj.name.clone(),
+                    condition.clone(),
+                ));
             }
         }
     }
@@ -1368,7 +1362,13 @@ pub fn project_workspace_role_edges<DB: ConfigsDatabase>(
     rls.sort();
     rls.dedup();
 
-    let merged = db.merged_visible_configuration(representative);
+    // Direct object rights resolve entirely from the enumerated roles above. The whole
+    // configuration is needed only as the SDBL lowering universe for RLS restriction
+    // queries, which may reference *any* metadata object — a per-object resolver cannot
+    // bound what a condition names. Roles without restrictions never touch it, so the
+    // coarse dependency is taken only when a restriction is actually present.
+    let merged =
+        if rls.is_empty() { None } else { db.merged_visible_configuration(representative) };
 
     let mut edges = Vec::new();
     let mut seen: FxHashSet<(GraphNode, GraphNode)> = FxHashSet::default();

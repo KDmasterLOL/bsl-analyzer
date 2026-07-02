@@ -158,8 +158,6 @@ fn mdo_ref_prefix(mdo: MdoType) -> Option<&'static str> {
         MdoType::DataProcessor => Some("DataProcessorObject"),
         MdoType::Report => Some("ReportObject"),
         MdoType::ExternalDataSource
-        | MdoType::Cube
-        | MdoType::DimensionTable
         | MdoType::CommonModule
         | MdoType::EventSubscription
         | MdoType::Subsystem
@@ -402,12 +400,7 @@ mod tests {
 
     #[test]
     fn typeref_from_attribute_unreachable_mdo_kinds_fall_to_unknown() {
-        for mdo in [
-            MdoType::ExternalDataSource,
-            MdoType::Cube,
-            MdoType::DimensionTable,
-            MdoType::CommonModule,
-        ] {
+        for mdo in [MdoType::ExternalDataSource, MdoType::CommonModule] {
             let attr = AttributeType::Ref { mdo_type: mdo, name: "Х".to_string() };
             assert_eq!(
                 TypeRef::from_attribute_type(&attr),
