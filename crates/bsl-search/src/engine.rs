@@ -802,14 +802,29 @@ impl SearchEngine {
             let rel_path =
                 file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            if let Some(stored_hash) = self.store.file_hash(&rel_path)? {
-                if stored_hash == hash.as_bytes() {
-                    continue;
+            let had_prior = match self.store.file_hash(&rel_path)? {
+                Some(stored_hash) => {
+                    if stored_hash == hash.as_bytes() {
+                        continue;
+                    }
+                    true
                 }
-            }
+                None => false,
+            };
 
             let chunks = Chunker::chunk(&content);
             if chunks.is_empty() {
+                // The content changed (its hash mismatched above) but now yields no chunks — the
+                // file was gutted to comments/blank while the daemon was down. Any prior chunks are
+                // now stale; leaving them makes a Clean boot false-clean (the vanished symbol is
+                // served forever), and the deletion reconcile does NOT cover this — the file still
+                // EXISTS on disk, so it is never "gone". Remove the stored rows. A file that was
+                // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
+                // so only prior-stored files are touched.
+                if had_prior {
+                    self.store.remove_file(&rel_path, "code")?;
+                    indexed += 1;
+                }
                 continue;
             }
 
@@ -859,14 +874,29 @@ impl SearchEngine {
             let rel_path =
                 file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            if let Some(stored_hash) = self.store.file_hash(&rel_path)? {
-                if stored_hash == hash.as_bytes() {
-                    continue;
+            let had_prior = match self.store.file_hash(&rel_path)? {
+                Some(stored_hash) => {
+                    if stored_hash == hash.as_bytes() {
+                        continue;
+                    }
+                    true
                 }
-            }
+                None => false,
+            };
 
             let chunks = Chunker::chunk(&content);
             if chunks.is_empty() {
+                // The content changed (its hash mismatched above) but now yields no chunks — the
+                // file was gutted to comments/blank while the daemon was down. Any prior chunks are
+                // now stale; leaving them makes a Clean boot false-clean (the vanished symbol is
+                // served forever), and the deletion reconcile does NOT cover this — the file still
+                // EXISTS on disk, so it is never "gone". Remove the stored rows. A file that was
+                // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
+                // so only prior-stored files are touched.
+                if had_prior {
+                    self.store.remove_file(&rel_path, "code")?;
+                    indexed += 1;
+                }
                 continue;
             }
 
@@ -1292,6 +1322,25 @@ impl SearchEngine {
             return Ok(());
         }
         let _ = self.workspace_overlay_snapshot(RefreshMode::Embed)?;
+        Ok(())
+    }
+
+    /// Mark the workspace overlay initialized with zero entries, WITHOUT a disk scan. The caller
+    /// must have proven the SQLite store was just reconciled with disk at boot (a fused parse
+    /// ingest, or an `index_directory_deferred`/`index_directory_fts` walk+hash re-ingest), so the
+    /// overlay baseline already equals the working tree and a prime would find no diffs. Zero cost,
+    /// zero RAM — and, unlike a prime, robust to how the boot hashed files, because it asserts the
+    /// reconciled invariant directly rather than re-deriving it. Flips the same `initialized` flag a
+    /// prime would, so the resident-fed incremental reindex (inert until initialized) goes live.
+    pub fn initialize_workspace_overlay_clean(&self) -> Result<(), SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok(());
+        }
+        let mut cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        cache.mark_initialized_clean();
         Ok(())
     }
 

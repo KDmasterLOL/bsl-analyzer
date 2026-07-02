@@ -198,6 +198,20 @@ impl WorkspaceOverlayCache {
         self.initialized = false;
     }
 
+    /// Mark the overlay initialized with no entries: the caller has proven the store this overlay
+    /// fronts was just reconciled with disk, so nothing differs from the baseline and a full disk
+    /// scan (a prime) would build zero entries anyway. This is the zero-scan, zero-RAM equivalent
+    /// of that prime. Until the overlay is initialized the incremental reindex is inert
+    /// ([`Self::reindex_dirty_from_snapshots`] no-ops on `!initialized`), so this is what unblocks
+    /// the resident-fed path; from here the watcher marks and the reindex serve fresh edits.
+    pub fn mark_initialized_clean(&mut self) {
+        self.entries.clear();
+        self.hidden_paths.clear();
+        self.dirty_paths.clear();
+        self.dirty_failures.clear();
+        self.initialized = true;
+    }
+
     /// Inject the graph-context provider so overlay chunks are enriched like the
     /// local index. Clears cached entries so they rebuild with context.
     pub fn set_graph_context_provider(&mut self, provider: Arc<dyn GraphContextProvider>) {

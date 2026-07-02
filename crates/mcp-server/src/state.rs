@@ -235,8 +235,9 @@ type EmbedPostPassHook = Box<dyn FnMut(&Path) + Send>;
 #[cfg(test)]
 static EMBED_POST_PASS_HOOK: Mutex<Option<EmbedPostPassHook>> = Mutex::new(None);
 
-/// Test seam: force the rescan walk to count as errored, so a test can assert the reconcile is
-/// skipped (a partial walk must never be treated as authoritative and delete healthy files).
+/// Test seam: force a reconcile walk (the overflow rescan and the boot store reconcile) to count as
+/// errored, so a test can assert the reconcile is skipped (a partial walk must never be treated as
+/// authoritative and delete healthy files) — and, at boot, that a Clean init downgrades to a prime.
 #[cfg(test)]
 static FORCE_REWALK_WALK_ERROR: AtomicBool = AtomicBool::new(false);
 
@@ -279,6 +280,26 @@ pub(crate) enum SemanticRuntimeStatus {
     Failed(String),
 }
 
+/// How the boot must initialize the workspace overlay before the engine is published. The overlay
+/// is inert until initialized — `reindex_dirty_from_snapshots` no-ops on `!initialized` — so without
+/// one of these the whole resident-fed incremental reindex (and overlay edit-freshness) is
+/// unreachable in local SQLite mode.
+enum OverlayInit {
+    /// The boot branch already re-ingested current disk into the store (fused parse ingest, or an
+    /// `index_directory_deferred`/`index_directory_fts` walk+hash re-ingest), so the overlay
+    /// baseline == working tree: mark it initialized with no entries. A prime here would scan the
+    /// whole tree only to build zero diffs, so this is the zero-cost equivalent.
+    Clean,
+    /// The store was reused warm WITHOUT re-reconciling it against disk (FTS-only reuse skips
+    /// re-indexing when chunks already exist), so a file changed while the daemon was down is not
+    /// yet in the store and empty-init would be false-clean for it. A disk scan is required to build
+    /// the overlay diff, so prime rather than empty-init.
+    Prime,
+    /// PostgresRemoteOverlay: the async remote warmup owns overlay initialization
+    /// (`needs_overlay_warmup`), so the synchronous boot path does nothing here.
+    RemoteWarmup,
+}
+
 struct WorkspaceSearchInit {
     engine: SearchEngine,
     mode: WorkspaceSearchMode,
@@ -287,6 +308,8 @@ struct WorkspaceSearchInit {
     /// background pass needs to fill them on its own connection. `None` means the
     /// engine is fully ready (warm cache, FTS-only, or standalone reindex).
     pending_embed: Option<PendingEmbed>,
+    /// How to bring the workspace overlay online for this boot branch.
+    overlay_init: OverlayInit,
 }
 
 /// Inputs for the background embedding pass: its own database path and embedder config
@@ -522,6 +545,27 @@ impl SharedState {
                 // sees it; the resident read itself is prefetched off the engine lock by
                 // `prefetch_resident_overlay`, so the two locks never nest.
                 init.engine.set_module_snapshot_source(snapshot_source);
+
+                // Bring the workspace overlay online BEFORE publishing. The overlay is inert until
+                // initialized (`reindex_dirty_from_snapshots` no-ops on `!initialized`), so the
+                // resident-fed incremental reindex — and overlay edit-freshness generally — is
+                // unreachable in local SQLite mode without this. Done here, on the still-owned
+                // engine, so it holds NO engine lock: `Prime`'s disk scan must not serialize behind
+                // the shared lock (I3), and the cold FTS branch already indexes disk before
+                // publishing, so a warm prime delays publish no differently.
+                match init.overlay_init {
+                    OverlayInit::Clean => {
+                        if let Err(e) = init.engine.initialize_workspace_overlay_clean() {
+                            tracing::warn!("workspace overlay clean-init failed: {e}");
+                        }
+                    }
+                    OverlayInit::Prime => {
+                        if let Err(e) = init.engine.prime_workspace_overlay() {
+                            tracing::warn!("workspace overlay prime failed: {e}");
+                        }
+                    }
+                    OverlayInit::RemoteWarmup => {}
+                }
 
                 if let Ok(mut guard) = search_engine.lock() {
                     *guard = Some(init.engine);
@@ -1156,6 +1200,7 @@ impl SharedState {
                 engine,
                 mode: WorkspaceSearchMode::PostgresRemoteOverlay,
                 pending_embed: None,
+                overlay_init: OverlayInit::RemoteWarmup,
             });
         }
 
@@ -1190,10 +1235,20 @@ impl SharedState {
             // on its own connection (see `spawn_workspace_search_init`).
             let pending_embed = Self::embedding_config()
                 .map(|config| PendingEmbed { db_path: db_path.clone(), config });
+            // The fused parse pass ingested files present on disk but never removed rows for a `.bsl`
+            // deleted while the daemon was down. Reconcile the store to disk so the overlay baseline
+            // truly == working tree before asserting Clean; a walk that could not prove this
+            // downgrades to a prime (which never asserts a false clean).
+            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine, &source_path) {
+                OverlayInit::Clean
+            } else {
+                OverlayInit::Prime
+            };
             return Some(WorkspaceSearchInit {
                 engine,
                 mode: WorkspaceSearchMode::SqliteLocal,
                 pending_embed,
+                overlay_init,
             });
         }
 
@@ -1245,25 +1300,52 @@ impl SharedState {
                 .flatten()
                 .map(|config| PendingEmbed { db_path: db_path.clone(), config });
 
+            // `index_directory_deferred` above re-ingested every file whose content hash changed
+            // (incl. edits made while the daemon was down) but did not remove rows for a `.bsl`
+            // deleted while down. Reconcile the store to disk so the overlay baseline == working tree
+            // before asserting Clean; a walk that could not prove this downgrades to a prime.
+            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine, &source_path) {
+                OverlayInit::Clean
+            } else {
+                OverlayInit::Prime
+            };
             return Some(WorkspaceSearchInit {
                 engine,
                 mode: WorkspaceSearchMode::SqliteLocal,
                 pending_embed,
+                overlay_init,
             });
         }
 
-        if engine.chunk_count().unwrap_or(0) == 0 {
+        // FTS-only branch (no embedder configured — the common local dev setup). A cold store (no
+        // chunks yet) gets a full walk+hash ingest; a warm store with existing chunks skips
+        // re-indexing entirely, so it is NOT reconciled against files EDITED while the daemon was
+        // down and must prime for those. Either way the index step never removes rows for files
+        // DELETED while down, so both sub-branches reconcile the store to disk here (removing gone
+        // rows); only the cold, freshly-ingested-and-reconciled sub-branch may then assert Clean.
+        let overlay_init = if engine.chunk_count().unwrap_or(0) == 0 {
             tracing::info!(?source_path, "building FTS index from source files");
             match engine.index_directory_fts(&source_path) {
                 Ok(indexed) => tracing::info!(indexed, "FTS index built"),
                 Err(e) => tracing::warn!("failed to build FTS index: {e}"),
             }
-        }
+            if Self::reconcile_boot_store_with_disk(&mut engine, &source_path) {
+                OverlayInit::Clean
+            } else {
+                OverlayInit::Prime
+            }
+        } else {
+            // Warm store: prime handles the while-down EDITS; the reconcile still removes rows for
+            // files DELETED while down (a prime only hides them lazily and never from the store).
+            Self::reconcile_boot_store_with_disk(&mut engine, &source_path);
+            OverlayInit::Prime
+        };
 
         Some(WorkspaceSearchInit {
             engine,
             mode: WorkspaceSearchMode::SqliteLocal,
             pending_embed: None,
+            overlay_init,
         })
     }
 
@@ -2071,6 +2153,73 @@ impl SharedState {
         }
     }
 
+    /// Reconcile the just-indexed workspace store against on-disk truth at BOOT, on the still-owned
+    /// engine (no shared lock held), BEFORE the overlay-init decision is applied. A boot index step
+    /// (`index_directory_deferred` / `index_directory_fts`, or a fused parse ingest) only re-ingests
+    /// files that EXIST now — it never removes rows for a `.bsl` DELETED while the daemon was down.
+    /// So a store row for a vanished file survives, and an [`OverlayInit::Clean`] — which asserts the
+    /// store already equals the working tree — would serve that ghost forever. This walks the source
+    /// tree (error-aware) and, on a CLEAN walk, calls [`SearchEngine::reconcile_workspace_files`] to
+    /// remove every stored-but-gone path (tombstone + overlay dirty + incremental vector eviction —
+    /// the same removal path the overflow rescan ships).
+    ///
+    /// Returns whether the store was PROVEN reconciled: `false` on any walk error OR a reconcile
+    /// failure. A partial walk's `present` set is short, so trusting it would delete healthy rows —
+    /// hence the S1 gate (skip reconcile on any walk error) is kept verbatim. And because a failed
+    /// walk could not prove reconciliation, the caller must NOT stay Clean: it downgrades to a prime,
+    /// whose own scan lazily hides files it finds missing. A prime's scan may itself be incomplete
+    /// after a walk error, but a prime never ASSERTS a clean store the way `Clean` does — it only
+    /// serves what it can see and hides the rest — so it is the strictly safer degraded default,
+    /// matching the pre-existing behavior for a store that could not be reconciled.
+    fn reconcile_boot_store_with_disk(engine: &mut SearchEngine, source_root: &Path) -> bool {
+        let mut present: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut walk_errors = 0usize;
+        for entry in walkdir::WalkDir::new(source_root).follow_links(true) {
+            match entry {
+                Ok(entry) => {
+                    if entry.file_type().is_file()
+                        && entry
+                            .path()
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("bsl"))
+                    {
+                        present.insert(entry.path().to_path_buf());
+                    }
+                }
+                Err(e) => {
+                    walk_errors += 1;
+                    tracing::warn!("search boot reconcile walk error: {e}");
+                }
+            }
+        }
+        #[cfg(test)]
+        if FORCE_REWALK_WALK_ERROR.load(Ordering::SeqCst) {
+            walk_errors += 1;
+        }
+        if walk_errors > 0 {
+            tracing::warn!(
+                walk_errors,
+                "search boot reconcile walk incomplete; priming the overlay instead of clean-init"
+            );
+            return false;
+        }
+        match engine.reconcile_workspace_files(&present) {
+            Ok(removed) => {
+                if removed > 0 {
+                    tracing::info!(
+                        removed,
+                        "search boot reconciled deleted files out of the store"
+                    );
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!("search boot reconcile failed; priming the overlay instead: {e}");
+                false
+            }
+        }
+    }
+
     /// Prefetch resident snapshots for the overlay's dirty paths and feed them into the
     /// incremental reindex, so a following query serves chunks cut from the SHARED resident
     /// parse instead of a second disk read+parse. Called at the top of a code-search request,
@@ -2238,7 +2387,7 @@ fn is_workspace_root_xml(xml: &Path, workspace_root: Option<&Path>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackgroundWorkGuard, SharedState};
+    use super::{BackgroundWorkGuard, OverlayInit, SharedState};
     use crate::baseline::{ExternalBaselineService, RefreshableExternalBaselineSource};
     use bsl_search::{
         BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexedDocument, SearchEngine,
@@ -4178,6 +4327,9 @@ mod tests {
     fn rescan_walk_error_skips_reconcile_and_keeps_stored_files() {
         use bsl_search::{Chunk, ChunkKind, Store};
 
+        // This test toggles the process-global `FORCE_REWALK_WALK_ERROR` seam; serialize against the
+        // boot-reconcile tests (which read it) so its forced error can't leak into their walk.
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let dir = tempdir().unwrap();
         let workspace = dir.path().to_path_buf();
         let db_path = dir.path().join("search.db");
@@ -4466,6 +4618,457 @@ mod tests {
             engine.workspace_overlay_dirty_paths().unwrap().len(),
             extra,
             "paths beyond the cap stay dirty for the lazy disk path / a later prefetch",
+        );
+    }
+
+    /// End-to-end through the REAL `SharedState::workspace` boot on a local SQLite workspace (no
+    /// Postgres baseline, no embedder — the common local setup): the boot must bring the workspace
+    /// overlay online so a post-boot edit is served fresh through the ordinary query path, fed from
+    /// the resident's shared parse. NO hand-priming — the boot itself has to initialize the overlay,
+    /// or the resident-fed incremental reindex (`reindex_dirty_from_snapshots` no-ops on
+    /// `!initialized`) is unreachable and the edit is never served. Reverting the boot's overlay-init
+    /// wiring leaves the overlay uninitialized, the reindex a no-op, the resident-fed count 0, and
+    /// the fresh symbol unfound — this test then fails.
+    #[test]
+    fn workspace_boot_initializes_overlay_so_local_edits_serve_fresh_from_resident() {
+        use crate::diagnostics_state::DiagnosticsStatus;
+        use std::time::{Duration, Instant};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        // No embedder configured -> FTS-only local mode, the branch whose overlay was never
+        // initialized before this fix.
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+        let _embedding_model = EnvVarGuard::unset("EMBEDDING_MODEL");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        // v1 baseline body; the boot ingests it into the store.
+        write_common_module_tree(
+            &workspace,
+            "Сервер",
+            "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n",
+        );
+        let module = workspace.join("CommonModules").join("Сервер").join("Ext").join("Module.bsl");
+
+        let state = SharedState::workspace(workspace.clone());
+
+        // Wait for the background init to publish the engine (the overlay is initialized just
+        // before publish, so a visible engine already has it online).
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if state.search_engine().lock().unwrap().is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the search engine never published");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // The resident feeds the overlay's shared parse; drive it to Ready.
+        state.diagnostics().ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !matches!(state.diagnostics().status(), DiagnosticsStatus::Ready { .. }) {
+            assert!(Instant::now() < deadline, "the resident never became ready");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Observe the workspace watcher independently so the edit's delivery is confirmed before we
+        // rely on the resident's own cursor (which `prefetch_resident_overlay` drains via catch_up).
+        let hub = state.change_hub().expect("workspace boot owns a change hub").clone();
+        assert!(hub.wait_until_watching(Duration::from_secs(10)), "the watcher must arm");
+        let mut observer = hub.subscribe();
+
+        // Edit on disk: v2 adds a symbol absent from the v1 baseline, so a hit for it can only come
+        // from the overlay serving the working-tree bytes.
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(
+            &module,
+            "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n\
+             Процедура СвежаяПроцедура() Экспорт КонецПроцедуры\n",
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut delivered = false;
+        while Instant::now() < deadline {
+            let batch = hub.drain(observer);
+            observer = batch.cursor;
+            if batch.entries.iter().any(|e| e.raw.to_string_lossy().ends_with("Module.bsl")) {
+                delivered = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(delivered, "the watcher delivered the edit");
+
+        // Prove the SINK marked the edit — do NOT hand-mark. The search sink (spawned by
+        // `SharedState::workspace`) drains the hub and marks the edited `.bsl` dirty in the overlay.
+        // That is only reachable once the boot brought the overlay online; revert that wiring and the
+        // overlay stays uninitialized, the sink's mark lands nowhere, and this poll never trips. So
+        // waiting for the sink's OWN mark exercises hub -> sink -> mark end-to-end.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let marked = {
+                let guard = state.search_engine().lock().unwrap();
+                let engine = guard.as_ref().unwrap();
+                engine
+                    .workspace_overlay_dirty_paths_snapshot()
+                    .unwrap()
+                    .keys()
+                    .any(|p| p.ends_with("Module.bsl"))
+            };
+            if marked {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the sink never marked the edited path dirty");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // With the sink's mark in place, drive the resident-fed prefetch exactly as the search tool
+        // does — NO dirty-marking of our own. `prefetch_resident_overlay` catch_ups the resident to
+        // the new bytes (off the engine lock) BEFORE it reads the snapshot, so the very call that
+        // consumes the dirty path already sees fresh bytes and feeds the reindex from the SHARED
+        // parse. This proves mark -> prefetch -> resident-fed.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let fed = loop {
+            SharedState::prefetch_resident_overlay(state.search_engine());
+            let fed = state
+                .search_engine()
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .workspace_overlay_resident_fed_count()
+                .unwrap();
+            if fed >= 1 {
+                break fed;
+            }
+            assert!(Instant::now() < deadline, "the resident-fed reindex never ran");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(fed, 1, "the edited file was reindexed from the resident's shared parse");
+
+        // Fresh bytes are served: the new symbol is found through the overlay (the lexical path the
+        // search tool drives), though it is absent from the v1 store baseline.
+        let (hits, _hidden) = {
+            let guard = state.search_engine().lock().unwrap();
+            let engine = guard.as_ref().unwrap();
+            engine.workspace_overlay_lexical_hits("СвежаяПроцедура", 10).unwrap()
+        };
+        state.shutdown();
+        assert!(
+            hits.iter().any(|hit| hit.file_path.ends_with("Module.bsl")),
+            "the overlay must serve the fresh working-tree bytes for the edited file",
+        );
+    }
+
+    /// Warm boot of a local FTS-only workspace: the store is reused from a prior run and its
+    /// re-index is skipped (chunks already exist), so a file changed WHILE THE DAEMON WAS DOWN is
+    /// not in the store and no watcher event ever fires for it. That branch must NOT empty-init the
+    /// overlay (which would be false-clean and serve the stale baseline forever) — it must prime,
+    /// scanning disk against the store baseline so the while-down edit is served fresh. This asserts
+    /// the branch selects [`OverlayInit::Prime`] and that the prime serves the fresh bytes with no
+    /// dirty-marking at all.
+    #[test]
+    fn warm_boot_ftsonly_primes_overlay_for_edits_made_while_down() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+        let _embedding_model = EnvVarGuard::unset("EMBEDDING_MODEL");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &workspace,
+            "Сервер",
+            "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n",
+        );
+        let module = workspace.join("CommonModules").join("Сервер").join("Ext").join("Module.bsl");
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+
+        // First (cold) boot: an empty store, so the FTS index is built from v1 disk and the branch
+        // reconciles -> Clean. Dropping the init persists the store under the workspace cache dir.
+        let cold = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("cold FTS-only init produces an engine");
+        assert!(matches!(cold.overlay_init, OverlayInit::Clean), "cold boot reconciles the store");
+        assert!(cold.engine.chunk_count().unwrap() > 0, "the store now holds the v1 baseline");
+        drop(cold);
+
+        // The daemon is "down"; the file gains a symbol absent from the persisted v1 store.
+        fs::write(
+            &module,
+            "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n\
+             Процедура СвежаяПроцедура() Экспорт КонецПроцедуры\n",
+        )
+        .unwrap();
+
+        // Second (warm) boot: the persisted store already has chunks, so FTS re-indexing is skipped
+        // and the store is NOT reconciled with the while-down edit -> this branch must prime.
+        let warm = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("warm FTS-only init produces an engine");
+        assert!(
+            matches!(warm.overlay_init, OverlayInit::Prime),
+            "a warm store that skipped re-indexing must prime, not empty-init",
+        );
+
+        // The store baseline is stale (v1), proving the boot did not reconcile it:
+        assert!(
+            warm.engine
+                .text_search("СвежаяПроцедура", 10, Some("code"))
+                .unwrap_or_default()
+                .is_empty(),
+            "sanity: the stale store baseline does not hold the while-down symbol",
+        );
+
+        // Apply the boot's chosen initialization exactly as `spawn_workspace_search_init` does. The
+        // prime scans disk against the store baseline; NO dirty-marking, NO watcher event.
+        warm.engine.prime_workspace_overlay().unwrap();
+
+        let (hits, _hidden) =
+            warm.engine.workspace_overlay_lexical_hits("СвежаяПроцедура", 10).unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.file_path.ends_with("Module.bsl")),
+            "the prime must serve the while-down edit that no watcher event covered",
+        );
+    }
+
+    /// Deleted-while-down through the REAL init path on the STANDALONE (deferred-embedding) branch,
+    /// a Clean branch: a semantic engine indexes two modules, the daemon stops, one module is
+    /// deleted on disk, and a re-boot re-runs the deferred index — which only re-ingests files that
+    /// still EXIST. The boot reconcile is what removes the vanished module's rows so the store ==
+    /// working tree, and the branch must still assert Clean (its baseline is now truly clean).
+    /// Store-level `file_count` is asserted (not `text_search(code)`, which routes through the
+    /// overlay and would hide the deleted file regardless), so reverting the boot reconcile leaves
+    /// the ghost row and fails this.
+    #[test]
+    fn deferred_boot_reconciles_deleted_file_and_stays_clean() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        // A configured embedder selects the semantic deferred branch; the URL is never dialed
+        // (deferred indexing writes NULL embeddings), it only flips `has_semantic` true.
+        let _embedding_url = EnvVarGuard::set("EMBEDDING_URL", "http://127.0.0.1:9/v1");
+        let _embedding_model = EnvVarGuard::set("EMBEDDING_MODEL", "test-model");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &workspace,
+            "Постоянный",
+            "&НаСервере\nФункция ЖивойСимвол() Экспорт Возврат 1; КонецФункции\n",
+        );
+        write_common_module_tree(
+            &workspace,
+            "Улетевший",
+            "&НаСервере\nФункция ИсчезнувшийСимвол() Экспорт Возврат 1; КонецФункции\n",
+        );
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+
+        // Cold boot: the deferred branch indexes both modules -> Clean; drop persists the store.
+        let cold = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("cold deferred init produces an engine");
+        assert!(cold.engine.has_semantic(), "a configured embedder selects the semantic branch");
+        assert!(matches!(cold.overlay_init, OverlayInit::Clean), "the deferred branch is Clean");
+        assert_eq!(cold.engine.file_count().unwrap(), 2, "both modules are indexed");
+        drop(cold);
+
+        // The daemon is down; the Улетевший module is deleted.
+        fs::remove_dir_all(workspace.join("CommonModules").join("Улетевший")).unwrap();
+        fs::remove_file(workspace.join("CommonModules").join("Улетевший.xml")).unwrap();
+
+        // Warm re-boot through the same real init path: the deferred re-index only sees present
+        // files, so ONLY the boot reconcile can remove the deleted module's rows.
+        let warm = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("warm deferred init produces an engine");
+        assert!(
+            matches!(warm.overlay_init, OverlayInit::Clean),
+            "a reconciled deferred boot stays Clean",
+        );
+        assert_eq!(
+            warm.engine.file_count().unwrap(),
+            1,
+            "the boot reconcile removed the deleted-while-down module's rows",
+        );
+        let files: Vec<String> = warm
+            .engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .map(|(path, _hash)| path)
+            .collect();
+        assert!(
+            files.iter().any(|p| p.contains("Постоянный")),
+            "the surviving module is untouched: {files:?}",
+        );
+        assert!(
+            !files.iter().any(|p| p.contains("Улетевший")),
+            "the deleted module is gone from the store: {files:?}",
+        );
+    }
+
+    /// Unit proof of the shared boot reconcile that every Clean branch funnels through
+    /// ([`SharedState::reconcile_boot_store_with_disk`]): a store row for a file DELETED while the
+    /// daemon was down is reconciled out, while a present file is kept, and the helper reports the
+    /// store PROVEN reconciled. The fused / standalone-deferred / FTS-cold Clean branches all call
+    /// this exact helper after their index step, so proving it here proves the deletion is removed on
+    /// each — without standing up a full graph build for the fused path. Store-level `file_count` is
+    /// asserted so the removal is real, not overlay-hidden.
+    #[test]
+    fn boot_reconcile_removes_deleted_file_keeps_present() {
+        // The boot reconcile reads the process-global `FORCE_REWALK_WALK_ERROR` seam; serialize
+        // against the walk-error tests that toggle it so a concurrent set can't force a false error.
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_common_module_tree(
+            &workspace,
+            "Улетевший",
+            "&НаСервере\nФункция ИсчезнувшийСимвол() Экспорт Возврат 1; КонецФункции\n",
+        );
+        write_common_module_tree(
+            &workspace,
+            "Постоянный",
+            "&НаСервере\nФункция ЖивойСимвол() Экспорт Возврат 1; КонецФункции\n",
+        );
+
+        let db_path = dir.path().join("search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.index_directory_fts(&workspace).unwrap();
+        assert_eq!(engine.file_count().unwrap(), 2, "both modules are indexed");
+
+        // The Улетевший module vanishes while the daemon is down.
+        fs::remove_dir_all(workspace.join("CommonModules").join("Улетевший")).unwrap();
+        fs::remove_file(workspace.join("CommonModules").join("Улетевший.xml")).unwrap();
+
+        let reconciled = SharedState::reconcile_boot_store_with_disk(&mut engine, &workspace);
+        assert!(reconciled, "a clean walk proves the store reconciled");
+        assert_eq!(
+            engine.file_count().unwrap(),
+            1,
+            "the deleted file's rows are reconciled out of the store",
+        );
+        let files: Vec<String> = engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .map(|(path, _hash)| path)
+            .collect();
+        assert!(
+            files.iter().any(|p| p.contains("Постоянный")) && files.len() == 1,
+            "only the present module survives: {files:?}",
+        );
+    }
+
+    /// A walk error at boot cannot prove the store was reconciled, so a Clean branch must DOWNGRADE
+    /// to a prime rather than assert a false clean. Force the reconcile walk to error and drive a
+    /// cold FTS-only boot (otherwise Clean) through the real init path: it must select Prime.
+    /// Reverting the downgrade (staying Clean on a failed walk) fails this.
+    #[test]
+    fn boot_walk_error_downgrades_clean_to_prime() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+        let _embedding_model = EnvVarGuard::unset("EMBEDDING_MODEL");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &workspace,
+            "Сервер",
+            "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n",
+        );
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                super::FORCE_REWALK_WALK_ERROR.store(false, super::Ordering::SeqCst);
+            }
+        }
+        super::FORCE_REWALK_WALK_ERROR.store(true, super::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("cold FTS-only init produces an engine");
+        assert!(
+            matches!(init.overlay_init, OverlayInit::Prime),
+            "a boot whose reconcile walk errored must prime, not assert a false clean",
+        );
+    }
+
+    /// A file that still EXISTS but was gutted to comments-only while the daemon was down yields zero
+    /// chunks; the boot indexer must REMOVE its now-stale prior chunks rather than skip it (the
+    /// deletion reconcile can't help — the file is not gone). Index a module with a symbol, gut it,
+    /// re-index: the prior chunk must leave the store. Reverting the chunkless-removal (bare
+    /// `continue`) leaves the stale chunk and fails this.
+    #[test]
+    fn boot_indexer_removes_stale_chunks_when_file_gutted_to_comments() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_common_module_tree(
+            &workspace,
+            "Сервер",
+            "&НаСервере\nФункция УникальныйСимвол() Экспорт Возврат 1; КонецФункции\n",
+        );
+        let module = workspace.join("CommonModules").join("Сервер").join("Ext").join("Module.bsl");
+
+        let db_path = dir.path().join("search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.index_directory_fts(&workspace).unwrap();
+        assert_eq!(engine.chunk_count().unwrap(), 1, "the original body is one chunk");
+
+        // Gutted to a comment-only file while down: hash changes, chunking yields nothing.
+        fs::write(&module, "// только комментарий, без исполняемого кода\n").unwrap();
+        engine.index_directory_fts(&workspace).unwrap();
+
+        assert_eq!(
+            engine.chunk_count().unwrap(),
+            0,
+            "the stale chunk of the now-chunkless file is removed from the store",
         );
     }
 }
