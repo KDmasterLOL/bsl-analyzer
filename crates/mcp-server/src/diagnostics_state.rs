@@ -2935,4 +2935,29 @@ mod tests {
         // Unparseable env text becomes `None` before clamping.
         assert_eq!("nonsense".parse::<u64>().ok(), None);
     }
+
+    /// A delivered file outside the scan universe (an editor temp file) is a no-op for the
+    /// diagnostics drain: it touches no resident input and triggers no scan on the healthy
+    /// hot path. `apply_drained_entries` already ignores non-`.bsl`/`.xml`/config paths.
+    #[test]
+    fn non_scan_file_delivery_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let mut observer = hub.subscribe();
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(root.join("CommonModules/Сервер/Ext/Module.bsl.tmp"), "editor swap").unwrap();
+        assert!(wait_for_delivery(&hub, &mut observer, ".tmp"), "hub delivered the temp file");
+
+        let gen0 = raw_generation(&state);
+        // A read drains the diagnostics cursor (which holds the .tmp), and must apply nothing.
+        let _ = state.read(|_, _| ());
+        assert_eq!(raw_generation(&state), gen0, "a non-scan file does not move the resident");
+        assert_eq!(state.scan_count(), 0, "and triggers no scan on the healthy path");
+    }
 }

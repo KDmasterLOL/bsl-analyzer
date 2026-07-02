@@ -12,11 +12,14 @@
 //! so a served response's revision always describes the exact build it serves.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
+
+use crate::change_hub::{ChangeEntry, ChangeKind, SinkCursor, WorkspaceChangeHub};
 
 use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use bsl_search::SearchEngine;
@@ -155,6 +158,16 @@ pub(crate) struct GraphState {
     scan: Arc<Mutex<Option<ScanCache>>>,
     workspace_root: Option<PathBuf>,
     drift_interval: Duration,
+    /// The daemon's change hub, when this profile has one. The graph does NOT apply
+    /// drift in place (its fast path deliberately full-rebuilds on a metadata touch); the
+    /// hub only lets a freshness check invalidate its throttled fingerprint cache the
+    /// instant a change is delivered, instead of waiting out the drift throttle.
+    change_hub: Option<WorkspaceChangeHub>,
+    /// This graph's cursor into the hub. Subscribed lazily on first freshness check.
+    hub_cursor: Arc<Mutex<Option<SinkCursor>>>,
+    /// Count of actual fingerprint walks (cache misses), so a test can assert an irrelevant
+    /// delivered change did NOT invalidate the throttled cache and re-trigger a scan.
+    scan_count: Arc<AtomicUsize>,
 }
 
 impl GraphState {
@@ -174,7 +187,24 @@ impl GraphState {
             scan: Arc::new(Mutex::new(None)),
             workspace_root,
             drift_interval: DRIFT_CHECK_INTERVAL,
+            change_hub: None,
+            hub_cursor: Arc::new(Mutex::new(None)),
+            scan_count: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Number of fingerprint walks performed (cache misses), for asserting that an
+    /// irrelevant hub delivery did not invalidate the throttled cache.
+    #[cfg(test)]
+    fn scan_count(&self) -> usize {
+        self.scan_count.load(Ordering::SeqCst)
+    }
+
+    /// Attach the daemon's change hub so a freshness check invalidates the throttled
+    /// fingerprint cache as soon as a change is delivered, without waiting out the throttle.
+    pub(crate) fn with_change_hub(mut self, hub: WorkspaceChangeHub) -> Self {
+        self.change_hub = Some(hub);
+        self
     }
 
     pub(crate) fn status(&self) -> GraphStatus {
@@ -424,15 +454,54 @@ impl GraphState {
     /// `None` when no workspace is configured.
     fn current_disk_fp(&self) -> Option<u64> {
         let root = self.workspace_root.as_deref()?;
+        // Drain the hub first: a delivered change (or a reconcile request) invalidates the
+        // throttled fingerprint cache so the scan below runs fresh and the drift is seen
+        // now, not after the throttle expires.
+        self.invalidate_scan_on_hub_drift();
         let mut cache = lock_recover(&self.scan);
         if let Some(c) = cache.as_ref() {
             if c.at.elapsed() < self.drift_interval {
                 return Some(c.disk_fp);
             }
         }
+        self.scan_count.fetch_add(1, Ordering::SeqCst);
         let fp = workspace_fingerprint(root);
         *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp });
         Some(fp)
+    }
+
+    /// Drop the throttled fingerprint cache if the hub delivered any change (or asked for a
+    /// reconcile) since the last check, so the next fingerprint scan reflects it immediately.
+    /// The graph never applies drift in place — this only bypasses the throttle; the
+    /// fingerprint scan remains the source of truth. Subscribes the cursor lazily.
+    fn invalidate_scan_on_hub_drift(&self) {
+        let Some(hub) = &self.change_hub else {
+            return;
+        };
+        let cursor = {
+            let mut slot = lock_recover(&self.hub_cursor);
+            match *slot {
+                Some(cursor) => cursor,
+                None => {
+                    let cursor = hub.subscribe();
+                    *slot = Some(cursor);
+                    cursor
+                }
+            }
+        };
+        let batch = hub.drain(cursor);
+        *lock_recover(&self.hub_cursor) = Some(batch.cursor);
+        // Invalidate only when a change touches the graph's scan universe. The hub accepts
+        // every path (filtering is the consumer's job), so an editor/tooling temp file under
+        // a scan root would otherwise reset the cache on every check and re-trigger the full
+        // fingerprint scan — the very cost this sink exists to avoid. `rescan_required`
+        // carries the per-cursor degrade/overflow signal, so a lossy hub still forces one
+        // invalidation without pinning the scan open on every call.
+        let relevant =
+            batch.rescan_required || batch.entries.iter().any(entry_touches_scan_universe);
+        if relevant {
+            *lock_recover(&self.scan) = None;
+        }
     }
 
     /// Build (or rebuild) the database off-thread and publish it coherently.
@@ -766,6 +835,20 @@ pub(crate) fn file_fingerprint(path: &Path) -> Option<u64> {
     Some(FileStat { path: String::new(), mtime, len: meta.len() }.fingerprint())
 }
 
+/// Whether a drained change is relevant to the graph's fingerprint scan (`.bsl`/`.xml`
+/// under a scan root). A removed file's `canonical` may fall back to the raw spelling, so
+/// both are checked; a `SubtreeRemoved` names a vanished directory whose descendants'
+/// extensions are unknown, so it is treated conservatively as relevant.
+fn entry_touches_scan_universe(entry: &ChangeEntry) -> bool {
+    if entry.kind == ChangeKind::SubtreeRemoved {
+        return true;
+    }
+    let is_scan_ext = |path: &Path| {
+        matches!(path.extension().and_then(|e| e.to_str()), Some("bsl") | Some("xml"))
+    };
+    is_scan_ext(&entry.canonical) || is_scan_ext(&entry.raw)
+}
+
 /// Stat every graph-relevant file (`.bsl` sources + `.xml` metadata descriptors)
 /// under the scan roots, once. Covers both extensions because graph resolution
 /// depends on configuration visibility registered from the metadata, not only on
@@ -773,44 +856,108 @@ pub(crate) fn file_fingerprint(path: &Path) -> Option<u64> {
 /// and mirrors the loader's scan roots and symlink/canonicalization policy so it
 /// compares the same file universe (otherwise it would report phantom drift).
 pub(crate) fn scan_file_stats(workspace_root: &Path) -> Vec<FileStat> {
-    let mut stats: Vec<FileStat> = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
+    scan_stats_over_roots(&scan_roots(workspace_root))
+}
 
-    for root in scan_roots(workspace_root) {
-        for entry in WalkDir::new(&root).follow_links(true) {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if !entry.file_type().is_file() {
-                continue;
+/// The parallel scan over an explicit set of roots (each a directory, or occasionally a
+/// single file for a misconfigured extension path). Split out so it can be exercised
+/// directly against the sequential reference in tests.
+fn scan_stats_over_roots(roots: &[PathBuf]) -> Vec<FileStat> {
+    use rayon::prelude::*;
+
+    // Work units: each top-level entry under each scan-root directory. Directories are
+    // walked in parallel; a file reachable through two roots (e.g. a symlinked subtree) is
+    // de-duplicated when the per-unit results are merged, so the output set is independent
+    // of how the work was partitioned.
+    let mut units: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        match std::fs::read_dir(root) {
+            Ok(entries) => units.extend(entries.flatten().map(|e| e.path())),
+            // Not a directory (a misconfigured extension path pointing at a file) or
+            // unreadable: a file root is itself one work unit — matching the old
+            // `WalkDir::new(file)` which yielded it; anything else contributes nothing.
+            Err(_) => {
+                if root.is_file() {
+                    units.push(root.clone());
+                }
             }
-            match entry.path().extension().and_then(|e| e.to_str()) {
-                Some("bsl") | Some("xml") => {}
-                _ => continue,
-            }
-            let path = entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            let (mtime, len) = entry
-                .metadata()
-                .ok()
-                .map(|m| {
-                    let mtime = m
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0);
-                    (mtime, m.len())
-                })
-                .unwrap_or((0, 0));
-            stats.push(FileStat { path: path.to_string_lossy().into_owned(), mtime, len });
         }
     }
 
+    let per_unit: Vec<Vec<FileStat>> = units.par_iter().map(|unit| walk_unit_stats(unit)).collect();
+
+    // Merge and de-duplicate by canonical path. The kept `FileStat` is identical whichever
+    // occurrence wins: `(mtime, len)` come from the same on-disk target.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stats: Vec<FileStat> = Vec::new();
+    for stat in per_unit.into_iter().flatten() {
+        if seen.insert(stat.path.clone()) {
+            stats.push(stat);
+        }
+    }
     stats
+}
+
+/// Walk one top-level unit (a directory subtree, or a single top-level file) and collect
+/// the `(canonical path, mtime, len)` of every `.bsl`/`.xml` under it. A per-directory
+/// cache canonicalises each containing directory once instead of every file, which
+/// dominates the walk's syscall cost on a large configuration.
+fn walk_unit_stats(unit: &Path) -> Vec<FileStat> {
+    let mut out: Vec<FileStat> = Vec::new();
+    let mut dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
+    for entry in WalkDir::new(unit).follow_links(true) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        match entry.path().extension().and_then(|e| e.to_str()) {
+            Some("bsl") | Some("xml") => {}
+            _ => continue,
+        }
+        let canonical = canonical_file_path(entry.path(), entry.path_is_symlink(), &mut dir_cache);
+        let (mtime, len) = entry
+            .metadata()
+            .ok()
+            .map(|m| {
+                let mtime = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                (mtime, m.len())
+            })
+            .unwrap_or((0, 0));
+        out.push(FileStat { path: canonical.to_string_lossy().into_owned(), mtime, len });
+    }
+    out
+}
+
+/// The canonical path of a walked file, matching `entry.path().canonicalize()` but reusing
+/// a per-directory canonicalisation. A file that is ITSELF a symlink is canonicalised
+/// directly (its target lies elsewhere); a plain file inherits its directory's canonical
+/// prefix joined with its own name — identical to canonicalising the whole path, since only
+/// the directory components could contain symlinks.
+fn canonical_file_path(
+    path: &Path,
+    is_symlink: bool,
+    dir_cache: &mut HashMap<PathBuf, PathBuf>,
+) -> PathBuf {
+    if is_symlink {
+        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => {
+            let canonical_parent = dir_cache
+                .entry(parent.to_path_buf())
+                .or_insert_with(|| parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf()));
+            canonical_parent.join(name)
+        }
+        _ => path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+    }
 }
 
 /// A cheap, order-independent fingerprint of the graph-relevant files on disk.
@@ -3885,5 +4032,211 @@ mod tests {
         assert!(!settled.stale);
         assert_eq!(settled.revision, 2);
         assert_eq!(settled.reload, "none");
+    }
+
+    /// The straightforward sequential scan the parallel per-directory version replaces:
+    /// canonicalise every file individually, dedup, in walk order. Kept as the parity
+    /// oracle so the optimisation cannot silently change the file universe. Takes explicit
+    /// roots (each a dir or a file) so a file-root case can be exercised too.
+    #[cfg(test)]
+    fn scan_stats_over_roots_reference(roots: &[PathBuf]) -> Vec<FileStat> {
+        let mut stats: Vec<FileStat> = Vec::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        for root in roots {
+            for entry in WalkDir::new(root).follow_links(true) {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                match entry.path().extension().and_then(|e| e.to_str()) {
+                    Some("bsl") | Some("xml") => {}
+                    _ => continue,
+                }
+                let path =
+                    entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
+                if !seen.insert(path.clone()) {
+                    continue;
+                }
+                let (mtime, len) = entry
+                    .metadata()
+                    .ok()
+                    .map(|m| {
+                        let mtime = m
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0);
+                        (mtime, m.len())
+                    })
+                    .unwrap_or((0, 0));
+                stats.push(FileStat { path: path.to_string_lossy().into_owned(), mtime, len });
+            }
+        }
+        stats
+    }
+
+    /// The parallel, per-directory-canonical scan yields the same `(canonical path,
+    /// fingerprint)` set as the sequential reference — through nested directories, a
+    /// symlinked subtree, and a file symlink (all canonicalise to the same targets, so
+    /// dedup collapses the duplicate reachable paths identically).
+    #[test]
+    fn scan_file_stats_matches_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(root, "Сервер", true, "&НаСервере\nФункция Ч() Экспорт КонецФункции");
+        write_common_module(
+            root,
+            "Клиент",
+            false,
+            "&НаКлиенте\nПроцедура П() Экспорт КонецПроцедуры",
+        );
+        // A deeper nested directory.
+        write(
+            root,
+            "Documents/Док/Forms/Форма/Ext/Form/Module.bsl",
+            "Процедура Р() КонецПроцедуры",
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            // A real subtree reachable BOTH directly and through a directory symlink.
+            write(root, "_real/Sub/File.bsl", "Процедура С() КонецПроцедуры");
+            symlink(root.join("_real"), root.join("Linked")).unwrap();
+            // A file that is itself a symlink to a real `.bsl`.
+            symlink(root.join("CommonModules/Сервер/Ext/Module.bsl"), root.join("Alias.bsl"))
+                .unwrap();
+        }
+
+        // A scan-root that is itself a FILE (a misconfigured extension path), which the
+        // partitioning must still stat rather than silently drop. It lives OUTSIDE the
+        // directory roots so it is reachable ONLY as an explicit file-root.
+        let ext_dir = tempfile::tempdir().unwrap();
+        let file_root = ext_dir.path().join("Standalone.xml");
+        std::fs::write(&file_root, "<Configuration/>").unwrap();
+        let mut roots = scan_roots(root);
+        roots.push(file_root.clone());
+
+        let key = |s: &FileStat| (s.path.clone(), s.fingerprint());
+        let mut got: Vec<_> = scan_stats_over_roots(&roots).iter().map(key).collect();
+        let mut want: Vec<_> = scan_stats_over_roots_reference(&roots).iter().map(key).collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "parallel scan must match the sequential reference byte-for-byte");
+        assert!(!got.is_empty(), "the fixture produced files");
+        let file_root_canonical =
+            file_root.canonicalize().unwrap_or(file_root).to_string_lossy().into_owned();
+        assert!(
+            got.iter().any(|(p, _)| *p == file_root_canonical),
+            "a file scan-root must be stat'd, not dropped",
+        );
+    }
+
+    /// A `.bsl` edit delivered by the hub is seen by the very next graph freshness check,
+    /// even with a long drift throttle — the hub drain invalidates the fingerprint cache so
+    /// the throttle is bypassed. Without the hub the edit would stay invisible until the
+    /// throttle expired.
+    #[test]
+    fn graph_freshness_invalidates_on_hub_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        sample_workspace(root);
+
+        let hub = WorkspaceChangeHub::start(vec![root.to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+
+        let mut graph = GraphState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
+        // A long throttle: without the hub the edit below would stay invisible this whole time.
+        graph.drift_interval = Duration::from_secs(120);
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let snap = graph.snapshot().expect("ready");
+        // Prime the fingerprint cache and subscribe the graph cursor at "now".
+        assert!(!graph.freshness(&snap).stale, "a freshly built graph is not stale");
+
+        // Confirm the hub delivered the edit (so the graph cursor holds it too).
+        let mut observer = hub.subscribe();
+        std::thread::sleep(Duration::from_millis(10));
+        write(
+            root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции",
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut delivered = false;
+        while Instant::now() < deadline {
+            let batch = hub.drain(observer);
+            observer = batch.cursor;
+            if batch.entries.iter().any(|e| e.raw.to_string_lossy().contains("Module.bsl")) {
+                delivered = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(delivered, "the hub delivered the edit");
+
+        // The next freshness check sees the drift immediately despite the 120s throttle.
+        assert!(
+            graph.freshness(&snap).stale,
+            "a hub-delivered edit is seen without waiting out the drift throttle",
+        );
+    }
+
+    /// An irrelevant file (an editor/tooling temp file) delivered under a scan root must NOT
+    /// invalidate the throttled fingerprint cache — otherwise every freshness check would
+    /// re-run the full scan, reviving the cost the sink exists to avoid.
+    #[test]
+    fn graph_freshness_ignores_non_scan_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        sample_workspace(root);
+
+        let hub = WorkspaceChangeHub::start(vec![root.to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+
+        let mut graph = GraphState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
+        graph.drift_interval = Duration::from_secs(120);
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let snap = graph.snapshot().expect("ready");
+        // Prime the cache + subscribe the cursor; one scan so far.
+        assert!(!graph.freshness(&snap).stale, "a freshly built graph is not stale");
+        let scans_after_prime = graph.scan_count();
+
+        // Deliver only a `.tmp` file — nothing in the graph's `.bsl`/`.xml` universe.
+        let mut observer = hub.subscribe();
+        std::thread::sleep(Duration::from_millis(10));
+        write(root, "CommonModules/Сервер/Ext/Module.bsl.tmp", "editor swap file");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut delivered = false;
+        while Instant::now() < deadline {
+            let batch = hub.drain(observer);
+            observer = batch.cursor;
+            if batch.entries.iter().any(|e| e.raw.to_string_lossy().contains(".tmp")) {
+                delivered = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(delivered, "the hub delivered the .tmp file");
+
+        // The `.tmp` is not scan-relevant, so the cache is NOT invalidated: the 120s throttle
+        // still holds and no fingerprint walk runs. (A temp file never changes the fingerprint
+        // either, so `stale` alone could not catch a spurious re-scan — hence the scan count.)
+        assert!(!graph.freshness(&snap).stale, "a temp file does not make the graph stale");
+        assert_eq!(
+            graph.scan_count(),
+            scans_after_prime,
+            "an irrelevant temp file must not invalidate the cache and re-trigger a scan",
+        );
     }
 }

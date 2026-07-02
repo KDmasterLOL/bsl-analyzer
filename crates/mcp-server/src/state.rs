@@ -155,12 +155,24 @@ impl SharedState {
             WorkspaceSearchMode::SqliteLocal
         };
 
+        // The change hub owns the recursive workspace watcher and starts before any
+        // consumer subscribes: the search engine is built on a background thread and must
+        // not gate the watcher's lifecycle. It watches the whole drift-scan universe — the
+        // config source root plus every extension root — so diagnostics/graph drift in
+        // extensions is event-delivered, not left to the reconciler. Search subscribes as a
+        // sink and preserves its prior behavior (mark only source-root `.bsl` paths dirty).
+        let mut watch_roots = vec![config_path.to_path_buf()];
+        watch_roots.extend(project.extension_paths().iter().map(|(_, path)| path.clone()));
+        let change_hub = WorkspaceChangeHub::start(watch_roots);
+
         // Created before the search-init thread so it can own the workspace graph: for
         // a local SQLite workspace the search-init drives a single fused parse pass
         // that builds the graph AND the search index, then publishes the graph through
         // this handle. A clone (cheap, shared `Arc`s) goes to the search thread; this
-        // copy stays in `SharedState` for graph-tool serving and drift/reload.
-        let graph = GraphState::for_workspace(source_dir.clone());
+        // copy stays in `SharedState` for graph-tool serving and drift/reload. It carries
+        // the hub so a graph freshness check invalidates its fingerprint cache on delivery.
+        let graph =
+            GraphState::for_workspace(source_dir.clone()).with_change_hub(change_hub.clone());
 
         Self::spawn_workspace_search_init(
             Arc::clone(&search_engine),
@@ -174,15 +186,6 @@ impl SharedState {
             graph.clone(),
         );
 
-        // The change hub owns the recursive workspace watcher and starts before any
-        // consumer subscribes: the search engine is built on a background thread and must
-        // not gate the watcher's lifecycle. It watches the whole drift-scan universe — the
-        // config source root plus every extension root — so diagnostics drift in extensions
-        // is event-delivered, not left to the reconciler. Search subscribes as a sink and
-        // preserves its prior behavior (mark only source-root `.bsl` paths dirty).
-        let mut watch_roots = vec![config_path.to_path_buf()];
-        watch_roots.extend(project.extension_paths().iter().map(|(_, path)| path.clone()));
-        let change_hub = WorkspaceChangeHub::start(watch_roots);
         Self::spawn_search_sink(
             change_hub.clone(),
             Arc::clone(&search_engine),
