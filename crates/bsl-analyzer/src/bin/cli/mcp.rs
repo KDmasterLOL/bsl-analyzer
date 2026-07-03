@@ -39,12 +39,16 @@ pub struct McpServeArgs {
 }
 
 impl McpCommand {
-    /// Default on-disk log destination for a daemon backend, when `BSL_LOG_FILE`
-    /// does not override it: `.build/bsl-analyzer-daemon.log` next to the graph
-    /// and search databases. A daemon is spawned by a broker proxy with no
+    /// Opt-in on-disk log destination for a daemon backend, enabled by
+    /// `BSL_MCP_DAEMON_LOG` (`1`/`true`/`yes`/`on` → `.build/bsl-analyzer-daemon.log`
+    /// next to the graph and search databases; any other non-empty value is taken
+    /// as an explicit path). A daemon is spawned by a broker proxy with no
     /// terminal, so without a file its diagnostics (build heartbeat, stall
-    /// watchdog reports) vanish into a closed stderr — exactly when a wedged
-    /// cold build most needs a post-mortem trail.
+    /// watchdog reports) vanish into a closed stderr — set the variable when
+    /// investigating daemon behaviour. Off by default: routine deployments should
+    /// not accrete log files. The stall watchdog separately drops a one-shot
+    /// report file next to the graph database when a build wedges, so that
+    /// post-mortem survives even with logging off.
     ///
     /// The file is APPENDED across runs (each run stamps a session-start line),
     /// never truncated or renamed at startup: the broker's spawn race can start
@@ -54,20 +58,44 @@ impl McpCommand {
     /// is kilobytes, so the rotation window and a spawn race cannot coincide).
     ///
     /// Returns `None` for non-daemon modes (stdio/broker keep stderr: a direct
-    /// client or terminal is attached) and when the directory cannot be prepared
-    /// (logging then falls back to stderr rather than failing startup).
+    /// client or terminal is attached), when the opt-in is absent, and when the
+    /// directory cannot be prepared (logging then falls back to stderr rather
+    /// than failing startup).
     pub fn default_daemon_log_file(&self) -> Option<PathBuf> {
+        self.daemon_log_file_for(std::env::var("BSL_MCP_DAEMON_LOG").ok().as_deref())
+    }
+
+    fn daemon_log_file_for(&self, opt_in: Option<&str>) -> Option<PathBuf> {
         const ROTATE_BYTES: u64 = 50 * 1024 * 1024;
 
         let McpCommand::Serve(args) = self else { return None };
         if !matches!(args.mode, McpServeMode::Daemon) {
             return None;
         }
-        let build_dir = args.source_dir.as_deref().unwrap_or_else(|| ".".as_ref()).join(".build");
-        std::fs::create_dir_all(&build_dir).ok()?;
-        let log_path = build_dir.join("bsl-analyzer-daemon.log");
+        let log_path = match opt_in.map(str::trim) {
+            None | Some("" | "0" | "false" | "no" | "off") => return None,
+            Some("1" | "true" | "yes" | "on") => {
+                let build_dir =
+                    args.source_dir.as_deref().unwrap_or_else(|| ".".as_ref()).join(".build");
+                std::fs::create_dir_all(&build_dir).ok()?;
+                build_dir.join("bsl-analyzer-daemon.log")
+            }
+            Some(path) => {
+                // An unpreparable explicit path degrades to stderr like every
+                // other failure here — opt-in logging must never fail startup.
+                let path = PathBuf::from(path);
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(parent).ok()?;
+                }
+                path
+            }
+        };
         if std::fs::metadata(&log_path).is_ok_and(|m| m.len() > ROTATE_BYTES) {
-            let _ = std::fs::rename(&log_path, build_dir.join("bsl-analyzer-daemon.log.prev"));
+            // Append `.prev` to the whole file name (`with_extension` would
+            // truncate a dotted name like `daemon.custom.log`).
+            let mut rotated = log_path.file_name().unwrap_or_default().to_os_string();
+            rotated.push(".prev");
+            let _ = std::fs::rename(&log_path, log_path.with_file_name(rotated));
         }
         Some(log_path)
     }
@@ -760,20 +788,30 @@ mod tests {
     }
 
     #[test]
-    fn daemon_log_defaults_into_build_dir_and_rotates_only_by_size() {
+    fn daemon_log_requires_explicit_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = serve_command(McpServeMode::Daemon, dir.path());
+        for off in [None, Some(""), Some("0"), Some("false"), Some("off")] {
+            assert!(cmd.daemon_log_file_for(off).is_none(), "{off:?} must keep stderr");
+        }
+    }
+
+    #[test]
+    fn daemon_log_opt_in_lands_in_build_dir_and_rotates_only_by_size() {
         let dir = tempfile::tempdir().unwrap();
 
         let path = serve_command(McpServeMode::Daemon, dir.path())
-            .default_daemon_log_file()
-            .expect("daemon mode defaults a log file");
+            .daemon_log_file_for(Some("1"))
+            .expect("opt-in enables the default log file");
         assert_eq!(path, dir.path().join(".build/bsl-analyzer-daemon.log"));
         assert!(path.parent().unwrap().is_dir(), "`.build` is created eagerly");
 
         // A small live log is left in place: a concurrent daemon candidate must
         // not rename the winner's file out from under it.
         std::fs::write(&path, "live winner log").unwrap();
-        let again =
-            serve_command(McpServeMode::Daemon, dir.path()).default_daemon_log_file().unwrap();
+        let again = serve_command(McpServeMode::Daemon, dir.path())
+            .daemon_log_file_for(Some("true"))
+            .unwrap();
         assert_eq!(again, path);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "live winner log");
         let prev = dir.path().join(".build/bsl-analyzer-daemon.log.prev");
@@ -781,16 +819,49 @@ mod tests {
 
         // An oversized log rotates to `.prev` (sparse file keeps the test cheap).
         std::fs::File::create(&path).unwrap().set_len(51 * 1024 * 1024).unwrap();
-        serve_command(McpServeMode::Daemon, dir.path()).default_daemon_log_file().unwrap();
+        serve_command(McpServeMode::Daemon, dir.path()).daemon_log_file_for(Some("1")).unwrap();
         assert!(prev.exists());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn daemon_log_opt_in_accepts_an_explicit_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join("custom.log");
+        let path = serve_command(McpServeMode::Daemon, dir.path())
+            .daemon_log_file_for(Some(custom.to_str().unwrap()))
+            .unwrap();
+        assert_eq!(path, custom);
+    }
+
+    #[test]
+    fn daemon_log_explicit_path_prepares_missing_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join("nested/dirs/daemon.log");
+        let path = serve_command(McpServeMode::Daemon, dir.path())
+            .daemon_log_file_for(Some(custom.to_str().unwrap()))
+            .expect("missing parent directories are created, not fatal");
+        assert_eq!(path, custom);
+        assert!(path.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn daemon_log_rotation_appends_prev_to_dotted_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join("daemon.custom.log");
+        std::fs::File::create(&custom).unwrap().set_len(51 * 1024 * 1024).unwrap();
+        serve_command(McpServeMode::Daemon, dir.path())
+            .daemon_log_file_for(Some(custom.to_str().unwrap()))
+            .unwrap();
+        assert!(dir.path().join("daemon.custom.log.prev").exists());
+        assert!(!custom.exists());
     }
 
     #[test]
     fn stdio_and_broker_modes_keep_stderr_logging() {
         let dir = tempfile::tempdir().unwrap();
         for mode in [McpServeMode::Stdio, McpServeMode::Broker] {
-            assert!(serve_command(mode, dir.path()).default_daemon_log_file().is_none());
+            assert!(serve_command(mode, dir.path()).daemon_log_file_for(Some("1")).is_none());
         }
     }
 }

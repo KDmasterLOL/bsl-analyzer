@@ -379,7 +379,35 @@ impl Drop for BuildWatchdog {
     }
 }
 
-fn spawn_build_watchdog(ticker: Arc<GraphBuildTicker>) -> BuildWatchdog {
+/// Append one stall episode to the report file next to the graph database. The
+/// daemon's file logging is opt-in, so this one-shot artifact is what survives a
+/// wedged build in a default deployment: nothing is written in healthy runs,
+/// and each episode appends a timestamped position + thread-state block.
+fn write_stall_report(dir: &Path, stalled_secs: u64, position: &str, threads: &str) {
+    use std::io::Write;
+    let path = dir.join("bsl-graph-stall-report.txt");
+    let epoch_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let entry = format!(
+        "[epoch {epoch_secs}] graph build stalled for {stalled_secs}s\n\
+         position: {position}\nthreads: {threads}\n\n"
+    );
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(entry.as_bytes()));
+    if let Err(e) = written {
+        tracing::warn!(path = %path.display(), "could not write stall report: {e}");
+    }
+}
+
+fn spawn_build_watchdog(
+    ticker: Arc<GraphBuildTicker>,
+    report_dir: Option<PathBuf>,
+) -> BuildWatchdog {
     let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let stop_pair = Arc::clone(&stop);
     // Misconfiguration must be loud: an operator reproducing a wedged build relies
@@ -441,12 +469,17 @@ fn spawn_build_watchdog(ticker: Arc<GraphBuildTicker>) -> BuildWatchdog {
                     reported_episodes = 0;
                 } else if episodes > reported_episodes {
                     reported_episodes = episodes;
+                    let position = ticker.position();
+                    let threads = thread_state_summary();
                     tracing::error!(
                         stalled_secs = stalled_ms / 1000,
-                        position = %ticker.position(),
-                        threads = %thread_state_summary(),
+                        position = %position,
+                        threads = %threads,
                         "graph build has made no progress; its parallel region may be deadlocked"
                     );
+                    if let Some(dir) = &report_dir {
+                        write_stall_report(dir, stalled_ms / 1000, &position, &threads);
+                    }
                     if abort_on_stall {
                         tracing::error!("BSL_GRAPH_STALL_ABORT=1: aborting the stalled process");
                         std::process::abort();
@@ -528,7 +561,8 @@ fn build_graph_database_inner(
     // chunking): kept alive until after `finalize`, so a wedge anywhere in the
     // pipeline gets reported rather than freezing silently.
     let ticker = Arc::new(GraphBuildTicker::default());
-    let _watchdog = spawn_build_watchdog(Arc::clone(&ticker));
+    let _watchdog =
+        spawn_build_watchdog(Arc::clone(&ticker), out_path.parent().map(Path::to_path_buf));
 
     // Scope the closures so their borrows end before `finalize`. `open_batch`
     // loads only the batch's texts (sharing the resident source root + config);
@@ -844,7 +878,8 @@ pub fn update_graph_database_bodies(
     // The reprojection's index pass runs the same guarded batch runners as a full
     // build, so it gets the same heartbeat + stall watchdog.
     let ticker = Arc::new(GraphBuildTicker::default());
-    let _watchdog = spawn_build_watchdog(Arc::clone(&ticker));
+    let _watchdog =
+        spawn_build_watchdog(Arc::clone(&ticker), out_path.parent().map(Path::to_path_buf));
 
     let rows = ide::reproject_changed_modules(
         &all_modules,
@@ -1215,6 +1250,28 @@ pub fn caller_delta_plan(
             .map(PathBuf::from)
             .collect(),
     ))
+}
+
+#[cfg(test)]
+mod stall_report_tests {
+    use super::write_stall_report;
+
+    #[test]
+    fn episodes_append_to_one_report_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_stall_report(dir.path(), 600, "call_edges batch 52/59", "t1:S:futex");
+        write_stall_report(dir.path(), 1200, "call_edges batch 52/59", "t1:S:futex");
+        let report =
+            std::fs::read_to_string(dir.path().join("bsl-graph-stall-report.txt")).unwrap();
+        assert!(report.contains("stalled for 600s"));
+        assert!(report.contains("stalled for 1200s"));
+    }
+
+    #[test]
+    fn missing_directory_is_a_warning_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        write_stall_report(&dir.path().join("gone"), 600, "index batch 1/2", "t1:S:futex");
+    }
 }
 
 #[cfg(test)]

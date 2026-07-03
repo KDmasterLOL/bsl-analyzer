@@ -10,7 +10,7 @@ use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
 
 use crate::{
-    metadata::{intern_configuration_path, load_configuration, ConfigurationPathInput},
+    metadata::{intern_configuration_path, ConfigurationPathInput},
     provider::{AnalysisProvider, VisibleConfigWithRoot},
     RootDatabase,
 };
@@ -93,7 +93,7 @@ impl<'db> SalsaProvider<'db> {
 impl AnalysisProvider for SalsaProvider<'_> {
     fn configuration(&self) -> Option<Arc<Configuration>> {
         let path_input = self.configuration_path_input?;
-        Some(load_configuration(self.db, path_input))
+        Some(self.db.load_configuration(path_input))
     }
 
     fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfigWithRoot> {
@@ -105,7 +105,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
                     vec![VisibleConfigWithRoot {
                         config: bsl_config::VisibleConfig {
                             name: None,
-                            configuration: load_configuration(self.db, path_input),
+                            configuration: self.db.load_configuration(path_input),
                         },
                         root,
                     }]
@@ -122,7 +122,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
                     &path.to_string_lossy(),
                     self.db.config_root_revision_for_path(&path),
                 );
-                let configuration = load_configuration(self.db, path_input);
+                let configuration = self.db.load_configuration(path_input);
                 VisibleConfigWithRoot {
                     config: bsl_config::VisibleConfig { name, configuration },
                     root: path,
