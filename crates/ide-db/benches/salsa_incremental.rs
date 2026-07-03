@@ -249,6 +249,49 @@ fn bench_metadata_revalidation_after_bsl_edit(c: &mut Criterion) {
     });
 }
 
+/// Cost of a "new revision, nothing changed" pass — the dominant LSP shape:
+/// a single keystroke opens a revision under which thousands of untouched memos
+/// must revalidate. `synthetic_write` opens that revision and reports a write of
+/// the given durability without mutating any input, so the following reads take
+/// the `maybe_changed_after` validate path (a dependency-edge walk that
+/// backdates) instead of re-executing. `bench_incremental_update` above measures
+/// re-execution after a real edit; this measures the far more frequent
+/// validate-only path, which was previously unmeasured.
+///
+/// The `low` variant models a plain code edit (LOW-durability input). The `high`
+/// variant bumps every durability tier at once, exposing the ceiling cost paid
+/// when a high-durability input (a library root, metadata) changes and the whole
+/// memo graph must revalidate.
+fn bench_validate_no_change(c: &mut Criterion) {
+    use salsa::{Database, Durability};
+
+    const NUM_FILES: u32 = 200;
+
+    let mut group = c.benchmark_group("validate_no_change");
+    for (label, durability) in [("low", Durability::LOW), ("high", Durability::HIGH)] {
+        let mut db = setup_db(NUM_FILES);
+        for i in 0..NUM_FILES {
+            let file_id = FileId(i);
+            let _ = db.parse(file_id);
+            let _ = db.item_tree(file_id);
+            let _ = db.symbol_tree(hir::ModuleId::new(file_id));
+        }
+
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                db.synthetic_write(black_box(durability));
+                for i in 0..NUM_FILES {
+                    let file_id = FileId(i);
+                    let _ = db.parse(black_box(file_id));
+                    let _ = db.item_tree(black_box(file_id));
+                    let _ = db.symbol_tree(black_box(hir::ModuleId::new(file_id)));
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_cache_hit,
@@ -257,6 +300,7 @@ criterion_group!(
     bench_item_tree_incremental,
     bench_symbol_tree_cache_hit,
     bench_large_file_set,
-    bench_metadata_revalidation_after_bsl_edit
+    bench_metadata_revalidation_after_bsl_edit,
+    bench_validate_no_change
 );
 criterion_main!(benches);

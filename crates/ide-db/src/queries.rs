@@ -686,3 +686,40 @@ pub fn method_cyclomatic_query<'db>(
     let module_metrics = module_cyclomatic_query(db, file_id_input);
     module_metrics.get(method_id.local_id)
 }
+
+#[cfg(test)]
+mod salsa_backtrace_tests {
+    use super::*;
+    use crate::RootDatabaseImpl;
+    use vfs::FileId;
+
+    /// Exercises the condition the `main` panic hook relies on: inside a running
+    /// query the database is attached to the thread, so `Backtrace::capture()`
+    /// can resolve the query stack — impossible once `catch_unwind` has unwound.
+    #[salsa::tracked]
+    fn capture_backtrace_in_query<'db>(
+        db: &'db dyn RootDatabase,
+        input: FileIdInput<'db>,
+    ) -> Option<String> {
+        let _ = input.file_id(db);
+        salsa::Backtrace::capture().map(|bt| bt.to_string())
+    }
+
+    #[test]
+    fn capture_inside_query_names_the_running_query() {
+        let db = RootDatabaseImpl::new();
+        let input = FileIdInput::new(&db, FileId(0));
+        let rendered = capture_backtrace_in_query(&db, input)
+            .expect("database is attached inside a tracked query");
+        assert!(rendered.contains("query stacktrace"), "unexpected render: {rendered}");
+        assert!(
+            rendered.contains("capture_backtrace_in_query"),
+            "backtrace should name the running query: {rendered}"
+        );
+    }
+
+    #[test]
+    fn capture_outside_any_query_is_none() {
+        assert!(salsa::Backtrace::capture().is_none());
+    }
+}
