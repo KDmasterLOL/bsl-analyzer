@@ -88,7 +88,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     result.extend(safe_collect("metadata", || collect_metadata_diagnostics(ctx)));
 
-    deduplicate_diagnostics(&mut result);
+    normalize_diagnostics(&mut result);
 
     result
 }
@@ -211,7 +211,7 @@ pub fn apply_extension_merge<'db>(
         standalone.extend(effective::remap_inserted(eff_inference, &effmod.segments));
     }
 
-    deduplicate_diagnostics(&mut standalone);
+    normalize_diagnostics(&mut standalone);
     standalone
 }
 
@@ -247,7 +247,13 @@ fn safe_collect(name: &str, f: impl FnOnce() -> Vec<Diagnostic>) -> Vec<Diagnost
     result
 }
 
-fn deduplicate_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
+/// Deduplicates dominated findings and puts the result into a canonical total order.
+///
+/// Several handlers group findings in hash collections whose iteration order varies
+/// run to run; sorting once here makes every consumer (LSP publish, CLI reporters,
+/// SARIF baselines compared byte-for-byte) deterministic without each handler having
+/// to enforce its own emit order.
+fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
     let dedupe_codes = [DiagnosticCode::UnreachableCode];
 
     let (mut to_dedupe, mut keep): (Vec<_>, Vec<_>) =
@@ -273,9 +279,79 @@ fn deduplicate_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
         keep.extend(deduped);
     }
 
+    keep.sort_by(|a, b| {
+        (a.range.start(), a.range.end(), a.code.as_str(), &a.message).cmp(&(
+            b.range.start(),
+            b.range.end(),
+            b.code.as_str(),
+            &b.message,
+        ))
+    });
+
     *diagnostics = keep;
 }
 
 fn ranges_overlap(a: ide_db::TextRange, b: ide_db::TextRange) -> bool {
     a.start() < b.end() && b.start() < a.end()
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::*;
+
+    fn diag(code: DiagnosticCode, start: u32, end: u32, message: &str) -> Diagnostic {
+        Diagnostic {
+            code,
+            message: message.to_string(),
+            severity: Severity::Information,
+            range: ide_db::TextRange::new(start.into(), end.into()),
+            tags: vec![],
+            fixes: vec![],
+        }
+    }
+
+    #[test]
+    fn normalize_orders_by_range_then_code_then_message() {
+        let mut diagnostics = vec![
+            diag(DiagnosticCode::LineLength, 10, 20, "b"),
+            diag(DiagnosticCode::LineLength, 0, 5, "z"),
+            diag(DiagnosticCode::MagicNumber, 10, 20, "a"),
+            diag(DiagnosticCode::LineLength, 10, 20, "a"),
+        ];
+
+        normalize_diagnostics(&mut diagnostics);
+
+        let keys: Vec<_> = diagnostics
+            .iter()
+            .map(|d| (u32::from(d.range.start()), d.code.as_str(), d.message.as_str()))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                (0, "LineLength", "z"),
+                (10, "LineLength", "a"),
+                (10, "LineLength", "b"),
+                (10, "MagicNumber", "a"),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_is_stable_across_input_permutations() {
+        let build = || {
+            vec![
+                diag(DiagnosticCode::MagicNumber, 3, 7, "m"),
+                diag(DiagnosticCode::LineLength, 3, 7, "m"),
+                diag(DiagnosticCode::LineLength, 1, 2, "x"),
+            ]
+        };
+
+        let mut forward = build();
+        normalize_diagnostics(&mut forward);
+
+        let mut reversed: Vec<_> = build().into_iter().rev().collect();
+        normalize_diagnostics(&mut reversed);
+
+        assert_eq!(forward, reversed);
+    }
 }

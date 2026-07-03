@@ -1,5 +1,5 @@
 use crate::{DiagnosticCode, DiagnosticsContext};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode};
 
@@ -38,7 +38,9 @@ pub fn has_template_in_parents(node: &SyntaxNode) -> bool {
 
 #[derive(Debug, Clone)]
 pub struct NstrConfig {
-    pub declared_languages: HashSet<String>,
+    /// Ordered so that language lists rendered into diagnostic messages are
+    /// byte-stable run to run (SARIF baselines are compared with plain `cmp`).
+    pub declared_languages: BTreeSet<String>,
 }
 
 impl NstrConfig {
@@ -46,7 +48,7 @@ impl NstrConfig {
         let declared_str =
             ctx.config.get_string(code, "declaredLanguages").unwrap_or(DEFAULT_DECLARED_LANGUAGES);
 
-        let declared_languages: HashSet<String> = declared_str
+        let declared_languages: BTreeSet<String> = declared_str
             .split(',')
             .map(|s| s.trim().fold_lower())
             .filter(|s| !s.is_empty())

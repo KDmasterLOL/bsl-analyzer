@@ -202,6 +202,10 @@ fn report_duplicates(
         }
     }
 
+    // The groups map iterates in hash order, which varies run to run; emit in source
+    // order (position of each literal's first occurrence) so the output is stable.
+    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
+
     diagnostics
 }
 
@@ -392,6 +396,24 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_groups_emitted_in_source_order() {
+        let code = r#"
+Процедура Тест()
+    А = "Первый литерал";
+    Б = "Второй литерал";
+    В = "Первый литерал";
+    Г = "Второй литерал";
+    Д = "Первый литерал";
+    Е = "Второй литерал";
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics[0].message.contains("Первый литерал"));
+        assert!(diagnostics[1].message.contains("Второй литерал"));
     }
 
     #[test]

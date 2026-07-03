@@ -298,7 +298,7 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        let snapshot = format_diags(code, &diagnostics).replace("[ru, en]", "[en, ru]");
+        let snapshot = format_diags(code, &diagnostics);
         expect![[r#"
             MultilingualStringHasAllDeclaredLanguages @ 13:17..13:23
               message: Добавьте строки для языков: [en, ru]
