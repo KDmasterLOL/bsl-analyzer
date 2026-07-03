@@ -159,6 +159,9 @@ fn lexical_code_hits(
         configured_baseline,
         external_baseline.as_ref(),
     )?;
+    // Reindex dirty overlay paths from the shared resident parse before serving. Runs OFF the
+    // engine lock and no-ops when the resident is unavailable.
+    crate::state::SharedState::prefetch_resident_overlay(engine);
     let guard = match try_acquire_engine(engine) {
         Ok(g) => g,
         Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
@@ -292,6 +295,9 @@ fn semantic_code_hits(
         .lock()
         .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
         .clone();
+    // Reindex dirty overlay paths from the shared resident parse before serving. Runs OFF the
+    // engine lock and no-ops when the resident is unavailable.
+    crate::state::SharedState::prefetch_resident_overlay(engine);
     let guard = match try_acquire_engine(engine) {
         Ok(g) => g,
         Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),

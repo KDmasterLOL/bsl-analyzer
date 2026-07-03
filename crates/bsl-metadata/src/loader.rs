@@ -13,6 +13,20 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     let path = path.as_ref();
     let _span = tracing::info_span!("load_from_directory", ?path).entered();
 
+    // This load fans out over a `rayon::scope` on the CURRENT pool. Under an
+    // exclusive-pool job (a graph-build worker) that nesting can deadlock: a
+    // worker waiting on the scope steals a sibling job whose query re-enters a
+    // memo suspended on this very thread. Report the violation loudly — the
+    // deadlock it precedes is otherwise silent.
+    if stdx::par_guard::no_nested_parallelism() {
+        tracing::error!(
+            ?path,
+            "whole-config metadata load entered from a no-nested-parallelism job; \
+             its rayon::scope may deadlock the calling pool"
+        );
+        debug_assert!(false, "metadata loader entered under a no-nested-parallelism job");
+    }
+
     let loaded = load_all_metadata_parallel(path);
     let config = build_configuration(loaded);
 

@@ -1,5 +1,6 @@
 pub mod case;
 pub mod fs;
+pub mod par_guard;
 pub mod thread;
 
 pub use itertools::Itertools;

@@ -21,10 +21,11 @@ pub use formatting::{FormattingConfig, FormattingResult};
 pub use graph::{
     build_workspace_graph_rows, classify_graph_id, confidence_label, method_graph_id,
     method_id_for_path, module_id_of_method, rank_resolve_candidates, reproject_changed_modules,
-    scope_for_path, BatchDbOpener, ChunkRow, Direction, EdgeRef, FusedChunkSink, GraphBuildSummary,
-    GraphContext, GraphDetail, GraphError, GraphIdKind, GraphOverview, GraphRowSink, ModuleMethod,
-    NeighborsParams, NeighborsResult, NodeRef, NodeResult, ReprojectedRows, ResolveCandidate,
-    ResolveResult, SourceItem, SourceResult, MAX_DROPPED_SAMPLE,
+    scope_for_path, warm_batch_config_roots, BatchDbOpener, ChunkRow, Direction, EdgeRef,
+    FusedChunkSink, GraphBuildSummary, GraphBuildTicker, GraphContext, GraphDetail, GraphError,
+    GraphIdKind, GraphOverview, GraphRowSink, ModuleMethod, NeighborsParams, NeighborsResult,
+    NodeRef, NodeResult, ReprojectedRows, ResolveCandidate, ResolveResult, SourceItem,
+    SourceResult, MAX_DROPPED_SAMPLE,
 };
 pub use hir::graph_index;
 pub use hir::ModuleId;
@@ -121,6 +122,20 @@ impl Analysis {
     pub fn file_text(&self, file_id: FileId) -> String {
         use ide_db::base_db::SourceDatabase;
         self.db.file_text(file_id).to_string()
+    }
+
+    /// A file's source text as the shared `Arc<str>` the database holds, without a `String`
+    /// copy. Reads the disk-backed text under the same LRU/revision contract as any query.
+    pub fn file_text_arc(&self, file_id: FileId) -> Arc<str> {
+        use ide_db::base_db::SourceDatabase;
+        self.db.file_text(file_id)
+    }
+
+    /// The file's parsed syntax tree, memoized in the database. Shares the one parse the rest
+    /// of the analysis rides, so a consumer can chunk it without re-parsing the source.
+    pub fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
+        use ide_db::base_db::RootQueryDb;
+        self.db.parse(file_id)
     }
 
     pub fn file_diagnostics_cached(

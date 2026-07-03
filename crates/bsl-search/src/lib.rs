@@ -59,8 +59,9 @@ pub use merge::{
 };
 pub use ports::{
     BaselineLexicalSearch, BaselineManifestFile, BaselineSemanticSearch, EmbeddingGenerator,
-    EmbeddingStore, GraphContextProvider, LexicalSearchIndex, OverlayBuilder, ResolvedViewService,
-    SnapshotCatalog, SnapshotContentStore, SnapshotPublisher, VectorSearchIndex,
+    EmbeddingStore, GraphContextError, GraphContextProvider, LexicalSearchIndex, ModuleSnapshot,
+    ModuleSnapshotSource, OverlayBuilder, ResolvedViewService, SnapshotCatalog,
+    SnapshotContentStore, SnapshotFetch, SnapshotPublisher, VectorSearchIndex,
     WorkspaceBaselineManifest, WorkspaceBaselineManifestStore,
 };
 pub use publish::{

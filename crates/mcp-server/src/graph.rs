@@ -15,8 +15,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::change_hub::{ChangeEntry, ChangeKind, SinkCursor, WorkspaceChangeHub};
@@ -56,6 +56,31 @@ pub(crate) enum GraphStatus {
     Ready { files: usize },
     /// Load failed.
     Failed(String),
+}
+
+/// What the graph hands its publish hook after a build publishes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GraphPublishSignal {
+    /// A fresher reload is already catching up: a fast-path hint the consumer may use to
+    /// skip this round and let that reload's publish do the re-render. Not correctness-bearing.
+    pub(crate) drift_pending: bool,
+    /// The mark-seq captured when THIS build started (see [`GraphState::mark_seq`]). Bounds
+    /// which context-dirty marks the consumer may clear: only drifts this build already
+    /// reflects, never one stamped after it began. This bound is what makes the consumption
+    /// correct.
+    pub(crate) build_start_seq: i64,
+}
+
+/// What a [`GraphState::nudge_rebuild`] scheduled. Surfaced so the single-flight
+/// behavior is assertable in a test without racing the background build thread.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NudgeOutcome {
+    /// The initial background load was started (`Idle → Loading`).
+    LoadStarted,
+    /// The single reload slot was claimed and a rebuild thread spawned.
+    ReloadClaimed,
+    /// Nothing scheduled: disabled, a build/reload already in flight, or no drift.
+    NoOp,
 }
 
 /// State of an in-flight or last-attempted background reload, surfaced to agents
@@ -168,6 +193,36 @@ pub(crate) struct GraphState {
     /// Count of actual fingerprint walks (cache misses), so a test can assert an irrelevant
     /// delivered change did NOT invalidate the throttled cache and re-trigger a scan.
     scan_count: Arc<AtomicUsize>,
+    /// Invoked on this graph's background thread immediately after each publish/adopt,
+    /// once the inner lock is released — the moment the graph "has caught up" and a
+    /// consumer (search context re-render) may read the fresh graph. Never called on a
+    /// query path. Receives a [`GraphPublishSignal`]: `build_start_seq` bounds which marks
+    /// the consumer may clear (correctness), `drift_pending` is a fast-path hint.
+    on_published: Option<Arc<dyn Fn(GraphPublishSignal) + Send + Sync>>,
+    /// The store's monotonic context-dirty mark counter, wired once the search engine
+    /// exists (the engine is built after this graph). Read at each build's start to capture
+    /// its `build_start_seq`. Absent (never wired, e.g. a disabled/reference graph, or a build
+    /// racing the one-time boot wiring) reads as `0` — a consume of NOTHING, so an early build's
+    /// publish can never clear a mark against a graph that predates it. Marks left pending
+    /// through that window are picked up explicitly once wiring completes (see
+    /// [`Self::consume_leftover_marks`]).
+    mark_seq: Arc<OnceLock<Arc<AtomicI64>>>,
+    /// A one-shot armed by [`Self::consume_leftover_marks`] at boot to consume context-dirty
+    /// marks left by a prior daemon run. Stores the mark-seq bound captured at the instant the
+    /// caller observed those leftovers (before the engine was published): `0` = disarmed,
+    /// `> 0` = armed with that bound. The boot build's own publish ran with the unwired (`0`)
+    /// bound and cleared nothing; this makes the next publish (or an immediate call, for an
+    /// already-published graph) re-run the refresh with the STORED bound — never a later live
+    /// read, which could clear a mark a new drift stamped after the capture. Cleared via `swap`
+    /// to `0`, so it fires exactly once.
+    leftover_bound: Arc<AtomicI64>,
+    /// A drift observed (via [`Self::nudge_rebuild`]) while a build/reload was already in
+    /// flight, so no reload slot could be claimed then. Re-checked at the next publish
+    /// ([`Self::notify_published`]): if disk moved past the just-published build, a follow-up
+    /// reload is claimed. Without this a drift arriving mid-build is silently lost — the
+    /// build's publish would consume the search context marks against a graph built BEFORE
+    /// the change.
+    pending_nudge: Arc<AtomicBool>,
 }
 
 impl GraphState {
@@ -190,6 +245,10 @@ impl GraphState {
             change_hub: None,
             hub_cursor: Arc::new(Mutex::new(None)),
             scan_count: Arc::new(AtomicUsize::new(0)),
+            on_published: None,
+            pending_nudge: Arc::new(AtomicBool::new(false)),
+            mark_seq: Arc::new(OnceLock::new()),
+            leftover_bound: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -205,6 +264,136 @@ impl GraphState {
     pub(crate) fn with_change_hub(mut self, hub: WorkspaceChangeHub) -> Self {
         self.change_hub = Some(hub);
         self
+    }
+
+    /// Attach a hook invoked on this graph's background thread after each publish/adopt
+    /// (see [`Self::notify_published`]). Used to drive the search context re-render once
+    /// the graph has caught up with an `.xml` drift. The hook receives
+    /// a [`GraphPublishSignal`]: `build_start_seq` bounds which marks it may clear
+    /// (correctness), `drift_pending` is a skip-this-round hint (optimization).
+    pub(crate) fn with_publish_hook(
+        mut self,
+        hook: Arc<dyn Fn(GraphPublishSignal) + Send + Sync>,
+    ) -> Self {
+        self.on_published = Some(hook);
+        self
+    }
+
+    /// Wire the store's monotonic mark-seq counter, shared with the search engine so a
+    /// build reads the same value the store increments. Called once, after the engine is
+    /// built (the engine outlives the graph's construction). Setting it again is a no-op —
+    /// there is one counter per workspace store.
+    pub(crate) fn set_mark_seq_source(&self, mark_seq: Arc<AtomicI64>) {
+        let _ = self.mark_seq.set(mark_seq);
+    }
+
+    /// The current mark-seq high-water value, captured at a build's start as its
+    /// `build_start_seq`. Unwired (disabled/reference graph, or a build racing the one-time
+    /// wiring at boot) reads as `0`: a consume of NOTHING. This deliberately makes an early
+    /// build's publish clear no marks, rather than an unbounded consume that could clear a
+    /// mark stamped after the publish snapshotted disk. Marks stranded across the wiring
+    /// window are recovered by [`Self::consume_leftover_marks`].
+    fn current_mark_seq(&self) -> i64 {
+        self.mark_seq.get().map(|counter| counter.load(Ordering::SeqCst)).unwrap_or(0)
+    }
+
+    /// Fire the publish hook, if any. Called after a publish/adopt with no graph lock
+    /// held, so the hook may take other locks (e.g. the search engine) without risking a
+    /// lock-order inversion against the graph's inner mutex.
+    ///
+    /// FIRST re-claims a reload for any drift recorded while this build was in flight, so
+    /// the hook observes the resulting reload state through [`Self::drift_pending`]: if a
+    /// follow-up reload is now catching up, the hook can skip this round and let that
+    /// reload's publish consume the marks (against a fresher graph).
+    ///
+    /// `build_start_seq` is captured by the CALLING build at its start and passed straight
+    /// through — never re-read here — so the reclaim's own new build (which captures its own
+    /// later seq on another thread) cannot move the bound this publish hands the hook. The
+    /// bound is what keeps the consumption correct: only marks at or below it — drifts this
+    /// build already reflects — may be cleared.
+    fn notify_published(&self, build_start_seq: i64) {
+        if self.pending_nudge.swap(false, Ordering::SeqCst) {
+            self.reclaim_pending_reload();
+        }
+        self.fire_hook(build_start_seq);
+        // A leftover-marks consume was armed at boot (see `consume_leftover_marks`). This build's
+        // own publish (above) captured its own `build_start_seq` — for the pre-wiring boot build
+        // that is `0`, which clears nothing — so re-run the hook once with the bound captured when
+        // the leftovers were observed, picking up marks a prior run left pending. Single-shot via
+        // the `swap`. The STORED bound (never a live read) is what keeps the consume from clearing
+        // a mark stamped after the capture: that mark is a new drift with its own nudge→publish.
+        let leftover_bound = self.leftover_bound.swap(0, Ordering::SeqCst);
+        if leftover_bound != 0 {
+            self.fire_hook(leftover_bound);
+        }
+    }
+
+    /// Invoke the publish hook, if any, with the given bound. The consumer sees the current
+    /// [`Self::drift_pending`] so it can defer when a fresher reload is imminent.
+    fn fire_hook(&self, build_start_seq: i64) {
+        if let Some(hook) = &self.on_published {
+            hook(GraphPublishSignal { drift_pending: self.drift_pending(), build_start_seq });
+        }
+    }
+
+    /// Recover context-dirty marks a PRIOR daemon run left in the persisted `context_dirty`
+    /// table. The boot graph build published BEFORE the mark-seq source was wired, so it ran
+    /// with the unwired (`0`) bound and cleared nothing; the persisted marks are still pending.
+    /// The caller captures `leftover_bound` — the mark-seq high-water at the instant it observed
+    /// these leftovers, before the engine was published — and passes it in. That boot build read
+    /// post-restart disk, so a consume against it bounded by `leftover_bound` clears exactly the
+    /// leftovers and no more. Correctness: leftover marks predate this daemon run, so ANY
+    /// boot-published graph (fresh build, fused, or fingerprint-valid cached) already reflects
+    /// their cause; a mark stamped after the capture (seq above the bound) is a new drift and is
+    /// guaranteed its own nudge→publish cycle, so it must not be cleared here against the boot
+    /// graph that predates it. Handles both post-boot states: an already-published (`Ready`)
+    /// graph consumes immediately; an in-flight build (`Loading`, whose own publish captured the
+    /// pre-wiring `0` bound and would clear nothing) arms a one-shot so ITS publish runs the
+    /// consume with `leftover_bound`. A `Ready` graph with a fresher reload already in flight
+    /// (`drift_pending`) leaves the one-shot armed so that reload's publish handles it against
+    /// the fresher graph.
+    pub(crate) fn consume_leftover_marks(&self, leftover_bound: i64) {
+        // Arm first (store the captured bound), then observe state, so a build publishing
+        // concurrently either runs the follow-up itself or leaves it for the immediate consume
+        // below — the `swap` to `0` in both paths keeps it single-shot.
+        self.leftover_bound.store(leftover_bound, Ordering::SeqCst);
+        if matches!(self.status(), GraphStatus::Ready { .. }) && !self.drift_pending() {
+            let bound = self.leftover_bound.swap(0, Ordering::SeqCst);
+            if bound != 0 {
+                self.fire_hook(bound);
+            }
+        }
+    }
+
+    /// Re-run the reload claim for a drift recorded (as a pending nudge) while a build was in
+    /// flight. Runs on the publish thread once the graph is `Ready`: claims a reload if disk
+    /// drifted past the just-published build; re-arms the pending flag if a reload is somehow
+    /// already running so its own publish re-checks; otherwise the published build already
+    /// matches disk and nothing is scheduled.
+    fn reclaim_pending_reload(&self) {
+        if self.claim_reload_slot() {
+            self.spawn_reload();
+        } else if self.reload_running() {
+            self.pending_nudge.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether a published reload is currently `Running`.
+    fn reload_running(&self) -> bool {
+        matches!(
+            lock_recover(&self.inner).published.as_ref().map(|p| &p.reload),
+            Some(ReloadState::Running)
+        )
+    }
+
+    /// Whether a fresher build is already catching up: a nudge was recorded while a build
+    /// was in flight, or a reload is currently running. The publish hook uses this only as a
+    /// fast-path hint — when a follow-up reload will publish shortly it can skip this round
+    /// and let that reload's publish re-render against the fresher graph. It is NOT what
+    /// makes consumption correct: the `build_start_seq` bound already prevents clearing a
+    /// mark against a graph that predates its drift, whatever this returns.
+    pub(crate) fn drift_pending(&self) -> bool {
+        self.pending_nudge.load(Ordering::SeqCst) || self.reload_running()
     }
 
     pub(crate) fn status(&self) -> GraphStatus {
@@ -309,6 +498,90 @@ impl GraphState {
         }
     }
 
+    /// Schedule the graph to catch up with a drift another consumer observed (the search
+    /// sink), WITHOUT waiting for a `graph` tool freshness check. A user who only calls
+    /// `search_code` never triggers a graph rebuild otherwise, so an `.xml` edit would
+    /// leave the search chunks' graph context stale forever — the context re-render only
+    /// runs on a graph publish. This closes that chain end-to-end: xml drift →
+    /// context-dirty marks + this nudge → background rebuild → publish → hook → refresh.
+    ///
+    /// Single-flight by construction and never blocks (the rebuild runs on a spawned
+    /// thread): an unbuilt graph (`Idle`) starts the one initial loader; a published graph
+    /// claims the ONE reload slot only when disk drifted since the build and no reload is
+    /// already running (so a storm of xml events during a running build queues no extra
+    /// rebuilds); `Disabled`/`Loading`/`Failed` schedule nothing. Walks the filesystem for
+    /// the drift check, so call from a blocking context (the sink thread), never a query.
+    pub(crate) fn nudge_rebuild(&self) -> NudgeOutcome {
+        match self.status() {
+            GraphStatus::Idle => {
+                self.ensure_loading();
+                NudgeOutcome::LoadStarted
+            }
+            // A build is in flight and captured disk at some earlier instant. Record the
+            // drift so the build's publish re-checks and reloads if disk moved past what it
+            // captured — otherwise the publish would consume the search context marks against
+            // a graph built before this change (the drift would be lost).
+            GraphStatus::Loading => {
+                self.pending_nudge.store(true, Ordering::SeqCst);
+                NudgeOutcome::NoOp
+            }
+            GraphStatus::Ready { .. } => {
+                if self.claim_reload_slot() {
+                    self.spawn_reload();
+                    NudgeOutcome::ReloadClaimed
+                } else {
+                    // Couldn't claim: either the graph already matches disk (nothing to do)
+                    // or a reload is already `Running`. In the latter case the running build
+                    // may have started before this drift, so record a pending nudge — its
+                    // publish re-checks and reloads again if disk still differs.
+                    if self.reload_running() {
+                        self.pending_nudge.store(true, Ordering::SeqCst);
+                    }
+                    NudgeOutcome::NoOp
+                }
+            }
+            // Nothing to schedule (`Disabled`, or `Failed` — a failed graph does not
+            // auto-retry from a nudge).
+            GraphStatus::Disabled | GraphStatus::Failed(_) => NudgeOutcome::NoOp,
+        }
+    }
+
+    /// Claim the single background-reload slot iff the workspace drifted on disk since the
+    /// published build and no reload is already `Running`. Returns whether THIS call won
+    /// the claim; a caller arriving while a reload runs (or when nothing drifted) gets
+    /// `false`. Shares the exact single-flight discipline [`Self::freshness`] uses, so a
+    /// nudge and a freshness check cannot both start a reload.
+    fn claim_reload_slot(&self) -> bool {
+        let disk_fp = self.current_disk_fp();
+        let mut inner = lock_recover(&self.inner);
+        let Some(published) = inner.published.as_mut() else {
+            return false;
+        };
+        let drifted = disk_fp.map(|fp| fp != published.fingerprint).unwrap_or(false);
+        if drifted && published.reload != ReloadState::Running {
+            published.reload = ReloadState::Running;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Spawn the background reload thread after a successful [`Self::claim_reload_slot`].
+    /// On spawn failure the reload slot is marked `Failed` so it is never left stuck
+    /// `Running` (which would block every later reload claim).
+    fn spawn_reload(&self) {
+        let state = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("bsl-graph-reload".to_owned())
+            .spawn(move || state.run_load(true));
+        if let Err(e) = spawned {
+            let mut inner = lock_recover(&self.inner);
+            if let Some(p) = inner.published.as_mut() {
+                p.reload = ReloadState::Failed(format!("could not spawn reload: {e}"));
+            }
+        }
+    }
+
     /// Drive the SqliteLocal startup graph decision in one place: claim the build,
     /// then either reuse a fresh cached graph, build the graph + search chunks in one
     /// fused pass (when an embedder is available), or fall back to a normal lazy graph
@@ -327,7 +600,12 @@ impl GraphState {
             // the search engine the normal way against whatever graph it produces.
             return FusedStartup::Standalone;
         }
-        if self.try_publish_cached(&workspace_root) {
+        // Capture the mark-seq at build start so the publish consumes only marks this build
+        // reflects. At boot this is `0` (unwired): the mark-seq source is wired after the engine
+        // is published, so a fused/cached boot build clears nothing here. Marks a prior run left
+        // pending are recovered explicitly after wiring (see `consume_leftover_marks`).
+        let build_start_seq = self.current_mark_seq();
+        if self.try_publish_cached(&workspace_root, build_start_seq) {
             // Warm start: the graph is reused from disk and the persisted search index
             // is reused by the standalone indexer's hash-skip (a near no-op).
             return FusedStartup::Standalone;
@@ -339,7 +617,7 @@ impl GraphState {
             self.ensure_loading();
             return FusedStartup::Standalone;
         }
-        match self.run_fused_cold_build(engine, source_path) {
+        match self.run_fused_cold_build(engine, source_path, build_start_seq) {
             Ok(()) => FusedStartup::Fused,
             Err(e) => {
                 tracing::warn!("fused cold-build failed; falling back to standalone index: {e}");
@@ -359,6 +637,7 @@ impl GraphState {
         &self,
         engine: &mut SearchEngine,
         source_path: &Path,
+        build_start_seq: i64,
     ) -> anyhow::Result<()> {
         let Some(workspace_root) = self.workspace_root.clone() else {
             anyhow::bail!("fused build on a non-workspace graph");
@@ -380,6 +659,7 @@ impl GraphState {
             tracing::warn!("fused graph build straddled a disk write; snapshot marked stale");
         }
         self.adopt_prebuilt(generation, fp_pre, files);
+        self.notify_published(build_start_seq);
         Ok(())
     }
 
@@ -519,11 +799,17 @@ impl GraphState {
         let generation =
             lock_recover(&self.inner).published.as_ref().map(|p| p.generation).unwrap_or(0) + 1;
 
+        // Capture the mark-seq at build start (before any disk read below): the post-publish
+        // refresh clears only marks at or below it — drifts this build already reflects. A
+        // drift stamped after this point carries a higher seq, is left for a later build, and
+        // is guaranteed one by the pending-nudge machinery (every xml mark also nudges).
+        let build_start_seq = self.current_mark_seq();
+
         // On the initial load, reuse a cached build from a previous process run if it
         // still matches the workspace — turning a multi-minute rebuild into a stat
         // walk plus an open. A reload is skipped here: it only fires once drift has
         // been detected, so the on-disk file is known stale and must be rebuilt.
-        if !is_reload && self.try_publish_cached(&workspace_root) {
+        if !is_reload && self.try_publish_cached(&workspace_root, build_start_seq) {
             return;
         }
 
@@ -531,7 +817,7 @@ impl GraphState {
         // (signatures intact, nothing added/removed, no `.xml` drift) reproject just
         // those modules instead of the whole config. On any ineligibility or failure
         // it returns false and we fall through to a full rebuild.
-        if is_reload && self.try_incremental_reload(&workspace_root, generation) {
+        if is_reload && self.try_incremental_reload(&workspace_root, generation, build_start_seq) {
             return;
         }
 
@@ -561,6 +847,7 @@ impl GraphState {
                     });
                     inner.status = GraphStatus::Ready { files };
                 }
+                self.notify_published(build_start_seq);
                 tracing::info!(files, generation, is_reload, "graph database build complete");
             }
             Ok(Err(e)) => {
@@ -583,7 +870,12 @@ impl GraphState {
     /// then publishes `generation`. Returns `true` on success; `false` (the common
     /// case for a structural change) leaves nothing published and falls back to a full
     /// rebuild.
-    fn try_incremental_reload(&self, workspace_root: &Path, generation: u64) -> bool {
+    fn try_incremental_reload(
+        &self,
+        workspace_root: &Path,
+        generation: u64,
+        build_start_seq: i64,
+    ) -> bool {
         let db_path = graph_db_path(workspace_root);
         let stored_fp = read_stored_fingerprints(&db_path);
         if stored_fp.is_empty() {
@@ -713,6 +1005,7 @@ impl GraphState {
                         Some(Published { generation, fingerprint: fp, reload: ReloadState::Idle });
                     inner.status = GraphStatus::Ready { files };
                 }
+                self.notify_published(build_start_seq);
                 tracing::info!(
                     files,
                     generation,
@@ -738,7 +1031,7 @@ impl GraphState {
     /// valid, current, non-straddled match for the workspace. Returns `true` (and
     /// transitions to `Ready`) when the cache was reused; `false` to fall through to
     /// a full build. The fingerprint scan it runs is the same one the build would do.
-    fn try_publish_cached(&self, workspace_root: &Path) -> bool {
+    fn try_publish_cached(&self, workspace_root: &Path, build_start_seq: i64) -> bool {
         let path = graph_db_path(workspace_root);
         let Ok(graph) = GraphDb::open(&path) else {
             return false; // missing, truncated, or stale-schema → rebuild
@@ -760,6 +1053,8 @@ impl GraphState {
         inner.published =
             Some(Published { generation: revision, fingerprint, reload: ReloadState::Idle });
         inner.status = GraphStatus::Ready { files };
+        drop(inner);
+        self.notify_published(build_start_seq);
         tracing::info!(files, revision, "reused cached graph database (workspace unchanged)");
         true
     }
@@ -1321,6 +1616,7 @@ pub(crate) fn db_for_files(
         }
     }
     db.set_all_config_paths(config_paths.to_vec());
+    ide::warm_batch_config_roots(&db, batch_files, config_paths);
     db
 }
 
@@ -1478,6 +1774,103 @@ mod tests {
         // the in-memory serve path.
         let edge = callers.edges.iter().find(|e| e.to.is_none()).expect("edge into the root");
         assert_eq!(edge.from.as_deref(), Some("method/common/Клиент/Главная"));
+    }
+
+    /// A publish hook attached via `with_publish_hook` fires on the graph's background
+    /// thread once the build completes and publishes — the seam the search context
+    /// re-render hangs on. Without the `notify_published()` call at the publish site the
+    /// counter stays zero and this fails.
+    #[test]
+    fn publish_hook_fires_after_a_build_publishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let fired = Arc::clone(&fired);
+            Arc::new(move |_signal: GraphPublishSignal| {
+                fired.fetch_add(1, Ordering::SeqCst);
+            }) as Arc<dyn Fn(GraphPublishSignal) + Send + Sync>
+        };
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        assert!(
+            fired.load(Ordering::SeqCst) >= 1,
+            "the publish hook must fire once the graph publishes its build",
+        );
+    }
+
+    /// A drift delivered while a build is in flight (`nudge_rebuild` during `Loading`, or while
+    /// a reload runs) is recorded, not dropped: the build's publish re-checks and — seeing disk
+    /// moved past what the build captured — claims a follow-up reload whose own publish fires
+    /// the hook again. Reverting the `pending_nudge` re-claim in `notify_published` leaves the
+    /// hook firing only once and this fails.
+    #[test]
+    fn a_nudge_recorded_during_a_build_reloads_on_publish() {
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let fired = Arc::clone(&fired);
+            Arc::new(move |_signal: GraphPublishSignal| {
+                fired.fetch_add(1, Ordering::SeqCst);
+            }) as Arc<dyn Fn(GraphPublishSignal) + Send + Sync>
+        };
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
+        // Simulate an initial build that already published (generation 1) with a fingerprint
+        // that does NOT match disk, plus a nudge that arrived while that build was in flight.
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            inner.published =
+                Some(Published { generation: 1, fingerprint: 0, reload: ReloadState::Idle });
+        }
+        graph.pending_nudge.store(true, Ordering::SeqCst);
+
+        // The publish chain fires the hook once and, seeing the recorded nudge with disk
+        // drifted past the faked build, claims a follow-up reload. Pass an explicit unbounded
+        // bound (i64::MAX) so the seq bound never gates this test — only the reclaim behavior
+        // under test decides how many times the hook fires.
+        graph.notify_published(i64::MAX);
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while fired.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            fired.load(Ordering::SeqCst) >= 2,
+            "the recorded nudge triggered a follow-up reload whose publish fired the hook again",
+        );
+    }
+
+    /// `drift_pending` reports a drift the context re-render must wait for: a recorded nudge or
+    /// a running reload. A clean published graph reports none.
+    #[test]
+    fn drift_pending_reflects_recorded_nudge_and_running_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("A.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+        let graph = GraphState::for_workspace(dir.path().to_path_buf());
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            inner.published =
+                Some(Published { generation: 1, fingerprint: 1, reload: ReloadState::Idle });
+        }
+        assert!(!graph.drift_pending(), "a clean published graph has no pending drift");
+
+        graph.pending_nudge.store(true, Ordering::SeqCst);
+        assert!(graph.drift_pending(), "a recorded nudge is a pending drift");
+        graph.pending_nudge.store(false, Ordering::SeqCst);
+
+        lock_recover(&graph.inner).published.as_mut().unwrap().reload = ReloadState::Running;
+        assert!(graph.drift_pending(), "a running reload is a pending drift");
     }
 
     /// Seed a graph database at the workspace's cache path as a prior process run
@@ -4238,5 +4631,56 @@ mod tests {
             scans_after_prime,
             "an irrelevant temp file must not invalidate the cache and re-trigger a scan",
         );
+    }
+
+    /// The single-flight core of the drift nudge: the FIRST claim on a drifted published
+    /// graph wins and marks the reload `Running`; a SECOND claim (a storm of xml events
+    /// while the build runs) loses, so no extra rebuild is ever queued. Deterministic — no
+    /// build thread is spawned, only the claim discipline is exercised.
+    #[test]
+    fn claim_reload_slot_is_single_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("A.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+        let graph = GraphState::for_workspace(dir.path().to_path_buf());
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            // fingerprint 0 can never match the real disk scan → a drift is always seen.
+            inner.published =
+                Some(Published { generation: 1, fingerprint: 0, reload: ReloadState::Idle });
+        }
+        assert!(graph.claim_reload_slot(), "the first claim wins on drift");
+        assert!(!graph.claim_reload_slot(), "a second claim loses while a reload is Running");
+    }
+
+    /// A nudge on an unbuilt (`Idle`) graph starts the one initial load without any `graph`
+    /// tool call — the search-only user's path. Asserting the outcome and that the status
+    /// left `Idle` (a load never returns to `Idle`; it goes `Loading → Ready`/`Failed`).
+    #[test]
+    fn nudge_rebuild_from_idle_starts_the_initial_load() {
+        let dir = tempfile::tempdir().unwrap();
+        sample_workspace(dir.path());
+        let graph = GraphState::for_workspace(dir.path().to_path_buf());
+        assert_eq!(graph.status(), GraphStatus::Idle);
+
+        assert_eq!(graph.nudge_rebuild(), NudgeOutcome::LoadStarted);
+        assert_ne!(graph.status(), GraphStatus::Idle, "the nudge scheduled the initial load");
+    }
+
+    /// A nudge arriving while a reload is already `Running` schedules nothing (single-flight),
+    /// so a storm of xml drift during a build cannot pile up rebuilds. No thread is spawned.
+    #[test]
+    fn nudge_rebuild_absorbs_a_storm_while_a_reload_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("A.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+        let graph = GraphState::for_workspace(dir.path().to_path_buf());
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            inner.published =
+                Some(Published { generation: 1, fingerprint: 0, reload: ReloadState::Running });
+        }
+        assert_eq!(graph.nudge_rebuild(), NudgeOutcome::NoOp);
+        assert_eq!(graph.nudge_rebuild(), NudgeOutcome::NoOp);
     }
 }

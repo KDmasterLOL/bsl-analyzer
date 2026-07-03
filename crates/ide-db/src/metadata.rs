@@ -104,13 +104,16 @@ pub fn load_configuration<'db>(
 /// actually changes. The result is identical to the inline merge, just shared.
 #[salsa::tracked(lru = 1024)]
 pub fn merged_configuration<'db>(
-    db: &'db dyn salsa::Database,
+    db: &'db dyn MetadataDb,
     main_input: ConfigurationPathInput<'db>,
     extension_input: ConfigurationPathInput<'db>,
 ) -> Arc<Configuration> {
     let _span = tracing::info_span!("merged_configuration").entered();
-    let main = load_configuration(db, main_input);
-    let extension = load_configuration(db, extension_input);
+    // Through the trait method, never the free query: the graph build's batch
+    // databases interpose a build-wide config cache there, and bypassing it made
+    // every batch re-run the whole-config XML load inside the worker pool.
+    let main = db.load_configuration(main_input);
+    let extension = db.load_configuration(extension_input);
     Arc::new(main.merged_with_extension(&extension))
 }
 
@@ -1166,15 +1169,19 @@ pub fn resolve_subsystem(
 
 #[salsa::db]
 pub trait MetadataDb: salsa::Database {
+    /// The ONE entry point for whole-config loads. Required (no default) and
+    /// object-safe on purpose: every reader — including queries that only hold
+    /// `&dyn MetadataDb` (`merged_configuration`) or a supertrait object (the
+    /// resolver provider) — must dispatch through the implementor, because an
+    /// implementor may interpose a cross-database cache (the graph build's
+    /// `GraphConfigCache`). A path that calls the free [`load_configuration`]
+    /// query directly bypasses that cache and re-runs the internally-parallel
+    /// XML load on every fresh batch database — inside the build's worker pool,
+    /// where its nested `rayon::scope` can deadlock the build.
     fn load_configuration<'db>(
         &'db self,
         path_input: ConfigurationPathInput<'db>,
-    ) -> Arc<Configuration>
-    where
-        Self: Sized,
-    {
-        load_configuration(self, path_input)
-    }
+    ) -> Arc<Configuration>;
 }
 
 pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleType> {
@@ -1644,7 +1651,14 @@ mod tests {
     impl salsa::Database for TestDatabase {}
 
     #[salsa::db]
-    impl MetadataDb for TestDatabase {}
+    impl MetadataDb for TestDatabase {
+        fn load_configuration<'db>(
+            &'db self,
+            path_input: ConfigurationPathInput<'db>,
+        ) -> Arc<Configuration> {
+            load_configuration(self, path_input)
+        }
+    }
 
     #[test]
     fn test_load_configuration_caching() {

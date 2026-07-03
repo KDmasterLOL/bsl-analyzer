@@ -100,16 +100,14 @@ impl Health {
 /// it — consumers that strip a non-canonical root (search strips the configured
 /// source root) need the raw spelling, or a symlinked root would fail to match.
 ///
-/// `canonical` and `kind` are the drift-consumption contract: the diagnostics
-/// sink re-stats `canonical` and branches on `kind`. The only sink today
-/// (search) needs just `raw`, so those two read only from tests until that sink
-/// lands.
+/// `canonical` and `kind` are the drift-consumption contract: the shared
+/// classifier re-stats `canonical` (stats are truth) and branches on `kind` for a
+/// subtree removal. `raw` is the watcher spelling search strips its source root
+/// against.
 #[derive(Debug, Clone)]
 pub(crate) struct ChangeEntry {
-    #[allow(dead_code)]
     pub(crate) canonical: PathBuf,
     pub(crate) raw: PathBuf,
-    #[allow(dead_code)]
     pub(crate) kind: ChangeKind,
     pub(crate) seq: u64,
 }

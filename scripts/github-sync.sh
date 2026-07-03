@@ -265,6 +265,7 @@ build_rsync_excludes() {
     excludes+=(--exclude ".git")
     excludes+=(--exclude ".git/")
     excludes+=(--exclude "target/")
+    excludes+=(--exclude "target-*/")
     echo "${excludes[@]}"
 }
 
