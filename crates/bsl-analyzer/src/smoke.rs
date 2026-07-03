@@ -818,6 +818,10 @@ fn run_session(args: &SmokeArgs) -> Result<SessionResult, String> {
             db,
             "session post-warm / peak (working set populated)",
         );
+        crate::mem_report::print_salsa_event_report(
+            db,
+            "session post-warm / peak (working set populated)",
+        );
         crate::mem_report::salsa_memory_rows(db)
             .into_iter()
             .take(SESSION_TOP_INGREDIENTS)
@@ -846,6 +850,10 @@ fn run_session(args: &SmokeArgs) -> Result<SessionResult, String> {
     std::thread::sleep(std::time::Duration::from_secs(2));
     let rss_post_trim_bytes = read_rss_bytes();
     crate::mem_report::print_salsa_memory_report(
+        ctx.state.analysis_host.raw_database(),
+        "session post-trim (enforce_lru + green-node cache cleared)",
+    );
+    crate::mem_report::print_salsa_event_report(
         ctx.state.analysis_host.raw_database(),
         "session post-trim (enforce_lru + green-node cache cleared)",
     );

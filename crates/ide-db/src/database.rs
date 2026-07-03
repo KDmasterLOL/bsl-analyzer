@@ -60,12 +60,25 @@ pub struct RootDatabaseImpl {
     /// which already memoises `load_configuration` per revision — there the field is
     /// absent and loading is unchanged.
     graph_config_cache: Option<Arc<GraphConfigCache>>,
+
+    /// Opt-in salsa event counters (`BSL_SALSA_EVENTS=1`). `Some` installs an
+    /// `event_callback` on the storage; the same `Arc` is shared across cloned
+    /// handles so the counters are process-global for this database tree. `None`
+    /// (the default) leaves the hot path at salsa's single `is_some` branch per
+    /// event. See [`crate::salsa_events`].
+    salsa_events: Option<Arc<crate::salsa_events::SalsaEventStats>>,
 }
 
 /// Build-scoped cache of loaded configurations by interned config-root path string.
 /// A fresh instance per build keeps it a content snapshot — a later build (new
 /// instance) never sees a stale entry — so no version key is needed.
 pub type GraphConfigCache = dashmap::DashMap<PathBuf, Arc<bsl_metadata::Configuration>>;
+
+/// Whether to install the salsa event-counter callback, gated by `BSL_SALSA_EVENTS=1`.
+/// Off leaves the runtime hot path at salsa's single `is_some` branch per event.
+fn salsa_events_enabled_by_env() -> bool {
+    matches!(std::env::var("BSL_SALSA_EVENTS").as_deref(), Ok("1"))
+}
 
 impl Default for RootDatabaseImpl {
     fn default() -> Self {
@@ -84,19 +97,40 @@ impl Clone for RootDatabaseImpl {
             // Share the same cache across clones so a per-job db clone sees configs
             // loaded by its siblings.
             graph_config_cache: self.graph_config_cache.clone(),
+            // Salsa shares one `event_callback` across all storage clones, so every
+            // handle must point at the same stats to keep counts consistent.
+            salsa_events: self.salsa_events.clone(),
         }
     }
 }
 
 impl RootDatabaseImpl {
     pub fn new() -> Self {
+        Self::new_inner(salsa_events_enabled_by_env())
+    }
+
+    fn new_inner(events_enabled: bool) -> Self {
+        // Install the event callback (if any) before any input is created so it
+        // observes the whole database lifetime, including the singleton inputs below.
+        let salsa_events =
+            events_enabled.then(|| Arc::new(crate::salsa_events::SalsaEventStats::default()));
+        let storage = match &salsa_events {
+            Some(stats) => {
+                let stats = Arc::clone(stats);
+                salsa::Storage::builder()
+                    .event_callback(Box::new(move |event| stats.record(&event)))
+                    .build()
+            }
+            None => salsa::Storage::default(),
+        };
         let db = Self {
-            storage: salsa::Storage::default(),
+            storage,
             files: Files::new(),
             config_revisions: Arc::new(DashMap::default()),
             metadata_listings: Arc::new(DashMap::default()),
             type_kernel: Arc::new(TypeKernelInner::new()),
             graph_config_cache: None,
+            salsa_events,
         };
         // The singleton inputs are created once here and retrieved via `::get()`
         // afterwards; a second `new()` against the same storage would panic inside
@@ -119,6 +153,14 @@ impl RootDatabaseImpl {
         let _ =
             FeaturesInput::builder(defaults.type_narrowing).durability(Durability::MEDIUM).new(&db);
         db
+    }
+
+    /// Construct a database with salsa event counting forced on, independent of the
+    /// `BSL_SALSA_EVENTS` env var (which is process-global and racy under the test
+    /// harness). For tests of [`crate::salsa_events`].
+    #[cfg(test)]
+    pub(crate) fn new_with_salsa_events() -> Self {
+        Self::new_inner(true)
     }
 
     pub(crate) fn type_kernel_inner(&self) -> &Arc<TypeKernelInner> {
@@ -157,6 +199,24 @@ impl RootDatabaseImpl {
                 )
             })
             .collect()
+    }
+
+    /// Per-ingredient salsa event counters (executes / validates / discards /
+    /// interns), sorted by descending execute count. `None` unless the database was
+    /// built with events enabled (`BSL_SALSA_EVENTS=1`). Names are resolved here via
+    /// [`salsa::Database::ingredient_debug_name`] — the callback that accumulates the
+    /// counts cannot touch the database.
+    pub fn salsa_event_report(&self) -> Option<Vec<crate::salsa_events::SalsaEventRow>> {
+        use salsa::Database;
+        let stats = self.salsa_events.as_ref()?;
+        Some(stats.rows(|idx| self.ingredient_debug_name(idx).into_owned()))
+    }
+
+    /// Global (keyless) salsa event counters — cancellation checks/flags and
+    /// accumulator discards. `None` unless events are enabled; see
+    /// [`Self::salsa_event_report`].
+    pub fn salsa_event_global(&self) -> Option<crate::salsa_events::GlobalCounts> {
+        self.salsa_events.as_ref().map(|s| s.global_counts())
     }
 
     /// Attach a build-scoped configuration cache shared across this build's batch
