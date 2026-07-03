@@ -71,7 +71,7 @@ pub fn file_name_usage_query<'db>(
     let file_id = file_id_input.file_id(db);
     let _span = tracing::debug_span!("file_name_usage_query", ?file_id).entered();
 
-    let parse = db.parse(file_id);
+    let parse = db.parse_ref(file_id);
     let root = parse.syntax_node();
 
     let mut names: FxHashSet<Name> = FxHashSet::default();

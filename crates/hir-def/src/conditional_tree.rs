@@ -435,7 +435,7 @@ pub fn conditional_tree_query<'db>(
 ) -> std::sync::Arc<ConditionalTree> {
     let _span = tracing::info_span!("conditional_tree", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
-    let parse = db.parse(file_id);
+    let parse = db.parse_ref(file_id);
     std::sync::Arc::new(lower_conditionals(&parse.syntax_node()))
 }
 

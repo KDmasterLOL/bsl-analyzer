@@ -21,7 +21,7 @@ impl Ctx {
     pub fn lower_file(db: &dyn RootQueryDb, file_id: FileId) -> Arc<ItemTree> {
         let _span = tracing::info_span!("lower_file", ?file_id).entered();
 
-        let parse = db.parse(file_id);
+        let parse = db.parse_ref(file_id);
         let file = match ast::SourceFile::cast(parse.syntax_node()) {
             Some(f) => f,
             None => {
@@ -358,6 +358,10 @@ mod tests {
     #[salsa::db]
     impl RootQueryDb for TestDb {
         fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
+            self.parse_ref(file_id).clone()
+        }
+
+        fn parse_ref(&self, file_id: FileId) -> &syntax::Parse<syntax::SyntaxNode> {
             let input = base_db::FileIdInput::new(self, file_id);
             base_db::parse_query(self, input)
         }

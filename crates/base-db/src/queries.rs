@@ -62,7 +62,7 @@ pub(crate) mod heap_estimate {
     }
 }
 
-#[salsa::tracked(lru = 512, heap_size = crate::queries::heap_estimate::parse_heap)]
+#[salsa::tracked(lru = 512, heap_size = crate::queries::heap_estimate::parse_heap, returns(ref))]
 pub fn parse_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) -> Parse<SyntaxNode> {
     let _span = tracing::info_span!("parse").entered();
 

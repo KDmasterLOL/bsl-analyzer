@@ -21,8 +21,8 @@ pub fn method_body_query<'db>(db: &'db dyn DefDatabase, method: MethodIdInput<'d
         return Arc::new(Body::default());
     };
 
-    let parse = db.parse(file_id);
-    let Some(method_node) = method_symbol.syntax_node(&parse) else {
+    let parse = db.parse_ref(file_id);
+    let Some(method_node) = method_symbol.syntax_node(parse) else {
         tracing::warn!(?mid, "method_body_query: syntax node not found at recorded range");
         return Arc::new(Body::default());
     };
@@ -56,8 +56,8 @@ pub fn method_body_with_source_map_query<'db>(
         return Arc::new((Body::default(), BodySourceMap::default()));
     };
 
-    let parse = db.parse(file_id);
-    let Some(method_node) = method_symbol.syntax_node(&parse) else {
+    let parse = db.parse_ref(file_id);
+    let Some(method_node) = method_symbol.syntax_node(parse) else {
         tracing::warn!(
             ?mid,
             "method_body_with_source_map_query: syntax node not found at recorded range"

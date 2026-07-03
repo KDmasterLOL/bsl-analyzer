@@ -392,7 +392,7 @@ pub fn region_tree_query<'db>(
 ) -> std::sync::Arc<RegionTree> {
     let _span = tracing::info_span!("region_tree", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
-    let parse = db.parse(file_id);
+    let parse = db.parse_ref(file_id);
     std::sync::Arc::new(lower_regions(&parse.syntax_node()))
 }
 

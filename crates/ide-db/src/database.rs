@@ -1671,6 +1671,10 @@ impl SourceDatabase for RootDatabaseImpl {
 #[salsa::db]
 impl RootQueryDb for RootDatabaseImpl {
     fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
+        self.parse_ref(file_id).clone()
+    }
+
+    fn parse_ref(&self, file_id: FileId) -> &syntax::Parse<syntax::SyntaxNode> {
         let input = base_db::FileIdInput::new(self, file_id);
         base_db::parse_query(self, input)
     }

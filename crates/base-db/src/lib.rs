@@ -59,6 +59,13 @@ pub trait SourceDatabase: salsa::Database {
 pub trait RootQueryDb: SourceDatabase {
     fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode>;
 
+    /// Borrow the parsed tree directly from the memo, skipping the `Vec<SyntaxError>`
+    /// deep clone that [`parse`](Self::parse) pays on every read. Prefer this on hot
+    /// per-file paths that only read the syntax node or errors; [`parse`](Self::parse)
+    /// stays for callers that must own the `Parse`. The borrow is tied to `&self`, and
+    /// Salsa only evicts a memo under `&mut`, so it cannot dangle.
+    fn parse_ref(&self, file_id: FileId) -> &syntax::Parse<syntax::SyntaxNode>;
+
     fn method_regions(
         &self,
         file_id: FileId,
@@ -422,6 +429,10 @@ mod tests {
     #[salsa::db]
     impl RootQueryDb for TestDatabase {
         fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
+            self.parse_ref(file_id).clone()
+        }
+
+        fn parse_ref(&self, file_id: FileId) -> &syntax::Parse<syntax::SyntaxNode> {
             let input = FileIdInput::new(self, file_id);
             parse_query(self, input)
         }
