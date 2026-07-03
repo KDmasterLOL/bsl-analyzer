@@ -417,7 +417,7 @@ mod vfs_race_tests {
         use base_db::{SourceDatabase, SourceRootId};
         let db = state.analysis_host.raw_database_mut();
         let sr = db.source_root_input(SourceRootId(0));
-        assert!(!sr.root(db).is_library);
+        assert!(!sr.root(db).is_library());
         assert_eq!(sr.root(db).file_set().len(), 0);
     }
 

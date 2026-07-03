@@ -14,20 +14,44 @@ pub const BSL_SOURCE_ROOT: SourceRootId = SourceRootId(0);
 /// XML still has a root through which `file_text`'s disk read resolves its path.
 pub const METADATA_SOURCE_ROOT: SourceRootId = SourceRootId(1);
 
+/// What kind of files a root holds, which decides the salsa durability of the
+/// file inputs registered under it. Durability is the shield that lets memos
+/// skip deep dependency verification when only lower-durability inputs changed,
+/// so the kinds are ordered by how often their contents actually change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceRootKind {
+    /// Workspace `.bsl` sources: edited on every keystroke.
+    Local,
+    /// Read-only library roots: effectively frozen for the session.
+    Library,
+    /// Configuration metadata XML: changes only on a designer/EDT export —
+    /// rare batches against a continuous stream of `.bsl` edits, so metadata
+    /// memos should not be re-verified per keystroke.
+    Metadata,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceRoot {
-    pub is_library: bool,
+    kind: SourceRootKind,
 
     file_set: FileSet,
 }
 
 impl SourceRoot {
     pub fn new_local(file_set: FileSet) -> Self {
-        SourceRoot { is_library: false, file_set }
+        SourceRoot { kind: SourceRootKind::Local, file_set }
     }
 
     pub fn new_library(file_set: FileSet) -> Self {
-        SourceRoot { is_library: true, file_set }
+        SourceRoot { kind: SourceRootKind::Library, file_set }
+    }
+
+    pub fn new_metadata(file_set: FileSet) -> Self {
+        SourceRoot { kind: SourceRootKind::Metadata, file_set }
+    }
+
+    pub fn is_library(&self) -> bool {
+        self.kind == SourceRootKind::Library
     }
 
     pub fn file_set(&self) -> &FileSet {
@@ -39,10 +63,10 @@ impl SourceRoot {
     }
 
     pub fn durability(&self) -> salsa::Durability {
-        if self.is_library {
-            salsa::Durability::HIGH
-        } else {
-            salsa::Durability::LOW
+        match self.kind {
+            SourceRootKind::Local => salsa::Durability::LOW,
+            SourceRootKind::Library => salsa::Durability::HIGH,
+            SourceRootKind::Metadata => salsa::Durability::MEDIUM,
         }
     }
 }
@@ -163,7 +187,8 @@ mod tests {
         file_set.insert(FileId(0), VfsPath::from(PathBuf::from("/test.bsl")));
 
         let root = SourceRoot::new_local(file_set);
-        assert!(!root.is_library);
+        assert!(!root.is_library());
+        assert_eq!(root.durability(), salsa::Durability::LOW);
         assert_eq!(root.file_set().len(), 1);
     }
 
@@ -173,7 +198,19 @@ mod tests {
         file_set.insert(FileId(0), VfsPath::from(PathBuf::from("/lib.bsl")));
 
         let root = SourceRoot::new_library(file_set);
-        assert!(root.is_library);
+        assert!(root.is_library());
+        assert_eq!(root.durability(), salsa::Durability::HIGH);
+        assert_eq!(root.file_set().len(), 1);
+    }
+
+    #[test]
+    fn test_source_root_metadata() {
+        let mut file_set = FileSet::new();
+        file_set.insert(FileId(0), VfsPath::from(PathBuf::from("/Catalogs/Товары.xml")));
+
+        let root = SourceRoot::new_metadata(file_set);
+        assert!(!root.is_library());
+        assert_eq!(root.durability(), salsa::Durability::MEDIUM);
         assert_eq!(root.file_set().len(), 1);
     }
 

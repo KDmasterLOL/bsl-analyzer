@@ -148,6 +148,107 @@ fn bench_large_file_set(c: &mut Criterion) {
     });
 }
 
+/// Cost of re-validating the metadata resolution chain after a plain `.bsl`
+/// edit. The edit is a LOW-durability write; the metadata cone (XML texts,
+/// structure listing, config revisions) is MEDIUM, so `config_index` /
+/// `parse_mdo_query` / `resolve_metadata_object` memos should shallow-verify
+/// in O(1) instead of re-walking their dependency edges per keystroke.
+fn bench_metadata_revalidation_after_bsl_edit(c: &mut Criterion) {
+    use ide_db::metadata::{MdoEntry, MetadataListingData};
+    use std::path::PathBuf;
+
+    const NUM_MDOS: u32 = 200;
+
+    fn catalog_xml(name: &str, seq: u32) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-{seq:012}">
+        <Properties><Name>{name}</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#
+        )
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let bsl_file = FileId(0);
+
+    let mut bsl_set = FileSet::new();
+    bsl_set.insert(bsl_file, VfsPath::new("/cfg/CommonModules/Модуль/Ext/Module.bsl"));
+    db.set_source_root(
+        ide_db::base_db::SourceRootId(0),
+        ide_db::base_db::SourceRoot::new_local(bsl_set),
+    );
+    db.set_file_source_root(bsl_file, ide_db::base_db::SourceRootId(0));
+    db.set_file_text(bsl_file, "Процедура А() КонецПроцедуры");
+
+    let mut metadata_set = FileSet::new();
+    for i in 0..NUM_MDOS {
+        metadata_set
+            .insert(FileId(1000 + i), VfsPath::new(format!("/cfg/Catalogs/Справочник{i}.xml")));
+    }
+    db.set_source_root(
+        ide_db::base_db::METADATA_SOURCE_ROOT,
+        ide_db::base_db::SourceRoot::new_metadata(metadata_set),
+    );
+    for i in 0..NUM_MDOS {
+        db.set_file_source_root(FileId(1000 + i), ide_db::base_db::METADATA_SOURCE_ROOT);
+        db.set_file_text(FileId(1000 + i), &catalog_xml(&format!("Справочник{i}"), i));
+    }
+
+    db.set_all_config_paths(vec![(None, PathBuf::from("/cfg"))]);
+    let entries: Vec<MdoEntry> = (0..NUM_MDOS)
+        .map(|i| MdoEntry {
+            kind: bsl_metadata::MdoType::Catalog,
+            name: format!("Справочник{i}"),
+            main: FileId(1000 + i),
+            predefined: None,
+        })
+        .collect();
+    db.set_metadata_listing(
+        "/cfg",
+        MetadataListingData {
+            entries,
+            defined_types: Vec::new(),
+            common_modules: Vec::new(),
+            event_subscriptions: Vec::new(),
+            scheduled_jobs: Vec::new(),
+            roles: Vec::new(),
+            http_services: Vec::new(),
+            web_services: Vec::new(),
+            integration_services: Vec::new(),
+            subsystems: Vec::new(),
+        },
+    );
+
+    for i in 0..NUM_MDOS {
+        let name = format!("Справочник{i}");
+        let resolved =
+            db.resolve_metadata_object_for_file(bsl_file, bsl_metadata::MdoType::Catalog, &name);
+        assert!(resolved.is_some(), "warm-up resolve must succeed for {name}");
+    }
+
+    c.bench_function("metadata_revalidation_after_bsl_edit", |b| {
+        let mut counter = 0;
+        b.iter(|| {
+            counter += 1;
+            db.set_file_text(
+                bsl_file,
+                black_box(&format!("Процедура А{counter}() КонецПроцедуры")),
+            );
+            for i in 0..NUM_MDOS {
+                let name = format!("Справочник{i}");
+                let resolved = db.resolve_metadata_object_for_file(
+                    black_box(bsl_file),
+                    bsl_metadata::MdoType::Catalog,
+                    &name,
+                );
+                assert!(resolved.is_some());
+            }
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_cache_hit,
@@ -155,6 +256,7 @@ criterion_group!(
     bench_item_tree_cache_hit,
     bench_item_tree_incremental,
     bench_symbol_tree_cache_hit,
-    bench_large_file_set
+    bench_large_file_set,
+    bench_metadata_revalidation_after_bsl_edit
 );
 criterion_main!(benches);

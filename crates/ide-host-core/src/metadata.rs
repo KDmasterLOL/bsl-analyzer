@@ -325,7 +325,7 @@ pub fn bootstrap_metadata_substrate(db: &mut RootDatabaseImpl, vfs: &impl VfsWri
     let mdo_count: usize = listings.iter().map(|listing| listing.data.entries.len()).sum();
     let file_count = revisions.len();
 
-    db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
+    db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_metadata(metadata_file_set));
     for (fid, _) in &revisions {
         db.set_file_source_root(*fid, METADATA_SOURCE_ROOT);
     }
@@ -592,7 +592,7 @@ pub fn refresh_metadata_substrate(
 
     let mut changed = false;
     if metadata_file_set.len() != files_before {
-        db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_local(metadata_file_set));
+        db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_metadata(metadata_file_set));
         changed = true;
     }
     for fid in &new_file_ids {

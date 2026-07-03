@@ -174,11 +174,25 @@ impl Files {
         revision: u64,
     ) {
         self.file_texts.remove(&file_id);
-        self.set_file_revision(db, file_id, revision);
+        let durability = self.durability_for_file(db, file_id).unwrap_or(salsa::Durability::LOW);
+        self.set_file_revision_with_durability(db, file_id, revision, durability);
     }
 
     fn set_file_revision(&self, db: &mut dyn SourceDatabase, file_id: FileId, revision: u64) {
         self.set_file_revision_with_durability(db, file_id, revision, salsa::Durability::LOW);
+    }
+
+    /// The durability of a file's inputs, decided by its source root (see
+    /// [`SourceRoot::durability`]); `None` when the file has no root mapping yet.
+    fn durability_for_file(
+        &self,
+        db: &dyn SourceDatabase,
+        file_id: FileId,
+    ) -> Option<salsa::Durability> {
+        let mapping = self.file_source_roots.get(&file_id).map(|e| *e.value())?;
+        let source_root_id = mapping.source_root_id(db);
+        let root_input = self.source_roots.get(&source_root_id).map(|e| *e.value())?;
+        Some(root_input.root(db).durability())
     }
 
     fn set_file_revision_with_durability(
@@ -207,12 +221,7 @@ impl Files {
     }
 
     pub fn set_file_text_smart(&self, db: &mut dyn SourceDatabase, file_id: FileId, text: &str) {
-        let mapping = self.file_source_roots.get(&file_id).map(|e| *e.value());
-        let durability = mapping.and_then(|mapping| {
-            let source_root_id = mapping.source_root_id(db);
-            let root_input = self.source_roots.get(&source_root_id).map(|e| *e.value())?;
-            Some(root_input.root(db).durability())
-        });
+        let durability = self.durability_for_file(db, file_id);
 
         match durability {
             Some(d) => {
@@ -240,6 +249,9 @@ impl Files {
         })
     }
 
+    /// The `SourceRootInput` carries the root's own durability: `file_text_query`'s
+    /// disk branch reads it (path resolution), so a LOW root input would floor every
+    /// disk-backed text memo under the root at LOW regardless of the file inputs.
     pub fn set_source_root(
         &self,
         db: &mut dyn SourceDatabase,
@@ -248,13 +260,14 @@ impl Files {
     ) {
         use salsa::Setter;
 
+        let durability = source_root.durability();
         let existing = self.source_roots.get(&source_root_id).map(|e| *e.value());
         match existing {
             Some(input) => {
-                input.set_root(db).to(source_root);
+                input.set_root(db).with_durability(durability).to(source_root);
             }
             None => {
-                let input = SourceRootInput::new(db, source_root);
+                let input = SourceRootInput::builder(source_root).durability(durability).new(db);
                 let previous = self.source_roots.insert(source_root_id, input);
                 debug_assert!(
                     previous.is_none(),
@@ -271,6 +284,10 @@ impl Files {
         })
     }
 
+    /// The file→root mapping inherits the target root's durability (the root input
+    /// must already be registered; an unknown root falls back to LOW). Same reason
+    /// as [`Self::set_source_root`]: `file_text_query`'s disk branch reads the
+    /// mapping, so it must not undercut the root's durability floor.
     pub fn set_file_source_root(
         &self,
         db: &mut dyn SourceDatabase,
@@ -279,13 +296,20 @@ impl Files {
     ) {
         use salsa::Setter;
 
+        let durability = self
+            .source_roots
+            .get(&source_root_id)
+            .map(|e| *e.value())
+            .map(|input| input.root(db).durability())
+            .unwrap_or(salsa::Durability::LOW);
         let existing = self.file_source_roots.get(&file_id).map(|e| *e.value());
         match existing {
             Some(input) => {
-                input.set_source_root_id(db).to(source_root_id);
+                input.set_source_root_id(db).with_durability(durability).to(source_root_id);
             }
             None => {
-                let input = FileSourceRootInput::new(db, source_root_id);
+                let input =
+                    FileSourceRootInput::builder(source_root_id).durability(durability).new(db);
                 let previous = self.file_source_roots.insert(file_id, input);
                 debug_assert!(
                     previous.is_none(),
@@ -303,10 +327,31 @@ mod tests {
     use vfs::VfsPath;
 
     #[salsa::db]
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct TestDatabase {
         storage: salsa::Storage<Self>,
         files: Files,
+        events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Default for TestDatabase {
+        fn default() -> Self {
+            let events: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+            Self {
+                storage: salsa::Storage::new(Some(Box::new({
+                    let events = events.clone();
+                    move |event| events.lock().unwrap().push(format!("{:?}", event.kind))
+                }))),
+                files: Files::default(),
+                events,
+            }
+        }
+    }
+
+    impl TestDatabase {
+        fn take_events(&self) -> Vec<String> {
+            std::mem::take(&mut self.events.lock().unwrap())
+        }
     }
 
     #[salsa::db]
@@ -550,6 +595,70 @@ mod tests {
         db.set_file_revision_from_disk(file_id, input::content_revision(content));
 
         assert_eq!(&*db.file_text(file_id), content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A memo whose whole input cone lives under the metadata root must survive a
+    /// LOW-durability write with a shallow O(1) verification — no walk into its
+    /// dependencies — while the same memo shape under a local root deep-verifies.
+    /// Deep verification is observable as a `DidValidateMemoizedValue` event for
+    /// the nested `file_text_query` memo when `parse_query` is re-validated.
+    #[test]
+    fn metadata_root_cone_shallow_verifies_after_low_write() {
+        use salsa::Database;
+
+        let dir = std::env::temp_dir().join(format!("bsl_durability_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let xml_path = dir.join("Товары.xml");
+        let bsl_path = dir.join("Модуль.bsl");
+        let xml_content = "<MetaDataObject/>";
+        let bsl_content = "Процедура А() КонецПроцедуры";
+        std::fs::write(&xml_path, xml_content).unwrap();
+        std::fs::write(&bsl_path, bsl_content).unwrap();
+
+        let mut db = TestDatabase::default();
+        let xml_file = FileId(0);
+        let bsl_file = FileId(1);
+
+        let mut metadata_set = FileSet::new();
+        metadata_set.insert(xml_file, VfsPath::new(xml_path.clone()));
+        db.set_source_root(METADATA_SOURCE_ROOT, SourceRoot::new_metadata(metadata_set));
+        let mut bsl_set = FileSet::new();
+        bsl_set.insert(bsl_file, VfsPath::new(bsl_path.clone()));
+        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(bsl_set));
+
+        db.set_file_source_root(xml_file, METADATA_SOURCE_ROOT);
+        db.set_file_source_root(bsl_file, BSL_SOURCE_ROOT);
+        db.set_file_revision_from_disk(xml_file, input::content_revision(xml_content));
+        db.set_file_revision_from_disk(bsl_file, input::content_revision(bsl_content));
+
+        let _ = db.parse(xml_file);
+        let _ = db.parse(bsl_file);
+
+        db.synthetic_write(salsa::Durability::LOW);
+
+        db.take_events();
+        let _ = db.parse(xml_file);
+        let xml_events = db.take_events();
+        assert!(
+            !xml_events.iter().any(|e| {
+                e.contains("DidValidateMemoizedValue") && e.contains("file_text_query")
+            }),
+            "metadata-rooted parse must shallow-verify after a LOW write, \
+             but its file_text dependency was walked: {xml_events:#?}"
+        );
+
+        db.take_events();
+        let _ = db.parse(bsl_file);
+        let bsl_events = db.take_events();
+        assert!(
+            bsl_events.iter().any(|e| {
+                e.contains("DidValidateMemoizedValue") && e.contains("file_text_query")
+            }),
+            "local-rooted parse is LOW and must deep-verify its file_text dependency \
+             after a LOW write: {bsl_events:#?}"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

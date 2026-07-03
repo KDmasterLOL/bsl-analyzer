@@ -124,14 +124,26 @@ impl RootDatabaseImpl {
             type_kernel_input: parking_lot::RwLock::new(None),
             graph_config_cache: None,
         };
-        let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new());
+        // The workspace/metadata inputs are MEDIUM durability: they change only on
+        // config drift or reload — rare batches against the keystroke stream. A
+        // `.bsl` edit is a LOW write, so every memo whose cone is MEDIUM-floored
+        // (the metadata chain) shallow-verifies in O(1) instead of re-walking its
+        // dependency edges on each keystroke.
+        use salsa::Durability;
+        let input = metadata::WorkspaceConfigsInput::builder(Vec::new())
+            .durability(Durability::MEDIUM)
+            .new(&db);
         *db.workspace_configs_input.write() = Some(input);
-        let load_state = metadata::WorkspaceLoadStateInput::new(&db, true);
+        let load_state = metadata::WorkspaceLoadStateInput::builder(true)
+            .durability(Durability::MEDIUM)
+            .new(&db);
         *db.workspace_load_state.write() = Some(load_state);
-        let global_config_revision = metadata::ConfigRevisionInput::new(&db, 0);
+        let global_config_revision =
+            metadata::ConfigRevisionInput::builder(0).durability(Durability::MEDIUM).new(&db);
         *db.global_config_revision.write() = Some(global_config_revision);
         let defaults = project_model::FeaturesConfig::default();
-        let features = FeaturesInput::new(&db, defaults.type_narrowing);
+        let features =
+            FeaturesInput::builder(defaults.type_narrowing).durability(Durability::MEDIUM).new(&db);
         *db.features_input.write() = Some(features);
         let type_kernel_input = TypeKernelInput::new(&db, TypeKernelHandle::new(type_kernel));
         *db.type_kernel_input.write() = Some(type_kernel_input);
@@ -301,7 +313,9 @@ impl RootDatabaseImpl {
         if self.config_revisions.contains_key(&key) {
             return;
         }
-        let input = metadata::ConfigRevisionInput::new(self, 0);
+        let input = metadata::ConfigRevisionInput::builder(0)
+            .durability(salsa::Durability::MEDIUM)
+            .new(self);
         self.config_revisions.insert(key, input);
     }
 
@@ -440,8 +454,7 @@ impl RootDatabaseImpl {
                 input.set_subsystems(self).to(subsystems);
             }
             None => {
-                let input = metadata::MetadataListingInput::new(
-                    self,
+                let input = metadata::MetadataListingInput::builder(
                     entries,
                     defined_types,
                     common_modules,
@@ -452,7 +465,9 @@ impl RootDatabaseImpl {
                     web_services,
                     integration_services,
                     subsystems,
-                );
+                )
+                .durability(salsa::Durability::MEDIUM)
+                .new(self);
                 self.metadata_listings.insert(key, input);
             }
         }
