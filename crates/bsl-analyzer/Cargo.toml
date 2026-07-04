@@ -12,6 +12,13 @@ doctest = false
 name = "bsl-analyzer-app"
 path = "src/bin/main.rs"
 
+[features]
+# Opt-in salsa DEBUG/TRACE runtime events (compile-time gated in salsa). Off by
+# default so release artifacts never pay for it. Enable with
+# `cargo build --features salsa-detailed-trace` and inspect via `BSL_LOG=salsa=debug`.
+# Complements the always-available per-ingredient counters (`BSL_SALSA_EVENTS=1`).
+salsa-detailed-trace = ["salsa/detailed-trace"]
+
 [dependencies]
 ide.workspace = true
 ide-host-core.workspace = true

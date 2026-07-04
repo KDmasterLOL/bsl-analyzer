@@ -15,12 +15,12 @@ use hir::{
 use vfs::FileId;
 
 use crate::features::FeaturesInput;
-use crate::metadata::MetadataDb;
+use crate::metadata::{GlobalConfigRevisionInput, MetadataDb};
 use crate::queries::{
     line_index_query, liveness_analysis_query, method_cfg_query, module_metadata_query,
     reaching_definitions_query,
 };
-use crate::type_kernel::{TypeKernelHandle, TypeKernelInner, TypeKernelInput};
+use crate::type_kernel::TypeKernelInner;
 use crate::{metadata, queries, vfs_helpers, RootDatabase, SdblHirEntries};
 use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 
@@ -29,12 +29,6 @@ pub struct RootDatabaseImpl {
     storage: salsa::Storage<Self>,
 
     files: Files,
-
-    workspace_configs_input: parking_lot::RwLock<Option<metadata::WorkspaceConfigsInput>>,
-
-    /// Boot gate for the whole-configuration loader; see
-    /// [`metadata::WorkspaceLoadStateInput`]. Defaults to `true` (complete).
-    workspace_load_state: parking_lot::RwLock<Option<metadata::WorkspaceLoadStateInput>>,
 
     /// Per-config-root revision inputs, keyed by the canonical root path. Shared
     /// across cloned database handles (snapshots) so every handle reads and bumps
@@ -51,16 +45,7 @@ pub struct RootDatabaseImpl {
     metadata_listings:
         Arc<DashMap<String, metadata::MetadataListingInput, BuildHasherDefault<FxHasher>>>,
 
-    /// Fallback revision input for files that match no registered config root
-    /// (e.g. a single file opened without a workspace). Such reads record a
-    /// dependency here; coarse "everything changed" events bump it.
-    global_config_revision: parking_lot::RwLock<Option<metadata::ConfigRevisionInput>>,
-
-    features_input: parking_lot::RwLock<Option<FeaturesInput>>,
-
     type_kernel: Arc<TypeKernelInner>,
-
-    type_kernel_input: parking_lot::RwLock<Option<TypeKernelInput>>,
 
     /// Optional process-side cache of loaded configurations, keyed by the interned
     /// config-root path string (stable and consistent across this build's batch
@@ -75,12 +60,25 @@ pub struct RootDatabaseImpl {
     /// which already memoises `load_configuration` per revision — there the field is
     /// absent and loading is unchanged.
     graph_config_cache: Option<Arc<GraphConfigCache>>,
+
+    /// Opt-in salsa event counters (`BSL_SALSA_EVENTS=1`). `Some` installs an
+    /// `event_callback` on the storage; the same `Arc` is shared across cloned
+    /// handles so the counters are process-global for this database tree. `None`
+    /// (the default) leaves the hot path at salsa's single `is_some` branch per
+    /// event. See [`crate::salsa_events`].
+    salsa_events: Option<Arc<crate::salsa_events::SalsaEventStats>>,
 }
 
 /// Build-scoped cache of loaded configurations by interned config-root path string.
 /// A fresh instance per build keeps it a content snapshot — a later build (new
 /// instance) never sees a stale entry — so no version key is needed.
 pub type GraphConfigCache = dashmap::DashMap<PathBuf, Arc<bsl_metadata::Configuration>>;
+
+/// Whether to install the salsa event-counter callback, gated by `BSL_SALSA_EVENTS=1`.
+/// Off leaves the runtime hot path at salsa's single `is_some` branch per event.
+fn salsa_events_enabled_by_env() -> bool {
+    matches!(std::env::var("BSL_SALSA_EVENTS").as_deref(), Ok("1"))
+}
 
 impl Default for RootDatabaseImpl {
     fn default() -> Self {
@@ -93,49 +91,76 @@ impl Clone for RootDatabaseImpl {
         Self {
             storage: self.storage.clone(),
             files: self.files.clone(),
-            workspace_configs_input: parking_lot::RwLock::new(*self.workspace_configs_input.read()),
-            workspace_load_state: parking_lot::RwLock::new(*self.workspace_load_state.read()),
             config_revisions: Arc::clone(&self.config_revisions),
             metadata_listings: Arc::clone(&self.metadata_listings),
-            global_config_revision: parking_lot::RwLock::new(*self.global_config_revision.read()),
-            features_input: parking_lot::RwLock::new(*self.features_input.read()),
             type_kernel: Arc::clone(&self.type_kernel),
-            type_kernel_input: parking_lot::RwLock::new(*self.type_kernel_input.read()),
             // Share the same cache across clones so a per-job db clone sees configs
             // loaded by its siblings.
             graph_config_cache: self.graph_config_cache.clone(),
+            // Salsa shares one `event_callback` across all storage clones, so every
+            // handle must point at the same stats to keep counts consistent.
+            salsa_events: self.salsa_events.clone(),
         }
     }
 }
 
 impl RootDatabaseImpl {
     pub fn new() -> Self {
-        let type_kernel = Arc::new(TypeKernelInner::new());
+        Self::new_inner(salsa_events_enabled_by_env())
+    }
+
+    fn new_inner(events_enabled: bool) -> Self {
+        // Install the event callback (if any) before any input is created so it
+        // observes the whole database lifetime, including the singleton inputs below.
+        let salsa_events =
+            events_enabled.then(|| Arc::new(crate::salsa_events::SalsaEventStats::default()));
+        let storage = match &salsa_events {
+            Some(stats) => {
+                let stats = Arc::clone(stats);
+                salsa::Storage::builder()
+                    .event_callback(Box::new(move |event| stats.record(&event)))
+                    .build()
+            }
+            None => salsa::Storage::default(),
+        };
         let db = Self {
-            storage: salsa::Storage::default(),
+            storage,
             files: Files::new(),
-            workspace_configs_input: parking_lot::RwLock::new(None),
-            workspace_load_state: parking_lot::RwLock::new(None),
             config_revisions: Arc::new(DashMap::default()),
             metadata_listings: Arc::new(DashMap::default()),
-            global_config_revision: parking_lot::RwLock::new(None),
-            features_input: parking_lot::RwLock::new(None),
-            type_kernel: Arc::clone(&type_kernel),
-            type_kernel_input: parking_lot::RwLock::new(None),
+            type_kernel: Arc::new(TypeKernelInner::new()),
             graph_config_cache: None,
+            salsa_events,
         };
-        let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new());
-        *db.workspace_configs_input.write() = Some(input);
-        let load_state = metadata::WorkspaceLoadStateInput::new(&db, true);
-        *db.workspace_load_state.write() = Some(load_state);
-        let global_config_revision = metadata::ConfigRevisionInput::new(&db, 0);
-        *db.global_config_revision.write() = Some(global_config_revision);
+        // The singleton inputs are created once here and retrieved via `::get()`
+        // afterwards; a second `new()` against the same storage would panic inside
+        // salsa, but every construction path goes through this function.
+        //
+        // The workspace/metadata inputs are MEDIUM durability: they change only on
+        // config drift or reload — rare batches against the keystroke stream. A
+        // `.bsl` edit is a LOW write, so every memo whose cone is MEDIUM-floored
+        // (the metadata chain) shallow-verifies in O(1) instead of re-walking its
+        // dependency edges on each keystroke.
+        use salsa::Durability;
+        let _ = metadata::WorkspaceConfigsInput::builder(Vec::new())
+            .durability(Durability::MEDIUM)
+            .new(&db);
+        let _ = metadata::WorkspaceLoadStateInput::builder(true)
+            .durability(Durability::MEDIUM)
+            .new(&db);
+        let _ = GlobalConfigRevisionInput::builder(0).durability(Durability::MEDIUM).new(&db);
         let defaults = project_model::FeaturesConfig::default();
-        let features = FeaturesInput::new(&db, defaults.type_narrowing);
-        *db.features_input.write() = Some(features);
-        let type_kernel_input = TypeKernelInput::new(&db, TypeKernelHandle::new(type_kernel));
-        *db.type_kernel_input.write() = Some(type_kernel_input);
+        let _ =
+            FeaturesInput::builder(defaults.type_narrowing).durability(Durability::MEDIUM).new(&db);
         db
+    }
+
+    /// Construct a database with salsa event counting forced on, independent of the
+    /// `BSL_SALSA_EVENTS` env var (which is process-global and racy under the test
+    /// harness). For tests of [`crate::salsa_events`].
+    #[cfg(test)]
+    pub(crate) fn new_with_salsa_events() -> Self {
+        Self::new_inner(true)
     }
 
     pub(crate) fn type_kernel_inner(&self) -> &Arc<TypeKernelInner> {
@@ -174,6 +199,24 @@ impl RootDatabaseImpl {
                 )
             })
             .collect()
+    }
+
+    /// Per-ingredient salsa event counters (executes / validates / discards /
+    /// interns), sorted by descending execute count. `None` unless the database was
+    /// built with events enabled (`BSL_SALSA_EVENTS=1`). Names are resolved here via
+    /// [`salsa::Database::ingredient_debug_name`] — the callback that accumulates the
+    /// counts cannot touch the database.
+    pub fn salsa_event_report(&self) -> Option<Vec<crate::salsa_events::SalsaEventRow>> {
+        use salsa::Database;
+        let stats = self.salsa_events.as_ref()?;
+        Some(stats.rows(|idx| self.ingredient_debug_name(idx).into_owned()))
+    }
+
+    /// Global (keyless) salsa event counters — cancellation checks/flags and
+    /// accumulator discards. `None` unless events are enabled; see
+    /// [`Self::salsa_event_report`].
+    pub fn salsa_event_global(&self) -> Option<crate::salsa_events::GlobalCounts> {
+        self.salsa_events.as_ref().map(|s| s.global_counts())
     }
 
     /// Attach a build-scoped configuration cache shared across this build's batch
@@ -215,19 +258,13 @@ impl RootDatabaseImpl {
     }
 
     fn workspace_configs(&self) -> metadata::WorkspaceConfigsInput {
-        self.workspace_configs_input
-            .read()
-            .expect("workspace_configs_input is initialized in RootDatabaseImpl::new")
-    }
-
-    pub fn workspace_configs_input(&self) -> metadata::WorkspaceConfigsInput {
-        self.workspace_configs()
+        metadata::WorkspaceConfigsInput::try_get(self)
+            .expect("WorkspaceConfigsInput is created in RootDatabaseImpl::new")
     }
 
     fn workspace_load_state(&self) -> metadata::WorkspaceLoadStateInput {
-        self.workspace_load_state
-            .read()
-            .expect("workspace_load_state is initialized in RootDatabaseImpl::new")
+        metadata::WorkspaceLoadStateInput::try_get(self)
+            .expect("WorkspaceLoadStateInput is created in RootDatabaseImpl::new")
     }
 
     /// Whether the host's initial workspace load has completed; see
@@ -244,10 +281,9 @@ impl RootDatabaseImpl {
         input.set_complete(self).to(complete);
     }
 
-    fn global_config_revision_input(&self) -> metadata::ConfigRevisionInput {
-        self.global_config_revision
-            .read()
-            .expect("global_config_revision is initialized in RootDatabaseImpl::new")
+    fn global_config_revision_input(&self) -> GlobalConfigRevisionInput {
+        GlobalConfigRevisionInput::try_get(self)
+            .expect("GlobalConfigRevisionInput is created in RootDatabaseImpl::new")
     }
 
     /// The current revision for a registered config root, as recorded in its
@@ -301,7 +337,9 @@ impl RootDatabaseImpl {
         if self.config_revisions.contains_key(&key) {
             return;
         }
-        let input = metadata::ConfigRevisionInput::new(self, 0);
+        let input = metadata::ConfigRevisionInput::builder(0)
+            .durability(salsa::Durability::MEDIUM)
+            .new(self);
         self.config_revisions.insert(key, input);
     }
 
@@ -370,13 +408,15 @@ impl RootDatabaseImpl {
     /// (e.g. metadata watch registration completing after the bootstrap load).
     pub fn bump_all_config_revisions(&mut self) {
         use salsa::Setter;
-        let mut inputs: Vec<metadata::ConfigRevisionInput> =
+        let inputs: Vec<metadata::ConfigRevisionInput> =
             self.config_revisions.iter().map(|e| *e.value()).collect();
-        inputs.push(self.global_config_revision_input());
         for input in inputs {
             let current = input.revision(self);
             input.set_revision(self).to(current.wrapping_add(1));
         }
+        let global = self.global_config_revision_input();
+        let current = global.revision(self);
+        global.set_revision(self).to(current.wrapping_add(1));
     }
 
     /// Set the workspace config roots. Exactly ONE entry must carry the `None` label
@@ -440,8 +480,7 @@ impl RootDatabaseImpl {
                 input.set_subsystems(self).to(subsystems);
             }
             None => {
-                let input = metadata::MetadataListingInput::new(
-                    self,
+                let input = metadata::MetadataListingInput::builder(
                     entries,
                     defined_types,
                     common_modules,
@@ -452,7 +491,9 @@ impl RootDatabaseImpl {
                     web_services,
                     integration_services,
                     subsystems,
-                );
+                )
+                .durability(salsa::Durability::MEDIUM)
+                .new(self);
                 self.metadata_listings.insert(key, input);
             }
         }
@@ -1515,7 +1556,7 @@ impl RootDatabaseImpl {
     }
 
     fn features(&self) -> FeaturesInput {
-        self.features_input.read().expect("features_input is initialized in RootDatabaseImpl::new")
+        FeaturesInput::try_get(self).expect("FeaturesInput is created in RootDatabaseImpl::new")
     }
 
     pub fn type_narrowing_enabled(&self) -> bool {
@@ -1630,6 +1671,10 @@ impl SourceDatabase for RootDatabaseImpl {
 #[salsa::db]
 impl RootQueryDb for RootDatabaseImpl {
     fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
+        self.parse_ref(file_id).clone()
+    }
+
+    fn parse_ref(&self, file_id: FileId) -> &syntax::Parse<syntax::SyntaxNode> {
         let input = base_db::FileIdInput::new(self, file_id);
         base_db::parse_query(self, input)
     }

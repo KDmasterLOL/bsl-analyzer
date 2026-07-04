@@ -1,4 +1,6 @@
-use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState};
+use crate::baseline::{
+    BaselineStatusProbe, ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState,
+};
 use crate::state::{OverlayWarmupState, SemanticRuntimeStatus, WorkspaceSearchMode};
 use crate::tools::response::structured;
 use bsl_search::{
@@ -555,6 +557,13 @@ fn search_not_ready(detail: &str, progress: &IndexProgress) -> CallToolResult {
     }))
 }
 
+/// The `not_ready` retry envelope for a query that arrived while the deferred baseline
+/// connect is still running. Distinct from the `baseline_unavailable` config errors: the
+/// agent should simply retry in a few seconds, not go fix configuration or restart.
+pub(crate) fn baseline_warming_not_ready(progress: &IndexProgress) -> CallToolResult {
+    search_not_ready("connecting to the shared PostgreSQL baseline (startup warmup)", progress)
+}
+
 /// The unified code search: run lexical and semantic, fuse by `fuse_smart` (exact-symbol tier
 /// then semantic tail), and degrade to lexical (with a trailing note) when semantic cannot serve.
 /// This is what the `search_code` action dispatches to.
@@ -1072,6 +1081,7 @@ pub fn search_docs(
     Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits))]))
 }
 
+#[allow(clippy::too_many_arguments, reason = "distinct status inputs, mirrored by _with_cap")]
 pub fn search_status(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     progress: &Arc<IndexProgress>,
@@ -1080,9 +1090,13 @@ pub fn search_status(
     overlay_warmup: OverlayWarmupState,
     configured_baseline: Option<ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
+    baseline_pending: bool,
 ) -> Result<CallToolResult, McpError> {
-    // The 30s cap mirrors `try_acquire_engine`: status degrades to a "busy" note rather than
-    // hanging to the MCP client timeout when a long operation holds the engine.
+    // Status is a polling primitive: agents call it in a loop to decide when search is usable,
+    // so it answers within the cap and degrades to the "busy" note instead of waiting out a
+    // long engine hold (overlay warmup, a slow embed). The trade-off is real: while something
+    // holds the engine for longer than the cap, status reports no counts / overlay stats —
+    // that is preferred over a poll that blocks for tens of seconds.
     search_status_with_cap(
         engine,
         progress,
@@ -1091,12 +1105,13 @@ pub fn search_status(
         overlay_warmup,
         configured_baseline,
         external_baseline,
-        std::time::Duration::from_secs(30),
+        baseline_pending,
+        std::time::Duration::from_secs(2),
     )
 }
 
 /// The status body, parameterized over the engine-acquire cap so tests can drive the timeout
-/// (busy) branch without a 30-second sleep. Production goes through [`search_status`].
+/// (busy) branch without a multi-second sleep. Production goes through [`search_status`].
 // Each argument is a distinct status input (engine, progress, runtime status, mode, warmup
 // outcome, baselines) plus the test-only acquire cap; bundling them into a context struct would
 // only rename the same fields, so the one-over-limit arity is accepted here.
@@ -1109,6 +1124,7 @@ fn search_status_with_cap(
     overlay_warmup: OverlayWarmupState,
     configured_baseline: Option<ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
+    baseline_pending: bool,
     engine_acquire_cap: std::time::Duration,
 ) -> Result<CallToolResult, McpError> {
     let mut out = String::new();
@@ -1117,6 +1133,10 @@ fn search_status_with_cap(
         .lock()
         .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
         .clone();
+    // One non-blocking probe feeds every baseline-derived line below (summary wording, source
+    // labels, the External baseline section). Status makes NO network round-trips of its own:
+    // the probe serves the last completed background probe and re-kicks one when stale.
+    let baseline_probe = external_baseline.as_ref().map(|service| service.probe_status_cached());
     // Cap the wait so status never hangs to the MCP client timeout while the overlay warmup or a
     // peer search holds the engine. On a genuine stall we still report the baseline + runtime
     // sections (which need no engine lock) and note the local index as busy.
@@ -1156,8 +1176,21 @@ fn search_status_with_cap(
         &overlay_warmup,
         configured_baseline.as_ref(),
         external_baseline.as_ref(),
+        baseline_probe.as_ref(),
         engine_state,
     );
+
+    // Pending is only reachable on the postgres path (a Connect plan exists for no other
+    // backend), so the placeholder backend below is accurate by construction.
+    if baseline_pending && configured_baseline.is_none() {
+        let _ = writeln!(out, "Configured baseline:");
+        let _ = writeln!(out, "  Backend:  postgres");
+        let _ = writeln!(
+            out,
+            "  Status:   connecting to the shared baseline (startup warmup) — retry shortly"
+        );
+        let _ = writeln!(out);
+    }
 
     if let Some(configured_baseline) = configured_baseline.as_ref() {
         let _ = writeln!(out, "Configured baseline:");
@@ -1278,62 +1311,83 @@ fn search_status_with_cap(
         if let Some(source) = external_baseline.as_ref() {
             match source.corpus() {
                 bsl_search::CorpusId::WorkspaceCode => {
-                    // Choosing the display label only needs to know whether a baseline snapshot
-                    // resolves — not its documents. `resolve_snapshot` is a metadata-only actor
-                    // round-trip, whereas `resolve_workspace_view` loads the entire baseline
-                    // corpus (hundreds of thousands of documents) under the engine lock, which
-                    // stalls `status` past the client timeout on a large remote overlay.
-                    let display_start = std::time::Instant::now();
-                    let code_lexical_source = match source.resolve_snapshot() {
-                        Ok(Some(_)) => "external baseline + local overlay",
-                        Ok(None) => "local sqlite + local overlay",
-                        Err(_) => "local sqlite + local overlay",
+                    // The display label only needs to know whether a baseline snapshot resolved
+                    // on the last probe — worth neither a PG round-trip nor a document load here.
+                    let code_lexical_source = match baseline_probe.as_ref() {
+                        Some(BaselineStatusProbe::Cached(cached))
+                            if matches!(
+                                cached.status.state,
+                                ExternalBaselineState::Ready { .. }
+                            ) =>
+                        {
+                            "external baseline + local overlay"
+                        }
+                        Some(BaselineStatusProbe::Pending) => {
+                            "external baseline (status probe pending) + local overlay"
+                        }
+                        _ => "local sqlite + local overlay",
                     };
-                    tracing::debug!(
-                        elapsed_ms = display_start.elapsed().as_millis() as u64,
-                        "search.status: resolve_snapshot display check"
-                    );
                     let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
-                    let code_semantic_source =
-                        match (&semantic_runtime, workspace_search_mode.clone()) {
-                            (SemanticRuntimeStatus::Disabled, _) => {
+                    let code_semantic_source = match (
+                        &semantic_runtime,
+                        workspace_search_mode.clone(),
+                    ) {
+                        (SemanticRuntimeStatus::Disabled, _) => {
+                            "not configured (set EMBEDDING_URL)".to_owned()
+                        }
+                        (SemanticRuntimeStatus::Indexing, _) => {
+                            "local sqlite semantic index building in background".to_owned()
+                        }
+                        (
+                            SemanticRuntimeStatus::OverlaySyncing,
+                            WorkspaceSearchMode::PostgresRemoteOverlay,
+                        ) => "remote baseline semantic + local overlay sync in progress".to_owned(),
+                        (
+                            SemanticRuntimeStatus::OverlaySyncing,
+                            WorkspaceSearchMode::SqliteLocal,
+                        ) => "local sqlite + local overlay sync in progress".to_owned(),
+                        (
+                            SemanticRuntimeStatus::Ready,
+                            WorkspaceSearchMode::PostgresRemoteOverlay,
+                        ) => {
+                            if baseline_probe_unreachable(baseline_probe.as_ref()) {
+                                "shared baseline not currently reachable (see the External baseline section); local overlay only".to_owned()
+                            } else if matches!(
+                                baseline_probe.as_ref(),
+                                Some(BaselineStatusProbe::Pending)
+                            ) {
+                                "remote baseline semantic (status probe pending) + local overlay only".to_owned()
+                            } else {
+                                "remote baseline semantic + local overlay only".to_owned()
+                            }
+                        }
+                        (SemanticRuntimeStatus::Ready, WorkspaceSearchMode::SqliteLocal) => {
+                            if semantic {
+                                "local sqlite + local overlay".to_owned()
+                            } else {
                                 "not configured (set EMBEDDING_URL)".to_owned()
                             }
-                            (SemanticRuntimeStatus::Indexing, _) => {
-                                "local sqlite semantic index building in background".to_owned()
-                            }
-                            (
-                                SemanticRuntimeStatus::OverlaySyncing,
-                                WorkspaceSearchMode::PostgresRemoteOverlay,
-                            ) => "remote baseline semantic + local overlay sync in progress"
-                                .to_owned(),
-                            (
-                                SemanticRuntimeStatus::OverlaySyncing,
-                                WorkspaceSearchMode::SqliteLocal,
-                            ) => "local sqlite + local overlay sync in progress".to_owned(),
-                            (
-                                SemanticRuntimeStatus::Ready,
-                                WorkspaceSearchMode::PostgresRemoteOverlay,
-                            ) => "remote baseline semantic + local overlay only".to_owned(),
-                            (SemanticRuntimeStatus::Ready, WorkspaceSearchMode::SqliteLocal) => {
-                                if semantic {
-                                    "local sqlite + local overlay".to_owned()
-                                } else {
-                                    "not configured (set EMBEDDING_URL)".to_owned()
-                                }
-                            }
-                            (SemanticRuntimeStatus::Failed(_), _) => "failed".to_owned(),
-                        };
+                        }
+                        (SemanticRuntimeStatus::Failed(_), _) => "failed".to_owned(),
+                    };
                     let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
                 }
                 bsl_search::CorpusId::Reference => {
-                    // Metadata-only check: `resolve_reference_view` loads all reference docs,
-                    // which is expensive under the engine lock. A snapshot resolve is enough
-                    // to decide the display label.
-                    let docs_lexical_source = match source.resolve_snapshot() {
-                        Ok(Some(_)) => "external baseline",
-                        Ok(None) => "local sqlite",
-                        Err(_) => "local sqlite",
+                    // Same probe-derived label as the workspace arm: no PG round-trip and no
+                    // reference-corpus document load just to word a display line.
+                    let docs_lexical_source = match baseline_probe.as_ref() {
+                        Some(BaselineStatusProbe::Cached(cached))
+                            if matches!(
+                                cached.status.state,
+                                ExternalBaselineState::Ready { .. }
+                            ) =>
+                        {
+                            "external baseline"
+                        }
+                        Some(BaselineStatusProbe::Pending) => {
+                            "external baseline (status probe pending)"
+                        }
+                        _ => "local sqlite",
                     };
                     let _ = writeln!(out, "  Docs lexical source: {docs_lexical_source}");
                     let docs_semantic_source = if semantic {
@@ -1400,86 +1454,92 @@ fn search_status_with_cap(
         let _ = writeln!(out, "Search index: building (background initialization in progress)");
     }
 
-    if let Some(external_baseline) = external_baseline {
-        let probe_start = std::time::Instant::now();
-        let status = external_baseline.probe_status();
+    // Everything below is engine-free; release the lock now so a concurrent search never
+    // queues behind status rendering. `index_building` is captured while the guard is held.
+    let index_building = guard.as_ref().is_some_and(|g| g.is_none());
+    if !engine_busy {
         tracing::debug!(
-            elapsed_ms = probe_start.elapsed().as_millis() as u64,
-            "search.status: external probe_status"
+            elapsed_ms = guard_held_start.elapsed().as_millis() as u64,
+            "search.status: total time holding engine guard"
         );
+    }
+    drop(guard);
+
+    if let Some(external_baseline) = external_baseline {
         let _ = writeln!(out);
         let _ = writeln!(out, "External baseline: configured");
-        let _ = writeln!(out, "  Backend:  {}", status.backend);
-        let _ = writeln!(out, "  Schema:   {}", status.schema);
-        let _ = writeln!(out, "  Select:   {}", status.selection);
-        if let Some(resolved) = status.resolved.as_deref() {
-            let _ = writeln!(out, "  Resolved: {}", resolved);
-        }
-        match status.state {
-            ExternalBaselineState::Ready { snapshot_id, fingerprint, documents, files } => {
-                let _ = writeln!(out, "  Status:   ready");
-                let _ = writeln!(out, "  Snapshot: {}", snapshot_id);
-                let _ = writeln!(out, "  Files:    {}", files);
-                let _ = writeln!(out, "  Chunks:   {}", documents);
-                if let Some(fingerprint) = fingerprint.as_deref() {
-                    let _ = writeln!(out, "  Fingerprint: {}", shorten_fingerprint(fingerprint));
+        match baseline_probe.as_ref() {
+            None | Some(BaselineStatusProbe::Pending) => {
+                let _ = writeln!(out, "  Backend:  postgres");
+                let _ = writeln!(out, "  Schema:   {}", external_baseline.schema_for_status());
+                let _ = writeln!(out, "  Select:   {}", external_baseline.selection());
+                let _ = writeln!(
+                    out,
+                    "  Status:   probing the shared baseline in the background — retry shortly"
+                );
+            }
+            Some(BaselineStatusProbe::Cached(cached)) => {
+                let status = &cached.status;
+                let _ = writeln!(out, "  Backend:  {}", status.backend);
+                let _ = writeln!(out, "  Schema:   {}", status.schema);
+                let _ = writeln!(out, "  Select:   {}", status.selection);
+                if let Some(resolved) = status.resolved.as_deref() {
+                    let _ = writeln!(out, "  Resolved: {}", resolved);
                 }
-                match external_baseline.corpus() {
-                    bsl_search::CorpusId::WorkspaceCode => {
-                        // A metadata-only check: do NOT load the baseline corpus here. The
-                        // baseline file/chunk counts are already printed above, and the local
-                        // overlay deltas appear in the `Workspace overlay` section, so the
-                        // post-merge resolved counts are redundant and not worth a full
-                        // document load under the engine lock (it stalls `status` past the
-                        // client timeout on a large remote overlay).
-                        let ext_resolve_start = std::time::Instant::now();
-                        let resolved_view = match external_baseline.resolve_snapshot() {
-                            Ok(Some(_)) => "ready",
-                            Ok(None) => "unavailable",
-                            Err(_) => "error",
-                        };
-                        tracing::debug!(
-                            elapsed_ms = ext_resolve_start.elapsed().as_millis() as u64,
-                            "search.status: external resolve_snapshot"
-                        );
-                        let _ = writeln!(out, "  Resolved view: {resolved_view}");
-                    }
-                    bsl_search::CorpusId::Reference => {
-                        if let Some(local_fingerprint) =
-                            external_baseline.local_reference_fingerprint()
-                        {
-                            let freshness = match fingerprint.as_deref() {
-                                Some(shared) if shared == local_fingerprint => "up to date",
-                                Some(_) => "stale",
-                                None => "unknown",
-                            };
-                            let _ = writeln!(out, "  Freshness: {}", freshness);
+                let _ = writeln!(
+                    out,
+                    "  Probed:   {}s ago (served from cache; re-probed in background when stale)",
+                    cached.age().as_secs()
+                );
+                match &status.state {
+                    ExternalBaselineState::Ready { snapshot_id, fingerprint, documents, files } => {
+                        let _ = writeln!(out, "  Status:   ready");
+                        let _ = writeln!(out, "  Snapshot: {}", snapshot_id);
+                        let _ = writeln!(out, "  Files:    {}", files);
+                        let _ = writeln!(out, "  Chunks:   {}", documents);
+                        if let Some(fingerprint) = fingerprint.as_deref() {
                             let _ = writeln!(
                                 out,
-                                "  Local fingerprint: {}",
-                                shorten_fingerprint(&local_fingerprint)
+                                "  Fingerprint: {}",
+                                shorten_fingerprint(fingerprint)
                             );
                         }
-                        // Metadata-only check: do NOT load the reference corpus here.
-                        // The baseline file/chunk counts are already printed above, so the
-                        // post-resolve counts are redundant and not worth a full document
-                        // load under the engine lock.
-                        let resolved_view = match external_baseline.resolve_snapshot() {
-                            Ok(Some(_)) => "ready",
-                            Ok(None) => "unavailable",
-                            Err(_) => "error",
-                        };
-                        let _ = writeln!(out, "  Resolved view: {resolved_view}");
+                        match external_baseline.corpus() {
+                            bsl_search::CorpusId::WorkspaceCode => {
+                                // "Ready" already implies the snapshot resolved during the
+                                // probe; searches re-resolve fresh on their own path, so the
+                                // line reports probe-time truth without another round-trip.
+                                let _ = writeln!(out, "  Resolved view: ready (as of last probe)");
+                            }
+                            bsl_search::CorpusId::Reference => {
+                                if let Some(local_fingerprint) =
+                                    external_baseline.local_reference_fingerprint()
+                                {
+                                    let freshness = match fingerprint.as_deref() {
+                                        Some(shared) if shared == local_fingerprint => "up to date",
+                                        Some(_) => "stale",
+                                        None => "unknown",
+                                    };
+                                    let _ = writeln!(out, "  Freshness: {}", freshness);
+                                    let _ = writeln!(
+                                        out,
+                                        "  Local fingerprint: {}",
+                                        shorten_fingerprint(&local_fingerprint)
+                                    );
+                                }
+                                let _ = writeln!(out, "  Resolved view: ready (as of last probe)");
+                            }
+                            bsl_search::CorpusId::Custom(_) => {}
+                        }
                     }
-                    bsl_search::CorpusId::Custom(_) => {}
+                    ExternalBaselineState::Missing => {
+                        let _ = writeln!(out, "  Status:   not found");
+                    }
+                    ExternalBaselineState::Error(error) => {
+                        let _ = writeln!(out, "  Status:   error");
+                        let _ = writeln!(out, "  Error:    {}", error);
+                    }
                 }
-            }
-            ExternalBaselineState::Missing => {
-                let _ = writeln!(out, "  Status:   not found");
-            }
-            ExternalBaselineState::Error(error) => {
-                let _ = writeln!(out, "  Status:   error");
-                let _ = writeln!(out, "  Error:    {}", error);
             }
         }
     }
@@ -1489,9 +1549,8 @@ fn search_status_with_cap(
     // Live counters are shown ONLY while `active` (a build is genuinely counting); an
     // inactive build object can hold stale totals from a finished/failed attempt (it is
     // never reset()), so we report a phase line instead of misleading numbers.
-    // Genuinely building = we hold the lock but the engine is not yet published. A busy timeout
+    // Genuinely building = we held the lock but the engine was not yet published. A busy timeout
     // (no guard) is reported separately above as "Local index: busy", not as initializing.
-    let index_building = guard.as_ref().is_some_and(|g| g.is_none());
     if progress.is_active() {
         let total = progress.total_chunks.load(Ordering::Relaxed);
         let done = progress.done_chunks.load(Ordering::Relaxed);
@@ -1514,13 +1573,6 @@ fn search_status_with_cap(
         "Note: code snippets are secret-redacted (credential-like values shown as ***); \
          treat snippet text as sanitized, not byte-exact."
     );
-
-    if !engine_busy {
-        tracing::debug!(
-            elapsed_ms = guard_held_start.elapsed().as_millis() as u64,
-            "search.status: total time holding engine guard"
-        );
-    }
 
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
@@ -1892,6 +1944,39 @@ enum SummaryEngineState {
     Building,
 }
 
+/// The summary's claim about baseline-served semantic search must not outrun the probe:
+/// before the first background probe lands the availability is unconfirmed, and a probe
+/// that ended in Missing/Error means the shared baseline is not currently reachable.
+fn baseline_semantic_summary(
+    baseline_selection: &str,
+    baseline_probe: Option<&BaselineStatusProbe>,
+) -> String {
+    match baseline_probe {
+        Some(BaselineStatusProbe::Pending) => format!(
+            "{baseline_selection} baseline configured; first background status probe still running — retry shortly."
+        ),
+        Some(BaselineStatusProbe::Cached(cached))
+            if !matches!(cached.status.state, ExternalBaselineState::Ready { .. }) =>
+        {
+            "shared baseline is not currently reachable (see the External baseline section)."
+                .to_owned()
+        }
+        _ => format!("served from the {baseline_selection} baseline (published index)."),
+    }
+}
+
+/// True when the last completed probe says the shared baseline is Missing or errored —
+/// the one case where summary lines must stop claiming baseline-backed availability.
+/// A pending probe is merely unconfirmed, not unreachable.
+fn baseline_probe_unreachable(baseline_probe: Option<&BaselineStatusProbe>) -> bool {
+    matches!(
+        baseline_probe,
+        Some(BaselineStatusProbe::Cached(cached))
+            if !matches!(cached.status.state, ExternalBaselineState::Ready { .. })
+    )
+}
+
+#[allow(clippy::too_many_arguments, reason = "distinct status inputs, mirrors search_status")]
 fn write_summary_block(
     out: &mut String,
     semantic_runtime: &SemanticRuntimeStatus,
@@ -1899,6 +1984,7 @@ fn write_summary_block(
     overlay_warmup: &OverlayWarmupState,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<&Arc<ExternalBaselineService>>,
+    baseline_probe: Option<&BaselineStatusProbe>,
     engine_state: SummaryEngineState,
 ) {
     // Reference profile = an external docs baseline (no local workspace code overlay). Its wording
@@ -1930,20 +2016,28 @@ fn write_summary_block(
     let semantic_line = match (semantic_runtime, workspace_search_mode) {
         (SemanticRuntimeStatus::Disabled, _) => "not configured (set EMBEDDING_URL).".to_owned(),
         (SemanticRuntimeStatus::Failed(_), _) => {
-            "baseline available; semantic runtime reported a failure (see below).".to_owned()
+            if baseline_probe_unreachable(baseline_probe) {
+                "semantic runtime reported a failure and the shared baseline is not currently reachable (see below).".to_owned()
+            } else {
+                "baseline available; semantic runtime reported a failure (see below).".to_owned()
+            }
         }
         (SemanticRuntimeStatus::OverlaySyncing, _) => {
-            "baseline available; local overlay still syncing.".to_owned()
+            if baseline_probe_unreachable(baseline_probe) {
+                "local overlay still syncing; the shared baseline is not currently reachable (see the External baseline section).".to_owned()
+            } else {
+                "baseline available; local overlay still syncing.".to_owned()
+            }
         }
         (SemanticRuntimeStatus::Indexing, _) => {
             "local semantic index building in background.".to_owned()
         }
         (SemanticRuntimeStatus::Ready, WorkspaceSearchMode::PostgresRemoteOverlay) => {
-            format!("served from the {baseline_selection} baseline (published index).")
+            baseline_semantic_summary(baseline_selection, baseline_probe)
         }
         (SemanticRuntimeStatus::Ready, WorkspaceSearchMode::SqliteLocal) => {
             if has_baseline {
-                format!("served from the {baseline_selection} baseline (published index).")
+                baseline_semantic_summary(baseline_selection, baseline_probe)
             } else {
                 "local semantic index.".to_owned()
             }
@@ -2311,6 +2405,7 @@ mod tests {
                 support: None,
             }),
             None,
+            false,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
@@ -2323,9 +2418,8 @@ mod tests {
         assert!(text.contains("Chunks:   1"));
     }
 
-    #[test]
-    fn search_status_shows_external_baseline_probe_errors() {
-        let source = ExternalBaselineService::for_test(
+    fn unreachable_workspace_service() -> Arc<ExternalBaselineService> {
+        ExternalBaselineService::for_test(
             RefreshableExternalBaselineSource::for_test(
                 bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
                 bsl_search::BaselineRef {
@@ -2336,6 +2430,25 @@ mod tests {
                 },
             )
             .unwrap(),
+        )
+    }
+
+    #[test]
+    fn search_status_shows_external_baseline_probe_errors() {
+        let source = unreachable_workspace_service();
+        // Status itself makes no PG round-trips: it renders the last completed background
+        // probe, so the error state is seeded the way a finished probe would leave it.
+        source.seed_status_cache_for_test(
+            crate::baseline::ExternalBaselineStatus {
+                backend: "postgres",
+                schema: "erp".to_owned(),
+                selection: "branch main".to_owned(),
+                resolved: None,
+                state: crate::baseline::ExternalBaselineState::Error(
+                    "connection refused".to_owned(),
+                ),
+            },
+            std::time::Duration::from_secs(1),
         );
 
         let result = search_status(
@@ -2351,6 +2464,7 @@ mod tests {
                 support: None,
             }),
             Some(source),
+            false,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
@@ -2360,6 +2474,76 @@ mod tests {
         assert!(text.contains("External baseline: configured"));
         assert!(text.contains("Backend:  postgres"));
         assert!(text.contains("Status:   error"));
+        assert!(text.contains("Error:    connection refused"));
+        assert!(
+            text.contains("Probed:   1s ago"),
+            "cached render must state the probe age: {text}"
+        );
+    }
+
+    #[test]
+    fn search_status_reports_pending_probe_without_blocking() {
+        let source = unreachable_workspace_service();
+
+        // No seeded cache: the first status call must answer immediately (the real probe
+        // against the unreachable server takes seconds) and say a probe is in flight,
+        // without claiming the baseline is established.
+        let started = std::time::Instant::now();
+        let result = search_status(
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            Some(source),
+            false,
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "status must not block on the first probe: {:?}",
+            started.elapsed()
+        );
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(
+            text.contains("probing the shared baseline in the background — retry shortly"),
+            "pending probe must be announced: {text}"
+        );
+        assert!(
+            text.contains("first background status probe still running"),
+            "summary must not claim an established baseline before the first probe: {text}"
+        );
+        assert!(
+            !text.contains("(published index)"),
+            "summary must not assert baseline availability while the probe is pending: {text}"
+        );
+    }
+
+    #[test]
+    fn search_status_reports_warming_while_baseline_connect_is_pending() {
+        let result = search_status(
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("Configured baseline:"), "{text}");
+        assert!(text.contains("Backend:  postgres"), "{text}");
+        assert!(text.contains("connecting to the shared baseline"), "{text}");
     }
 
     #[test]
@@ -2394,6 +2578,7 @@ mod tests {
                 support: None,
             }),
             None,
+            false,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
@@ -2827,6 +3012,7 @@ mod tests {
                 support: None,
             }),
             None,
+            false,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
@@ -2866,6 +3052,7 @@ mod tests {
                 warmup,
                 postgres_baseline(),
                 None,
+                false,
             )
             .unwrap()
             .content[0]
@@ -2917,6 +3104,7 @@ mod tests {
             OverlayWarmupState::Pending,
             None,
             None,
+            false,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("text").text.as_str();
@@ -3133,6 +3321,7 @@ mod tests {
                 support: None,
             }),
             None,
+            false,
             Duration::from_millis(40),
         )
         .unwrap();

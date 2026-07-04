@@ -541,6 +541,10 @@ fn analyze_salsa(
                 &db,
                 "PEAK (last chunk, pre-eviction)",
             );
+            bsl_analyzer::mem_report::print_salsa_event_report(
+                &db,
+                "PEAK (last chunk, pre-eviction)",
+            );
         }
 
         // `config_path_input` (which borrows `&db`) is now out of scope, so the
@@ -573,6 +577,7 @@ fn analyze_salsa(
 
     if report_mem {
         bsl_analyzer::mem_report::print_salsa_memory_report(&db, "TROUGH (post-eviction)");
+        bsl_analyzer::mem_report::print_salsa_event_report(&db, "TROUGH (post-eviction)");
     }
 
     // Results are appended chunk-by-chunk in `file_ids` order, and rayon's

@@ -593,6 +593,7 @@ fn build_server(
                 tracing::info!(%url, "Configuring 1C HTTP client");
                 state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));
             }
+            state.warm_start();
             state
         }
         mcp_server::McpProfile::Reference => mcp_server::SharedState::reference(source_dir),

@@ -10,7 +10,7 @@ pub(super) fn build(db: &dyn RootDatabase, name: &str) -> Option<SymbolSignature
     let input = TypeNameInput::new(db, name.to_string());
     let function = global_function_query(db, input)?;
     let docs = PlatformDataInner::instance().get_global_function_docs(function.id);
-    Some(from_global_function(&function, docs.as_ref()))
+    Some(from_global_function(function, docs.as_ref()))
 }
 
 pub fn from_global_function(

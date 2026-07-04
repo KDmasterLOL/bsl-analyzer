@@ -249,6 +249,23 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Err(e.into());
     }
 
+    // A panic inside a Salsa query leaves no useful trace of *which* query blew
+    // up once `catch_unwind` has unwound past the query stack: Salsa attaches the
+    // database (and hence the query stack) to the thread only for the duration of
+    // a tracked-fn body. Capturing here, in the panic hook, runs at the panic
+    // point while that attachment is still live, so the query stacktrace resolves.
+    // `capture()` returns `None` — and this hook stays silent — for panics on a
+    // thread not currently executing a query; hangs are out of reach entirely
+    // (the query stack lives on the stuck thread's thread-local, not ours). The
+    // per-request panic log in `handlers::dispatch` is complementary, not replaced.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(backtrace) = salsa::Backtrace::capture() {
+            tracing::error!(query_backtrace = %backtrace, "panic inside salsa query");
+        }
+        prev_hook(info);
+    }));
+
     if append_log && log_file.is_some() {
         // Appended daemon logs concatenate runs; the separator must survive the
         // default filter (`warn` + the `bsl_graph` diagnosis trail), so it rides

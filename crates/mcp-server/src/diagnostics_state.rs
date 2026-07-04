@@ -19,10 +19,12 @@
 //! clones the Salsa `Storage`) and the clone never leaves the calling thread.
 //!
 //! Freshness is pull-on-request, mirroring the graph: each read cheaply re-checks the
-//! workspace on disk (throttled). A changed `.bsl` body is re-keyed with `set_file_text`
-//! and any `.xml` add/remove/edit point-refreshes the metadata substrate — both in place
-//! under the resident mutex. Only a non-`.xml` file add/remove or an analyzer config-file
-//! change falls back to a full off-thread rebuild. An idle sweeper drops the resident db
+//! workspace on disk (throttled). A changed `.bsl` body is re-keyed with `set_file_text`,
+//! a created/deleted `.bsl` is (un)registered into the live source root, and any `.xml`
+//! add/remove/edit point-refreshes the metadata substrate — all in place under the
+//! resident mutex, preserving every unrelated memo. Only an analyzer config-file change
+//! or a removed directory subtree falls back to a full off-thread rebuild. An idle
+//! sweeper drops the resident db
 //! after a quiet period so a standalone `mcp serve` reclaims the memory after a burst.
 
 use std::cell::RefCell;
@@ -864,15 +866,12 @@ impl DiagnosticsState {
             return false;
         }
 
-        // A non-XML add/remove moves the file universe (a new or vanished `.bsl`), and an
-        // analyzer-config edit can change the extension set — neither is expressible as a
-        // substrate point-refresh, so both force a full rebuild. Everything else (any
-        // `.xml` add/remove/edit, plus `.bsl` body edits) is reconciled in place.
-        let full_rebuild = config_changed
-            || changes.added.iter().any(|p| !p.ends_with(".xml"))
-            || changes.removed.iter().any(|p| !p.ends_with(".xml"));
-
-        if full_rebuild {
+        // Only an analyzer-config edit forces a full rebuild (it can change the
+        // extension set and the effective diagnostics config). Everything else — any
+        // `.xml` add/remove/edit, `.bsl` body edits, AND `.bsl` files appearing or
+        // vanishing — is reconciled into the live resident in place. A removed subtree
+        // needs no special case here: the scan diff enumerates every descendant.
+        if config_changed {
             self.kick_full_reload();
             return true;
         }
@@ -888,9 +887,19 @@ impl DiagnosticsState {
             .filter(|p| p.ends_with(".xml"))
             .map(PathBuf::from)
             .collect();
+        let added_bsl: Vec<String> =
+            changes.added.iter().filter(|p| !p.ends_with(".xml")).cloned().collect();
         let modified_bsl: Vec<String> =
             changes.modified.iter().filter(|p| !p.ends_with(".xml")).cloned().collect();
-        self.apply_metadata_and_body_drift(&xml_paths, &modified_bsl, scan);
+        let removed_bsl: Vec<String> =
+            changes.removed.iter().filter(|p| !p.ends_with(".xml")).cloned().collect();
+        self.apply_metadata_and_body_drift(
+            &xml_paths,
+            &added_bsl,
+            &modified_bsl,
+            &removed_bsl,
+            scan,
+        );
         true
     }
 
@@ -940,19 +949,34 @@ impl DiagnosticsState {
 
         let class = crate::drift_classify::classify_drift(entries, &config_paths, Some(&baseline));
 
-        // A config edit or a structural change (a subtree removal, a new `.bsl`, or a
-        // removed resident `.bsl`) is not expressible as a substrate point-refresh.
+        // A config edit changes the effective diagnostics/extension setup and a removed
+        // subtree hides descendants the drain could not enumerate — neither is
+        // expressible in place. Everything else (xml, and `.bsl` added / modified /
+        // removed) reconciles into the live resident.
         if class.config_changed || class.structural_rescan {
             self.kick_full_reload();
             return;
         }
-        if class.xml_paths.is_empty() && class.bsl_modified.is_empty() {
+        if class.xml_paths.is_empty()
+            && class.bsl_modified.is_empty()
+            && class.bsl_added.is_empty()
+            && class.bsl_removed.is_empty()
+        {
             return;
         }
         let xml_paths: Vec<PathBuf> =
             class.xml_paths.iter().map(|d| PathBuf::from(&d.key)).collect();
+        let added_bsl: Vec<String> = class.bsl_added.iter().map(|d| d.key.clone()).collect();
         let modified_bsl: Vec<String> = class.bsl_modified.iter().map(|d| d.key.clone()).collect();
-        self.apply_drained_resident(&xml_paths, &modified_bsl, &class.removed_keys, &class.new_fp);
+        let removed_bsl: Vec<String> = class.bsl_removed.iter().map(|d| d.key.clone()).collect();
+        self.apply_drained_resident(
+            &xml_paths,
+            &added_bsl,
+            &modified_bsl,
+            &removed_bsl,
+            &class.removed_keys,
+            &class.new_fp,
+        );
     }
 
     /// Apply already-classified event-driven drift to the resident and advance the drift
@@ -960,10 +984,16 @@ impl DiagnosticsState {
     /// mutation — substrate point-refresh + body re-key + `Running`-guard — with the scan
     /// path via [`apply_resident_changes`]; only the stats update differs (delta vs full
     /// rebase), because the drain has no whole-workspace scan to rebase onto.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one bucket per drift class, same as the classifier"
+    )]
     fn apply_drained_resident(
         &self,
         xml_paths: &[PathBuf],
+        added_bsl: &[String],
         modified_bsl: &[String],
+        removed_bsl: &[String],
         removed_keys: &[String],
         new_fp: &HashMap<String, u64>,
     ) {
@@ -973,13 +1003,16 @@ impl DiagnosticsState {
             if inner.reload == ReloadState::Running {
                 return;
             }
-            let Inner { resident: Some(resident), stats, generation, .. } = &mut *inner else {
+            let Inner { resident: Some(resident), stats, generation, status, .. } = &mut *inner
+            else {
                 return;
             };
             let (rebuild, moved) = apply_resident_changes(
                 resident,
                 xml_paths,
+                added_bsl,
                 modified_bsl,
+                removed_bsl,
                 |p| new_fp.get(p).copied(),
                 stats,
             );
@@ -994,9 +1027,14 @@ impl DiagnosticsState {
                 }
                 if moved {
                     *generation += 1;
+                    // An add/remove changed the served file universe; keep the
+                    // observable `Ready { files }` count truthful.
+                    *status = DiagnosticsStatus::Ready { files: resident.by_path.len() };
                     tracing::info!(
                         xml = xml_paths.len(),
+                        added = added_bsl.len(),
                         bodies = modified_bsl.len(),
+                        removed = removed_bsl.len(),
                         generation = *generation,
                         "diagnostics event-driven drift refresh",
                     );
@@ -1020,7 +1058,9 @@ impl DiagnosticsState {
     fn apply_metadata_and_body_drift(
         &self,
         xml_paths: &[PathBuf],
+        added_bsl: &[String],
         modified_bsl: &[String],
+        removed_bsl: &[String],
         scan: &OwnedScan,
     ) {
         let new_fp: HashMap<&str, u64> =
@@ -1042,13 +1082,16 @@ impl DiagnosticsState {
             {
                 return;
             }
-            let Inner { resident: Some(resident), stats, generation, .. } = &mut *inner else {
+            let Inner { resident: Some(resident), stats, generation, status, .. } = &mut *inner
+            else {
                 return;
             };
             let (rebuild, moved) = apply_resident_changes(
                 resident,
                 xml_paths,
+                added_bsl,
                 modified_bsl,
+                removed_bsl,
                 |p| new_fp.get(p).copied(),
                 stats,
             );
@@ -1063,9 +1106,14 @@ impl DiagnosticsState {
                 *stats = scan.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
                 if moved {
                     *generation += 1;
+                    // An add/remove changed the served file universe; keep the
+                    // observable `Ready { files }` count truthful.
+                    *status = DiagnosticsStatus::Ready { files: resident.by_path.len() };
                     tracing::info!(
                         xml = xml_paths.len(),
+                        added = added_bsl.len(),
                         bodies = modified_bsl.len(),
+                        removed = removed_bsl.len(),
                         generation = *generation,
                         "diagnostics metadata drift refresh",
                     );
@@ -1560,11 +1608,14 @@ fn config_fingerprint(root: &Path) -> u64 {
 fn apply_resident_changes(
     resident: &mut DiagnosticsResident,
     xml_paths: &[PathBuf],
+    added_bsl: &[String],
     modified_bsl: &[String],
+    removed_bsl: &[String],
     fp_of: impl Fn(&str) -> Option<u64>,
     stats: &HashMap<String, u64>,
 ) -> (bool, bool) {
-    use ide_host_core::{set_file_text_source, FileTextSource};
+    use base_db::{SourceDatabase, SourceRoot};
+    use ide_host_core::{set_file_text_source, FileTextSource, VfsWrite};
 
     // Pre-classification: an XML path resolving outside every registered config root is
     // drift the point-refresh cannot express — `refresh_metadata_substrate` gates its
@@ -1578,14 +1629,87 @@ fn apply_resident_changes(
     }
 
     let mut moved = false;
-    // Metadata XML drift is two independent invalidations. (1) Point-refresh the per-MDO
-    // substrate: re-discover the owning roots and re-read only the changed/new composing
-    // files. (2) Bump each owning root's config revision UNCONDITIONALLY so a non-enrolled
-    // `.xml` (`Configuration.xml`, form/template descriptors) a whole-config load would
-    // re-read still invalidates the coarse Channel-2 memo. Any `.xml` drift is movement.
-    if !xml_paths.is_empty() {
-        ide_host_core::refresh_metadata_substrate(&mut resident.db, &resident.vfs, xml_paths);
-        resident.db.bump_config_for_paths(xml_paths.iter().map(|p| p.as_path()));
+
+    // (1) Reconcile the file universe FIRST — mirrors the LSP's `process_changes`
+    // discipline (one FileSet clone, per-file inputs, one `set_source_root`), so the
+    // substrate refresh below resolves module back-links through an up-to-date VFS and
+    // root. Per-file ordering matters: the source-root + content-revision inputs are
+    // registered BEFORE the file becomes visible through the FileSet
+    // (`file_text_query` panics on a visible file with no revision).
+    let mut file_set_modified = false;
+    let mut file_set = {
+        let db = &resident.db;
+        db.source_root_input(crate::graph::GRAPH_SOURCE_ROOT).root(db).file_set().clone()
+    };
+    for path in added_bsl {
+        // Vanished again before we got here (create+delete coalesced apart): the
+        // removal pass — or the next drift window — settles it.
+        if fp_of(path).is_none() && !Path::new(path).is_file() {
+            continue;
+        }
+        let vfs_path = vfs::VfsPath::new(path.clone());
+        let file_id = resident.vfs.with_write(|vfs| vfs.alloc_file_id(vfs_path.clone()));
+        if let Some(&known) = resident.by_path.get(path.as_str()) {
+            if known != file_id {
+                // The path is already registered under a different id — an aliasing
+                // (symlink/canonicalisation) case registration cannot express safely.
+                return (true, moved);
+            }
+        }
+        resident.db.set_file_source_root(file_id, crate::graph::GRAPH_SOURCE_ROOT);
+        match base_db::read_disk_text(Path::new(path)) {
+            Ok(text) => {
+                set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text))
+            }
+            Err(_) => set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone),
+        }
+        if file_set.path_for_file(&file_id).is_none() {
+            file_set.insert(file_id, vfs_path);
+            file_set_modified = true;
+        }
+        // The classifier's `key` IS the canonical by_path spelling (both come from the
+        // scan-universe canonicalisation), so insert it verbatim — re-canonicalising
+        // here could diverge on a path that vanished between classify and apply.
+        resident.by_path.insert(path.clone(), file_id);
+        moved = true;
+    }
+    for path in removed_bsl {
+        // Never indexed → nothing to unregister (an untracked removal is not drift).
+        let Some(&file_id) = resident.by_path.get(path.as_str()) else { continue };
+        set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone);
+        if file_set.path_for_file(&file_id).is_some() {
+            file_set.remove(file_id);
+            file_set_modified = true;
+        }
+        resident.by_path.remove(path.as_str());
+        moved = true;
+    }
+    if file_set_modified {
+        resident
+            .db
+            .set_source_root(crate::graph::GRAPH_SOURCE_ROOT, SourceRoot::new_local(file_set));
+    }
+
+    // (2) Refresh the per-MDO substrate. Beside the drifted `.xml`, a created or
+    // deleted common-module/service body changes its listing's `module_file`
+    // reverse-index entry (the body is ordinary source, so it never flows through the
+    // metadata-XML path) — include those bodies in the same re-discovery, exactly as
+    // the LSP does. The config-revision bump stays `.xml`-only: a body add/remove does
+    // not change the whole-config metadata content.
+    let structural_listing_bodies: Vec<PathBuf> = added_bsl
+        .iter()
+        .chain(removed_bsl)
+        .map(PathBuf::from)
+        .filter(|p| project_model::is_substrate_listed_body_path(p))
+        .filter(|p| config_roots.iter().any(|(_, root)| p.starts_with(root)))
+        .collect();
+    if !xml_paths.is_empty() || !structural_listing_bodies.is_empty() {
+        let mut refresh: Vec<PathBuf> = xml_paths.to_vec();
+        refresh.extend(structural_listing_bodies);
+        ide_host_core::refresh_metadata_substrate(&mut resident.db, &resident.vfs, &refresh);
+        if !xml_paths.is_empty() {
+            resident.db.bump_config_for_paths(xml_paths.iter().map(|p| p.as_path()));
+        }
         moved = true;
     }
 
@@ -2007,6 +2131,122 @@ mod tests {
             }
             _ => panic!("expected Ready"),
         }
+    }
+
+    /// A brand-new common module (descriptor + body) registers into the live resident:
+    /// no rebuild (pre-existing FileIds stay stable — a re-enumeration would shift them,
+    /// the new name sorts first), and the substrate lists the module (its module-level
+    /// diagnostic fires, which requires the `module_file` back-link).
+    #[test]
+    fn incremental_add_of_new_common_module() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+        let gen0 = state.generation();
+        let existing = module_path(root, "Сервер");
+        let existing_id_before = match state.read(|r, _| r.file_id_for(&existing)) {
+            ResidentOutcome::Ready(Some(id), _) => id,
+            _ => panic!("existing module resolves before the add"),
+        };
+
+        // The name sorts before "Сервер", so a full re-enumeration would renumber it.
+        std::thread::sleep(Duration::from_millis(10));
+        write_common_module(root, "ААльфа", true, "Процедура Внутренняя()\nКонецПроцедуры");
+
+        assert!(wait_for_apply(&state, gen0), "the add applies in place");
+        assert!(
+            matches!(state.status(), DiagnosticsStatus::Ready { .. }),
+            "incremental add stays Ready"
+        );
+
+        let added = module_path(root, "ААльфа");
+        let out = state.read(|resident, _| {
+            let existing_id_after =
+                resident.file_id_for(&existing).expect("existing module still resolves");
+            let new_id = resident.file_id_for(&added).expect("new module resolves");
+            let findings = resident.analysis().diagnostics(new_id, &DiagnosticsConfig::default());
+            (existing_id_after, findings)
+        });
+        let ResidentOutcome::Ready((existing_id_after, findings), _) = out else {
+            panic!("expected Ready")
+        };
+        assert_eq!(
+            existing_id_after, existing_id_before,
+            "pre-existing FileIds survive an incremental add (a rebuild would renumber)"
+        );
+        assert!(
+            findings.iter().any(|d| d.code.as_str() == "CommonModuleMissingAPI"),
+            "the module-level diagnostic fires — the substrate listed the new module: {:?}",
+            findings.iter().map(|d| d.code.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A new body with no metadata descriptor still registers (readable, findings served);
+    /// it just carries no substrate listing until its `.xml` lands.
+    #[test]
+    fn incremental_add_of_bare_body_without_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+        let gen0 = state.generation();
+
+        std::thread::sleep(Duration::from_millis(10));
+        let body = module_path(root, "БезОписания");
+        fs::create_dir_all(body.parent().unwrap()).unwrap();
+        fs::write(&body, "Процедура Тест()\n    Перем Неиспользуемая;\nКонецПроцедуры").unwrap();
+
+        assert!(wait_for_apply(&state, gen0), "the bare add applies in place");
+        let out = state.read(|resident, _| {
+            let id = resident.file_id_for(&body).expect("bare body resolves");
+            resident.analysis().diagnostics(id, &DiagnosticsConfig::default()).len()
+        });
+        assert!(matches!(out, ResidentOutcome::Ready(n, _) if n > 0), "findings served");
+    }
+
+    /// A deleted body unregisters in place: the path stops resolving, the survivor keeps
+    /// its FileId, and the state stays Ready without a rebuild.
+    #[test]
+    fn incremental_remove_of_module_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write_common_module(root, "Удаляемый", true, "Процедура У()\nКонецПроцедуры");
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+        let gen0 = state.generation();
+        let survivor = module_path(root, "Сервер");
+        let survivor_id_before = match state.read(|r, _| r.file_id_for(&survivor)) {
+            ResidentOutcome::Ready(Some(id), _) => id,
+            _ => panic!("survivor resolves before the removal"),
+        };
+
+        std::thread::sleep(Duration::from_millis(10));
+        let doomed = module_path(root, "Удаляемый");
+        fs::remove_file(&doomed).unwrap();
+
+        assert!(wait_for_apply(&state, gen0), "the removal applies in place");
+        assert!(
+            matches!(state.status(), DiagnosticsStatus::Ready { .. }),
+            "incremental removal stays Ready"
+        );
+        let out = state
+            .read(|resident, _| (resident.file_id_for(&doomed), resident.file_id_for(&survivor)));
+        let ResidentOutcome::Ready((gone, kept), _) = out else { panic!("expected Ready") };
+        assert!(gone.is_none(), "the removed body no longer resolves");
+        assert_eq!(kept, Some(survivor_id_before), "the survivor keeps its FileId");
     }
 
     /// Idle eviction drops the resident db back to `Idle` after the quiet period, and

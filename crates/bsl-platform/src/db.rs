@@ -473,7 +473,7 @@ pub struct PrefixedMethodLookupInput {
     pub method_name: String,
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(as_ref))]
 pub fn platform_type_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -483,7 +483,7 @@ pub fn platform_type_query<'db>(
     data.get_type(&name).cloned()
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(as_ref))]
 pub fn platform_method_query<'db>(
     db: &'db dyn salsa::Database,
     input: MethodLookupInput<'db>,
@@ -514,7 +514,7 @@ pub fn manager_methods_query<'db>(
     Arc::new(data.get_manager_methods(&prefix).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(as_ref))]
 pub fn prefixed_method_query<'db>(
     db: &'db dyn salsa::Database,
     input: PrefixedMethodLookupInput<'db>,
@@ -545,7 +545,7 @@ pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformM
         .cloned()
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(as_ref))]
 pub fn global_function_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -565,7 +565,7 @@ pub fn platform_constructors_query<'db>(
     Arc::new(data.get_constructors(&type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(as_ref))]
 pub fn platform_property_query<'db>(
     db: &'db dyn salsa::Database,
     input: MethodLookupInput<'db>,
@@ -586,7 +586,7 @@ pub fn type_properties_query<'db>(
     Arc::new(data.get_type_properties(&type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(as_ref))]
 pub fn global_property_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -596,7 +596,7 @@ pub fn global_property_query<'db>(
     data.get_global_property(&name).cloned()
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(as_ref))]
 pub fn global_member_method_query<'db>(
     db: &'db dyn salsa::Database,
     input: MethodLookupInput<'db>,

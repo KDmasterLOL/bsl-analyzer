@@ -238,7 +238,7 @@ fn hover_platform_property_on_ty<DB: RootDatabase>(
         for type_name in hir::form_control_platform_type_chain(kind).iter().rev() {
             let input = MethodLookupInput::new(db, type_name.to_string(), prop_name.to_string());
             if let Some(prop) = platform_property_query(db, input) {
-                return Some(render_property_hover(&prop, range));
+                return Some(render_property_hover(prop, range));
             }
         }
         return None;
@@ -246,7 +246,7 @@ fn hover_platform_property_on_ty<DB: RootDatabase>(
     let type_key = platform_type_key_id(db, receiver)?;
     let input = MethodLookupInput::new(db, type_key, prop_name.to_string());
     let prop = platform_property_query(db, input)?;
-    Some(render_property_hover(&prop, range))
+    Some(render_property_hover(prop, range))
 }
 
 fn hover_platform_method_on_token<DB: RootDatabase>(
@@ -634,7 +634,7 @@ fn hover_for_global_function<DB: RootDatabase>(
     let function = global_function_query(db, input)?;
     let docs = PlatformDataInner::instance().get_global_function_docs(function.id);
 
-    let sig = from_global_function(&function, docs.as_ref());
+    let sig = from_global_function(function, docs.as_ref());
     let mut markup = render_hover_markdown(&sig, Lang::Russian);
     append_availability(&mut markup, function.context.as_ref());
 

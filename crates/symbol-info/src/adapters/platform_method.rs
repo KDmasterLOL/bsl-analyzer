@@ -13,7 +13,7 @@ pub(super) fn build(
     let input = MethodLookupInput::new(db, type_name.to_string(), method_name.to_string());
     let method = platform_method_query(db, input)?;
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
-    Some(from_platform_method(&method, docs.as_ref()))
+    Some(from_platform_method(method, docs.as_ref()))
 }
 
 pub fn from_platform_method(

@@ -41,9 +41,19 @@ pub(crate) fn canonicalize_configuration_path(raw_path: &str) -> String {
     }
 }
 
-#[salsa::input(debug)]
+#[salsa::input(singleton, debug)]
 pub struct WorkspaceConfigsInput {
     pub paths: Vec<(Option<String>, PathBuf)>,
+}
+
+/// Fallback revision counter for files that match no registered config root
+/// (e.g. a single file opened without a workspace). Such reads record a
+/// dependency here; coarse "everything changed" events bump it. A separate type
+/// from the per-root [`ConfigRevisionInput`] so it can be a Salsa singleton:
+/// there is exactly one global fallback per database.
+#[salsa::input(singleton, debug)]
+pub struct GlobalConfigRevisionInput {
+    pub revision: u32,
 }
 
 /// Whether the host's initial workspace load has completed. Defaults to `true`
@@ -57,7 +67,7 @@ pub struct WorkspaceConfigsInput {
 /// even fully on disk in the VFS yet. The flag is a Salsa input (not a plain
 /// field) so the read inside a calling query records a dependency: the finalize
 /// flip then invalidates anything that resolved against the gated stub.
-#[salsa::input(debug)]
+#[salsa::input(singleton, debug)]
 pub struct WorkspaceLoadStateInput {
     pub complete: bool,
 }

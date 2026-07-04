@@ -176,10 +176,10 @@ pub fn effective_module_text<'db>(
     let _span = tracing::info_span!("effective_module_text", ?base_file, ?ext_file).entered();
 
     let base_text = db.file_text(base_file);
-    let base_parse = db.parse(base_file);
-    let ext_parse = db.parse(ext_file);
+    let base_parse = db.parse_ref(base_file);
+    let ext_parse = db.parse_ref(ext_file);
 
-    let (text, segments) = assemble_effective(&base_text, &base_parse, &ext_parse)?;
+    let (text, segments) = assemble_effective(&base_text, base_parse, ext_parse)?;
     Some(Arc::new(EffectiveModule { text: Arc::from(text), segments, base_file, ext_file }))
 }
 

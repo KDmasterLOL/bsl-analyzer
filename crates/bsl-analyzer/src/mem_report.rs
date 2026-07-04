@@ -76,3 +76,56 @@ pub fn print_salsa_memory_report(db: &ide::RootDatabaseImpl, label: &str) {
         );
     }
 }
+
+/// Print the per-ingredient salsa event map (top 40 by executes) under `label`:
+/// how many query instances executed vs. revalidated from cache, plus intern and
+/// discard activity — the dynamic view the static memory map cannot give. A no-op
+/// unless the database was built with `BSL_SALSA_EVENTS=1`, so callers can invoke
+/// it unconditionally without changing default output. Emitted to stderr.
+pub fn print_salsa_event_report(db: &ide::RootDatabaseImpl, label: &str) {
+    let Some(rows) = db.salsa_event_report() else {
+        return;
+    };
+
+    eprintln!("\n##### salsa events — {label} (top 40 ingredients by executes) #####");
+    eprintln!(
+        "{:<44}{:>10}{:>10}{:>9}{:>8}{:>9}{:>9}{:>9}{:>7}",
+        "ingredient",
+        "execute",
+        "validate",
+        "discard",
+        "stale",
+        "int_new",
+        "int_reu",
+        "int_val",
+        "block",
+    );
+    let (mut te, mut tv, mut td) = (0u64, 0u64, 0u64);
+    for r in &rows {
+        te += r.execute;
+        tv += r.validate;
+        td += r.did_discard;
+    }
+    for r in rows.iter().take(40) {
+        eprintln!(
+            "{:<44}{:>10}{:>10}{:>9}{:>8}{:>9}{:>9}{:>9}{:>7}",
+            r.name,
+            r.execute,
+            r.validate,
+            r.did_discard,
+            r.discard_stale,
+            r.intern_new,
+            r.intern_reuse,
+            r.intern_validate,
+            r.block_on,
+        );
+    }
+    eprint!("--- salsa events totals: execute={te} validate={tv} discard={td}");
+    if let Some(g) = db.salsa_event_global() {
+        eprint!(
+            " | check_cancel={} set_cancel={} discard_accum={}",
+            g.check_cancellation, g.set_cancellation, g.discard_accumulated
+        );
+    }
+    eprintln!(" ---");
+}

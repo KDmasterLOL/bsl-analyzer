@@ -130,7 +130,7 @@ fn resolve_method_inner(
             let prefix = facet.mdo.manager_type_prefix()?;
             let method = lookup_prefixed(salsa_db, prefix, method_name.as_str())?;
             let mdo_name = Name::new(facet.name.as_str());
-            let resolution = build_resolution(kernel_db, &method, facet.mdo, &mdo_name);
+            let resolution = build_resolution(kernel_db, method, facet.mdo, &mdo_name);
             Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
@@ -155,7 +155,7 @@ fn resolve_method_inner(
         _ => {
             let key = platform_type_key_id(kernel_db, receiver)?;
             let method = lookup_scalar(salsa_db, &key, method_name.as_str())?;
-            let info = to_method_info(kernel_db, &method);
+            let info = to_method_info(kernel_db, method);
             Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
@@ -178,7 +178,7 @@ fn resolve_metadata_ref(
 ) -> Option<ResolvedPlatformMethod> {
     if let MetadataKind::TabularSection { parent } = kind {
         let method = lookup_scalar(salsa_db, "Tabular section", method_name.as_str())?;
-        let info = build_tabular_section_method_info(kernel_db, &method, parent, mdo_name);
+        let info = build_tabular_section_method_info(kernel_db, method, parent, mdo_name);
         return Some(ResolvedPlatformMethod {
             handle: PlatformMethodHandle {
                 method_id: method.id,
@@ -194,7 +194,7 @@ fn resolve_metadata_ref(
 
     if let Some((prefix, parent_mdo)) = metadata_kind_to_prefix_and_mdo(kind) {
         if let Some(method) = lookup_prefixed(salsa_db, prefix, method_name.as_str()) {
-            let resolution = build_resolution(kernel_db, &method, parent_mdo, mdo_name);
+            let resolution = build_resolution(kernel_db, method, parent_mdo, mdo_name);
             return Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
@@ -213,7 +213,7 @@ fn resolve_metadata_ref(
 
     if let Some(scalar_key) = kind.scalar_platform_key() {
         if let Some(method) = lookup_scalar(salsa_db, scalar_key, method_name.as_str()) {
-            let info = to_method_info(kernel_db, &method);
+            let info = to_method_info(kernel_db, method);
             return Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
@@ -229,20 +229,20 @@ fn resolve_metadata_ref(
     None
 }
 
-fn lookup_scalar(
-    db: &dyn salsa::Database,
+fn lookup_scalar<'db>(
+    db: &'db dyn salsa::Database,
     type_name: &str,
     method_name: &str,
-) -> Option<PlatformMethod> {
+) -> Option<&'db PlatformMethod> {
     let input = MethodLookupInput::new(db, type_name.to_string(), method_name.to_string());
     platform_method_query(db, input)
 }
 
-fn lookup_prefixed(
-    db: &dyn salsa::Database,
+fn lookup_prefixed<'db>(
+    db: &'db dyn salsa::Database,
     prefix: &str,
     method_name: &str,
-) -> Option<PlatformMethod> {
+) -> Option<&'db PlatformMethod> {
     let input = PrefixedMethodLookupInput::new(db, prefix.to_string(), method_name.to_string());
     prefixed_method_query(db, input)
 }

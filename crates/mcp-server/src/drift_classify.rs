@@ -10,12 +10,13 @@
 //! rescan / config) is shared; baseline-relative policy is the caller's, selected by the
 //! `baseline` argument:
 //!
-//! - With a baseline (diagnostics), the classification reproduces the old inline rules
-//!   exactly, including EXTENSION MATCHING: an exact lowercase suffix (`ends_with(".bsl")`
-//!   / `ends_with(".xml")`), so `Module.BSL` is ignored just as before. A new `.bsl` or a
-//!   removed resident `.bsl` folds into `structural_rescan` (a full rebuild),
-//!   content-unchanged touches are dropped, and `new_fp`/`removed_keys` carry the stats
-//!   delta. `bsl_removed` stays empty (a removed body is structural).
+//! - With a baseline (diagnostics), EXTENSION MATCHING is an exact lowercase suffix
+//!   (`ends_with(".bsl")` / `ends_with(".xml")`), so `Module.BSL` is ignored just as
+//!   before. A new `.bsl` lands in `bsl_added`, a removed tracked `.bsl` in
+//!   `bsl_removed` — both are reconciled into the live resident in place (the file
+//!   universe moves without a rebuild). Content-unchanged touches are dropped, and
+//!   `new_fp`/`removed_keys` carry the stats delta. Only a removed directory subtree
+//!   (descendants unenumerable) remains `structural_rescan`.
 //! - Without a baseline (search), EXTENSION MATCHING is case-INSENSITIVE (as the old
 //!   search sink's `extension().eq_ignore_ascii_case`), so `Module.BSL` is classified.
 //!   Every present `.bsl` is `bsl_modified`, every gone `.bsl` is `bsl_removed`, and every
@@ -47,20 +48,24 @@ pub(crate) struct DriftClassification {
     /// `.bsl` bodies present on disk with changed content. Diagnostics re-keys them; search
     /// marks them dirty.
     pub bsl_modified: Vec<DriftPath>,
-    /// `.bsl` files gone from disk. Search tombstones them. Empty with a baseline
-    /// (diagnostics folds a removed resident body into `structural_rescan`).
+    /// Brand-new `.bsl` files (present on disk, absent from the baseline). Diagnostics
+    /// registers them into the live resident in place. Empty without a baseline (search
+    /// treats any present file as `bsl_modified`).
+    pub bsl_added: Vec<DriftPath>,
+    /// `.bsl` files gone from disk. Search tombstones them; diagnostics tombstones the
+    /// resident registration in place (only tracked files land here with a baseline).
     pub bsl_removed: Vec<DriftPath>,
-    /// A change no point-refresh can express: a removed directory subtree, or — with a
-    /// baseline — a new/removed resident `.bsl` that moves the file universe. Diagnostics
-    /// full-rebuilds; search re-walks.
+    /// A change no point-refresh can express: a removed directory subtree whose
+    /// descendants the drain could not enumerate. Diagnostics full-rebuilds; search
+    /// re-walks.
     pub structural_rescan: bool,
     /// An analyzer config file at the workspace root changed.
     pub config_changed: bool,
-    /// On-disk fingerprints for the added/edited `.xml` and modified `.bsl`, for the
-    /// diagnostics stats delta. Empty without a baseline.
+    /// On-disk fingerprints for every present drifted file (added/edited `.xml`, added
+    /// and modified `.bsl`), for the diagnostics stats delta. Empty without a baseline.
     pub new_fp: HashMap<String, u64>,
-    /// Baseline keys now gone (a removed tracked `.xml`), for the diagnostics stats delta.
-    /// Empty without a baseline.
+    /// Baseline keys now gone (a removed tracked `.xml` or `.bsl`), for the diagnostics
+    /// stats delta. Empty without a baseline.
     pub removed_keys: Vec<String>,
 }
 
@@ -144,13 +149,13 @@ pub(crate) fn classify_drift(
                     }
                     None => {
                         // A brand-new `.xml` is a substrate re-discovery; a brand-new
-                        // `.bsl` moves the file universe → structural.
+                        // `.bsl` is an in-place resident registration.
                         if is_xml {
                             out.xml_paths.push(drift_path(&key));
-                            out.new_fp.insert(key.clone(), fp);
                         } else {
-                            out.structural_rescan = true;
+                            out.bsl_added.push(drift_path(&key));
                         }
+                        out.new_fp.insert(key.clone(), fp);
                     }
                 },
             },
@@ -169,10 +174,10 @@ pub(crate) fn classify_drift(
                     if base.contains_key(&key) {
                         if is_xml {
                             out.xml_paths.push(drift_path(&key));
-                            out.removed_keys.push(key.clone());
                         } else {
-                            out.structural_rescan = true;
+                            out.bsl_removed.push(drift_path(&key));
                         }
+                        out.removed_keys.push(key.clone());
                     }
                 }
             },
@@ -267,12 +272,18 @@ mod tests {
         assert_eq!(class.bsl_modified[0].key, modified.to_string_lossy());
         assert!(class.new_fp.contains_key(&modified.to_string_lossy().into_owned()));
         assert_eq!(class.xml_paths.len(), 1, "the new xml is a substrate re-discovery");
-        assert!(class.structural_rescan, "a new .bsl moves the file universe");
-        assert!(class.bsl_removed.is_empty(), "diagnostics never populates bsl_removed");
+        assert_eq!(class.bsl_added.len(), 1, "a new .bsl registers in place");
+        assert_eq!(class.bsl_added[0].key, new_bsl.to_string_lossy());
+        assert!(
+            class.new_fp.contains_key(&new_bsl.to_string_lossy().into_owned()),
+            "the new body's fingerprint enters the stats delta"
+        );
+        assert!(!class.structural_rescan, "a new .bsl no longer forces a rebuild");
+        assert!(class.bsl_removed.is_empty(), "nothing was removed");
     }
 
-    /// A tracked `.bsl` removal is structural for diagnostics; an untracked removal is a
-    /// no-op. A tracked `.xml` removal is a resolver input carrying a stats-delete key.
+    /// A tracked `.bsl` removal unregisters in place; an untracked removal is a no-op.
+    /// A tracked `.xml` removal is a resolver input; both removals carry stats-delete keys.
     #[test]
     fn baseline_policy_gates_removals_on_the_baseline() {
         let dir = tempfile::tempdir().unwrap();
@@ -293,9 +304,18 @@ mod tests {
 
         let class = classify_drift(&entries, &HashSet::new(), Some(&baseline));
 
-        assert!(class.structural_rescan, "a tracked body removal rebuilds");
+        assert!(!class.structural_rescan, "a tracked body removal unregisters in place");
+        assert_eq!(class.bsl_removed.len(), 1, "only the tracked body removal is drift");
+        assert_eq!(class.bsl_removed[0].key, tracked_bsl.to_string_lossy());
         assert_eq!(class.xml_paths.len(), 1, "the tracked xml removal feeds the resolver");
-        assert_eq!(class.removed_keys, vec![tracked_xml.to_string_lossy().into_owned()]);
+        let mut removed = class.removed_keys.clone();
+        removed.sort();
+        let mut expected = vec![
+            tracked_bsl.to_string_lossy().into_owned(),
+            tracked_xml.to_string_lossy().into_owned(),
+        ];
+        expected.sort();
+        assert_eq!(removed, expected, "both tracked removals leave the stats baseline");
     }
 
     /// Extension matching is policy-dependent: the baseline (diagnostics) policy keeps the

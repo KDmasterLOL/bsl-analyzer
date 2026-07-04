@@ -38,7 +38,7 @@ impl FileChange {
                 let root_id = SourceRootId(idx as u32);
                 let file_count = root.iter().count();
 
-                if root.is_library {
+                if root.is_library() {
                     library_files += file_count;
                 } else {
                     user_files += file_count;

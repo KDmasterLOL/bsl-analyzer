@@ -137,21 +137,40 @@ impl Serialize for Rule<'_> {
 }
 
 /// Streams every finding without holding the full result array in memory.
+///
+/// Emission follows a canonical order — files by URI, findings within a file by
+/// (position, ruleId, message) — so two runs over the same tree produce
+/// byte-identical documents even if an upstream producer yields files or
+/// findings in a run-dependent order. Only vectors of references are sorted;
+/// the streaming form (no materialized JSON tree) is preserved.
 struct ResultsSeq<'a> {
     results: &'a AnalysisResults,
 }
 
 impl Serialize for ResultsSeq<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut files: Vec<_> = self
+            .results
+            .diagnostics
+            .iter()
+            .map(|file| (sarif_uri(&file.relative_path), file))
+            .collect();
+        files.sort_by(|(a, _), (b, _)| a.cmp(b));
+
         let mut seq = serializer.serialize_seq(None)?;
-        for file in &self.results.diagnostics {
-            let uri = sarif_uri(&file.relative_path);
-            for diagnostic in &file.diagnostics {
+        for (uri, file) in &files {
+            let mut diagnostics: Vec<_> = file.diagnostics.iter().collect();
+            diagnostics.sort_by(|a, b| {
+                (a.start_line, a.start_column, a.end_line, a.end_column, &a.code, &a.message).cmp(
+                    &(b.start_line, b.start_column, b.end_line, b.end_column, &b.code, &b.message),
+                )
+            });
+            for diagnostic in diagnostics {
                 seq.serialize_element(&ResultElem {
                     rule_id: &diagnostic.code,
                     level: sarif_level(&diagnostic.severity),
                     message: &diagnostic.message,
-                    uri: &uri,
+                    uri,
                     start_line: diagnostic.start_line + 1,
                     start_column: diagnostic.start_column + 1,
                     end_line: diagnostic.end_line + 1,
@@ -397,6 +416,63 @@ mod tests {
     }
 
     #[test]
+    fn orders_results_canonically_regardless_of_input_order() {
+        let temp = TempDir::new().expect("tempdir");
+        let results = AnalysisResults {
+            files_analyzed: 2,
+            files_with_issues: 2,
+            total_diagnostics: 4,
+            elapsed_secs: 0.1,
+            diagnostics: vec![
+                FileAnalysis {
+                    path: PathBuf::from("b.bsl"),
+                    relative_path: PathBuf::from("b.bsl"),
+                    diagnostics: vec![diag_at("LineLength", 0, 0)],
+                },
+                FileAnalysis {
+                    path: PathBuf::from("a.bsl"),
+                    relative_path: PathBuf::from("a.bsl"),
+                    diagnostics: vec![
+                        diag_at("UnusedLocalVariable", 5, 2),
+                        diag_at("MagicNumber", 5, 2),
+                        diag_at("LineLength", 1, 0),
+                    ],
+                },
+            ],
+            source_dir: PathBuf::from("."),
+            workspace_dir: PathBuf::from("."),
+        };
+
+        SarifReporter.report(&results, temp.path()).expect("write sarif");
+        let sarif: Value = serde_json::from_str(
+            &std::fs::read_to_string(temp.path().join("bsl-analyzer.sarif")).expect("sarif report"),
+        )
+        .expect("valid json");
+
+        let emitted = sarif["runs"][0]["results"].as_array().unwrap();
+        let keys: Vec<(String, u64, String)> = emitted
+            .iter()
+            .map(|r| {
+                let location = &r["locations"][0]["physicalLocation"];
+                (
+                    location["artifactLocation"]["uri"].as_str().unwrap().to_string(),
+                    location["region"]["startLine"].as_u64().unwrap(),
+                    r["ruleId"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("a.bsl".to_string(), 2, "LineLength".to_string()),
+                ("a.bsl".to_string(), 6, "MagicNumber".to_string()),
+                ("a.bsl".to_string(), 6, "UnusedLocalVariable".to_string()),
+                ("b.bsl".to_string(), 1, "LineLength".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn maps_diagnostic_severity_to_sarif_level() {
         assert_eq!(sarif_level("Blocker"), "error");
         assert_eq!(sarif_level("Critical"), "error");
@@ -425,6 +501,16 @@ mod tests {
             end_line: 0,
             end_column: 0,
             tags: vec![],
+        }
+    }
+
+    fn diag_at(code: &str, start_line: usize, start_column: usize) -> DiagnosticOutput {
+        DiagnosticOutput {
+            start_line,
+            start_column,
+            end_line: start_line,
+            end_column: start_column + 1,
+            ..diag(code, "Warning")
         }
     }
 

@@ -4741,3 +4741,30 @@ fn configuration_for_root_reads_objects_and_rereads_after_bump() {
     );
     assert!(cfg2.metadata_objects().len() > before, "the added object is visible after re-read");
 }
+
+#[test]
+fn salsa_events_count_query_executes() {
+    // Off by default: no callback installed, so no report at all.
+    let plain = RootDatabaseImpl::new_inner(false);
+    assert!(plain.salsa_event_report().is_none(), "no counters unless events are enabled");
+
+    // On: a real query execution is recorded as an `execute`, and the report
+    // resolves the ingredient to its debug name.
+    let mut db = RootDatabaseImpl::new_with_salsa_events();
+    let file_id = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new("/test.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
+
+    let _ = db.parse(file_id);
+
+    let rows = db.salsa_event_report().expect("events enabled must yield a report");
+    let parse_row = rows
+        .iter()
+        .find(|r| r.name.contains("parse"))
+        .expect("the parse query must have executed and be named");
+    assert!(parse_row.execute >= 1, "parse executed at least once");
+    assert!(db.salsa_event_global().is_some(), "global counters available when enabled");
+}

@@ -1,6 +1,3 @@
-use std::fmt;
-use std::sync::Arc;
-
 use bsl_types::intern::{canonicalise, TypeKernelDb};
 use bsl_types::kind::{TypeId, TypeKind};
 use elsa::sync::FrozenVec;
@@ -23,35 +20,6 @@ struct Sentinels {
     null: u64,
     undefined: u64,
     boolean: u64,
-}
-
-#[derive(Clone)]
-pub(crate) struct TypeKernelHandle(Arc<TypeKernelInner>);
-
-impl TypeKernelHandle {
-    pub(crate) fn new(inner: Arc<TypeKernelInner>) -> Self {
-        Self(inner)
-    }
-}
-
-impl fmt::Debug for TypeKernelHandle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TypeKernelHandle({:p})", Arc::as_ptr(&self.0))
-    }
-}
-
-impl PartialEq for TypeKernelHandle {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for TypeKernelHandle {}
-
-#[salsa::input(debug)]
-pub(crate) struct TypeKernelInput {
-    #[returns(clone)]
-    pub(crate) inner: TypeKernelHandle,
 }
 
 impl Default for TypeKernelInner {

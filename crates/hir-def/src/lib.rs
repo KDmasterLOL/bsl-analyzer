@@ -516,7 +516,7 @@ pub fn compute_execution_context(common_module: &bsl_metadata::CommonModule) -> 
 }
 
 pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -> ModuleBodies {
-    let parse = db.parse(module_id.file_id);
+    let parse = db.parse_ref(module_id.file_id);
     let root = parse.syntax_node();
 
     let file_text = db.file_text(module_id.file_id);
