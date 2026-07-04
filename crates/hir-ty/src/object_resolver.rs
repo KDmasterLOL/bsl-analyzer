@@ -174,6 +174,21 @@ impl MetadataResolver for ConfigsObjectResolver<'_> {
     }
 }
 
+impl ConfigsObjectResolver<'_> {
+    /// The base configuration in the slice — the one not contributed by an extension
+    /// (`name.is_none()`).
+    ///
+    /// The cold kinds that [`bsl_metadata::Configuration::merge_extension_overlay`]
+    /// does NOT merge (roles, event subscriptions, scheduled jobs, HTTP/Web services)
+    /// are authoritative in the base alone. The canonical [`DbObjectResolver`] reads
+    /// the main listing only for them and never surfaces an extension-only object of
+    /// these kinds, so this resolver must resolve/enumerate them from the base rather
+    /// than across the whole slice.
+    fn base_configuration(&self) -> Option<&bsl_metadata::Configuration> {
+        self.0.iter().find(|cfg| cfg.name.is_none()).map(|cfg| cfg.configuration.as_ref())
+    }
+}
+
 impl ObjectResolver for ConfigsObjectResolver<'_> {
     fn resolve_metadata_object(
         &self,
@@ -206,23 +221,55 @@ impl ObjectResolver for ConfigsObjectResolver<'_> {
     }
 
     fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name> {
-        self.0
-            .iter()
-            .rev()
-            .find_map(|cfg| metadata_reference_name(cfg.configuration.as_ref(), kind, name))
+        match kind {
+            // Subsystems merge across base + extensions (mirrors
+            // `DbObjectResolver::resolve_subsystem_for_file`), so an extension-only or
+            // extension-augmented subsystem stays visible: scan the whole slice, the
+            // last (extension) entry winning.
+            MetadataReferenceKind::Subsystem => self
+                .0
+                .iter()
+                .rev()
+                .find_map(|cfg| metadata_reference_name(cfg.configuration.as_ref(), kind, name)),
+            // Non-merging cold kinds are enumerated exhaustively (not via `_`) so a
+            // future mergeable reference kind fails to compile until its visibility
+            // is decided rather than silently defaulting to base-only.
+            MetadataReferenceKind::Role
+            | MetadataReferenceKind::EventSubscription
+            | MetadataReferenceKind::ScheduledJob
+            | MetadataReferenceKind::HttpService
+            | MetadataReferenceKind::WebService => self
+                .base_configuration()
+                .and_then(|config| metadata_reference_name(config, kind, name)),
+        }
     }
 
     fn metadata_reference_members(&self, kind: MetadataReferenceKind) -> Vec<Name> {
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for cfg in self.0 {
-            for name in metadata_reference_names(cfg.configuration.as_ref(), kind) {
-                if seen.insert(name.as_str().fold_lower()) {
-                    out.push(name);
+        match kind {
+            MetadataReferenceKind::Subsystem => {
+                let mut seen = std::collections::HashSet::new();
+                let mut out = Vec::new();
+                for cfg in self.0 {
+                    for name in metadata_reference_names(cfg.configuration.as_ref(), kind) {
+                        if seen.insert(name.as_str().fold_lower()) {
+                            out.push(name);
+                        }
+                    }
                 }
+                out
             }
+            // Base-only for the non-merging cold kinds; a single config never lists a
+            // name twice, so no cross-config dedup is needed. Enumerated exhaustively
+            // (see `resolve_metadata_reference`) to keep the compile-time guard.
+            MetadataReferenceKind::Role
+            | MetadataReferenceKind::EventSubscription
+            | MetadataReferenceKind::ScheduledJob
+            | MetadataReferenceKind::HttpService
+            | MetadataReferenceKind::WebService => self
+                .base_configuration()
+                .map(|config| metadata_reference_names(config, kind))
+                .unwrap_or_default(),
         }
-        out
     }
 
     fn recorders_for_register(&self, parent: MdoType, register_name: &str) -> Vec<String> {
@@ -293,5 +340,77 @@ fn metadata_reference_names(
         MetadataReferenceKind::Subsystem => {
             config.subsystems().iter().map(|item| Name::new(item.name())).collect()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bsl_config::VisibleConfig;
+    use bsl_metadata::{Configuration, Role};
+
+    /// `[base, extension]` where each config carries one role. Roles are a
+    /// non-merging cold kind, so all five (`Role`, `EventSubscription`,
+    /// `ScheduledJob`, `HttpService`, `WebService`) share the same resolver arm;
+    /// `Role` stands in for the family.
+    fn base_plus_extension_roles() -> Vec<VisibleConfig> {
+        let mut base = Configuration::new("Base");
+        base.add_role(Role::new("БазоваяРоль"));
+        let mut ext = Configuration::new("Ext");
+        ext.add_role(Role::new("РольРасширения"));
+
+        vec![
+            VisibleConfig { name: None, configuration: Arc::new(base) },
+            VisibleConfig { name: Some("Ext".into()), configuration: Arc::new(ext) },
+        ]
+    }
+
+    #[test]
+    fn cold_kind_reference_resolves_from_base_only() {
+        let configs = base_plus_extension_roles();
+        let resolver = ConfigsObjectResolver(&configs);
+
+        assert_eq!(
+            resolver
+                .resolve_metadata_reference(MetadataReferenceKind::Role, "БазоваяРоль")
+                .as_ref()
+                .map(Name::as_str),
+            Some("БазоваяРоль"),
+        );
+        // An extension-only role is invisible: roles do not merge, and the canonical
+        // DbObjectResolver reads the main listing only.
+        assert_eq!(
+            resolver.resolve_metadata_reference(MetadataReferenceKind::Role, "РольРасширения"),
+            None,
+        );
+    }
+
+    #[test]
+    fn cold_kind_members_enumerate_base_only() {
+        let configs = base_plus_extension_roles();
+        let resolver = ConfigsObjectResolver(&configs);
+
+        let names: Vec<String> = resolver
+            .metadata_reference_members(MetadataReferenceKind::Role)
+            .iter()
+            .map(|name| name.as_str().to_string())
+            .collect();
+        assert_eq!(names, vec!["БазоваяРоль".to_string()]);
+    }
+
+    #[test]
+    fn cold_kind_falls_back_to_empty_without_base() {
+        // A slice with no base config (`name.is_none()`) exposes no cold-kind objects.
+        let mut ext = Configuration::new("Ext");
+        ext.add_role(Role::new("РольРасширения"));
+        let configs =
+            vec![VisibleConfig { name: Some("Ext".into()), configuration: Arc::new(ext) }];
+        let resolver = ConfigsObjectResolver(&configs);
+
+        assert_eq!(
+            resolver.resolve_metadata_reference(MetadataReferenceKind::Role, "РольРасширения"),
+            None,
+        );
+        assert!(resolver.metadata_reference_members(MetadataReferenceKind::Role).is_empty());
     }
 }
