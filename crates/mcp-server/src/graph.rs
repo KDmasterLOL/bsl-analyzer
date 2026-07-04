@@ -111,6 +111,12 @@ impl ReloadState {
 /// opens the file separately. Keeping these together still gives a reader a torn-free
 /// freshness token.
 struct Published {
+    /// Whether this snapshot was published KNOWING it does not reflect current disk
+    /// (the boot stale-publish). Any successful build/reload publish replaces it with
+    /// a fresh entry. Gates the boot leftover-marks consume: even if the pre-claimed
+    /// catch-up fails (`reload` drops to `Failed`, so `drift_pending` no longer
+    /// holds), marks must not be cleared against this snapshot.
+    stale: bool,
     generation: u64,
     fingerprint: u64,
     reload: ReloadState,
@@ -122,6 +128,33 @@ struct Published {
 struct Inner {
     status: GraphStatus,
     published: Option<Published>,
+}
+
+/// How often the query-path freshness fold must come from a real walk instead of the
+/// event-maintained map. Bounds how long a change the hub cannot observe (see
+/// [`GraphState::fp_map`]) can keep freshness wrong.
+const WALK_VERIFY_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Cap on idle pooled snapshot handles. Concurrent graph queries beyond it just open
+/// their own handle, exactly as before pooling.
+const SNAPSHOT_POOL_CAP: usize = 4;
+
+/// A pooled idle read handle plus the freshness token it was opened under.
+struct PooledSnapshotEntry {
+    generation: u64,
+    fingerprint: u64,
+    force_stale: bool,
+    db: GraphDb,
+}
+
+/// See [`GraphState::fp_map`].
+#[derive(Default)]
+struct FpMapState {
+    /// `canonical path → (mtime nanos, len)` for every graph-relevant file, in the
+    /// exact spelling the walk produces (hub entries carry the same canonical key).
+    map: Option<std::collections::BTreeMap<String, (u128, u64)>>,
+    /// When the map was last anchored to a real walk.
+    walked_at: Option<Instant>,
 }
 
 /// Throttled cache of the last on-disk fingerprint scan. Guarded by its own mutex
@@ -138,10 +171,37 @@ struct ScanCache {
 /// if a reload publishes a newer generation while the query runs. The handle is an
 /// own read-only connection opened against the on-disk SQLite graph.
 pub(crate) struct GraphSnapshot {
-    pub graph: GraphDb,
+    pub graph: PooledGraphDb,
     generation: u64,
     fingerprint: u64,
     force_stale: bool,
+}
+
+/// A read handle checked out of (and returned to) [`GraphState::snapshot_pool`].
+/// Dereferences to the underlying [`GraphDb`]; on drop the handle goes back to the
+/// pool (up to [`SNAPSHOT_POOL_CAP`]) so the next query skips the multi-GB open.
+pub(crate) struct PooledGraphDb {
+    /// Present from construction until `Drop` takes it back to the pool.
+    entry: Option<PooledSnapshotEntry>,
+    pool: Arc<Mutex<Vec<PooledSnapshotEntry>>>,
+}
+
+impl std::ops::Deref for PooledGraphDb {
+    type Target = GraphDb;
+    fn deref(&self) -> &GraphDb {
+        &self.entry.as_ref().expect("pooled handle is present until drop").db
+    }
+}
+
+impl Drop for PooledGraphDb {
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            if pool.len() < SNAPSHOT_POOL_CAP {
+                pool.push(entry);
+            }
+        }
+    }
 }
 
 /// Freshness verdict for one `graph` response.
@@ -193,6 +253,20 @@ pub(crate) struct GraphState {
     /// Count of actual fingerprint walks (cache misses), so a test can assert an irrelevant
     /// delivered change did NOT invalidate the throttled cache and re-trigger a scan.
     scan_count: Arc<AtomicUsize>,
+    /// Event-maintained per-file stat map mirroring what a fingerprint walk observes,
+    /// so a query-path freshness check can fold ~100k in-memory entries (<1ms) instead
+    /// of stat-walking the tree (seconds). Seeded by a real walk, patched per delivered
+    /// hub entry, and re-anchored to a real walk every [`WALK_VERIFY_INTERVAL`] — the
+    /// hub cannot see everything (events predating its subscribe, writes through paths
+    /// outside the watched roots), so the walk stays the periodic source of truth.
+    /// Dropped to `None` (next check walks) on hub overflow or a subtree removal.
+    fp_map: Arc<Mutex<FpMapState>>,
+    /// Idle read handles onto the CURRENT published graph file, tagged with the
+    /// freshness token they were opened under. Opening the multi-GB SQLite file costs
+    /// ~a second on a large configuration; a pooled handle keeps serving the same
+    /// coherent snapshot for free. Entries for superseded generations are discarded
+    /// lazily at checkout (the tag no longer matches the published generation).
+    snapshot_pool: Arc<Mutex<Vec<PooledSnapshotEntry>>>,
     /// Invoked on this graph's background thread immediately after each publish/adopt,
     /// once the inner lock is released — the moment the graph "has caught up" and a
     /// consumer (search context re-render) may read the fresh graph. Never called on a
@@ -249,6 +323,8 @@ impl GraphState {
             pending_nudge: Arc::new(AtomicBool::new(false)),
             mark_seq: Arc::new(OnceLock::new()),
             leftover_bound: Arc::new(AtomicI64::new(0)),
+            fp_map: Arc::new(Mutex::new(FpMapState::default())),
+            snapshot_pool: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -312,6 +388,9 @@ impl GraphState {
     /// bound is what keeps the consumption correct: only marks at or below it — drifts this
     /// build already reflects — may be cleared.
     fn notify_published(&self, build_start_seq: i64) {
+        // Idle pooled read handles belong to the superseded file; drop them now so
+        // they release it promptly instead of waiting out lazy checkout discards.
+        lock_recover(&self.snapshot_pool).clear();
         if self.pending_nudge.swap(false, Ordering::SeqCst) {
             self.reclaim_pending_reload();
         }
@@ -342,11 +421,13 @@ impl GraphState {
     /// The caller captures `leftover_bound` — the mark-seq high-water at the instant it observed
     /// these leftovers, before the engine was published — and passes it in. That boot build read
     /// post-restart disk, so a consume against it bounded by `leftover_bound` clears exactly the
-    /// leftovers and no more. Correctness: leftover marks predate this daemon run, so ANY
-    /// boot-published graph (fresh build, fused, or fingerprint-valid cached) already reflects
-    /// their cause; a mark stamped after the capture (seq above the bound) is a new drift and is
-    /// guaranteed its own nudge→publish cycle, so it must not be cleared here against the boot
-    /// graph that predates it. Handles both post-boot states: an already-published (`Ready`)
+    /// leftovers and no more. Correctness: leftover marks predate this daemon run, so any
+    /// boot-published graph REFLECTING CURRENT DISK (fresh build, fused, or fingerprint-valid
+    /// cached) already reflects their cause — the one exception, a stale boot publish, pre-claims
+    /// the reload slot atomically so the `drift_pending` guard below defers this consume to the
+    /// catch-up publish; a mark stamped after the capture (seq above the bound) is a new drift
+    /// and is guaranteed its own nudge→publish cycle, so it must not be cleared here against the
+    /// boot graph that predates it. Handles both post-boot states: an already-published (`Ready`)
     /// graph consumes immediately; an in-flight build (`Loading`, whose own publish captured the
     /// pre-wiring `0` bound and would clear nothing) arms a one-shot so ITS publish runs the
     /// consume with `leftover_bound`. A `Ready` graph with a fresher reload already in flight
@@ -357,7 +438,14 @@ impl GraphState {
         // concurrently either runs the follow-up itself or leaves it for the immediate consume
         // below — the `swap` to `0` in both paths keeps it single-shot.
         self.leftover_bound.store(leftover_bound, Ordering::SeqCst);
-        if matches!(self.status(), GraphStatus::Ready { .. }) && !self.drift_pending() {
+        // `published_stale` outlives `drift_pending`: if the stale boot's pre-claimed
+        // catch-up FAILS, the slot drops to `Failed` and `drift_pending` no longer
+        // holds — but the snapshot still predates the marks' causes, so the one-shot
+        // must stay armed for the next successful publish.
+        if matches!(self.status(), GraphStatus::Ready { .. })
+            && !self.drift_pending()
+            && !self.published_stale()
+        {
             let bound = self.leftover_bound.swap(0, Ordering::SeqCst);
             if bound != 0 {
                 self.fire_hook(bound);
@@ -376,6 +464,12 @@ impl GraphState {
         } else if self.reload_running() {
             self.pending_nudge.store(true, Ordering::SeqCst);
         }
+    }
+
+    /// Whether the published snapshot is the boot stale-publish (known not to reflect
+    /// current disk). See [`Published::stale`].
+    fn published_stale(&self) -> bool {
+        lock_recover(&self.inner).published.as_ref().is_some_and(|p| p.stale)
     }
 
     /// Whether a published reload is currently `Running`.
@@ -485,7 +579,8 @@ impl GraphState {
     pub(crate) fn adopt_prebuilt(&self, generation: u64, fingerprint: u64, files: usize) {
         *lock_recover(&self.scan) = None;
         let mut inner = lock_recover(&self.inner);
-        inner.published = Some(Published { generation, fingerprint, reload: ReloadState::Idle });
+        inner.published =
+            Some(Published { generation, fingerprint, stale: false, reload: ReloadState::Idle });
         inner.status = GraphStatus::Ready { files };
     }
 
@@ -610,6 +705,13 @@ impl GraphState {
             // is reused by the standalone indexer's hash-skip (a near no-op).
             return FusedStartup::Standalone;
         }
+        // Cached but drifted: stale answers now beat a fused multi-minute rebuild. The
+        // stale publish (Ready) supersedes this path's external claim (Loading), the
+        // pre-claimed reload catches the graph up, and the search index still reuses
+        // its persisted store through the standalone hash-skip.
+        if self.try_publish_stale_and_catch_up(&workspace_root) {
+            return FusedStartup::Standalone;
+        }
         if !engine.has_semantic() {
             // No embedder → no fused semantic pass; build the graph normally and let
             // the caller build the FTS-only index.
@@ -672,14 +774,49 @@ impl GraphState {
         // the FILE's own meta (below), not from the lock — so even if a reload
         // renames a newer file in between this check and the open, the snapshot's
         // freshness token describes exactly the build it serves, never a torn mix.
-        lock_recover(&self.inner).published.as_ref()?;
+        let published_generation = lock_recover(&self.inner).published.as_ref()?.generation;
+        // Reuse an idle handle opened under the still-current generation; a handle a
+        // publish superseded is discarded here (checkout-time lazy invalidation), so
+        // a stale snapshot can serve its own checkout to completion but never a new
+        // request.
+        {
+            let mut pool = lock_recover(&self.snapshot_pool);
+            while let Some(entry) = pool.pop() {
+                if entry.generation == published_generation {
+                    let (generation, fingerprint, force_stale) =
+                        (entry.generation, entry.fingerprint, entry.force_stale);
+                    return Some(GraphSnapshot {
+                        graph: PooledGraphDb {
+                            entry: Some(entry),
+                            pool: Arc::clone(&self.snapshot_pool),
+                        },
+                        generation,
+                        fingerprint,
+                        force_stale,
+                    });
+                }
+            }
+        }
         // A complete file is always present once `Ready` (the loader renames it into
         // place atomically and publishes only after); a failed open (incomplete or
         // missing) degrades to the caller's "still loading" path.
         let path = graph_db_path(self.workspace_root.as_deref()?);
         let graph = GraphDb::open(&path).ok()?;
         let (generation, fingerprint, force_stale) = graph.freshness_token().ok()?;
-        Some(GraphSnapshot { graph, generation, fingerprint, force_stale })
+        Some(GraphSnapshot {
+            graph: PooledGraphDb {
+                entry: Some(PooledSnapshotEntry {
+                    generation,
+                    fingerprint,
+                    force_stale,
+                    db: graph,
+                }),
+                pool: Arc::clone(&self.snapshot_pool),
+            },
+            generation,
+            fingerprint,
+            force_stale,
+        })
     }
 
     /// Report the freshness of `snapshot` relative to disk, and on drift kick an
@@ -734,9 +871,9 @@ impl GraphState {
     /// `None` when no workspace is configured.
     fn current_disk_fp(&self) -> Option<u64> {
         let root = self.workspace_root.as_deref()?;
-        // Drain the hub first: a delivered change (or a reconcile request) invalidates the
-        // throttled fingerprint cache so the scan below runs fresh and the drift is seen
-        // now, not after the throttle expires.
+        // Drain the hub first: a delivered change patches the fingerprint map and
+        // invalidates the throttled cache, so the drift is seen now, not after the
+        // throttle expires.
         self.invalidate_scan_on_hub_drift();
         let mut cache = lock_recover(&self.scan);
         if let Some(c) = cache.as_ref() {
@@ -744,8 +881,45 @@ impl GraphState {
                 return Some(c.disk_fp);
             }
         }
+        // Between walk anchors, fold the event-maintained map (in-memory, <1ms on 100k
+        // entries) instead of stat-walking the tree. The map's fold is bit-identical to
+        // the walk's by construction (same sorted-entries fold). Trusted ONLY while a
+        // healthy hub feeds it — with no hub (or a degraded watcher) nothing patches
+        // the map, so every check must walk, exactly as before.
+        let hub_healthy = matches!(
+            &self.change_hub,
+            Some(hub) if matches!(hub.health(), crate::change_hub::Health::Healthy)
+        );
+        if !hub_healthy {
+            // Events may be missing while the hub is absent or degraded; un-anchor the
+            // map so a hub that recovers later starts from a fresh walk, never from a
+            // map with a hole it cannot detect.
+            let mut fp_state = lock_recover(&self.fp_map);
+            fp_state.map = None;
+            fp_state.walked_at = None;
+        }
+        if hub_healthy {
+            let fp_state = lock_recover(&self.fp_map);
+            if let (Some(map), Some(walked_at)) = (fp_state.map.as_ref(), fp_state.walked_at) {
+                if walked_at.elapsed() < WALK_VERIFY_INTERVAL {
+                    let entries: Vec<(String, u128, u64)> =
+                        map.iter().map(|(p, (m, l))| (p.clone(), *m, *l)).collect();
+                    let fp = fold_fingerprint_entries(&entries);
+                    *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp });
+                    return Some(fp);
+                }
+            }
+        }
         self.scan_count.fetch_add(1, Ordering::SeqCst);
-        let fp = workspace_fingerprint(root);
+        let mut entries: Vec<(String, u128, u64)> =
+            scan_file_stats(root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
+        entries.sort();
+        let fp = fold_fingerprint_entries(&entries);
+        {
+            let mut fp_state = lock_recover(&self.fp_map);
+            fp_state.map = Some(entries.into_iter().map(|(p, m, l)| (p, (m, l))).collect());
+            fp_state.walked_at = Some(Instant::now());
+        }
         *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp });
         Some(fp)
     }
@@ -771,16 +945,48 @@ impl GraphState {
         };
         let batch = hub.drain(cursor);
         *lock_recover(&self.hub_cursor) = Some(batch.cursor);
-        // Invalidate only when a change touches the graph's scan universe. The hub accepts
-        // every path (filtering is the consumer's job), so an editor/tooling temp file under
-        // a scan root would otherwise reset the cache on every check and re-trigger the full
-        // fingerprint scan — the very cost this sink exists to avoid. `rescan_required`
-        // carries the per-cursor degrade/overflow signal, so a lossy hub still forces one
-        // invalidation without pinning the scan open on every call.
-        let relevant =
-            batch.rescan_required || batch.entries.iter().any(entry_touches_scan_universe);
-        if relevant {
+        // A lossy hub (overflow) may have dropped events the map will never see: drop
+        // the map too, so the next check re-anchors with a real walk.
+        if batch.rescan_required {
             *lock_recover(&self.scan) = None;
+            let mut fp_state = lock_recover(&self.fp_map);
+            fp_state.map = None;
+            fp_state.walked_at = None;
+            return;
+        }
+        // Act only on changes touching the graph's scan universe. The hub accepts every
+        // path (filtering is the consumer's job), so an editor/tooling temp file under a
+        // scan root would otherwise reset the cache on every check and re-trigger the
+        // full fingerprint scan — the very cost this sink exists to avoid.
+        let relevant: Vec<&ChangeEntry> =
+            batch.entries.iter().filter(|e| entry_touches_scan_universe(e)).collect();
+        if relevant.is_empty() {
+            return;
+        }
+        *lock_recover(&self.scan) = None;
+        let mut fp_state = lock_recover(&self.fp_map);
+        // A vanished subtree hides descendants the drain could not enumerate; the map
+        // cannot express that, so drop it and let the next check walk.
+        if relevant.iter().any(|e| e.kind == ChangeKind::SubtreeRemoved) {
+            fp_state.map = None;
+            fp_state.walked_at = None;
+            return;
+        }
+        let Some(map) = fp_state.map.as_mut() else {
+            return;
+        };
+        // Events are hints, stats are truth: re-stat each delivered path and patch the
+        // map to what is on disk now (a gone file leaves it).
+        for entry in relevant {
+            let key = entry.canonical.to_string_lossy().into_owned();
+            match stat_pair(&entry.canonical) {
+                Some(pair) => {
+                    map.insert(key, pair);
+                }
+                None => {
+                    map.remove(&key);
+                }
+            }
         }
     }
 
@@ -810,6 +1016,14 @@ impl GraphState {
         // walk plus an open. A reload is skipped here: it only fires once drift has
         // been detected, so the on-disk file is known stale and must be rebuilt.
         if !is_reload && self.try_publish_cached(&workspace_root, build_start_seq) {
+            return;
+        }
+
+        // Cached but drifted: serve the stale snapshot immediately and catch up through
+        // the reload lifecycle (its failure path keeps the snapshot and flags
+        // `reload="failed"`, unlike this initial load's `Failed`). The catch-up build
+        // recomputes its own generation from the just-published revision.
+        if !is_reload && self.try_publish_stale_and_catch_up(&workspace_root) {
             return;
         }
 
@@ -843,6 +1057,7 @@ impl GraphState {
                     inner.published = Some(Published {
                         generation,
                         fingerprint: fp_pre,
+                        stale: false,
                         reload: ReloadState::Idle,
                     });
                     inner.status = GraphStatus::Ready { files };
@@ -1001,8 +1216,12 @@ impl GraphState {
                 *lock_recover(&self.scan) = None;
                 {
                     let mut inner = lock_recover(&self.inner);
-                    inner.published =
-                        Some(Published { generation, fingerprint: fp, reload: ReloadState::Idle });
+                    inner.published = Some(Published {
+                        generation,
+                        fingerprint: fp,
+                        stale: false,
+                        reload: ReloadState::Idle,
+                    });
                     inner.status = GraphStatus::Ready { files };
                 }
                 self.notify_published(build_start_seq);
@@ -1050,12 +1269,62 @@ impl GraphState {
 
         *lock_recover(&self.scan) = None;
         let mut inner = lock_recover(&self.inner);
-        inner.published =
-            Some(Published { generation: revision, fingerprint, reload: ReloadState::Idle });
+        inner.published = Some(Published {
+            generation: revision,
+            fingerprint,
+            stale: false,
+            reload: ReloadState::Idle,
+        });
         inner.status = GraphStatus::Ready { files };
         drop(inner);
         self.notify_published(build_start_seq);
         tracing::info!(files, revision, "reused cached graph database (workspace unchanged)");
+        true
+    }
+
+    /// Boot variant for a cached graph that no longer matches disk: publish it anyway —
+    /// stale answers now beat "still indexing" for the minutes a full rebuild takes —
+    /// and pre-claim the reload slot in the SAME lock hold, then let the normal reload
+    /// lifecycle catch up (incrementally when eligible, else a full rebuild). The
+    /// atomic Ready+Running publish keeps every existing guard honest:
+    /// `freshness()`/`claim_reload_slot` stay single-flight against the pre-claimed
+    /// slot, and `consume_leftover_marks` sees `drift_pending` and defers the leftover
+    /// consume to the catch-up publish — unlike a fingerprint-clean cached publish,
+    /// THIS snapshot does not reflect the leftover marks' causes. A snapshot from a
+    /// straddled build (`force_stale`) was never coherent and is not served. No
+    /// `notify_published`: the publish hook must only run against a build that
+    /// reflects current disk.
+    fn try_publish_stale_and_catch_up(&self, workspace_root: &Path) -> bool {
+        let path = graph_db_path(workspace_root);
+        let Ok(graph) = GraphDb::open(&path) else {
+            return false; // missing, truncated, or stale-schema → full rebuild
+        };
+        let Ok((revision, fingerprint, force_stale)) = graph.freshness_token() else {
+            return false;
+        };
+        if force_stale {
+            return false;
+        }
+        let files = graph.files().unwrap_or(0);
+        drop(graph);
+
+        {
+            let mut inner = lock_recover(&self.inner);
+            inner.published = Some(Published {
+                generation: revision,
+                fingerprint,
+                stale: true,
+                // Pre-claimed: the catch-up spawned below owns the one reload slot.
+                reload: ReloadState::Running,
+            });
+            inner.status = GraphStatus::Ready { files };
+        }
+        tracing::info!(
+            files,
+            revision,
+            "published stale cached graph database; catch-up reload starting"
+        );
+        self.spawn_reload();
         true
     }
 
@@ -1262,9 +1531,32 @@ fn workspace_fingerprint(workspace_root: &Path) -> u64 {
     let mut entries: Vec<(String, u128, u64)> =
         scan_file_stats(workspace_root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
     entries.sort();
+    fold_fingerprint_entries(&entries)
+}
+
+/// The one fold both fingerprint producers share, so the event-maintained map and the
+/// walk agree bit-for-bit: `entries` must be sorted `(path, mtime, len)` tuples (paths
+/// are unique, so path order alone determines it).
+fn fold_fingerprint_entries(entries: &[(String, u128, u64)]) -> u64 {
     let mut hasher = DefaultHasher::new();
     entries.hash(&mut hasher);
     hasher.finish()
+}
+
+/// The raw `(mtime nanos, len)` pair for the fingerprint map, matching what
+/// [`scan_file_stats`] records for a present regular file.
+fn stat_pair(path: &Path) -> Option<(u128, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Some((mtime, meta.len()))
 }
 
 /// Granular drift between a built graph's stored per-file fingerprints and the
@@ -1829,8 +2121,12 @@ mod tests {
         {
             let mut inner = lock_recover(&graph.inner);
             inner.status = GraphStatus::Ready { files: 0 };
-            inner.published =
-                Some(Published { generation: 1, fingerprint: 0, reload: ReloadState::Idle });
+            inner.published = Some(Published {
+                generation: 1,
+                fingerprint: 0,
+                stale: false,
+                reload: ReloadState::Idle,
+            });
         }
         graph.pending_nudge.store(true, Ordering::SeqCst);
 
@@ -1860,8 +2156,12 @@ mod tests {
         {
             let mut inner = lock_recover(&graph.inner);
             inner.status = GraphStatus::Ready { files: 0 };
-            inner.published =
-                Some(Published { generation: 1, fingerprint: 1, reload: ReloadState::Idle });
+            inner.published = Some(Published {
+                generation: 1,
+                fingerprint: 1,
+                stale: false,
+                reload: ReloadState::Idle,
+            });
         }
         assert!(!graph.drift_pending(), "a clean published graph has no pending drift");
 
@@ -1921,9 +2221,10 @@ mod tests {
     }
 
     /// A cached build whose fingerprint no longer matches the workspace (it moved
-    /// since the build) is discarded and rebuilt from scratch.
+    /// since the build) is served immediately as a stale snapshot — answers now beat
+    /// "still indexing" — while the pre-claimed catch-up reload replaces it.
     #[test]
-    fn rebuilds_when_cached_fingerprint_differs() {
+    fn serves_stale_cache_and_catches_up() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         sample_workspace(root);
@@ -1933,9 +2234,117 @@ mod tests {
         graph.ensure_loading();
         wait_ready(&graph);
 
+        // Ready right away: either the stale cache (revision 7) is being served with
+        // the catch-up still running, or — on a fast machine over this tiny fixture —
+        // the catch-up already published revision 8. Never a from-scratch generation 1.
+        let first = graph.snapshot().expect("ready graph snapshots").generation;
+        assert!(
+            first == 7 || first == 8,
+            "the stale cache is served (or already caught up), never rebuilt at 1: {first}"
+        );
+
+        // The catch-up publishes past the cached revision and rewrites the file.
+        for _ in 0..500 {
+            if graph.snapshot().map(|s| s.generation) == Some(8) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let snap = graph.snapshot().expect("ready graph snapshots");
-        assert_eq!(snap.generation, 1, "stale cache discarded and rebuilt at generation 1");
+        assert_eq!(snap.generation, 8, "the catch-up reload published past the cache");
         assert_ne!(meta_string(&graph_db_path(root), "built_at"), "cached-build-sentinel");
+    }
+
+    /// Even after the stale boot's pre-claimed catch-up FAILS (`reload=Failed`, so
+    /// `drift_pending` no longer holds), the leftover-marks one-shot must stay armed:
+    /// the stale snapshot predates the marks' causes, and firing the hook against it
+    /// would clear them for good.
+    #[test]
+    fn leftover_consume_stays_armed_while_published_snapshot_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let hook_fired = Arc::clone(&fired);
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(Arc::new(
+            move |_signal| {
+                hook_fired.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.published = Some(Published {
+                generation: 7,
+                fingerprint: 1,
+                stale: true,
+                reload: ReloadState::Failed("catch-up failed".to_owned()),
+            });
+            inner.status = GraphStatus::Ready { files: 1 };
+        }
+
+        graph.consume_leftover_marks(5);
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "no consume against the stale snapshot");
+        assert_eq!(
+            graph.leftover_bound.load(Ordering::SeqCst),
+            5,
+            "the one-shot stays armed for the next successful publish"
+        );
+    }
+
+    /// The event-maintained map's fold must be bit-identical to the walk's fold, or
+    /// freshness would report phantom drift after every hub-patched entry.
+    #[test]
+    fn fp_map_fold_matches_walk_fold() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let walk = workspace_fingerprint(root);
+        let mut entries: Vec<(String, u128, u64)> =
+            scan_file_stats(root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
+        entries.sort();
+        let map: std::collections::BTreeMap<String, (u128, u64)> =
+            entries.into_iter().map(|(p, m, l)| (p, (m, l))).collect();
+        let via_map: Vec<(String, u128, u64)> =
+            map.iter().map(|(p, (m, l))| (p.clone(), *m, *l)).collect();
+        assert_eq!(fold_fingerprint_entries(&via_map), walk, "map fold == walk fold");
+    }
+
+    /// A dropped snapshot's read handle returns to the pool and is reused by the next
+    /// query on the same generation; an entry a publish superseded is discarded at
+    /// checkout instead of serving a new request.
+    #[test]
+    fn snapshot_pool_reuses_and_discards_superseded_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        seed_cache(root, workspace_fingerprint(root));
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let pool_len = || lock_recover(&graph.snapshot_pool).len();
+        assert_eq!(pool_len(), 0, "no idle handles before the first query");
+        let s1 = graph.snapshot().expect("snapshots");
+        drop(s1);
+        assert_eq!(pool_len(), 1, "the dropped handle parks in the pool");
+        let s2 = graph.snapshot().expect("snapshots");
+        assert_eq!(pool_len(), 0, "the parked handle is checked out, not re-opened");
+        drop(s2);
+        assert_eq!(pool_len(), 1);
+
+        // Re-tag the parked entry with a generation that no longer matches the
+        // published one: the next checkout must discard it and open the current file.
+        {
+            let mut pool = lock_recover(&graph.snapshot_pool);
+            let entry = pool.pop().expect("one parked entry");
+            pool.push(PooledSnapshotEntry { generation: entry.generation + 100, ..entry });
+        }
+        let s3 = graph.snapshot().expect("snapshots");
+        assert_eq!(s3.generation, 7, "a superseded handle never serves a new request");
+        assert_eq!(pool_len(), 0, "the superseded entry was discarded at checkout");
     }
 
     /// A cached build flagged `force_stale` (it straddled a disk write and was never
@@ -4646,8 +5055,12 @@ mod tests {
             let mut inner = lock_recover(&graph.inner);
             inner.status = GraphStatus::Ready { files: 0 };
             // fingerprint 0 can never match the real disk scan → a drift is always seen.
-            inner.published =
-                Some(Published { generation: 1, fingerprint: 0, reload: ReloadState::Idle });
+            inner.published = Some(Published {
+                generation: 1,
+                fingerprint: 0,
+                stale: false,
+                reload: ReloadState::Idle,
+            });
         }
         assert!(graph.claim_reload_slot(), "the first claim wins on drift");
         assert!(!graph.claim_reload_slot(), "a second claim loses while a reload is Running");
@@ -4677,8 +5090,12 @@ mod tests {
         {
             let mut inner = lock_recover(&graph.inner);
             inner.status = GraphStatus::Ready { files: 0 };
-            inner.published =
-                Some(Published { generation: 1, fingerprint: 0, reload: ReloadState::Running });
+            inner.published = Some(Published {
+                generation: 1,
+                fingerprint: 0,
+                stale: false,
+                reload: ReloadState::Running,
+            });
         }
         assert_eq!(graph.nudge_rebuild(), NudgeOutcome::NoOp);
         assert_eq!(graph.nudge_rebuild(), NudgeOutcome::NoOp);
