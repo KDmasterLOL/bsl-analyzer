@@ -13,10 +13,11 @@ use project_model::{
 };
 use std::collections::HashMap;
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::thread::JoinHandle;
@@ -47,6 +48,246 @@ pub(crate) struct BaselineSnapshotDocuments {
 pub(crate) struct BaselineRuntime {
     pub configured_baseline: ConfiguredBaselineStatus,
     pub external_baseline: Option<Arc<ExternalBaselineService>>,
+}
+
+/// The outcome of the cheap, local part of baseline resolution.
+///
+/// Everything decidable from config, env, and the credential helper subprocess stays
+/// synchronous (milliseconds), so misconfiguration is still reported instantly and with
+/// today's exact semantics. Only the network part — building the PG source and probing
+/// snapshot support, seconds against a remote server — is deferred behind `Connect`, so
+/// a serve path can move it off the startup critical path.
+// No `Debug`: `Connect` carries the resolved connection URL, credentials included —
+// a stray `{:?}` in a log line must not be able to print it.
+pub(crate) enum BaselineBootstrap {
+    /// Resolution finished locally (sqlite backend, incomplete postgres config, or a
+    /// credential failure): the runtime is final and carries the issue, if any.
+    Immediate(BaselineRuntime),
+    /// Credentials resolved; connecting to the baseline still requires network work.
+    Connect(Box<BaselineConnectPlan>),
+}
+
+impl BaselineBootstrap {
+    /// Run the deferred part (if any) right here. Sync callers — CLI config
+    /// diagnostics, tests — keep the historical one-call behaviour through this.
+    pub(crate) fn connect_now(self) -> BaselineRuntime {
+        match self {
+            Self::Immediate(runtime) => runtime,
+            Self::Connect(plan) => plan.connect(),
+        }
+    }
+}
+
+/// A shared slot for a baseline runtime whose network part may still be connecting.
+///
+/// Mirrors the resident lifecycle idiom (`DiagnosticsStatus`/`GraphStatus`): an explicit
+/// pending state under a mutex, filled exactly once by the `bsl-baseline-init` thread.
+/// Readers never block (tools render "connecting" instead of erroring); the search-init
+/// threads, which genuinely need the outcome, wait on the condvar with a bounded
+/// timeout. `Pending` is deliberately distinct from "ready without a baseline": request
+/// gates must answer "warming — retry" during the connect, not "fix config and restart".
+#[derive(Clone, Debug)]
+pub(crate) struct DeferredBaselineRuntime {
+    inner: Arc<DeferredBaselineInner>,
+}
+
+#[derive(Debug)]
+struct DeferredBaselineInner {
+    slot: StdMutex<BaselineSlot>,
+    ready: Condvar,
+    closed: AtomicBool,
+}
+
+#[derive(Debug)]
+enum BaselineSlot {
+    Pending,
+    Ready(Option<BaselineRuntime>),
+}
+
+/// A coherent single-lock snapshot of [`DeferredBaselineRuntime`], for handlers that
+/// need the pending flag and the runtime pieces to describe the same instant.
+pub(crate) struct BaselineView {
+    pub pending: bool,
+    pub configured: Option<ConfiguredBaselineStatus>,
+    pub external: Option<Arc<ExternalBaselineService>>,
+}
+
+impl DeferredBaselineRuntime {
+    /// A slot that is ready from the start (sqlite / misconfigured / test runtimes).
+    pub(crate) fn ready(runtime: BaselineRuntime) -> Self {
+        Self::with_slot(BaselineSlot::Ready(Some(runtime)))
+    }
+
+    /// A slot for profiles that have no baseline at all (disabled/shared state).
+    pub(crate) fn absent() -> Self {
+        Self::with_slot(BaselineSlot::Ready(None))
+    }
+
+    fn with_slot(slot: BaselineSlot) -> Self {
+        Self {
+            inner: Arc::new(DeferredBaselineInner {
+                slot: StdMutex::new(slot),
+                ready: Condvar::new(),
+                closed: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// Run the plan's network connect on a background thread and publish the outcome.
+    ///
+    /// The thread is deliberately detached (its `JoinHandle` is dropped): it performs
+    /// exactly one bounded action and publishes into the slot, whose closed-flag
+    /// handshake with [`Self::shutdown`] guarantees the produced service never
+    /// outlives the owning state unmanaged — joining would add a shutdown stall for
+    /// no extra safety.
+    pub(crate) fn spawn(plan: BaselineConnectPlan) -> Self {
+        let deferred = Self::with_slot(BaselineSlot::Pending);
+        let publish_into = deferred.clone();
+        let spawned = std::thread::Builder::new()
+            .name("bsl-baseline-init".to_owned())
+            .spawn(move || publish_into.publish(plan.connect()));
+        if let Err(e) = spawned {
+            // No thread — resolve the slot immediately so waiters cannot hang forever.
+            tracing::warn!("could not spawn baseline connect thread: {e}");
+            deferred.publish(BaselineRuntime {
+                configured_baseline: ConfiguredBaselineStatus {
+                    backend: "postgres",
+                    selection: "shared baseline".to_owned(),
+                    issue: Some(format!("could not spawn baseline connect thread: {e}")),
+                    support: None,
+                },
+                external_baseline: None,
+            });
+        }
+        deferred
+    }
+
+    fn publish(&self, runtime: BaselineRuntime) {
+        let service = runtime.external_baseline.clone();
+        let mut slot = self.inner.slot.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = BaselineSlot::Ready(Some(runtime));
+        drop(slot);
+        self.inner.ready.notify_all();
+        // The closed check runs AFTER the store: a shutdown that flagged `closed` while
+        // the slot was still pending found no service to stop, so stopping it is this
+        // thread's job. Ordering guarantees no leak either way — whichever of the two
+        // sides observes the other's write shuts the service down, and the service's
+        // own shutdown is idempotent, so both doing it is harmless.
+        if self.inner.closed.load(Ordering::SeqCst) {
+            if let Some(service) = service {
+                service.shutdown();
+            }
+        }
+    }
+
+    /// One consistent view of the slot under a single lock hold. Request handlers that
+    /// combine the pending flag with the runtime pieces must use this: reading them
+    /// through separate calls lets a publish land in between, and a torn
+    /// `pending=false / configured=None / external=Some` mix reads as a config error.
+    pub(crate) fn view(&self) -> BaselineView {
+        match &*self.inner.slot.lock().unwrap_or_else(|e| e.into_inner()) {
+            BaselineSlot::Pending => {
+                BaselineView { pending: true, configured: None, external: None }
+            }
+            BaselineSlot::Ready(runtime) => BaselineView {
+                pending: false,
+                configured: runtime.as_ref().map(|r| r.configured_baseline.clone()),
+                external: runtime.as_ref().and_then(|r| r.external_baseline.clone()),
+            },
+        }
+    }
+
+    /// The service handle, if the runtime is ready and has one. Never blocks.
+    pub(crate) fn external(&self) -> Option<Arc<ExternalBaselineService>> {
+        match &*self.inner.slot.lock().unwrap_or_else(|e| e.into_inner()) {
+            BaselineSlot::Ready(Some(runtime)) => runtime.external_baseline.clone(),
+            _ => None,
+        }
+    }
+
+    /// Block until the slot is resolved or `timeout` elapses. Returns whether it is
+    /// resolved. For background init threads only — request paths must not wait.
+    pub(crate) fn wait_ready(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut slot = self.inner.slot.lock().unwrap_or_else(|e| e.into_inner());
+        while matches!(*slot, BaselineSlot::Pending) {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            let (guard, _timeout) =
+                self.inner.ready.wait_timeout(slot, remaining).unwrap_or_else(|e| e.into_inner());
+            slot = guard;
+        }
+        true
+    }
+
+    /// Close the slot: a ready service shuts down now; a still-connecting one is shut
+    /// down by [`Self::publish`] the moment it lands.
+    pub(crate) fn shutdown(&self) {
+        self.inner.closed.store(true, Ordering::SeqCst);
+        if let Some(service) = self.external() {
+            service.shutdown();
+        }
+    }
+}
+
+/// Everything the deferred network step needs, captured by value so it can run on a
+/// background thread after `SharedState` construction returned. No `Debug`:
+/// `connection` is the resolved URL with live credentials.
+pub(crate) struct BaselineConnectPlan {
+    corpus: CorpusId,
+    connection: String,
+    schema: Option<String>,
+    context: RefreshContext,
+    selection: String,
+    project_root: Option<PathBuf>,
+    policy: SearchBaselinePolicyConfig,
+}
+
+impl BaselineConnectPlan {
+    pub(crate) fn corpus(&self) -> &CorpusId {
+        &self.corpus
+    }
+
+    /// The slow tail of baseline resolution: build the PG-backed source (network),
+    /// resolve workspace support, and spawn the service actor. Mirrors the historical
+    /// in-line tail of `BaselineRuntime::for_corpus` exactly, including its
+    /// failure-to-issue folding.
+    pub(crate) fn connect(self) -> BaselineRuntime {
+        let Self { corpus, connection, schema, context, selection, project_root, policy } = self;
+        match RefreshableExternalBaselineSource::new(connection, schema, context) {
+            Ok(source) => {
+                let support = if matches!(corpus, CorpusId::WorkspaceCode) {
+                    resolve_workspace_support_status(project_root.as_deref(), &policy, &source)
+                } else {
+                    None
+                };
+                let service = ExternalBaselineService::spawn(source);
+                tracing::info!(corpus = %corpus, "refreshable external baseline source configured");
+                BaselineRuntime {
+                    configured_baseline: ConfiguredBaselineStatus {
+                        backend: "postgres",
+                        selection,
+                        issue: None,
+                        support,
+                    },
+                    external_baseline: Some(Arc::new(service)),
+                }
+            }
+            Err(error) => {
+                tracing::warn!(corpus = %corpus, "failed to configure refreshable external baseline source: {error}");
+                BaselineRuntime {
+                    configured_baseline: ConfiguredBaselineStatus {
+                        backend: "postgres",
+                        selection,
+                        issue: Some(error.to_string()),
+                        support: None,
+                    },
+                    external_baseline: None,
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -105,7 +346,14 @@ enum BaselineServiceRequest {
 
 impl BaselineRuntime {
     pub(crate) fn workspace(project_root: Option<&Path>, project_config: &ProjectConfig) -> Self {
-        Self::for_corpus(
+        Self::workspace_bootstrap(project_root, project_config).connect_now()
+    }
+
+    pub(crate) fn workspace_bootstrap(
+        project_root: Option<&Path>,
+        project_config: &ProjectConfig,
+    ) -> BaselineBootstrap {
+        Self::bootstrap_for_corpus(
             CorpusId::WorkspaceCode,
             project_root,
             Some(&project_config.search.baseline),
@@ -116,7 +364,11 @@ impl BaselineRuntime {
     }
 
     pub(crate) fn reference(project_config: Option<&ProjectConfig>) -> Self {
-        Self::for_corpus(
+        Self::reference_bootstrap(project_config).connect_now()
+    }
+
+    pub(crate) fn reference_bootstrap(project_config: Option<&ProjectConfig>) -> BaselineBootstrap {
+        Self::bootstrap_for_corpus(
             CorpusId::Reference,
             None,
             project_config.map(|config| &config.search.baseline),
@@ -127,18 +379,18 @@ impl BaselineRuntime {
     }
 
     #[allow(clippy::too_many_arguments, reason = "private resolution chain uses all inputs")]
-    fn for_corpus(
+    fn bootstrap_for_corpus(
         corpus: CorpusId,
         project_root: Option<&Path>,
         project_config: Option<&SearchBaselineConfig>,
         selection_prefix: &str,
         schema_keys: &[&str],
         allow_env_backend_without_config: bool,
-    ) -> Self {
+    ) -> BaselineBootstrap {
         let configured_backend = project_config.map(|config| config.backend.clone());
         let use_postgres = matches!(configured_backend, Some(SearchBaselineBackend::Postgres));
         if !use_postgres && !allow_env_backend_without_config {
-            return Self {
+            return BaselineBootstrap::Immediate(BaselineRuntime {
                 configured_baseline: ConfiguredBaselineStatus {
                     backend: "sqlite",
                     selection: local_baseline_description(&corpus),
@@ -146,7 +398,7 @@ impl BaselineRuntime {
                     support: None,
                 },
                 external_baseline: None,
-            };
+            });
         }
 
         let default_target = SearchBaselineTargetConfig::default();
@@ -172,7 +424,7 @@ impl BaselineRuntime {
 
         if !postgres.is_configured() {
             if use_postgres {
-                return Self {
+                return BaselineBootstrap::Immediate(BaselineRuntime {
                     configured_baseline: ConfiguredBaselineStatus {
                         backend: "postgres",
                         selection,
@@ -183,10 +435,10 @@ impl BaselineRuntime {
                         support: None,
                     },
                     external_baseline: None,
-                };
+                });
             }
 
-            return Self {
+            return BaselineBootstrap::Immediate(BaselineRuntime {
                 configured_baseline: ConfiguredBaselineStatus {
                     backend: "sqlite",
                     selection: local_baseline_description(&corpus),
@@ -194,13 +446,13 @@ impl BaselineRuntime {
                     support: None,
                 },
                 external_baseline: None,
-            };
+            });
         }
 
         let connection = match resolve_postgres_url(postgres, PostgresAccessMode::Reader) {
             Ok(resolved) => resolved.url,
             Err(error) => {
-                return Self {
+                return BaselineBootstrap::Immediate(BaselineRuntime {
                     configured_baseline: ConfiguredBaselineStatus {
                         backend: "postgres",
                         selection,
@@ -210,7 +462,7 @@ impl BaselineRuntime {
                         support: None,
                     },
                     external_baseline: None,
-                };
+                });
             }
         };
 
@@ -223,38 +475,15 @@ impl BaselineRuntime {
             schema_keys: schema_keys.iter().map(|s| s.to_string()).collect(),
         };
 
-        match RefreshableExternalBaselineSource::new(connection, schema.clone(), context) {
-            Ok(source) => {
-                let support = if matches!(corpus, CorpusId::WorkspaceCode) {
-                    resolve_workspace_support_status(project_root, &baseline_target.policy, &source)
-                } else {
-                    None
-                };
-                let service = ExternalBaselineService::spawn(source);
-                tracing::info!(corpus = %corpus, "refreshable external baseline source configured");
-                Self {
-                    configured_baseline: ConfiguredBaselineStatus {
-                        backend: "postgres",
-                        selection,
-                        issue: None,
-                        support,
-                    },
-                    external_baseline: Some(Arc::new(service)),
-                }
-            }
-            Err(error) => {
-                tracing::warn!(corpus = %corpus, "failed to configure refreshable external baseline source: {error}");
-                Self {
-                    configured_baseline: ConfiguredBaselineStatus {
-                        backend: "postgres",
-                        selection,
-                        issue: Some(error.to_string()),
-                        support: None,
-                    },
-                    external_baseline: None,
-                }
-            }
-        }
+        BaselineBootstrap::Connect(Box::new(BaselineConnectPlan {
+            corpus,
+            connection,
+            schema,
+            context,
+            selection,
+            project_root: project_root.map(Path::to_path_buf),
+            policy: baseline_target.policy.clone(),
+        }))
     }
 
     fn summary(&self) -> BaselineResolutionSummary {
@@ -1405,10 +1634,11 @@ fn platform_reference_documents() -> Vec<Document> {
 #[cfg(test)]
 mod tests {
     use super::{
-        baseline_description, resolve_project_baseline_diagnostics, BaselineRuntime,
-        BaselineServiceRequest, ConfiguredBaselineStatus, ExternalBaselineService,
-        ExternalBaselineSource, ExternalBaselineState, ExternalBaselineStatus,
-        RefreshOrTerminalError, RefreshableExternalBaselineSource,
+        baseline_description, resolve_project_baseline_diagnostics, BaselineBootstrap,
+        BaselineRuntime, BaselineServiceRequest, BaselineSlot, ConfiguredBaselineStatus,
+        DeferredBaselineRuntime, ExternalBaselineService, ExternalBaselineSource,
+        ExternalBaselineState, ExternalBaselineStatus, RefreshOrTerminalError,
+        RefreshableExternalBaselineSource,
     };
     use bsl_search::{BaselineRef, CorpusId, ExternalBaselineConfig, SearchError};
     use project_model::{
@@ -1421,6 +1651,116 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    /// A postgres project config whose credential helper resolves synchronously (tiny
+    /// python shim, same pattern as project-model's resolver tests) — enough for the
+    /// bootstrap to classify it as connectable without any server.
+    fn resolvable_postgres_project_config() -> ProjectConfig {
+        ProjectConfig {
+            search: SearchConfig {
+                baseline: SearchBaselineConfig {
+                    backend: SearchBaselineBackend::Postgres,
+                    postgres: SearchPostgresConfig {
+                        host: Some("localhost".to_owned()),
+                        port: Some(5433),
+                        dbname: Some("mydb".to_owned()),
+                        schema: Some("bsl_search".to_owned()),
+                        vault_role_base: Some("search/base".to_owned()),
+                        credential_helper: SearchPostgresCredentialHelperConfig {
+                            program: Some("python3".to_owned()),
+                            args: vec![
+                                "-c".to_owned(),
+                                "import sys; sys.stdin.readline(); sys.stdout.write(sys.argv[1])"
+                                    .to_owned(),
+                                r#"{"protocol":"bsl-analyzer.postgres-helper.v1","ok":true,"url":"postgres://user:pass@localhost:5433/mydb","lease_id":"vault/lease/123","expires_at":"2026-06-01T00:00:00Z","renewable":false}"#
+                                    .to_owned(),
+                            ],
+                        },
+                    },
+                    ..SearchBaselineConfig::default()
+                },
+            },
+            ..ProjectConfig::default()
+        }
+    }
+
+    #[test]
+    fn workspace_bootstrap_defers_only_the_network_connect() {
+        let bootstrap =
+            BaselineRuntime::workspace_bootstrap(None, &resolvable_postgres_project_config());
+        let BaselineBootstrap::Connect(plan) = bootstrap else {
+            panic!("resolvable postgres config must classify as a deferred Connect plan");
+        };
+        assert!(matches!(plan.corpus(), CorpusId::WorkspaceCode));
+    }
+
+    #[test]
+    fn workspace_bootstrap_resolves_config_errors_immediately() {
+        let bootstrap = BaselineRuntime::workspace_bootstrap(
+            None,
+            &ProjectConfig {
+                search: SearchConfig {
+                    baseline: SearchBaselineConfig {
+                        backend: SearchBaselineBackend::Postgres,
+                        ..SearchBaselineConfig::default()
+                    },
+                },
+                ..ProjectConfig::default()
+            },
+        );
+        let BaselineBootstrap::Immediate(runtime) = bootstrap else {
+            panic!("an unconfigured postgres backend must not defer anything");
+        };
+        assert_eq!(runtime.configured_baseline.backend, "postgres");
+        assert!(runtime.configured_baseline.issue.is_some());
+        assert!(runtime.external_baseline.is_none());
+    }
+
+    #[test]
+    fn deferred_slot_pending_then_publish_wakes_waiters() {
+        let deferred = DeferredBaselineRuntime::with_slot(BaselineSlot::Pending);
+        let view = deferred.view();
+        assert!(view.pending);
+        assert!(view.external.is_none());
+        assert!(view.configured.is_none());
+        assert!(!deferred.wait_ready(Duration::from_millis(30)), "a pending slot times out");
+
+        let waiter = deferred.clone();
+        let handle = std::thread::spawn(move || waiter.wait_ready(Duration::from_secs(5)));
+        deferred.publish(BaselineRuntime {
+            configured_baseline: ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            },
+            external_baseline: None,
+        });
+        assert!(handle.join().unwrap(), "publish must wake the condvar waiter");
+        let view = deferred.view();
+        assert!(!view.pending);
+        assert_eq!(view.configured.map(|status| status.backend), Some("postgres"));
+    }
+
+    #[test]
+    fn deferred_slot_ready_and_absent_never_report_pending() {
+        let absent = DeferredBaselineRuntime::absent();
+        assert!(!absent.view().pending);
+        assert!(absent.view().configured.is_none());
+
+        let ready = DeferredBaselineRuntime::ready(BaselineRuntime {
+            configured_baseline: ConfiguredBaselineStatus {
+                backend: "sqlite",
+                selection: "local workspace index".to_owned(),
+                issue: None,
+                support: None,
+            },
+            external_baseline: None,
+        });
+        assert!(!ready.view().pending);
+        assert!(ready.wait_ready(Duration::from_millis(1)));
+        assert_eq!(ready.view().configured.map(|status| status.backend), Some("sqlite"));
+    }
 
     #[test]
     fn baseline_description_prefers_snapshot_id() {

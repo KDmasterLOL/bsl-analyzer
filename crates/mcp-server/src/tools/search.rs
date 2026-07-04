@@ -555,6 +555,13 @@ fn search_not_ready(detail: &str, progress: &IndexProgress) -> CallToolResult {
     }))
 }
 
+/// The `not_ready` retry envelope for a query that arrived while the deferred baseline
+/// connect is still running. Distinct from the `baseline_unavailable` config errors: the
+/// agent should simply retry in a few seconds, not go fix configuration or restart.
+pub(crate) fn baseline_warming_not_ready(progress: &IndexProgress) -> CallToolResult {
+    search_not_ready("connecting to the shared PostgreSQL baseline (startup warmup)", progress)
+}
+
 /// The unified code search: run lexical and semantic, fuse by `fuse_smart` (exact-symbol tier
 /// then semantic tail), and degrade to lexical (with a trailing note) when semantic cannot serve.
 /// This is what the `search_code` action dispatches to.
@@ -1072,6 +1079,7 @@ pub fn search_docs(
     Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits))]))
 }
 
+#[allow(clippy::too_many_arguments, reason = "distinct status inputs, mirrored by _with_cap")]
 pub fn search_status(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     progress: &Arc<IndexProgress>,
@@ -1080,6 +1088,7 @@ pub fn search_status(
     overlay_warmup: OverlayWarmupState,
     configured_baseline: Option<ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
+    baseline_pending: bool,
 ) -> Result<CallToolResult, McpError> {
     // The 30s cap mirrors `try_acquire_engine`: status degrades to a "busy" note rather than
     // hanging to the MCP client timeout when a long operation holds the engine.
@@ -1091,6 +1100,7 @@ pub fn search_status(
         overlay_warmup,
         configured_baseline,
         external_baseline,
+        baseline_pending,
         std::time::Duration::from_secs(30),
     )
 }
@@ -1109,6 +1119,7 @@ fn search_status_with_cap(
     overlay_warmup: OverlayWarmupState,
     configured_baseline: Option<ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
+    baseline_pending: bool,
     engine_acquire_cap: std::time::Duration,
 ) -> Result<CallToolResult, McpError> {
     let mut out = String::new();
@@ -1158,6 +1169,18 @@ fn search_status_with_cap(
         external_baseline.as_ref(),
         engine_state,
     );
+
+    // Pending is only reachable on the postgres path (a Connect plan exists for no other
+    // backend), so the placeholder backend below is accurate by construction.
+    if baseline_pending && configured_baseline.is_none() {
+        let _ = writeln!(out, "Configured baseline:");
+        let _ = writeln!(out, "  Backend:  postgres");
+        let _ = writeln!(
+            out,
+            "  Status:   connecting to the shared baseline (startup warmup) — retry shortly"
+        );
+        let _ = writeln!(out);
+    }
 
     if let Some(configured_baseline) = configured_baseline.as_ref() {
         let _ = writeln!(out, "Configured baseline:");
@@ -2311,6 +2334,7 @@ mod tests {
                 support: None,
             }),
             None,
+            false,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
@@ -2351,6 +2375,7 @@ mod tests {
                 support: None,
             }),
             Some(source),
+            false,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
@@ -2360,6 +2385,26 @@ mod tests {
         assert!(text.contains("External baseline: configured"));
         assert!(text.contains("Backend:  postgres"));
         assert!(text.contains("Status:   error"));
+    }
+
+    #[test]
+    fn search_status_reports_warming_while_baseline_connect_is_pending() {
+        let result = search_status(
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("Configured baseline:"), "{text}");
+        assert!(text.contains("Backend:  postgres"), "{text}");
+        assert!(text.contains("connecting to the shared baseline"), "{text}");
     }
 
     #[test]
@@ -2394,6 +2439,7 @@ mod tests {
                 support: None,
             }),
             None,
+            false,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
@@ -2827,6 +2873,7 @@ mod tests {
                 support: None,
             }),
             None,
+            false,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
@@ -2866,6 +2913,7 @@ mod tests {
                 warmup,
                 postgres_baseline(),
                 None,
+                false,
             )
             .unwrap()
             .content[0]
@@ -2917,6 +2965,7 @@ mod tests {
             OverlayWarmupState::Pending,
             None,
             None,
+            false,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("text").text.as_str();
@@ -3133,6 +3182,7 @@ mod tests {
                 support: None,
             }),
             None,
+            false,
             Duration::from_millis(40),
         )
         .unwrap();

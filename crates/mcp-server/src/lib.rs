@@ -355,8 +355,7 @@ impl McpServer {
                     .lock()
                     .map(|guard| guard.clone())
                     .unwrap_or(crate::state::OverlayWarmupState::Pending);
-                let configured_baseline = self.state.configured_baseline();
-                let external_baseline = self.state.external_baseline();
+                let baseline = self.state.baseline_view();
                 tokio::task::spawn_blocking(move || {
                     tools::search::search_status(
                         &engine,
@@ -364,8 +363,9 @@ impl McpServer {
                         &semantic_runtime,
                         workspace_search_mode,
                         overlay_warmup,
-                        configured_baseline,
-                        external_baseline,
+                        baseline.configured,
+                        baseline.external,
+                        baseline.pending,
                     )
                 })
                 .await
@@ -379,8 +379,23 @@ impl McpServer {
                 let engine = self.state.search_engine().clone();
                 let semantic_runtime = self.state.semantic_runtime();
                 let workspace_search_mode = self.state.workspace_search_mode();
-                let configured_baseline = self.state.configured_baseline();
-                let external_baseline = self.state.external_baseline();
+                // A query landing during the deferred baseline connect gets the retry
+                // envelope, not the gates' "fix config / restart MCP" errors — those are
+                // for resolved-and-broken, this is merely not-resolved-yet. One snapshot
+                // feeds both the pending check and the gates, so a publish in between
+                // cannot produce a torn pending/configured/external mix.
+                let baseline = self.state.baseline_view();
+                if matches!(
+                    workspace_search_mode,
+                    crate::state::WorkspaceSearchMode::PostgresRemoteOverlay
+                ) && baseline.pending
+                {
+                    return Ok(tools::search::baseline_warming_not_ready(
+                        self.state.index_progress(),
+                    ));
+                }
+                let configured_baseline = baseline.configured;
+                let external_baseline = baseline.external;
                 // The graph keys file ids against the repo (workspace) root; pass it so search
                 // can mint form/file `graph_id`s with the same `src/cf/…` prefix the graph uses.
                 let graph_root = self.state.workspace_root().cloned();
@@ -861,8 +876,7 @@ impl McpServer {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
                 let semantic_runtime = self.state.semantic_runtime();
-                let configured_baseline = self.state.configured_baseline();
-                let external_baseline = self.state.external_baseline();
+                let baseline = self.state.baseline_view();
                 // The reference/shared path runs no overlay warmup, so its state is always
                 // `Pending`; the Summary block words this profile as a reference docs index.
                 let overlay_warmup = crate::state::OverlayWarmupState::Pending;
@@ -873,8 +887,9 @@ impl McpServer {
                         &semantic_runtime,
                         WorkspaceSearchMode::SqliteLocal,
                         overlay_warmup,
-                        configured_baseline,
-                        external_baseline,
+                        baseline.configured,
+                        baseline.external,
+                        baseline.pending,
                     )
                 })
                 .await
@@ -884,8 +899,9 @@ impl McpServer {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
                 let engine = self.state.search_engine().clone();
-                let configured_baseline = self.state.configured_baseline();
-                let external_baseline = self.state.external_baseline();
+                let baseline = self.state.baseline_view();
+                let configured_baseline = baseline.configured;
+                let external_baseline = baseline.external;
                 let action = p.action.clone();
                 tokio::task::spawn_blocking(move || match action.as_str() {
                     "find_docs" => tools::search::find_docs(

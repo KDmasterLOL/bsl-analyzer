@@ -1,4 +1,6 @@
-use crate::baseline::{BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineService};
+use crate::baseline::{
+    BaselineBootstrap, BaselineRuntime, DeferredBaselineRuntime, ExternalBaselineService,
+};
 use crate::change_hub::WorkspaceChangeHub;
 use crate::diagnostics_state::DiagnosticsState;
 use crate::graph::GraphState;
@@ -29,6 +31,12 @@ pub(crate) type SharedSearchEngine = Arc<Mutex<Option<SearchEngine>>>;
 /// while covering the common "edit a handful of files, then search" case in one shot.
 const MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY: usize = 64;
 
+/// How long a search-init thread waits for the deferred baseline connect before
+/// proceeding degraded. Generous by design: the wait sits on a background thread and
+/// only unusually slow networks ever reach it; the connect itself typically lands in
+/// seconds and wakes the waiter through the slot's condvar immediately.
+const BASELINE_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Clone)]
 pub struct SharedState {
     workspace_root: Option<PathBuf>,
@@ -45,8 +53,10 @@ pub struct SharedState {
     /// diffs" from "warmup failed" instead of leaving a bare `Ready` ambiguous.
     overlay_warmup: Arc<Mutex<OverlayWarmupState>>,
     workspace_search_mode: WorkspaceSearchMode,
-    external_baseline: Option<Arc<ExternalBaselineService>>,
-    configured_baseline: Option<ConfiguredBaselineStatus>,
+    /// Baseline runtime behind its connect lifecycle: the PG source is built on a
+    /// background thread, so construction (and thus the MCP `initialize` handshake)
+    /// never waits on the network. Readers see an explicit pending state meanwhile.
+    baseline: DeferredBaselineRuntime,
     graph: GraphState,
     diagnostics: DiagnosticsState,
     /// Daemon-owned filesystem change hub. Created before any consumer subscribes
@@ -332,15 +342,18 @@ impl SharedState {
         let overlay_warmup = Arc::new(Mutex::new(OverlayWarmupState::Pending));
         let background_indexers = Arc::new(AtomicUsize::new(0));
         let watcher_ready = Arc::new(AtomicBool::new(false));
-        let baseline_runtime = BaselineRuntime::workspace(Some(&project.root), &project.config);
-        let workspace_search_mode = if baseline_runtime
-            .external_baseline
-            .as_ref()
-            .is_some_and(|baseline| matches!(baseline.corpus(), CorpusId::WorkspaceCode))
-        {
-            WorkspaceSearchMode::PostgresRemoteOverlay
-        } else {
-            WorkspaceSearchMode::SqliteLocal
+        // Only the cheap, local part of baseline resolution runs here (config, env,
+        // credential helper); the PG connect itself is deferred to a background thread
+        // so a slow or unreachable server never delays the daemon's socket. The search
+        // mode is therefore decided by configured INTENT (credentials resolved for a
+        // postgres workspace baseline), not by connect success: a PG outage keeps the
+        // workspace in Postgres mode with a visible issue instead of silently falling
+        // back to (re)building a local index of the whole configuration.
+        let bootstrap = BaselineRuntime::workspace_bootstrap(Some(&project.root), &project.config);
+        let workspace_search_mode = Self::workspace_mode_for(&bootstrap);
+        let baseline = match bootstrap {
+            BaselineBootstrap::Immediate(runtime) => DeferredBaselineRuntime::ready(runtime),
+            BaselineBootstrap::Connect(plan) => DeferredBaselineRuntime::spawn(*plan),
         };
 
         // The change hub owns the recursive workspace watcher and starts before any
@@ -397,7 +410,8 @@ impl SharedState {
             Arc::clone(&background_indexers),
             source_dir.clone(),
             Arc::clone(&watcher_ready),
-            baseline_runtime.external_baseline.clone(),
+            baseline.clone(),
+            workspace_search_mode.clone(),
             graph.clone(),
             Arc::clone(&embed_flight),
             Arc::clone(&snapshot_source),
@@ -421,8 +435,7 @@ impl SharedState {
             semantic_runtime,
             overlay_warmup,
             workspace_search_mode,
-            external_baseline: baseline_runtime.external_baseline,
-            configured_baseline: Some(baseline_runtime.configured_baseline),
+            baseline,
             graph,
             diagnostics,
             change_hub: Some(change_hub),
@@ -471,7 +484,8 @@ impl SharedState {
         background_indexers: Arc<AtomicUsize>,
         workspace_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
-        external_baseline: Option<Arc<ExternalBaselineService>>,
+        baseline: DeferredBaselineRuntime,
+        mode: WorkspaceSearchMode,
         graph: GraphState,
         embed_flight: Arc<EmbedFlight>,
         snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource>,
@@ -483,9 +497,27 @@ impl SharedState {
                 // broker stays alive even if the launching client disconnects mid-build.
                 let _init_guard = BackgroundWorkGuard::new(&background_indexers);
                 tracing::info!("search engine initialization started in background");
+                // Postgres mode needs the baseline connect's outcome before it can load
+                // the manifest; waiting HERE keeps the wait on this background thread
+                // (never a request path) and off the slot's lock. On timeout the init
+                // proceeds without a service and fails exactly like today's PG-error
+                // path — offline with a visible issue, never a local reindex.
+                let external_baseline = match mode {
+                    WorkspaceSearchMode::PostgresRemoteOverlay => {
+                        if !baseline.wait_ready(BASELINE_CONNECT_WAIT) {
+                            tracing::warn!(
+                                timeout_secs = BASELINE_CONNECT_WAIT.as_secs(),
+                                "baseline connect still pending; workspace search init proceeds degraded"
+                            );
+                        }
+                        baseline.external()
+                    }
+                    WorkspaceSearchMode::SqliteLocal => None,
+                };
                 let init = Self::init_workspace_search_engine(
                     &workspace_root,
                     &watcher_ready,
+                    mode,
                     external_baseline,
                     &graph,
                 );
@@ -630,21 +662,35 @@ impl SharedState {
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let background_indexers = Arc::new(AtomicUsize::new(0));
         let project_config = project_root.as_deref().and_then(project_model::ProjectConfig::load);
-        let baseline_runtime = BaselineRuntime::reference(project_config.as_ref());
+        // Same deferral as the workspace profile: the PG/Vault connect runs off-thread
+        // so a reference daemon's socket comes up immediately.
+        let baseline = match BaselineRuntime::reference_bootstrap(project_config.as_ref()) {
+            BaselineBootstrap::Immediate(runtime) => DeferredBaselineRuntime::ready(runtime),
+            BaselineBootstrap::Connect(plan) => DeferredBaselineRuntime::spawn(*plan),
+        };
 
         {
             let engine_arc = Arc::clone(&search_engine);
             let progress_arc = Arc::clone(&index_progress);
             let semantic_runtime_arc = Arc::clone(&semantic_runtime);
-            let external_baseline = baseline_runtime.external_baseline.clone();
+            let baseline = baseline.clone();
             let init_guard = BackgroundWorkGuard::new(&background_indexers);
             std::thread::Builder::new()
                 .name("bsl-search-reference-init".to_owned())
                 .spawn(move || {
                     let _init_guard = init_guard;
                     tracing::info!("reference search engine initialization started in background");
+                    // Wait for the deferred connect before deciding shared-vs-local:
+                    // a still-pending baseline read as `None` would rebuild the local
+                    // platform docs cache instead of serving the shared snapshot.
+                    if !baseline.wait_ready(BASELINE_CONNECT_WAIT) {
+                        tracing::warn!(
+                            timeout_secs = BASELINE_CONNECT_WAIT.as_secs(),
+                            "baseline connect still pending; reference search init proceeds degraded"
+                        );
+                    }
                     let engine =
-                        Self::init_reference_search_engine(&progress_arc, external_baseline);
+                        Self::init_reference_search_engine(&progress_arc, baseline.external());
                     let semantic_status = engine
                         .as_ref()
                         .map(|engine| {
@@ -677,8 +723,7 @@ impl SharedState {
             semantic_runtime,
             overlay_warmup: Arc::new(Mutex::new(OverlayWarmupState::Pending)),
             workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
-            external_baseline: baseline_runtime.external_baseline,
-            configured_baseline: Some(baseline_runtime.configured_baseline),
+            baseline,
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
@@ -698,8 +743,7 @@ impl SharedState {
             semantic_runtime: Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             overlay_warmup: Arc::new(Mutex::new(OverlayWarmupState::Pending)),
             workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
-            external_baseline: None,
-            configured_baseline: None,
+            baseline: DeferredBaselineRuntime::absent(),
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
@@ -710,6 +754,18 @@ impl SharedState {
 
     pub(crate) fn graph(&self) -> &GraphState {
         &self.graph
+    }
+
+    /// Start building the diagnostics resident now instead of on the first tool call.
+    ///
+    /// A serve path calls this right after construction so the resident (seconds of
+    /// enumerate + metadata substrate on a large configuration) is ready before the
+    /// agent's first `diagnostics` request rather than billed to it. Deliberately not
+    /// part of [`Self::workspace`]: state is also constructed by tests and short-lived
+    /// commands that never serve diagnostics, and those must not pay for (or race) a
+    /// background resident build. No-op without a workspace root.
+    pub fn warm_start(&self) {
+        self.diagnostics.ensure_loading();
     }
 
     pub(crate) fn diagnostics(&self) -> &DiagnosticsState {
@@ -780,18 +836,38 @@ impl SharedState {
         self.workspace_search_mode.clone()
     }
 
-    pub(crate) fn external_baseline(&self) -> Option<Arc<ExternalBaselineService>> {
-        self.external_baseline.clone()
+    /// A single-lock snapshot of the baseline lifecycle — the only read surface for
+    /// tool handlers. While the deferred connect is `pending`, gates answer "warming —
+    /// retry shortly" instead of a config error; one snapshot per request keeps the
+    /// pending flag and the runtime pieces describing the same instant.
+    pub(crate) fn baseline_view(&self) -> crate::baseline::BaselineView {
+        self.baseline.view()
     }
 
-    pub(crate) fn configured_baseline(&self) -> Option<ConfiguredBaselineStatus> {
-        self.configured_baseline.clone()
+    /// The workspace search mode implied by the baseline bootstrap: configured INTENT,
+    /// never connect success. EVERY postgres-configured outcome — a deferred connect
+    /// AND the immediate failures (unconfigured section, credential rejection) — stays
+    /// in Postgres mode. Mapping a failure to `SqliteLocal` would route `search_code`
+    /// into a silent full local reindex of the configuration, hiding exactly the
+    /// failure the issue text reports; in Postgres mode the gates surface that issue.
+    fn workspace_mode_for(bootstrap: &BaselineBootstrap) -> WorkspaceSearchMode {
+        match bootstrap {
+            BaselineBootstrap::Connect(plan)
+                if matches!(plan.corpus(), CorpusId::WorkspaceCode) =>
+            {
+                WorkspaceSearchMode::PostgresRemoteOverlay
+            }
+            BaselineBootstrap::Immediate(runtime)
+                if runtime.configured_baseline.backend == "postgres" =>
+            {
+                WorkspaceSearchMode::PostgresRemoteOverlay
+            }
+            _ => WorkspaceSearchMode::SqliteLocal,
+        }
     }
 
     pub fn shutdown(&self) {
-        if let Some(ref service) = self.external_baseline {
-            service.shutdown();
-        }
+        self.baseline.shutdown();
         self.diagnostics.shutdown();
     }
 
@@ -1120,6 +1196,7 @@ impl SharedState {
     fn init_workspace_search_engine(
         workspace_root: &std::path::Path,
         watcher_ready: &Arc<AtomicBool>,
+        mode: WorkspaceSearchMode,
         external_baseline: Option<Arc<ExternalBaselineService>>,
         graph: &GraphState,
     ) -> Option<WorkspaceSearchInit> {
@@ -1129,10 +1206,22 @@ impl SharedState {
         let project = project_model::Project::new(workspace_root);
         let source_path = project.source_path().to_path_buf();
 
-        if let Some(external_baseline) = external_baseline
-            .as_ref()
-            .filter(|baseline| matches!(baseline.corpus(), CorpusId::WorkspaceCode))
-        {
+        // Branch by the configured MODE, never by baseline presence: in Postgres mode a
+        // missing service (connect failed / still pending past the wait) must leave the
+        // search offline with a visible issue. Falling through to the local branch here
+        // would silently start a full local reindex of the whole configuration — the
+        // exact cost Postgres mode exists to avoid.
+        if matches!(mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+            let Some(external_baseline) = external_baseline
+                .as_ref()
+                .filter(|baseline| matches!(baseline.corpus(), CorpusId::WorkspaceCode))
+            else {
+                tracing::warn!(
+                    "Postgres workspace mode is configured but the shared baseline is \
+                     unavailable; workspace search stays offline (no local fallback)"
+                );
+                return None;
+            };
             let mut engine = Self::open_workspace_overlay_search_engine(&db_path)?;
             Self::configure_workspace_engine(
                 &mut engine,
@@ -1596,7 +1685,8 @@ impl SharedState {
                 Arc::clone(&self.background_indexers),
                 root,
                 watcher_ready,
-                self.external_baseline.clone(),
+                self.baseline.clone(),
+                self.workspace_search_mode.clone(),
                 self.graph.clone(),
                 Arc::clone(&self.embed_flight),
                 Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
@@ -2387,8 +2477,11 @@ fn is_workspace_root_xml(xml: &Path, workspace_root: Option<&Path>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackgroundWorkGuard, OverlayInit, SharedState};
-    use crate::baseline::{ExternalBaselineService, RefreshableExternalBaselineSource};
+    use super::{BackgroundWorkGuard, OverlayInit, SharedState, WorkspaceSearchMode};
+    use crate::baseline::{
+        BaselineBootstrap, BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineService,
+        RefreshableExternalBaselineSource,
+    };
     use bsl_search::{
         BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexedDocument, SearchEngine,
     };
@@ -2398,6 +2491,36 @@ mod tests {
     use std::sync::{Arc, Mutex, OnceLock};
     use tempfile::tempdir;
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn immediate_bootstrap(backend: &'static str, issue: Option<&str>) -> BaselineBootstrap {
+        BaselineBootstrap::Immediate(BaselineRuntime {
+            configured_baseline: ConfiguredBaselineStatus {
+                backend,
+                selection: "test".to_owned(),
+                issue: issue.map(str::to_owned),
+                support: None,
+            },
+            external_baseline: None,
+        })
+    }
+
+    /// A postgres config failure (unconfigured section, credential rejection) must NOT
+    /// downgrade the mode to SqliteLocal: that would silently reindex the whole
+    /// configuration locally instead of surfacing the configured backend's issue.
+    #[test]
+    fn workspace_mode_stays_postgres_for_immediate_config_failures() {
+        assert!(matches!(
+            SharedState::workspace_mode_for(&immediate_bootstrap(
+                "postgres",
+                Some("credentials rejected"),
+            )),
+            WorkspaceSearchMode::PostgresRemoteOverlay
+        ));
+        assert!(matches!(
+            SharedState::workspace_mode_for(&immediate_bootstrap("sqlite", None)),
+            WorkspaceSearchMode::SqliteLocal
+        ));
+    }
 
     struct EnvVarGuard {
         key: &'static str,
@@ -2505,6 +2628,7 @@ mod tests {
         let init = SharedState::init_workspace_search_engine(
             workspace,
             &watcher_ready,
+            crate::state::WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(external),
             &crate::graph::GraphState::disabled(),
         );
@@ -2566,6 +2690,7 @@ mod tests {
         let init = SharedState::init_workspace_search_engine(
             workspace,
             &watcher_ready,
+            crate::state::WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(external),
             &crate::graph::GraphState::disabled(),
         );
@@ -2600,6 +2725,7 @@ mod tests {
         let init = SharedState::init_workspace_search_engine(
             workspace,
             &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
         )
@@ -4799,6 +4925,7 @@ mod tests {
         let cold = SharedState::init_workspace_search_engine(
             &workspace,
             &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
         )
@@ -4820,6 +4947,7 @@ mod tests {
         let warm = SharedState::init_workspace_search_engine(
             &workspace,
             &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
         )
@@ -4889,6 +5017,7 @@ mod tests {
         let cold = SharedState::init_workspace_search_engine(
             &workspace,
             &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
         )
@@ -4907,6 +5036,7 @@ mod tests {
         let warm = SharedState::init_workspace_search_engine(
             &workspace,
             &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
         )
@@ -5029,6 +5159,7 @@ mod tests {
         let init = SharedState::init_workspace_search_engine(
             &workspace,
             &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
         )
