@@ -950,6 +950,23 @@ type EmbeddingIdentity = (String, usize);
 /// populated; inner `Option` = the recorded identity (`None` when the baseline has none).
 type EmbeddingIdentityCache = StdMutex<Option<(usize, Option<EmbeddingIdentity>)>>;
 
+/// A resolved baseline snapshot: which candidate matched and the snapshot it points at.
+type ResolvedSnapshot = (BaselineRef, bsl_search::Snapshot);
+
+/// Memoized `resolve_snapshot` result. The tuple is `(generation, resolved_at, snapshot)`.
+/// Only a resolved snapshot is cached — a `None` resolution (no baseline yet) and errors are
+/// never stored, so a caller that must see the current state (the workspace boot path fails
+/// closed on `None`) always re-resolves and a freshly published snapshot is picked up at once.
+type SnapshotCache = StdMutex<Option<(usize, Instant, ResolvedSnapshot)>>;
+
+/// How long a resolved snapshot keeps serving from cache. A published snapshot changes the
+/// resolution without bumping `refresh_generation` (only a credential refresh bumps it), so a
+/// TTL — not just the generation key — bounds the staleness window: an *updated* snapshot on an
+/// already-resolved baseline is picked up within a minute. This is the documented fresh-search
+/// window. (A baseline going from unresolved to resolved is picked up immediately, since `None`
+/// is never cached.)
+const SNAPSHOT_CACHE_TTL: Duration = Duration::from_secs(60);
+
 #[derive(Debug)]
 pub(crate) struct RefreshableExternalBaselineSource {
     inner: StdRwLock<ExternalBaselineSource>,
@@ -958,6 +975,10 @@ pub(crate) struct RefreshableExternalBaselineSource {
     refresh_lock: StdMutex<()>,
     /// Invalidated by `refresh_inner` whenever credentials are refreshed (the generation bumps).
     embedding_identity_cache: EmbeddingIdentityCache,
+    /// Memoized `resolve_snapshot`, keyed by `refresh_generation` plus a TTL. Every search
+    /// resolves the snapshot, and each resolution is a PG round-trip; the cache keeps that off
+    /// the hot path. See [`SNAPSHOT_CACHE_TTL`] for why the TTL is required on top of the key.
+    snapshot_cache: SnapshotCache,
 }
 
 impl RefreshableExternalBaselineSource {
@@ -981,6 +1002,7 @@ impl RefreshableExternalBaselineSource {
             refresh_generation: AtomicUsize::new(0),
             refresh_lock: StdMutex::new(()),
             embedding_identity_cache: StdMutex::new(None),
+            snapshot_cache: StdMutex::new(None),
         })
     }
 
@@ -1006,6 +1028,7 @@ impl RefreshableExternalBaselineSource {
             context,
             refresh_generation: AtomicUsize::new(0),
             embedding_identity_cache: StdMutex::new(None),
+            snapshot_cache: StdMutex::new(None),
             refresh_lock: StdMutex::new(()),
         })
     }
@@ -1029,6 +1052,7 @@ impl RefreshableExternalBaselineSource {
             context,
             refresh_generation: AtomicUsize::new(0),
             embedding_identity_cache: StdMutex::new(None),
+            snapshot_cache: StdMutex::new(None),
             refresh_lock: StdMutex::new(()),
         })
     }
@@ -1246,7 +1270,59 @@ impl RefreshableExternalBaselineSource {
     pub(crate) fn resolve_snapshot(
         &self,
     ) -> Result<Option<(BaselineRef, bsl_search::Snapshot)>, bsl_search::SearchError> {
-        self.delegate(|source| source.resolve_snapshot())
+        // Every search resolves the snapshot, and each resolution is a PG round-trip. A resolved
+        // snapshot is near-immutable, so memoize it keyed by `refresh_generation` (a credential
+        // refresh bumps it and invalidates the slot) plus a TTL (a snapshot publish does NOT bump
+        // the generation, so the TTL bounds the staleness — see `SNAPSHOT_CACHE_TTL`). `None` and
+        // errors are never cached: callers that must observe the current state re-resolve every
+        // call, so an unresolved→resolved transition is picked up immediately.
+        //
+        // The generation is sampled before the resolve. A credential refresh racing the round-trip
+        // can only make the sampled generation stale, never fresher, so the worst case is a slot
+        // stamped with a superseded generation — the next lookup sees the bumped generation, misses,
+        // and re-resolves. A stale value is therefore never served past the refresh.
+        let generation = self.refresh_generation.load(Ordering::Acquire);
+        {
+            let cache = self.snapshot_cache.lock().expect("baseline snapshot cache poisoned");
+            if let Some((cached_generation, resolved_at, resolved)) = cache.as_ref() {
+                if *cached_generation == generation && resolved_at.elapsed() < SNAPSHOT_CACHE_TTL {
+                    tracing::debug!(
+                        generation,
+                        age_ms = resolved_at.elapsed().as_millis() as u64,
+                        "resolve_snapshot served from cache"
+                    );
+                    return Ok(Some(resolved.clone()));
+                }
+            }
+        }
+
+        tracing::debug!(generation, "resolve_snapshot cache miss, resolving from storage");
+        let resolved = self.delegate(|source| source.resolve_snapshot())?;
+
+        if let Some(resolved) = &resolved {
+            let mut cache = self.snapshot_cache.lock().expect("baseline snapshot cache poisoned");
+            *cache = Some((generation, Instant::now(), resolved.clone()));
+        }
+        Ok(resolved)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_snapshot_cache_for_test(&self, resolved: ResolvedSnapshot, age: Duration) {
+        let resolved_at = Instant::now().checked_sub(age).expect("test age under process uptime");
+        *self.snapshot_cache.lock().expect("baseline snapshot cache poisoned") =
+            Some((self.refresh_generation(), resolved_at, resolved));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_cache_slot_for_test(
+        &self,
+    ) -> Option<(usize, Instant, ResolvedSnapshot)> {
+        self.snapshot_cache.lock().expect("baseline snapshot cache poisoned").clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bump_refresh_generation_for_test(&self) {
+        self.refresh_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     pub(crate) fn _selection(&self) -> String {
@@ -1787,7 +1863,8 @@ mod tests {
         BaselineRuntime, BaselineServiceRequest, BaselineSlot, BaselineStatusProbe,
         ConfiguredBaselineStatus, DeferredBaselineRuntime, ExternalBaselineService,
         ExternalBaselineSource, ExternalBaselineState, ExternalBaselineStatus,
-        RefreshOrTerminalError, RefreshableExternalBaselineSource, StatusProbeState,
+        RefreshOrTerminalError, RefreshableExternalBaselineSource, ResolvedSnapshot,
+        StatusProbeState, SNAPSHOT_CACHE_TTL,
     };
     use bsl_search::{BaselineRef, CorpusId, ExternalBaselineConfig, SearchError};
     use project_model::{
@@ -2356,6 +2433,89 @@ mod tests {
                 || err_msg.contains("missing_config"),
             "expected wrapper to surface error, got: {err_msg}"
         );
+    }
+
+    fn unreachable_snapshot_source() -> RefreshableExternalBaselineSource {
+        RefreshableExternalBaselineSource::for_test(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            BaselineRef {
+                corpus: CorpusId::Reference,
+                snapshot_id: Some(bsl_search::SnapshotId::new("ref:1.0.0")),
+                branch: None,
+                commit: None,
+            },
+        )
+        .unwrap()
+    }
+
+    fn seeded_resolution() -> ResolvedSnapshot {
+        (
+            BaselineRef {
+                corpus: CorpusId::Reference,
+                snapshot_id: Some(bsl_search::SnapshotId::new("ref:1.0.0")),
+                branch: None,
+                commit: None,
+            },
+            bsl_search::Snapshot::new("ref:1.0.0", CorpusId::Reference),
+        )
+    }
+
+    #[test]
+    fn resolve_snapshot_serves_fresh_slot_without_round_trip() {
+        // A fresh cache slot is served without touching the (unreachable) DB: a round-trip would
+        // error, so an `Ok` proves the value came from cache.
+        let source = unreachable_snapshot_source();
+        source.seed_snapshot_cache_for_test(seeded_resolution(), Duration::from_secs(1));
+
+        let resolved = source.resolve_snapshot().expect("fresh slot served from cache");
+        assert_eq!(resolved, Some(seeded_resolution()));
+    }
+
+    #[test]
+    fn resolve_snapshot_cache_expires_after_ttl() {
+        // Past the TTL the slot is stale, so the resolve falls through to the DB and errors.
+        let source = unreachable_snapshot_source();
+        source.seed_snapshot_cache_for_test(
+            seeded_resolution(),
+            SNAPSHOT_CACHE_TTL + Duration::from_secs(1),
+        );
+
+        assert!(
+            source.resolve_snapshot().is_err(),
+            "stale slot must re-resolve, not serve the expired snapshot",
+        );
+    }
+
+    #[test]
+    fn resolve_snapshot_generation_bump_invalidates_slot() {
+        // A credential refresh bumps the generation; the slot no longer matches and is bypassed.
+        let source = unreachable_snapshot_source();
+        source.seed_snapshot_cache_for_test(seeded_resolution(), Duration::from_secs(1));
+        assert!(source.resolve_snapshot().is_ok(), "sanity: fresh slot serves");
+
+        source.bump_refresh_generation_for_test();
+
+        assert!(
+            source.resolve_snapshot().is_err(),
+            "generation bump must invalidate the slot and re-resolve",
+        );
+    }
+
+    #[test]
+    fn resolve_snapshot_does_not_cache_errors_and_retries() {
+        // An errored resolve never populates the slot, so every call re-resolves — a baseline that
+        // recovers is picked up on the next call rather than waiting out a cached failure.
+        let source = unreachable_snapshot_source();
+        assert!(source.resolve_snapshot().is_err());
+        assert!(
+            source.snapshot_cache_slot_for_test().is_none(),
+            "errors must not populate the cache",
+        );
+        assert!(
+            source.resolve_snapshot().is_err(),
+            "a second call must re-resolve, not serve a cached error",
+        );
+        assert!(source.snapshot_cache_slot_for_test().is_none());
     }
 
     #[test]
