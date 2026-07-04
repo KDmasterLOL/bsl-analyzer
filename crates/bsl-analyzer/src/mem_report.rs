@@ -129,3 +129,23 @@ pub fn print_salsa_event_report(db: &ide::RootDatabaseImpl, label: &str) {
     }
     eprintln!(" ---");
 }
+
+/// Print the top salsa *keys* (concrete file/method query instances) by
+/// re-execution count — the per-key churn attribution that names which modules
+/// drove recomputation, complementing the per-ingredient table above. No-op
+/// unless the database was built with `BSL_SALSA_EVENTS=1`. Emitted to stderr.
+///
+/// Must be called at the end of a single-revision batch (see
+/// [`ide::RootDatabaseImpl::salsa_key_event_report`]); the analyze/smoke call
+/// sites satisfy that.
+pub fn print_salsa_key_event_report(db: &ide::RootDatabaseImpl, label: &str) {
+    let Some(rows) = db.salsa_key_event_report(40) else {
+        return;
+    };
+
+    eprintln!("\n##### salsa hot keys — {label} (top 40 by executes) #####");
+    eprintln!("{:>10}{:>8}  key", "execute", "stale");
+    for r in &rows {
+        eprintln!("{:>10}{:>8}  {}", r.execute, r.discard_stale, r.name);
+    }
+}

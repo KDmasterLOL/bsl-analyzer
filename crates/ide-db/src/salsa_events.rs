@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use rustc_hash::FxHasher;
-use salsa::{Event, EventKind, IngredientIndex};
+use salsa::{DatabaseKeyIndex, Event, EventKind, IngredientIndex};
 
 type FxDashMap<K, V> = DashMap<K, V, BuildHasherDefault<FxHasher>>;
 
@@ -45,12 +45,31 @@ struct IngredientCounters {
     block_on: AtomicU64,
 }
 
+/// Per-*key* churn counters — how often one concrete query instance (a specific
+/// file or method, not just the query type) re-executed or had a stale output
+/// discarded. This is the incremental-attribution signal the per-ingredient
+/// counters cannot give: "which 12 modules caused 80% of the re-execution".
+#[derive(Default)]
+struct KeyCounters {
+    /// `WillExecute` for this exact `DatabaseKeyIndex` — the instance recomputed.
+    execute: AtomicU64,
+    /// `WillDiscardStaleOutput` attributed to this executing key.
+    discard_stale: AtomicU64,
+}
+
 /// Lock-free aggregation of the salsa event stream. Shared (as `Arc`) across all
 /// cloned database handles and rayon worker snapshots — a salsa `event_callback`
 /// is one per `Zalsa`, so the counters are process-global for one database tree.
 #[derive(Default)]
 pub struct SalsaEventStats {
     per_ingredient: FxDashMap<IngredientIndex, IngredientCounters>,
+    /// Per-key churn (`execute` / `discard_stale`), keyed by the full
+    /// [`DatabaseKeyIndex`] the event carries. Grows with the number of *distinct*
+    /// keys that executed in the observed run — bounded by the workload, and only
+    /// populated under the `BSL_SALSA_EVENTS=1` gate. The hot path only inserts
+    /// `Copy` keys and bumps atomics; top-K selection and name resolution happen at
+    /// report time (see [`Self::top_keys`]), never in the callback.
+    per_key: FxDashMap<DatabaseKeyIndex, KeyCounters>,
     /// `WillCheckCancellation` — no ingredient key; counted globally. Fires very often.
     check_cancellation: AtomicU64,
     /// `DidSetCancellationFlag` — a handle set the cancellation flag.
@@ -71,20 +90,35 @@ impl SalsaEventStats {
         pick(ctr.value()).fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record one salsa event. Runs on the hot path — atomics only, panic-free, no
-    /// database access (a re-entrant salsa call here could deadlock against the memo
-    /// or intern-table locks held at the event's emission point).
+    fn bump_key(&self, key: DatabaseKeyIndex, pick: impl Fn(&KeyCounters) -> &AtomicU64) {
+        if let Some(ctr) = self.per_key.get(&key) {
+            pick(ctr.value()).fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let ctr = self.per_key.entry(key).or_default();
+        pick(ctr.value()).fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one salsa event. Runs on the hot path — panic-free, no allocation-heavy
+    /// work, no formatting, and no database access (a re-entrant salsa call here could
+    /// deadlock against the memo or intern-table locks held at the event's emission
+    /// point). Steady state is a read-locked map lookup plus a relaxed atomic add; the
+    /// first sighting of an ingredient or key takes a sharded write lock to insert its
+    /// counter once. The per-key map is higher-cardinality than the per-ingredient
+    /// one, so it sees more first-sight inserts, but only ever `Copy` keys and atomics.
     pub fn record(&self, event: &Event) {
         match &event.kind {
             EventKind::WillExecute { database_key } => {
-                self.bump(database_key.ingredient_index(), |c| &c.execute)
+                self.bump(database_key.ingredient_index(), |c| &c.execute);
+                self.bump_key(*database_key, |c| &c.execute);
             }
             EventKind::DidValidateMemoizedValue { database_key } => {
                 self.bump(database_key.ingredient_index(), |c| &c.validate)
             }
             EventKind::DidDiscard { key } => self.bump(key.ingredient_index(), |c| &c.did_discard),
             EventKind::WillDiscardStaleOutput { execute_key, .. } => {
-                self.bump(execute_key.ingredient_index(), |c| &c.discard_stale)
+                self.bump(execute_key.ingredient_index(), |c| &c.discard_stale);
+                self.bump_key(*execute_key, |c| &c.discard_stale);
             }
             EventKind::DidInternValue { key, .. } => {
                 self.bump(key.ingredient_index(), |c| &c.intern_new)
@@ -147,6 +181,30 @@ impl SalsaEventStats {
         rows.sort_by_key(|r| std::cmp::Reverse((r.execute, r.validate)));
         rows
     }
+
+    /// The `k` hottest keys by `(execute, discard_stale)`, as raw
+    /// [`DatabaseKeyIndex`] values with their counts. Names are deliberately *not*
+    /// resolved here: turning a key into a readable file/method requires the
+    /// database (interned-value lookup + `salsa::attach`), which the report call
+    /// site has but this crate-internal aggregator must not touch. See
+    /// `RootDatabaseImpl::salsa_key_event_report` for the resolving wrapper.
+    pub fn top_keys(&self, k: usize) -> Vec<KeyEventCount> {
+        let mut rows: Vec<KeyEventCount> = self
+            .per_key
+            .iter()
+            .map(|e| {
+                let c = e.value();
+                KeyEventCount {
+                    key: *e.key(),
+                    execute: c.execute.load(Ordering::Relaxed),
+                    discard_stale: c.discard_stale.load(Ordering::Relaxed),
+                }
+            })
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse((r.execute, r.discard_stale)));
+        rows.truncate(k);
+        rows
+    }
 }
 
 /// Global keyless event counters; see [`SalsaEventStats::global_counts`].
@@ -155,6 +213,24 @@ pub struct GlobalCounts {
     pub check_cancellation: u64,
     pub set_cancellation: u64,
     pub discard_accumulated: u64,
+}
+
+/// One hot key with raw counts, before name resolution; see
+/// [`SalsaEventStats::top_keys`].
+#[derive(Clone, Copy)]
+pub struct KeyEventCount {
+    pub key: DatabaseKeyIndex,
+    pub execute: u64,
+    pub discard_stale: u64,
+}
+
+/// One hot key resolved to a human-readable name (`query(<module/method>)` where
+/// the key type is known, else `query(Id(..))`); see
+/// `RootDatabaseImpl::salsa_key_event_report`.
+pub struct KeyEventRow {
+    pub name: String,
+    pub execute: u64,
+    pub discard_stale: u64,
 }
 
 /// One ingredient's resolved event row; see [`SalsaEventStats::rows`].

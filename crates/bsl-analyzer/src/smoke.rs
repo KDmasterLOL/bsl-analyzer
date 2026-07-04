@@ -822,6 +822,13 @@ fn run_session(args: &SmokeArgs) -> Result<SessionResult, String> {
             db,
             "session post-warm / peak (working set populated)",
         );
+        // Only at the peak, before `enforce_lru` below bumps the revision: key
+        // decode reads interned inputs and is sound only within the revision that
+        // produced the captured keys.
+        crate::mem_report::print_salsa_key_event_report(
+            db,
+            "session post-warm / peak (working set populated)",
+        );
         crate::mem_report::salsa_memory_rows(db)
             .into_iter()
             .take(SESSION_TOP_INGREDIENTS)
