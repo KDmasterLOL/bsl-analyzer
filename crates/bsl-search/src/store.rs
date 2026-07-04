@@ -1467,10 +1467,36 @@ impl Store {
         Ok(Some(fingerprints))
     }
 
+    /// Readers key manifest validity on the header row alone
+    /// (`load_baseline_manifest_fingerprints`), so the header and the file rows must
+    /// never be observable half-deleted: a surviving header over an emptied files table
+    /// would read back as a valid-but-empty manifest. One transaction removes both.
     pub fn clear_baseline_manifest(&self) -> Result<(), SearchError> {
-        self.conn.execute("DELETE FROM baseline_manifest_files", [])?;
-        self.conn.execute("DELETE FROM baseline_manifest WHERE id = 1", [])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM baseline_manifest_files", [])?;
+        tx.execute("DELETE FROM baseline_manifest WHERE id = 1", [])?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// The persisted manifest header, but only when the `baseline_manifest_files` rows
+    /// agree with the count recorded in it. The header is what downstream readers trust,
+    /// while the file rows are what overlay diffing actually consumes — a database where
+    /// the two disagree (a half-clear written by an older binary, manual surgery) must
+    /// not be reused as a warm-boot cache. A mismatch reads as "no manifest".
+    pub fn load_coherent_baseline_manifest(
+        &self,
+    ) -> Result<Option<BaselineManifestRecord>, SearchError> {
+        let Some(record) = self.load_baseline_manifest()? else {
+            return Ok(None);
+        };
+        let file_rows: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM baseline_manifest_files", [], |row| row.get(0))?;
+        if file_rows as usize != record.manifest_files {
+            return Ok(None);
+        }
+        Ok(Some(record))
     }
 
     pub fn insert_overlay_tombstone(
@@ -2622,6 +2648,48 @@ mod tests {
         store.clear_baseline_manifest().unwrap();
         assert!(store.load_baseline_manifest().unwrap().is_none());
         assert!(store.load_baseline_manifest_fingerprints("code").unwrap().is_none());
+    }
+
+    #[test]
+    fn coherent_baseline_manifest_rejects_header_without_matching_file_rows() {
+        let store = Store::in_memory().unwrap();
+        assert!(store.load_coherent_baseline_manifest().unwrap().is_none());
+
+        let manifest = crate::WorkspaceBaselineManifest {
+            snapshot_id: "snap-123".to_owned(),
+            snapshot_fingerprint: Some("fp-abc".to_owned()),
+            files: vec![
+                crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "src/A.bsl".to_owned(),
+                    file_fingerprint: "fp-a".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-a".to_owned(),
+                },
+                crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "src/B.bsl".to_owned(),
+                    file_fingerprint: "fp-b".to_owned(),
+                    document_count: 2,
+                    file_object_id: "obj-b".to_owned(),
+                },
+            ],
+        };
+        store.save_baseline_manifest(&manifest).unwrap();
+
+        let record = store.load_coherent_baseline_manifest().unwrap().unwrap();
+        assert_eq!(record.snapshot_id, "snap-123");
+        assert_eq!(record.manifest_files, 2);
+
+        // A file row lost underneath an intact header (older binaries cleared the two
+        // tables non-transactionally) must disqualify the record even though the plain
+        // header read still succeeds.
+        store
+            .conn
+            .execute("DELETE FROM baseline_manifest_files WHERE path = 'src/B.bsl'", [])
+            .unwrap();
+        assert!(store.load_baseline_manifest().unwrap().is_some());
+        assert!(store.load_coherent_baseline_manifest().unwrap().is_none());
     }
 
     #[test]

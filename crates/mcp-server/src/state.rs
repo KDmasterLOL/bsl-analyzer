@@ -1193,6 +1193,26 @@ impl SharedState {
         }
     }
 
+    /// Whether the persisted manifest was fetched for exactly this snapshot. The
+    /// snapshot id is the strong per-publish key; the fingerprint must ALSO agree
+    /// (including a both-`None` pair from publishers that never stamp one) so a
+    /// re-published snapshot that reused an id can never serve stale fingerprints.
+    fn baseline_manifest_matches_snapshot(
+        record: &bsl_search::BaselineManifestRecord,
+        snapshot: &bsl_search::Snapshot,
+    ) -> bool {
+        record.snapshot_id == snapshot.id.0 && record.fingerprint == snapshot.fingerprint
+    }
+
+    /// A failed Postgres-mode init must not leave a manifest behind that a later boot
+    /// could mistake for a valid warm cache. The clear itself failing only costs that
+    /// boot a manifest re-download, so it is not worth failing over.
+    fn clear_baseline_manifest_best_effort(store: &bsl_search::Store) {
+        if let Err(error) = store.clear_baseline_manifest() {
+            tracing::warn!("failed to clear stale workspace baseline manifest: {error}");
+        }
+    }
+
     fn init_workspace_search_engine(
         workspace_root: &std::path::Path,
         watcher_ready: &Arc<AtomicBool>,
@@ -1239,49 +1259,75 @@ impl SharedState {
                 tracing::warn!("failed to clear stale local overlay state: {error}");
                 return None;
             }
-            if let Err(error) = store.clear_baseline_manifest() {
-                tracing::warn!("failed to clear stale workspace baseline manifest: {error}");
-                return None;
-            }
 
-            let manifest = match external_baseline.resolve_snapshot() {
+            // The persisted manifest is deliberately NOT cleared up front: it is
+            // immutable for a given snapshot, so it doubles as a warm-boot disk cache.
+            // Once the cheap snapshot resolution below confirms the baseline still
+            // points at the snapshot the manifest was fetched for, the expensive
+            // per-file manifest download from Postgres is skipped entirely. Every
+            // failure path clears it instead, so a failed init stays fail-closed.
+            let manifest_files = match external_baseline.resolve_snapshot() {
                 Ok(Some((_baseline_ref, snapshot))) => {
-                    match external_baseline.load_baseline_manifest(&snapshot.id.0) {
-                        Ok(manifest) => {
-                            let store = engine.store();
-                            if let Err(error) = store.save_baseline_manifest(&manifest) {
-                                tracing::warn!(
-                                    "failed to persist workspace baseline manifest: {error}"
-                                );
-                                return None;
-                            }
+                    let cached = store.load_coherent_baseline_manifest().unwrap_or_else(|error| {
+                        tracing::debug!(
+                            "failed to read the persisted workspace baseline manifest: {error}"
+                        );
+                        None
+                    });
+                    let cached = cached.filter(|record| {
+                        Self::baseline_manifest_matches_snapshot(record, &snapshot)
+                    });
+                    match cached {
+                        Some(record) => {
                             tracing::info!(
                                 snapshot_id = %snapshot.id.0,
-                                manifest_files = manifest.files.len(),
-                                "workspace baseline manifest loaded and persisted"
+                                manifest_files = record.manifest_files,
+                                "workspace baseline manifest served from disk cache"
                             );
-                            manifest
+                            record.manifest_files
                         }
-                        Err(error) => {
-                            tracing::warn!("failed to load workspace baseline manifest: {error}");
-                            return None;
-                        }
+                        None => match external_baseline.load_baseline_manifest(&snapshot.id.0) {
+                            Ok(manifest) => {
+                                if let Err(error) = store.save_baseline_manifest(&manifest) {
+                                    tracing::warn!(
+                                        "failed to persist workspace baseline manifest: {error}"
+                                    );
+                                    Self::clear_baseline_manifest_best_effort(store);
+                                    return None;
+                                }
+                                tracing::info!(
+                                    snapshot_id = %snapshot.id.0,
+                                    manifest_files = manifest.files.len(),
+                                    "workspace baseline manifest loaded and persisted"
+                                );
+                                manifest.files.len()
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    "failed to load workspace baseline manifest: {error}"
+                                );
+                                Self::clear_baseline_manifest_best_effort(store);
+                                return None;
+                            }
+                        },
                     }
                 }
                 Ok(None) => {
                     tracing::warn!(
                         "workspace baseline manifest unavailable for configured Postgres mode"
                     );
+                    Self::clear_baseline_manifest_best_effort(store);
                     return None;
                 }
                 Err(error) => {
                     tracing::warn!("failed to resolve workspace baseline snapshot: {error}");
+                    Self::clear_baseline_manifest_best_effort(store);
                     return None;
                 }
             };
 
             tracing::info!(
-                manifest_files = manifest.files.len(),
+                manifest_files,
                 "workspace overlay-only baseline initialized; baseline search served from Postgres"
             );
 
@@ -2609,6 +2655,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stale_engine.file_count().unwrap(), 1);
+        // Seed a persisted manifest too: with the warm-boot cache the init path no
+        // longer wipes it up front, so this test must prove the failure branch does.
+        stale_engine
+            .store()
+            .save_baseline_manifest(&bsl_search::WorkspaceBaselineManifest {
+                snapshot_id: "stale-snap".to_owned(),
+                snapshot_fingerprint: Some("stale-fp".to_owned()),
+                files: vec![bsl_search::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "GhostModule.bsl".to_owned(),
+                    file_fingerprint: "ghost".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-ghost".to_owned(),
+                }],
+            })
+            .unwrap();
+        assert!(stale_engine.store().load_baseline_manifest().unwrap().is_some());
         drop(stale_engine);
 
         let watcher_ready = Arc::new(AtomicBool::new(false));
@@ -2638,6 +2701,32 @@ mod tests {
         assert_eq!(reopened.file_count().unwrap(), 0);
         assert!(reopened.text_search("ПризрачнаяПроцедура", 10, Some("code")).unwrap().is_empty());
         assert!(reopened.store().load_baseline_manifest().unwrap().is_none());
+    }
+
+    #[test]
+    fn baseline_manifest_matches_snapshot_requires_id_and_fingerprint_agreement() {
+        let record =
+            |snapshot_id: &str, fingerprint: Option<&str>| bsl_search::BaselineManifestRecord {
+                snapshot_id: snapshot_id.to_owned(),
+                fingerprint: fingerprint.map(str::to_owned),
+                manifest_files: 1,
+                fetched_at: "0".to_owned(),
+            };
+        let snapshot = |id: &str, fingerprint: Option<&str>| {
+            let snapshot = bsl_search::Snapshot::new(id, CorpusId::WorkspaceCode);
+            match fingerprint {
+                Some(fingerprint) => snapshot.with_fingerprint(fingerprint),
+                None => snapshot,
+            }
+        };
+        let matches = SharedState::baseline_manifest_matches_snapshot;
+
+        assert!(matches(&record("snap-1", Some("fp-1")), &snapshot("snap-1", Some("fp-1"))));
+        assert!(matches(&record("snap-1", None), &snapshot("snap-1", None)));
+        assert!(!matches(&record("snap-1", Some("fp-1")), &snapshot("snap-2", Some("fp-1"))));
+        assert!(!matches(&record("snap-1", Some("fp-1")), &snapshot("snap-1", Some("fp-2"))));
+        assert!(!matches(&record("snap-1", None), &snapshot("snap-1", Some("fp-1"))));
+        assert!(!matches(&record("snap-1", Some("fp-1")), &snapshot("snap-1", None)));
     }
 
     #[test]
