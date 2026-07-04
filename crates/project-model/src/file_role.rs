@@ -40,19 +40,55 @@ pub fn is_metadata_path(path: &Path) -> bool {
 /// per-MDO structure listing (its `module_file` reverse-index entry). Callers use
 /// this to also refresh the metadata substrate on a common-module body add/remove.
 pub fn is_common_module_body_path(path: &Path) -> bool {
+    substrate_listed_family(path) == Some("CommonModules")
+}
+
+/// Whether `path` is a module body whose creation or deletion changes a per-MDO
+/// structure listing's `module_file` reverse-index entry: common modules and the three
+/// service families. Their bodies are ordinary BSL source (they flow through the
+/// source-change path, not the metadata-XML one), yet the substrate stores a back-link
+/// to the body's `FileId`, so a structural body change must also refresh the substrate.
+/// Other module kinds (object/manager/form/command modules) resolve their owner through
+/// the directory layout at query time and need no listing refresh.
+pub fn is_substrate_listed_body_path(path: &Path) -> bool {
+    matches!(
+        substrate_listed_family(path),
+        Some("CommonModules" | "HTTPServices" | "WebServices" | "IntegrationServices")
+    )
+}
+
+/// The `<Family>` directory name for a `<Family>/<Name>/Ext/Module.bsl` layout, if
+/// `path` matches it.
+fn substrate_listed_family(path: &Path) -> Option<&str> {
     if path.file_name().and_then(|n| n.to_str()) != Some("Module.bsl") {
-        return false;
+        return None;
     }
-    let ext_dir = path.parent();
-    let common_modules_dir = ext_dir.and_then(|p| p.parent()).and_then(|p| p.parent());
-    ext_dir.and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("Ext")
-        && common_modules_dir.and_then(|p| p.file_name()).and_then(|n| n.to_str())
-            == Some("CommonModules")
+    let ext_dir = path.parent()?;
+    if ext_dir.file_name().and_then(|n| n.to_str()) != Some("Ext") {
+        return None;
+    }
+    ext_dir.parent()?.parent()?.file_name().and_then(|n| n.to_str())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn substrate_listed_bodies_cover_common_modules_and_services() {
+        assert!(is_substrate_listed_body_path(Path::new("/ws/CommonModules/X/Ext/Module.bsl")));
+        assert!(is_substrate_listed_body_path(Path::new("/ws/HTTPServices/S/Ext/Module.bsl")));
+        assert!(is_substrate_listed_body_path(Path::new("/ws/WebServices/S/Ext/Module.bsl")));
+        assert!(is_substrate_listed_body_path(Path::new(
+            "/ws/IntegrationServices/S/Ext/Module.bsl"
+        )));
+        // Object/manager/form modules resolve their owner by layout at query time.
+        assert!(!is_substrate_listed_body_path(Path::new("/ws/Catalogs/C/Ext/ObjectModule.bsl")));
+        assert!(!is_substrate_listed_body_path(Path::new(
+            "/ws/Catalogs/C/Forms/F/Ext/Form/Module.bsl"
+        )));
+        assert!(!is_substrate_listed_body_path(Path::new("/ws/Documents/D/Ext/Module.bsl")));
+    }
 
     #[test]
     fn classifies_bsl_as_source() {

@@ -171,9 +171,10 @@ impl GlobalState {
         let mut config_file_changed = false;
         let mut bsl_source_changed = false;
         let mut changed_metadata_paths: Vec<std::path::PathBuf> = Vec::new();
-        // Common module body `.bsl` files that were added or removed (not merely
-        // edited): their per-MDO listing `module_file` entry must be rebuilt.
-        let mut changed_common_module_bodies: Vec<std::path::PathBuf> = Vec::new();
+        // Substrate-listed module bodies (common modules and HTTP/Web/Integration
+        // services) that were added or removed (not merely edited): their per-MDO
+        // listing `module_file` entry must be rebuilt.
+        let mut changed_listed_bodies: Vec<std::path::PathBuf> = Vec::new();
 
         for file in changed_files {
             // Capture the change kind before `file.change` is consumed below; only an
@@ -204,8 +205,8 @@ impl GlobalState {
                     tracing::info!(path = %path_path.display(), "metadata XML file changed");
                     changed_metadata_paths.push(path_path.to_path_buf());
                 }
-                if change_is_structural && project_model::is_common_module_body_path(path_path) {
-                    changed_common_module_bodies.push(path_path.to_path_buf());
+                if change_is_structural && project_model::is_substrate_listed_body_path(path_path) {
+                    changed_listed_bodies.push(path_path.to_path_buf());
                 }
                 project_model::is_bsl_source_path(path_path)
             };
@@ -293,13 +294,13 @@ impl GlobalState {
             }
         }
 
-        // A common module body `.bsl` add/remove changes the per-MDO common-module
-        // listing (its `module_file` reverse-index entry), but the body is ordinary
+        // A listed module body `.bsl` add/remove (common module or service) changes its
+        // per-MDO listing's `module_file` reverse-index entry, but the body is ordinary
         // source — it never flows through the metadata-XML refresh path. Re-discover
         // the owning roots so the reverse index reflects the new/removed body. (The
         // initial sync is suppressed; the post-sync bootstrap rebuilds the listings.)
-        if !suppress_metadata_bump && !changed_common_module_bodies.is_empty() {
-            self.refresh_metadata_substrate(&changed_common_module_bodies);
+        if !suppress_metadata_bump && !changed_listed_bodies.is_empty() {
+            self.refresh_metadata_substrate(&changed_listed_bodies);
         }
 
         tracing::info!(
