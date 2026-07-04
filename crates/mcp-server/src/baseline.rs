@@ -21,7 +21,7 @@ use std::sync::Condvar;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineResolutionSummary {
@@ -299,13 +299,58 @@ pub(crate) struct ExternalBaselineService {
     sender: mpsc::Sender<BaselineServiceRequest>,
     worker: StdMutex<Option<JoinHandle<()>>>,
     closed: AtomicBool,
+    /// Shared with the actor worker so the status probe can run off the request queue:
+    /// a slow `probe_status` (aggregate PG queries) must not delay queued searches, and
+    /// searches must not delay `search status`.
+    source: Arc<RefreshableExternalBaselineSource>,
+    status_probe: Arc<StatusProbeState>,
+}
+
+/// How long a successful (`Ready`/`Missing`) status probe keeps serving from cache.
+/// Baseline snapshots change only on publish, so a minute of staleness is honest —
+/// the render says how old the probe is.
+const STATUS_PROBE_TTL: Duration = Duration::from_secs(60);
+/// A probe that ended in an error retries much sooner: transient auth/network failures
+/// recover quickly after a credential refresh, and a minute of a stale error would
+/// misreport a healthy baseline. The window still bounds probe storms under polling.
+const STATUS_PROBE_ERROR_RETRY: Duration = Duration::from_secs(5);
+
+/// A completed background status probe, served from cache by `probe_status_cached`.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedBaselineStatus {
+    pub status: ExternalBaselineStatus,
+    pub probed_at: Instant,
+    /// `refresh_generation` of the source observed after the probe; a credential
+    /// refresh bumps it and invalidates the slot.
+    generation: usize,
+}
+
+impl CachedBaselineStatus {
+    pub(crate) fn age(&self) -> Duration {
+        self.probed_at.elapsed()
+    }
+}
+
+/// What a non-blocking status probe can report: the last completed probe, or nothing
+/// yet (first call; a background probe has been kicked).
+#[derive(Debug, Clone)]
+pub(crate) enum BaselineStatusProbe {
+    Cached(CachedBaselineStatus),
+    Pending,
+}
+
+/// Owned by the service and captured by detached probe threads. Deliberately NOT a
+/// reference to the service itself: a probe in flight must not keep the service (and
+/// its actor worker) alive, and after `closed` it must drop its result on the floor.
+#[derive(Debug)]
+struct StatusProbeState {
+    slot: StdMutex<Option<CachedBaselineStatus>>,
+    refreshing: AtomicBool,
+    closed: AtomicBool,
 }
 
 #[derive(Debug)]
 enum BaselineServiceRequest {
-    ProbeStatus {
-        reply: mpsc::Sender<ExternalBaselineStatus>,
-    },
     ResolveSnapshot {
         reply: mpsc::Sender<
             Result<Option<(BaselineRef, bsl_search::Snapshot)>, bsl_search::SearchError>,
@@ -510,10 +555,12 @@ impl ExternalBaselineService {
         let schema = source._schema_for_status();
         let selection = source._selection();
         let local_reference_fingerprint = source.local_reference_fingerprint();
+        let source = Arc::new(source);
         let (sender, receiver) = mpsc::channel();
+        let worker_source = Arc::clone(&source);
         let worker = std::thread::Builder::new()
             .name(format!("baseline-service-{}", corpus.as_str()))
-            .spawn(move || Self::worker_loop(source, receiver))
+            .spawn(move || Self::worker_loop(worker_source, receiver))
             .expect("failed to spawn external baseline service worker");
 
         Self {
@@ -524,6 +571,12 @@ impl ExternalBaselineService {
             sender,
             worker: StdMutex::new(Some(worker)),
             closed: AtomicBool::new(false),
+            source,
+            status_probe: Arc::new(StatusProbeState {
+                slot: StdMutex::new(None),
+                refreshing: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
+            }),
         }
     }
 
@@ -533,14 +586,11 @@ impl ExternalBaselineService {
     }
 
     fn worker_loop(
-        source: RefreshableExternalBaselineSource,
+        source: Arc<RefreshableExternalBaselineSource>,
         receiver: mpsc::Receiver<BaselineServiceRequest>,
     ) {
         while let Ok(request) = receiver.recv() {
             match request {
-                BaselineServiceRequest::ProbeStatus { reply } => {
-                    let _ = reply.send(source.probe_status());
-                }
                 BaselineServiceRequest::ResolveSnapshot { reply } => {
                     let _ = reply.send(source.resolve_snapshot());
                 }
@@ -649,16 +699,104 @@ impl ExternalBaselineService {
         })?
     }
 
-    pub(crate) fn probe_status(&self) -> ExternalBaselineStatus {
-        self.request(|reply| BaselineServiceRequest::ProbeStatus { reply }).unwrap_or_else(
-            |error| ExternalBaselineStatus {
-                backend: "postgres",
-                schema: self.schema.clone(),
-                selection: self.selection.clone(),
-                resolved: None,
-                state: ExternalBaselineState::Error(error.to_string()),
-            },
-        )
+    /// Non-blocking status probe: returns the last completed probe immediately and,
+    /// when it is stale (or absent), kicks at most one background re-probe. The probe
+    /// runs off the actor queue on the shared PG pool, so `search status` never waits
+    /// for the aggregate status queries and queued searches never wait for the probe.
+    pub(crate) fn probe_status_cached(&self) -> BaselineStatusProbe {
+        let cached =
+            self.status_probe.slot.lock().expect("baseline status probe slot poisoned").clone();
+
+        let generation = self.source.refresh_generation();
+        let fresh = cached.as_ref().is_some_and(|entry| {
+            let ttl = if matches!(entry.status.state, ExternalBaselineState::Error(_)) {
+                STATUS_PROBE_ERROR_RETRY
+            } else {
+                STATUS_PROBE_TTL
+            };
+            entry.generation == generation && entry.age() < ttl
+        });
+
+        if !fresh
+            && !self.status_probe.closed.load(Ordering::Acquire)
+            && self
+                .status_probe
+                .refreshing
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            let probe = Arc::clone(&self.status_probe);
+            let source = Arc::clone(&self.source);
+            let spawned = std::thread::Builder::new()
+                .name(format!("bsl-baseline-status-{}", self.corpus.as_str()))
+                .spawn(move || {
+                    // Re-arms the CAS gate on every exit path, panic included, so a
+                    // failed probe can never wedge the cache in "refreshing" forever.
+                    struct RearmOnDrop(Arc<StatusProbeState>);
+                    impl Drop for RearmOnDrop {
+                        fn drop(&mut self) {
+                            self.0.refreshing.store(false, Ordering::Release);
+                        }
+                    }
+                    let _rearm = RearmOnDrop(Arc::clone(&probe));
+                    if probe.closed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    // The generation is read BEFORE the probe: a credential refresh landing
+                    // mid-probe then makes this entry immediately stale (one extra re-probe)
+                    // instead of stamping a result from the old source with the new
+                    // generation and serving it as fresh for a whole TTL.
+                    let generation = source.refresh_generation();
+                    let status = source.probe_status();
+                    if probe.closed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    *probe.slot.lock().expect("baseline status probe slot poisoned") =
+                        Some(CachedBaselineStatus {
+                            status,
+                            probed_at: Instant::now(),
+                            generation,
+                        });
+                });
+            if spawned.is_err() {
+                self.status_probe.refreshing.store(false, Ordering::Release);
+            }
+        }
+
+        match cached {
+            Some(entry) => BaselineStatusProbe::Cached(entry),
+            None => BaselineStatusProbe::Pending,
+        }
+    }
+
+    /// Schema as rendered by `search status` while the first probe is still pending.
+    pub(crate) fn schema_for_status(&self) -> &str {
+        &self.schema
+    }
+
+    pub(crate) fn selection(&self) -> &str {
+        &self.selection
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_status_cache_for_test(&self, status: ExternalBaselineStatus, age: Duration) {
+        let probed_at = Instant::now().checked_sub(age).expect("test age under process uptime");
+        *self.status_probe.slot.lock().expect("baseline status probe slot poisoned") =
+            Some(CachedBaselineStatus {
+                status,
+                probed_at,
+                generation: self.source.refresh_generation(),
+            });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_probe_refreshing_for_test(&self) -> bool {
+        self.status_probe.refreshing.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_probe_slot_for_test(&self) -> Option<CachedBaselineStatus> {
+        self.status_probe.slot.lock().expect("baseline status probe slot poisoned").clone()
     }
 
     pub(crate) fn resolve_reference_view(
@@ -715,6 +853,13 @@ impl ExternalBaselineService {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
+        // A status probe still in flight now drops its result instead of publishing
+        // into a cache nobody will read. The thread itself is not cancelled: it holds
+        // the source Arc and possibly an in-flight PG call until that call returns —
+        // an accepted trade-off; it never keeps the service or its actor worker alive.
+        // The last published slot stays readable, but nothing renders it after
+        // shutdown in the normal lifecycle.
+        self.status_probe.closed.store(true, Ordering::Release);
 
         let (reply_tx, reply_rx) = mpsc::channel();
         let acknowledged = match self
@@ -886,6 +1031,10 @@ impl RefreshableExternalBaselineSource {
             embedding_identity_cache: StdMutex::new(None),
             refresh_lock: StdMutex::new(()),
         })
+    }
+
+    fn refresh_generation(&self) -> usize {
+        self.refresh_generation.load(Ordering::Acquire)
     }
 
     fn run_with_refresh<F, T>(&self, operation: F) -> Result<T, RefreshOrTerminalError>
@@ -1635,10 +1784,10 @@ fn platform_reference_documents() -> Vec<Document> {
 mod tests {
     use super::{
         baseline_description, resolve_project_baseline_diagnostics, BaselineBootstrap,
-        BaselineRuntime, BaselineServiceRequest, BaselineSlot, ConfiguredBaselineStatus,
-        DeferredBaselineRuntime, ExternalBaselineService, ExternalBaselineSource,
-        ExternalBaselineState, ExternalBaselineStatus, RefreshOrTerminalError,
-        RefreshableExternalBaselineSource,
+        BaselineRuntime, BaselineServiceRequest, BaselineSlot, BaselineStatusProbe,
+        ConfiguredBaselineStatus, DeferredBaselineRuntime, ExternalBaselineService,
+        ExternalBaselineSource, ExternalBaselineState, ExternalBaselineStatus,
+        RefreshOrTerminalError, RefreshableExternalBaselineSource, StatusProbeState,
     };
     use bsl_search::{BaselineRef, CorpusId, ExternalBaselineConfig, SearchError};
     use project_model::{
@@ -2217,20 +2366,9 @@ mod tests {
             .spawn(move || {
                 while let Ok(request) = receiver.recv() {
                     match request {
-                        BaselineServiceRequest::ProbeStatus { reply } => {
+                        BaselineServiceRequest::ResolveSnapshot { reply } => {
                             std::thread::sleep(Duration::from_millis(250));
-                            let _ = reply.send(ExternalBaselineStatus {
-                                backend: "postgres",
-                                schema: "test".to_owned(),
-                                selection: "test".to_owned(),
-                                resolved: None,
-                                state: ExternalBaselineState::Ready {
-                                    snapshot_id: "snapshot:test".to_owned(),
-                                    fingerprint: None,
-                                    documents: 0,
-                                    files: 0,
-                                },
-                            });
+                            let _ = reply.send(Ok(None));
                         }
                         BaselineServiceRequest::Shutdown { reply } => {
                             let _ = reply.send(());
@@ -2241,6 +2379,16 @@ mod tests {
                 }
             })
             .unwrap();
+        let source = RefreshableExternalBaselineSource::for_test(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            BaselineRef {
+                corpus: CorpusId::WorkspaceCode,
+                snapshot_id: None,
+                branch: Some("main".to_owned()),
+                commit: None,
+            },
+        )
+        .unwrap();
         let service = Arc::new(ExternalBaselineService {
             corpus: CorpusId::WorkspaceCode,
             schema: "test".to_owned(),
@@ -2249,11 +2397,17 @@ mod tests {
             sender,
             worker: StdMutex::new(Some(worker)),
             closed: AtomicBool::new(false),
+            source: Arc::new(source),
+            status_probe: Arc::new(StatusProbeState {
+                slot: StdMutex::new(None),
+                refreshing: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
+            }),
         });
 
         let probe_service = Arc::clone(&service);
         let probe_thread = std::thread::spawn(move || {
-            let _ = probe_service.probe_status();
+            let _ = probe_service.resolve_snapshot();
         });
         std::thread::sleep(Duration::from_millis(20));
 
@@ -2274,5 +2428,161 @@ mod tests {
         );
 
         probe_thread.join().unwrap();
+    }
+
+    fn unreachable_workspace_service() -> Arc<ExternalBaselineService> {
+        ExternalBaselineService::for_test(
+            RefreshableExternalBaselineSource::for_test(
+                ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+                BaselineRef {
+                    corpus: CorpusId::WorkspaceCode,
+                    snapshot_id: None,
+                    branch: Some("main".to_owned()),
+                    commit: None,
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    fn ready_status() -> ExternalBaselineStatus {
+        ExternalBaselineStatus {
+            backend: "postgres",
+            schema: "test".to_owned(),
+            selection: "branch main".to_owned(),
+            resolved: Some("branch main @ abc".to_owned()),
+            state: ExternalBaselineState::Ready {
+                snapshot_id: "snapshot:test".to_owned(),
+                fingerprint: Some("fp".to_owned()),
+                documents: 10,
+                files: 2,
+            },
+        }
+    }
+
+    fn error_status() -> ExternalBaselineStatus {
+        ExternalBaselineStatus {
+            backend: "postgres",
+            schema: "test".to_owned(),
+            selection: "branch main".to_owned(),
+            resolved: None,
+            state: ExternalBaselineState::Error("connection refused".to_owned()),
+        }
+    }
+
+    #[test]
+    fn status_probe_first_call_returns_pending_without_blocking() {
+        let service = unreachable_workspace_service();
+
+        let started = Instant::now();
+        let probe = service.probe_status_cached();
+
+        // The real probe against the unreachable server takes seconds (pool connection
+        // timeout); the cached call must come back immediately with Pending and leave
+        // the probing to the background thread it kicked.
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "probe_status_cached blocked for {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(probe, BaselineStatusProbe::Pending), "expected Pending: {probe:?}");
+        // The kicked probe is either still in flight or already finished and published
+        // its (error) result — asserting the disjunction keeps the test independent of
+        // how fast the connection attempt fails.
+        assert!(
+            service.status_probe_refreshing_for_test()
+                || service.status_probe_slot_for_test().is_some(),
+            "background probe must be kicked"
+        );
+
+        // A second call while the first background probe is still in flight must not
+        // stack another probe; it still answers Pending immediately.
+        let probe = service.probe_status_cached();
+        assert!(matches!(probe, BaselineStatusProbe::Pending));
+    }
+
+    #[test]
+    fn status_probe_serves_fresh_slot_without_reprobing() {
+        let service = unreachable_workspace_service();
+        service.seed_status_cache_for_test(ready_status(), Duration::from_secs(1));
+
+        let probe = service.probe_status_cached();
+
+        let BaselineStatusProbe::Cached(cached) = probe else {
+            panic!("expected cached status");
+        };
+        assert!(matches!(cached.status.state, ExternalBaselineState::Ready { .. }));
+        assert!(
+            !service.status_probe_refreshing_for_test(),
+            "a fresh slot must not trigger a background probe"
+        );
+        let slot = service.status_probe_slot_for_test().expect("seeded slot");
+        assert!(
+            matches!(slot.status.state, ExternalBaselineState::Ready { .. }),
+            "the seeded slot must not be overwritten by a stray probe"
+        );
+    }
+
+    #[test]
+    fn status_probe_reprobes_stale_slot_but_serves_the_old_value() {
+        let service = unreachable_workspace_service();
+        service.seed_status_cache_for_test(ready_status(), Duration::from_secs(120));
+
+        let probe = service.probe_status_cached();
+
+        let BaselineStatusProbe::Cached(cached) = probe else {
+            panic!("expected the stale value to be served while the re-probe runs");
+        };
+        assert!(matches!(cached.status.state, ExternalBaselineState::Ready { .. }));
+        assert!(cached.age() >= Duration::from_secs(120));
+        // Kicked = still in flight, or already finished and overwrote the stale slot.
+        assert!(
+            service.status_probe_refreshing_for_test()
+                || service
+                    .status_probe_slot_for_test()
+                    .is_some_and(|slot| slot.age() < Duration::from_secs(60)),
+            "a stale slot must kick a background re-probe"
+        );
+    }
+
+    #[test]
+    fn status_probe_error_result_retries_before_the_ready_ttl() {
+        // 10s-old error: inside the 60s Ready TTL but past the 5s error retry window,
+        // so a cached transient failure does not linger for a minute after recovery.
+        let service = unreachable_workspace_service();
+        service.seed_status_cache_for_test(error_status(), Duration::from_secs(10));
+
+        let probe = service.probe_status_cached();
+
+        assert!(matches!(probe, BaselineStatusProbe::Cached(_)));
+        assert!(
+            service.status_probe_refreshing_for_test()
+                || service
+                    .status_probe_slot_for_test()
+                    .is_some_and(|slot| slot.age() < Duration::from_secs(10)),
+            "an aged error slot must re-probe sooner than the Ready TTL"
+        );
+
+        let service = unreachable_workspace_service();
+        service.seed_status_cache_for_test(error_status(), Duration::from_secs(1));
+        let _ = service.probe_status_cached();
+        assert!(
+            !service.status_probe_refreshing_for_test(),
+            "a just-probed error must not be hammered on every poll"
+        );
+    }
+
+    #[test]
+    fn status_probe_does_not_spawn_after_shutdown() {
+        let service = unreachable_workspace_service();
+        service.shutdown();
+
+        let probe = service.probe_status_cached();
+
+        assert!(matches!(probe, BaselineStatusProbe::Pending));
+        assert!(
+            !service.status_probe_refreshing_for_test(),
+            "a closed service must not spawn probe threads"
+        );
     }
 }
