@@ -16,6 +16,7 @@ use crate::ports::{
 use postgres::{GenericClient, NoTls, Row, Transaction};
 use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const SCHEMA_METADATA_TABLE: &str = "_schema_metadata_";
@@ -44,11 +45,18 @@ const SERVING_LEXICAL_BATCH_SIZE: usize = 2_000;
 const SERVING_SEMANTIC_BATCH_SIZE: usize = 256;
 const SEMANTIC_PUBLICATION_COMPLETE_PREFIX: &str = "semantic_publication_complete:";
 
+/// Readiness re-verification period. A successful check is trusted for this long, then
+/// re-run, so the typed `StorageNotInitialized` / `SchemaVersionMismatch` errors still
+/// surface (with bounded delay) if the schema is dropped or migrated mid-process — callers
+/// branch on those exact error kinds and never treat them as retryable.
+const STORAGE_READINESS_TTL: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone)]
 pub struct PostgresBaselineAdapter {
     config: ExternalBaselineConfig,
     schema: String,
     pool: Pool<PostgresConnectionManager<NoTls>>,
+    storage_verified_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl PostgresBaselineAdapter {
@@ -63,7 +71,7 @@ impl PostgresBaselineAdapter {
             .max_size(4)
             .connection_timeout(std::time::Duration::from_secs(5))
             .build_unchecked(manager);
-        Ok(Self { config, schema, pool })
+        Ok(Self { config, schema, pool, storage_verified_at: Arc::new(Mutex::new(None)) })
     }
 
     pub fn config(&self) -> &ExternalBaselineConfig {
@@ -143,17 +151,26 @@ impl PostgresBaselineAdapter {
     }
 
     pub fn check_storage_readiness(&self) -> Result<(), SearchError> {
-        let mut client = self.connect()?;
-        for table_name in REQUIRED_STORAGE_TABLES {
-            let exists = client.query_opt(
-                "SELECT 1 FROM information_schema.tables
-                 WHERE table_schema = $1 AND table_name = $2
-                 LIMIT 1",
-                &[&self.schema, table_name],
-            )?;
-            if exists.is_none() {
-                return Err(SearchError::StorageNotInitialized { schema: self.schema.clone() });
+        // Nearly every public method starts with this check; without the TTL cache each
+        // call pays information_schema roundtrips on the shared 4-connection pool.
+        // Only success is cached — failures re-check on every call so `migrate_storage`
+        // heals a not-ready schema without waiting out the TTL.
+        if let Ok(verified_at) = self.storage_verified_at.lock() {
+            if verified_at.is_some_and(|at| at.elapsed() < STORAGE_READINESS_TTL) {
+                return Ok(());
             }
+        }
+
+        let mut client = self.connect()?;
+        let present_tables: i64 = client
+            .query_one(
+                "SELECT COUNT(DISTINCT table_name) FROM information_schema.tables
+                 WHERE table_schema = $1 AND table_name = ANY($2)",
+                &[&self.schema, &REQUIRED_STORAGE_TABLES],
+            )?
+            .get(0);
+        if present_tables as usize != REQUIRED_STORAGE_TABLES.len() {
+            return Err(SearchError::StorageNotInitialized { schema: self.schema.clone() });
         }
 
         let version = {
@@ -177,6 +194,9 @@ impl PostgresBaselineAdapter {
             return Err(SearchError::StorageNotInitialized { schema: self.schema.clone() });
         }
 
+        if let Ok(mut verified_at) = self.storage_verified_at.lock() {
+            *verified_at = Some(Instant::now());
+        }
         Ok(())
     }
 
@@ -2828,33 +2848,64 @@ fn collect_active_embedding_keys(
     Ok(active_keys)
 }
 
+/// Counts visible files per collection with one server-side aggregate instead of
+/// materializing every visible `snapshot_files` row over the wire (25k+ rows on large
+/// corpora) just to count them in Rust. The aggregate mirrors the visibility rules of
+/// `materialize_visible_snapshot_file_map`: the first occurrence of a `(collection, path)`
+/// key in child-first ancestry order wins, and on a position tie a deletion shadows a file
+/// published by the same snapshot (`is_deletion DESC`).
 fn effective_snapshot_summary(
     client: &mut impl GenericClient,
     adapter: &PostgresBaselineAdapter,
     snapshot_id: &str,
 ) -> Result<EffectiveSnapshotSummary, SearchError> {
-    let visible_files = materialize_visible_snapshot_files(client, adapter, snapshot_id)?;
-    let mut documents = 0usize;
-    let mut by_collection = BTreeMap::<String, (usize, usize)>::new();
-    for file in &visible_files {
-        documents += file.document_count;
-        let entry = by_collection.entry(file.collection.clone()).or_default();
-        entry.0 += 1;
-        entry.1 += file.document_count;
-    }
+    let ancestry = snapshot_ancestry_ids(client, adapter, snapshot_id)?;
+    let query = format!(
+        "WITH entries AS (
+             SELECT collection, path, document_count, FALSE AS is_deletion,
+                    array_position($1::TEXT[], snapshot_id) AS ancestry_position
+             FROM {files}
+             WHERE snapshot_id = ANY($1)
+             UNION ALL
+             SELECT collection, path, 0 AS document_count, TRUE AS is_deletion,
+                    array_position($1::TEXT[], snapshot_id) AS ancestry_position
+             FROM {deletions}
+             WHERE snapshot_id = ANY($1)
+         ),
+         winners AS (
+             SELECT DISTINCT ON (collection, path) collection, document_count, is_deletion
+             FROM entries
+             ORDER BY collection, path, ancestry_position, is_deletion DESC
+         )
+         SELECT collection,
+                COUNT(*)::BIGINT AS files,
+                COALESCE(SUM(document_count), 0)::BIGINT AS documents
+         FROM winners
+         WHERE NOT is_deletion
+         GROUP BY collection",
+        files = adapter.table("snapshot_files"),
+        deletions = adapter.table("snapshot_deletions"),
+    );
 
-    Ok(EffectiveSnapshotSummary {
-        total_files: visible_files.len(),
-        total_documents: documents,
-        collections: by_collection
-            .into_iter()
-            .map(|(collection, (files, documents))| BaselineCollectionRecord {
-                collection,
-                files,
-                documents,
-            })
-            .collect(),
-    })
+    let mut total_files = 0usize;
+    let mut total_documents = 0usize;
+    let mut collections = Vec::new();
+    for row in client.query(&query, &[&ancestry])? {
+        let files = row.get::<_, i64>("files").max(0) as usize;
+        let documents = row.get::<_, i64>("documents").max(0) as usize;
+        total_files += files;
+        total_documents += documents;
+        collections.push(BaselineCollectionRecord {
+            collection: row.get("collection"),
+            files,
+            documents,
+        });
+    }
+    // Byte-order sort in Rust, not SQL ORDER BY: the materialized path grouped through a
+    // BTreeMap and SQL collation order can disagree with it on non-ASCII names.
+    collections.sort_by(|left, right| left.collection.cmp(&right.collection));
+
+    Ok(EffectiveSnapshotSummary { total_files, total_documents, collections })
 }
 
 fn materialize_visible_snapshot_file_map(
@@ -2988,12 +3039,16 @@ fn query_string_column(
 mod tests {
     use super::{
         file_object_id_for, fingerprint_file_documents, group_documents_by_file,
-        semantic_publish_phase_count, semantic_publish_plan, semantic_publish_strategy,
-        unique_content_object_rows, ContentObjectRow, PostgresBaselineAdapter, SemanticPublishPlan,
+        materialize_visible_snapshot_files, semantic_publish_phase_count, semantic_publish_plan,
+        semantic_publish_strategy, unique_content_object_rows, ContentObjectRow,
+        EffectiveSnapshotSummary, PostgresBaselineAdapter, SemanticPublishPlan,
         SemanticPublishStrategy, VisibleSnapshotFile,
     };
-    use crate::domain::{CorpusId, ExternalBaselineConfig};
-    use crate::ports::{BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog};
+    use crate::domain::{CorpusId, ExternalBaselineConfig, Snapshot, SnapshotPublishMetadata};
+    use crate::external_baseline::BaselineCollectionRecord;
+    use crate::ports::{
+        BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotPublisher,
+    };
     use crate::{BaselineRef, IndexedDocument};
 
     #[test]
@@ -3273,6 +3328,262 @@ mod tests {
             file_fingerprint: format!("fp:{collection}:{path}"),
             document_count: 1,
             file_object_id: format!("fo:{collection}:{path}"),
+        }
+    }
+
+    /// Drops the throwaway test schema even when an assertion panics mid-test.
+    struct TestSchemaGuard {
+        adapter: PostgresBaselineAdapter,
+        schema: String,
+    }
+
+    impl Drop for TestSchemaGuard {
+        fn drop(&mut self) {
+            if let Ok(mut client) = self.adapter.connect() {
+                let _ =
+                    client.batch_execute(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema));
+            }
+        }
+    }
+
+    fn materialized_summary(
+        adapter: &PostgresBaselineAdapter,
+        snapshot_id: &str,
+    ) -> EffectiveSnapshotSummary {
+        let mut client = adapter.connect().unwrap();
+        let visible = materialize_visible_snapshot_files(&mut *client, adapter, snapshot_id)
+            .unwrap_or_else(|error| panic!("materialize {snapshot_id}: {error}"));
+        let mut documents = 0usize;
+        let mut by_collection = std::collections::BTreeMap::<String, (usize, usize)>::new();
+        for file in &visible {
+            documents += file.document_count;
+            let entry = by_collection.entry(file.collection.clone()).or_default();
+            entry.0 += 1;
+            entry.1 += file.document_count;
+        }
+        let collections = by_collection
+            .into_iter()
+            .map(|(collection, (files, documents))| BaselineCollectionRecord {
+                collection,
+                files,
+                documents,
+            })
+            .collect();
+        EffectiveSnapshotSummary {
+            total_files: visible.len(),
+            total_documents: documents,
+            collections,
+        }
+    }
+
+    /// Parity oracle for the server-side summary aggregate: every snapshot's counts must
+    /// equal a recount over the materialized visible-file map, which stays the semantic
+    /// reference for resolve and publish paths.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn snapshot_summary_aggregate_matches_materialized_visibility_on_live_postgres() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let unique =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        let schema = format!("bsl_parity_{}_{unique}", std::process::id());
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        let corpus = CorpusId::WorkspaceCode;
+        let metadata = SnapshotPublishMetadata::default();
+        let changed_a = [
+            indexed_document("code", "src/A.bsl", "A1", 10, "hash-a1-v2", "text-a1-v2"),
+            indexed_document("code", "src/A.bsl", "A2", 20, "hash-a2-v2", "text-a2-v2"),
+            indexed_document("code", "src/A.bsl", "A3", 30, "hash-a3", "text-a3"),
+        ];
+
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("snap-1", corpus.clone()),
+                &metadata,
+                &[
+                    indexed_document("code", "src/A.bsl", "A1", 10, "hash-a1", "text-a1"),
+                    indexed_document("code", "src/A.bsl", "A2", 20, "hash-a2", "text-a2"),
+                    indexed_document("code", "src/B.bsl", "B", 10, "hash-b", "text-b"),
+                    indexed_document("platform", "std/P.bsl", "P", 10, "hash-p", "text-p"),
+                ],
+            )
+            .unwrap();
+        // B and P are not republished: the publish path records them as deletions.
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("snap-2", corpus.clone()).with_parent("snap-1"),
+                &metadata,
+                &[
+                    changed_a[0].clone(),
+                    changed_a[1].clone(),
+                    changed_a[2].clone(),
+                    indexed_document("code", "src/C.bsl", "C", 10, "hash-c", "text-c"),
+                ],
+            )
+            .unwrap();
+        // A is byte-identical to snap-2, so it is reused (visible via the parent row only);
+        // P returns after an ancestor deletion; C drops out.
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("snap-3", corpus.clone()).with_parent("snap-2"),
+                &metadata,
+                &[
+                    changed_a[0].clone(),
+                    changed_a[1].clone(),
+                    changed_a[2].clone(),
+                    indexed_document("code", "src/D.bsl", "D1", 10, "hash-d1", "text-d1"),
+                    indexed_document("code", "src/D.bsl", "D2", 20, "hash-d2", "text-d2"),
+                    indexed_document("platform", "std/P.bsl", "P", 10, "hash-p", "text-p"),
+                ],
+            )
+            .unwrap();
+        // An empty publish over a non-empty parent turns every visible file into a deletion.
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("snap-4", corpus.clone()).with_parent("snap-3"),
+                &metadata,
+                &[],
+            )
+            .unwrap();
+        adapter
+            .publish_snapshot(&Snapshot::new("root-empty", corpus.clone()), &metadata, &[])
+            .unwrap();
+
+        // A file row and a deletion row for the same key in the same snapshot cannot come
+        // out of the publish path; the deletion must win on the ancestry-position tie.
+        {
+            let mut client = adapter.connect().unwrap();
+            client
+                .execute(
+                    &format!(
+                        "INSERT INTO {} (id, collection, file_fingerprint, document_count)
+                         VALUES ($1, $2, $3, $4)",
+                        adapter.table("file_objects")
+                    ),
+                    &[&"adversarial-fo", &"code", &"adversarial-fp", &7i32],
+                )
+                .unwrap();
+            client
+                .execute(
+                    &format!(
+                        "INSERT INTO {} (snapshot_id, collection, path, file_fingerprint,
+                                         document_count, file_object_id)
+                         VALUES ($1, $2, $3, $4, $5, $6)",
+                        adapter.table("snapshot_files")
+                    ),
+                    &[
+                        &"snap-3",
+                        &"code",
+                        &"src/Shadowed.bsl",
+                        &"adversarial-fp",
+                        &7i32,
+                        &"adversarial-fo",
+                    ],
+                )
+                .unwrap();
+            client
+                .execute(
+                    &format!(
+                        "INSERT INTO {} (snapshot_id, collection, path) VALUES ($1, $2, $3)",
+                        adapter.table("snapshot_deletions")
+                    ),
+                    &[&"snap-3", &"code", &"src/Shadowed.bsl"],
+                )
+                .unwrap();
+        }
+
+        struct SnapshotExpectation {
+            snapshot_id: &'static str,
+            files: usize,
+            documents: usize,
+            collections: &'static [(&'static str, usize, usize)],
+        }
+        let expectations = [
+            SnapshotExpectation {
+                snapshot_id: "snap-1",
+                files: 3,
+                documents: 4,
+                collections: &[("code", 2, 3), ("platform", 1, 1)],
+            },
+            SnapshotExpectation {
+                snapshot_id: "snap-2",
+                files: 2,
+                documents: 4,
+                collections: &[("code", 2, 4)],
+            },
+            SnapshotExpectation {
+                snapshot_id: "snap-3",
+                files: 3,
+                documents: 6,
+                collections: &[("code", 2, 5), ("platform", 1, 1)],
+            },
+            SnapshotExpectation { snapshot_id: "snap-4", files: 0, documents: 0, collections: &[] },
+            SnapshotExpectation {
+                snapshot_id: "root-empty",
+                files: 0,
+                documents: 0,
+                collections: &[],
+            },
+        ];
+        for expectation in &expectations {
+            let snapshot_id = expectation.snapshot_id;
+            let details = adapter
+                .snapshot_details(snapshot_id)
+                .unwrap()
+                .unwrap_or_else(|| panic!("snapshot {snapshot_id} must exist"));
+            let materialized = materialized_summary(&adapter, snapshot_id);
+            assert_eq!(
+                materialized.total_files, expectation.files,
+                "{snapshot_id}: materialized files"
+            );
+            assert_eq!(
+                materialized.total_documents, expectation.documents,
+                "{snapshot_id}: materialized documents"
+            );
+            assert_eq!(
+                details.snapshot.files, materialized.total_files,
+                "{snapshot_id}: aggregate files diverge from materialization"
+            );
+            assert_eq!(
+                details.snapshot.documents, materialized.total_documents,
+                "{snapshot_id}: aggregate documents diverge from materialization"
+            );
+            assert_eq!(
+                details.collections, materialized.collections,
+                "{snapshot_id}: aggregate collections diverge from materialization"
+            );
+            let expected_collections: Vec<BaselineCollectionRecord> = expectation
+                .collections
+                .iter()
+                .map(|(collection, files, documents)| BaselineCollectionRecord {
+                    collection: (*collection).to_owned(),
+                    files: *files,
+                    documents: *documents,
+                })
+                .collect();
+            assert_eq!(details.collections, expected_collections, "{snapshot_id}: collections");
+        }
+
+        let listed = adapter.list_snapshots(None, None, None, 10).unwrap();
+        assert_eq!(listed.len(), expectations.len(), "listing must cover every snapshot");
+        for record in &listed {
+            let materialized = materialized_summary(&adapter, &record.snapshot_id);
+            assert_eq!(
+                record.files, materialized.total_files,
+                "{}: listed files diverge from materialization",
+                record.snapshot_id
+            );
+            assert_eq!(
+                record.documents, materialized.total_documents,
+                "{}: listed documents diverge from materialization",
+                record.snapshot_id
+            );
         }
     }
 }
