@@ -1,5 +1,6 @@
 pub mod debug;
 pub mod diagnostics;
+pub mod event_log;
 pub mod execution;
 pub mod graph;
 pub mod its_help;

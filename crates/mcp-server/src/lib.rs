@@ -100,6 +100,28 @@ struct ExecuteParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct EventLogParams {
+    /// Lower time bound (inclusive), ISO-8601, e.g. `2026-07-05T00:00:00` or `2026-07-05`.
+    date_from: Option<String>,
+    /// Upper time bound (inclusive), ISO-8601.
+    date_to: Option<String>,
+    /// Severity: Информация/Предупреждение/Ошибка/Примечание or Information/Warning/Error/Note.
+    level: Option<String>,
+    /// Infobase user name (deleted users can only be matched by name).
+    user: Option<String>,
+    /// Event name, e.g. `_$Session$_.Authentication` or a metadata event like `_$Data$_.Post`.
+    event: Option<String>,
+    /// Full metadata name to filter by, e.g. `Документ.ЗаказКлиента`.
+    metadata: Option<String>,
+    /// Case-insensitive substring filter over the comment/data columns, applied AFTER the
+    /// platform read — so it narrows the already-`limit`-capped newest window, it does not
+    /// scan the whole log. Widen `limit` if a match may lie deeper.
+    contains: Option<String>,
+    /// Max records (newest first), default 100, capped at 1000.
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct GraphParams {
     /// overview | schema | node | source | neighbors | callers | callees | resolve
     action: String,
@@ -455,6 +477,28 @@ impl McpServer {
                 None,
             )),
         }
+    }
+
+    #[tool(name = "event_log", annotations(read_only_hint = true))]
+    async fn event_log(
+        &self,
+        params: Parameters<EventLogParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        tools::event_log::event_log(
+            &self.state,
+            tools::event_log::EventLogQuery {
+                date_from: p.date_from,
+                date_to: p.date_to,
+                level: p.level,
+                user: p.user,
+                event: p.event,
+                metadata: p.metadata,
+                contains: p.contains,
+                limit: p.limit,
+            },
+        )
+        .await
     }
 
     #[tool(name = "debug")]
@@ -961,7 +1005,7 @@ impl ServerHandler for McpServer {
                  durable ids it returns. The `diagnostics` tool surfaces analyzer findings grep \
                  cannot (unreachable code, type mismatch, unresolved call); start with action \
                  'catalog' to discover the available codes. \
-                 Tools: metadata, search, graph, diagnostics, query, execute, debug."
+                 Tools: metadata, search, graph, diagnostics, query, execute, event_log, debug."
                     .into()
             }
             McpProfile::Reference => {

@@ -18,6 +18,7 @@
 | `workspace` | `diagnostics` | диагностики кода: `catalog`/`schema` (без базы), `file` (находки по файлу), `workspace` (агрегаты по конфигурации) | `--source-dir` |
 | `workspace` | `query` | `schema` (контракт без базы), `validate` для SDBL, а также `execute` для `SELECT` | `--onec-url` нужен для live-валидации через платформу и для `execute` |
 | `workspace` | `execute` | `check`, `run`, `eval` для BSL-кода | `--onec-url` нужен для `run` и `eval` |
+| `workspace` | `event_log` | чтение журнала регистрации 1С с фильтрами (`date_from`, `date_to`, `level`, `user`, `event`, `metadata`, `contains`, `limit`); свежие записи первыми. `contains` — пост-фильтр по уже усечённому окну из `limit` записей (не по всему журналу); неизвестный `metadata` даёт ошибку, а не тихое расширение выборки | `--onec-url` + право `EventLog` у пользователя сервиса |
 | `workspace` | `debug` | attach, breakpoints, step, stack trace, locals, eval | `--onec-url` и доступ к отладочному контуру |
 
 `graph` и `diagnostics` — два семантических примитива, которые недоступны через grep:
@@ -48,8 +49,11 @@
 - в `workspace`: `metadata`, `graph`, `diagnostics`, поиск по коду и
   `query(action=validate)` с локальным парсером.
 
-Для `query(action=execute)`, `execute(action=run|eval)` и для отладки нужно
-живое подключение к базе через `--onec-url`.
+Для `query(action=execute)`, `execute(action=run|eval)`, `event_log` и для
+отладки нужно живое подключение к базе через `--onec-url`. Для `event_log`
+пользователь сервиса дополнительно должен обладать правом `EventLog` (роль
+`BSL_ОсновнаяРоль` его выдаёт; при использовании другой роли назначьте право
+администрирования журнала регистрации).
 
 ## Диагностики и граф: проектный конфиг и резидентная база
 
@@ -187,7 +191,8 @@ bsl-analyzer extension export -o ./bsl-extension
 ### 4. Настройте права
 
 Пользователю 1С, под которым MCP будет обращаться к сервису, должна быть
-назначена роль `BSL_ОсновнаяРоль`.
+назначена роль `BSL_ОсновнаяРоль`. Роль включает право `EventLog`, необходимое
+инструменту `event_log` для чтения журнала регистрации.
 
 ### 5. Проверьте доступность сервиса
 
@@ -198,7 +203,7 @@ curl http://localhost/base/hs/bsl-analyzer/version
 Ожидаемый ответ:
 
 ```json
-{"version":"1.0.0"}
+{"version":"1.1.0"}
 ```
 
 ### 6. Запустите `workspace`-профиль с подключением
