@@ -596,13 +596,17 @@ impl PostgresBaselineAdapter {
         params.push(&limit);
 
         let rows = client.query(&query, &params)?;
-        let mut snapshots = Vec::with_capacity(rows.len());
-        for row in rows {
-            let mut snapshot = snapshot_record_from_metadata_row(row);
-            let summary = effective_snapshot_summary(&mut *client, self, &snapshot.snapshot_id)?;
-            snapshot.files = summary.total_files;
-            snapshot.documents = summary.total_documents;
-            snapshots.push(snapshot);
+        let mut snapshots: Vec<BaselineSnapshotRecord> =
+            rows.into_iter().map(snapshot_record_from_metadata_row).collect();
+
+        // Effective file/document totals for every listed snapshot in one round-trip, rather than
+        // walking each snapshot's ancestry and summarising it separately.
+        let seed_ids: Vec<String> = snapshots.iter().map(|s| s.snapshot_id.clone()).collect();
+        let totals = effective_snapshot_totals_batch(&mut *client, self, &seed_ids)?;
+        for snapshot in &mut snapshots {
+            let (files, documents) = totals.get(&snapshot.snapshot_id).copied().unwrap_or((0, 0));
+            snapshot.files = files;
+            snapshot.documents = documents;
         }
         Ok(snapshots)
     }
@@ -2908,6 +2912,110 @@ fn effective_snapshot_summary(
     Ok(EffectiveSnapshotSummary { total_files, total_documents, collections })
 }
 
+/// Per-seed effective (visible) file/document totals for a batch of snapshots, computed in one
+/// round-trip instead of walking each snapshot's ancestry and summarising it separately (which
+/// `effective_snapshot_summary` does per call — `list_snapshots` over N snapshots of depth D would
+/// otherwise issue `1 + N*(D+1)` queries). A `RECURSIVE` CTE expands every seed's ancestry keyed by
+/// the seed it belongs to, so the child-first visibility rule (`DISTINCT ON (seed, collection, path)`
+/// by ancestry depth, a same-position deletion shadowing its file) matches the single-snapshot path.
+/// Only totals are returned: `list_snapshots` does not use the per-collection breakdown.
+///
+/// The delicate error semantics of `snapshot_ancestry_ids` are preserved: a parent that points at a
+/// missing snapshot and a parent chain that cycles are both surfaced as the same errors, emitted as
+/// discriminated rows in the same result so a corrupt chain still fails the listing instead of
+/// silently under-counting. Seeds with no visible files simply have no aggregate row (totals 0/0).
+fn effective_snapshot_totals_batch(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    seed_ids: &[String],
+) -> Result<HashMap<String, (usize, usize)>, SearchError> {
+    if seed_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let query = format!(
+        "WITH RECURSIVE chain(seed_id, snapshot_id, next_parent, depth, missing) AS (
+             SELECT id, id, parent_snapshot_id, 0, FALSE
+             FROM {snapshots}
+             WHERE id = ANY($1)
+             UNION ALL
+             SELECT c.seed_id, c.next_parent, s.parent_snapshot_id, c.depth + 1, s.id IS NULL
+             FROM chain c
+             LEFT JOIN {snapshots} s ON s.id = c.next_parent
+             WHERE c.next_parent IS NOT NULL
+         ) CYCLE snapshot_id SET is_cycle USING cycle_path,
+         entries AS (
+             SELECT c.seed_id, f.collection, f.path, f.document_count,
+                    FALSE AS is_deletion, c.depth AS ancestry_position
+             FROM chain c
+             JOIN {files} f ON f.snapshot_id = c.snapshot_id
+             WHERE NOT c.is_cycle AND NOT c.missing
+             UNION ALL
+             SELECT c.seed_id, d.collection, d.path, 0,
+                    TRUE AS is_deletion, c.depth AS ancestry_position
+             FROM chain c
+             JOIN {deletions} d ON d.snapshot_id = c.snapshot_id
+             WHERE NOT c.is_cycle AND NOT c.missing
+         ),
+         winners AS (
+             SELECT DISTINCT ON (seed_id, collection, path) seed_id, document_count, is_deletion
+             FROM entries
+             ORDER BY seed_id, collection, path, ancestry_position, is_deletion DESC
+         ),
+         totals AS (
+             SELECT seed_id,
+                    COUNT(*)::BIGINT AS files,
+                    COALESCE(SUM(document_count), 0)::BIGINT AS documents
+             FROM winners
+             WHERE NOT is_deletion
+             GROUP BY seed_id
+         ),
+         failures AS (
+             SELECT DISTINCT seed_id, snapshot_id AS offending, 'cycle' AS reason
+             FROM chain WHERE is_cycle
+             UNION
+             SELECT DISTINCT seed_id, snapshot_id AS offending, 'missing' AS reason
+             FROM chain WHERE missing
+         )
+         SELECT 'total'::TEXT AS row_kind, seed_id, files, documents,
+                NULL::TEXT AS offending, NULL::TEXT AS reason
+         FROM totals
+         UNION ALL
+         SELECT 'failure'::TEXT AS row_kind, seed_id, NULL::BIGINT, NULL::BIGINT, offending, reason
+         FROM failures",
+        snapshots = adapter.table("snapshots"),
+        files = adapter.table("snapshot_files"),
+        deletions = adapter.table("snapshot_deletions"),
+    );
+
+    let rows = client.query(&query, &[&seed_ids])?;
+    let mut totals = HashMap::with_capacity(seed_ids.len());
+    let mut failures: HashMap<String, (String, String)> = HashMap::new();
+    for row in rows {
+        let row_kind: String = row.get("row_kind");
+        if row_kind == "failure" {
+            failures.insert(row.get("seed_id"), (row.get("offending"), row.get("reason")));
+            continue;
+        }
+        let files = row.get::<_, i64>("files").max(0) as usize;
+        let documents = row.get::<_, i64>("documents").max(0) as usize;
+        totals.insert(row.get::<_, String>("seed_id"), (files, documents));
+    }
+
+    // A corrupt ancestry chain fails the whole listing, as the per-snapshot path did. Report the
+    // first seed in listing order that is corrupt so the error is deterministic when several seeds
+    // are corrupt at once (the batch result set has no inherent order).
+    for seed_id in seed_ids {
+        if let Some((offending, reason)) = failures.get(seed_id) {
+            return Err(SearchError::ExternalBaseline(match reason.as_str() {
+                "cycle" => format!("snapshot parent chain contains cycle at '{offending}'"),
+                _ => format!("snapshot '{offending}' was not found"),
+            }));
+        }
+    }
+    Ok(totals)
+}
+
 fn materialize_visible_snapshot_file_map(
     client: &mut impl GenericClient,
     adapter: &PostgresBaselineAdapter,
@@ -3038,10 +3146,10 @@ fn query_string_column(
 #[cfg(test)]
 mod tests {
     use super::{
-        file_object_id_for, fingerprint_file_documents, group_documents_by_file,
-        materialize_visible_snapshot_files, semantic_publish_phase_count, semantic_publish_plan,
-        semantic_publish_strategy, unique_content_object_rows, ContentObjectRow,
-        EffectiveSnapshotSummary, PostgresBaselineAdapter, SemanticPublishPlan,
+        effective_snapshot_totals_batch, file_object_id_for, fingerprint_file_documents,
+        group_documents_by_file, materialize_visible_snapshot_files, semantic_publish_phase_count,
+        semantic_publish_plan, semantic_publish_strategy, unique_content_object_rows,
+        ContentObjectRow, EffectiveSnapshotSummary, PostgresBaselineAdapter, SemanticPublishPlan,
         SemanticPublishStrategy, VisibleSnapshotFile,
     };
     use crate::domain::{CorpusId, ExternalBaselineConfig, Snapshot, SnapshotPublishMetadata};
@@ -3585,5 +3693,85 @@ mod tests {
                 record.snapshot_id
             );
         }
+    }
+
+    /// The batched totals path reimplements ancestry walking in SQL; it must surface the same
+    /// cycle / missing-parent errors as the iterative `snapshot_ancestry_ids`, and pick the error
+    /// deterministically (first corrupt seed in listing order) when several seeds are corrupt.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn snapshot_totals_batch_surfaces_corrupt_ancestry_on_live_postgres() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let unique =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        let schema = format!("bsl_corrupt_{}_{unique}", std::process::id());
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        // A healthy snapshot, plus two corrupt ones inserted directly: the publish path cannot
+        // produce a self-cycle or a parent pointing at a non-existent snapshot.
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("good", CorpusId::WorkspaceCode),
+                &SnapshotPublishMetadata::default(),
+                &[indexed_document("code", "src/A.bsl", "A", 5, "hash-a", "text-a")],
+            )
+            .unwrap();
+        {
+            let mut client = adapter.connect().unwrap();
+            let insert = format!(
+                "INSERT INTO {} (id, corpus, parent_snapshot_id) VALUES ($1, $2, $3)",
+                adapter.table("snapshots")
+            );
+            client.execute(&insert, &[&"cyc", &"workspace-code", &"cyc"]).unwrap();
+            client.execute(&insert, &[&"dang", &"workspace-code", &"ghost"]).unwrap();
+        }
+
+        let mut client = adapter.connect().unwrap();
+        let seed = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<String>>();
+
+        let healthy =
+            effective_snapshot_totals_batch(&mut *client, &adapter, &seed(&["good"])).unwrap();
+        let reference = materialized_summary(&adapter, "good");
+        assert_eq!(
+            healthy.get("good").copied(),
+            Some((reference.total_files, reference.total_documents)),
+            "healthy seed totals must match the materialized reference",
+        );
+
+        let cycle = effective_snapshot_totals_batch(&mut *client, &adapter, &seed(&["cyc"]))
+            .expect_err("self-cycle must error");
+        assert!(cycle.to_string().contains("cycle at 'cyc'"), "unexpected cycle error: {cycle}");
+
+        let missing = effective_snapshot_totals_batch(&mut *client, &adapter, &seed(&["dang"]))
+            .expect_err("dangling parent must error");
+        assert!(
+            missing.to_string().contains("'ghost' was not found"),
+            "unexpected missing error: {missing}",
+        );
+
+        // The first corrupt seed in listing order decides the error, regardless of result-set order.
+        let cyc_first =
+            effective_snapshot_totals_batch(&mut *client, &adapter, &seed(&["cyc", "dang"]))
+                .expect_err("mixed corrupt batch must error");
+        assert!(cyc_first.to_string().contains("cycle at 'cyc'"), "cyc-first: {cyc_first}");
+        let dang_first =
+            effective_snapshot_totals_batch(&mut *client, &adapter, &seed(&["dang", "cyc"]))
+                .expect_err("mixed corrupt batch must error");
+        assert!(
+            dang_first.to_string().contains("'ghost' was not found"),
+            "dang-first: {dang_first}",
+        );
+
+        // A healthy seed alongside a corrupt one still fails the whole batch.
+        let mixed =
+            effective_snapshot_totals_batch(&mut *client, &adapter, &seed(&["good", "dang"]))
+                .expect_err("healthy + corrupt must error");
+        assert!(mixed.to_string().contains("'ghost' was not found"), "good+dang: {mixed}");
     }
 }

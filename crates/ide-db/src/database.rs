@@ -219,6 +219,97 @@ impl RootDatabaseImpl {
         self.salsa_events.as_ref().map(|s| s.global_counts())
     }
 
+    /// The `k` hottest salsa *keys* (concrete file/method query instances) by
+    /// re-execution count, resolved to readable names. This answers "which files
+    /// or methods drove the churn", the per-key complement to
+    /// [`Self::salsa_event_report`]'s per-query-type view. `None` unless events are
+    /// enabled (`BSL_SALSA_EVENTS=1`).
+    ///
+    /// Resolution decodes the key's interned input (`FileIdInput` / `MethodIdInput`)
+    /// back to a path, which is only sound *in the revision that produced the keys*:
+    /// a later revision may have reused the interned slot (salsa ids carry a
+    /// generation), so a stale decode could misname or fault. Callers must therefore
+    /// invoke this at the end of a single-revision batch (the CLI `analyze` / smoke
+    /// runs), not from an incremental LSP session. The [`salsa::attach`] scope makes
+    /// the fallback for unlisted query families render as `query(Id(..))` rather than
+    /// raw numeric indices; each interned read is panic-guarded so a decode fault
+    /// degrades one row to that fallback instead of aborting the report.
+    pub fn salsa_key_event_report(
+        &self,
+        k: usize,
+    ) -> Option<Vec<crate::salsa_events::KeyEventRow>> {
+        let stats = self.salsa_events.as_ref()?;
+        let counts = stats.top_keys(k);
+        Some(salsa::attach(self, || {
+            counts
+                .into_iter()
+                .map(|c| crate::salsa_events::KeyEventRow {
+                    name: self.resolve_hot_key_name(c.key),
+                    execute: c.execute,
+                    discard_stale: c.discard_stale,
+                })
+                .collect()
+        }))
+    }
+
+    /// Name one hot salsa key: `query(<module path>[#m<local>])` for the curated
+    /// per-file / per-method query families, else the attach-rendered
+    /// `query(Id(..))` fallback. Must run inside a [`salsa::attach`] scope (for the
+    /// fallback) and only within the key's originating revision (see
+    /// [`Self::salsa_key_event_report`]).
+    fn resolve_hot_key_name(&self, key: salsa::DatabaseKeyIndex) -> String {
+        use salsa::Database;
+        let query = self.ingredient_debug_name(key.ingredient_index());
+        self.decode_hot_key(query.as_ref(), key.key_index()).unwrap_or_else(|| format!("{key:?}"))
+    }
+
+    /// Decode a hot key's interned id to a readable location for the curated query
+    /// families. Returns `None` for unlisted queries so the caller falls back to the
+    /// raw id — an unknown family is never guessed, which would risk decoding the id
+    /// against the wrong interned table.
+    fn decode_hot_key(&self, query: &str, id: salsa::Id) -> Option<String> {
+        use salsa::plumbing::FromId;
+        // A qualified debug name (`crate::module::parse_query`) still matches on its
+        // final segment.
+        let name = query.rsplit("::").next().unwrap_or(query);
+
+        // Only queries whose salsa key is a *single* interned input can be decoded
+        // this way: the key id then IS that input's id. Queries with a composite key
+        // (e.g. `file_diagnostics_query(FileIdInput, DiagnosticsConfigId)`) intern the
+        // whole tuple, so their id is not a `FileIdInput` and must not be listed —
+        // it would decode against the wrong table. An unlisted query degrades to the
+        // raw-id fallback rather than risking a wrong-table decode.
+        const FILE_KEYED: &[&str] = &[
+            "parse_query",
+            "file_text_query",
+            "item_tree_query",
+            "symbol_tree_query",
+            "infer_query",
+            "infer_module_code_query",
+            "module_bodies_query",
+        ];
+        const METHOD_KEYED: &[&str] =
+            &["infer_method_query", "method_body_query", "method_return_type_query"];
+
+        if FILE_KEYED.contains(&name) {
+            let file_id = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                FileIdInput::from_id(id).file_id(self)
+            }))
+            .ok()?;
+            let path = vfs_helpers::get_file_path(self, file_id)?;
+            Some(format!("{query}({})", path.display()))
+        } else if METHOD_KEYED.contains(&name) {
+            let method_id = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                hir::MethodIdInput::from_id(id).method_id(self)
+            }))
+            .ok()?;
+            let path = vfs_helpers::get_file_path(self, method_id.module.file_id)?;
+            Some(format!("{query}({}#m{})", path.display(), method_id.local_id))
+        } else {
+            None
+        }
+    }
+
     /// Attach a build-scoped configuration cache shared across this build's batch
     /// databases. See [`GraphConfigCache`] and the `graph_config_cache` field.
     pub fn set_graph_config_cache(&mut self, cache: Arc<GraphConfigCache>) {

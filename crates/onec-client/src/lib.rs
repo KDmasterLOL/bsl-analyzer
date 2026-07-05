@@ -69,6 +69,10 @@ impl Client {
         self.post("/eval", request).await
     }
 
+    pub async fn event_log(&self, request: &EventLogRequest) -> Result<EventLogResult, Error> {
+        self.post("/event-log", request).await
+    }
+
     async fn post<T: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         endpoint: &str,
@@ -157,4 +161,34 @@ pub struct EvalResult {
     #[serde(rename = "type")]
     pub type_name: Option<String>,
     pub error: Option<String>,
+}
+
+/// Filters for a read of the 1C event log (журнал регистрации). Dates are ISO-8601
+/// strings; every filter is optional and omitted from the payload when `None` so the
+/// 1C side falls back to no restriction on that dimension.
+#[derive(Debug, Default, Serialize)]
+pub struct EventLogRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventLogResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+    pub total: u32,
+    pub truncated: bool,
 }

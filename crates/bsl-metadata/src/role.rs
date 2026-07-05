@@ -48,7 +48,6 @@ pub struct RoleObjectRef {
 }
 
 impl Role {
-    #[cfg(test)]
     pub fn new(name: impl Into<String>) -> Self {
         Self { uuid: Uuid::new_v4(), name: name.into(), data: RoleData::default() }
     }

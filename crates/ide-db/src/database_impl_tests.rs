@@ -4768,3 +4768,39 @@ fn salsa_events_count_query_executes() {
     assert!(parse_row.execute >= 1, "parse executed at least once");
     assert!(db.salsa_event_global().is_some(), "global counters available when enabled");
 }
+
+#[test]
+fn salsa_key_event_report_decodes_file_keyed_query() {
+    // Off by default: no per-key report either.
+    let plain = RootDatabaseImpl::new_inner(false);
+    assert!(plain.salsa_key_event_report(10).is_none(), "no per-key report unless enabled");
+
+    let mut db = RootDatabaseImpl::new_with_salsa_events();
+    let file_id = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new("/hot.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
+
+    // A file-keyed query (`parse_query`) executes for this file.
+    let _ = db.parse(file_id);
+
+    let rows = db.salsa_key_event_report(40).expect("events enabled must yield a per-key report");
+    let parse_key = rows
+        .iter()
+        .find(|r| r.name.contains("parse"))
+        .expect("the parse query key must appear in the hot-key report");
+    assert!(parse_key.execute >= 1, "the parse key executed at least once");
+    // The interned FileIdInput must decode back to a readable path, not a raw Id.
+    assert!(
+        parse_key.name.contains("/hot.bsl"),
+        "file-keyed query must decode to its path, got {:?}",
+        parse_key.name
+    );
+    assert!(
+        !parse_key.name.contains("Id("),
+        "a decoded key must not fall back to a raw Id, got {:?}",
+        parse_key.name
+    );
+}

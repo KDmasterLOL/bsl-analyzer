@@ -545,6 +545,10 @@ fn analyze_salsa(
                 &db,
                 "PEAK (last chunk, pre-eviction)",
             );
+            bsl_analyzer::mem_report::print_salsa_key_event_report(
+                &db,
+                "PEAK (last chunk, pre-eviction)",
+            );
         }
 
         // `config_path_input` (which borrows `&db`) is now out of scope, so the
@@ -578,6 +582,11 @@ fn analyze_salsa(
     if report_mem {
         bsl_analyzer::mem_report::print_salsa_memory_report(&db, "TROUGH (post-eviction)");
         bsl_analyzer::mem_report::print_salsa_event_report(&db, "TROUGH (post-eviction)");
+        // No per-key report here: eviction runs no new queries, so the hot keys are
+        // identical to PEAK's, and the per-key decode is meaningful only at the peak
+        // working set. Keeping it at PEAK also keeps the decode inside the single
+        // revision that executed the keys, without depending on eviction leaving the
+        // revision untouched.
     }
 
     // Results are appended chunk-by-chunk in `file_ids` order, and rayon's

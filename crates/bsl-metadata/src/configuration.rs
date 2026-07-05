@@ -557,7 +557,7 @@ impl Configuration {
         self.name_to_role.get(&name_lower).and_then(|&idx| self.roles.get(idx))
     }
 
-    pub(crate) fn add_role(&mut self, role: Role) {
+    pub fn add_role(&mut self, role: Role) {
         let idx = self.roles.len();
         self.name_to_role.insert(role.name().fold_lower(), idx);
         self.roles.push(role);

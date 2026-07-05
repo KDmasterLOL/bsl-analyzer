@@ -138,6 +138,33 @@ pub struct MdoFiles<'db> {
     pub predefined: Option<vfs::FileId>,
 }
 
+/// Whether a loose-XML metadata object's discovery key (its file stem) disagrees
+/// with the `<Name>` parsed from the file, compared case-insensitively (BSL names
+/// fold). Discovery keys these substrates by stem for structure-only invalidation;
+/// the 1C designer keeps stem == `<Name>` (a rename touches both), so a divergence
+/// only arises in hand-built or non-standard dumps.
+fn stem_name_diverges(stem_key: &str, xml_name: &str) -> bool {
+    stem_key.fold_lower() != xml_name.fold_lower()
+}
+
+/// Surface a stem-vs-`<Name>` divergence for a loose-XML metadata object as a
+/// `warn`. Bootstrapped `resolve_*`/enumeration keys by the file stem while the
+/// whole-config `find_*` keys by the parsed `<Name>`, so a divergence makes the two
+/// paths disagree silently (a `<Name>` lookup misses the stem index; enumeration
+/// reports the stem, not the `<Name>`). This is observability only — the resolve
+/// still keys by stem. `stem_key` is the lookup key that matched the stem index.
+fn warn_on_stem_name_divergence(kind: &str, stem_key: &str, xml_name: &str) {
+    if stem_name_diverges(stem_key, xml_name) {
+        tracing::warn!(
+            kind,
+            stem_key,
+            xml_name,
+            "metadata file stem disagrees with its <Name>; bootstrapped resolve keys by \
+             stem and diverges from the whole-config <Name> lookup"
+        );
+    }
+}
+
 /// Parse one metadata object from its composing files, read through the versioned
 /// VFS (`file_text`). Memoised per MDO and backdated on an unchanged object, so a
 /// reload re-parses only the files that actually changed and only that object's
@@ -381,7 +408,9 @@ pub fn resolve_metadata_object(
     let index = config_index(db, listing);
     let ids = index.lookup(mdo_type, &name)?;
     let files = MdoFiles::new(db, mdo_type, ids.main, ids.predefined);
-    parse_mdo_query(db, files)
+    let object = parse_mdo_query(db, files)?;
+    warn_on_stem_name_divergence(mdo_type.english_name(), &name, &object.name);
+    Some(object)
 }
 
 /// Parse one register from its main XML, read through the versioned VFS. The
@@ -416,7 +445,9 @@ pub fn resolve_register(
     let index = config_index(db, listing);
     let ids = index.lookup(mdo_type, &name)?;
     let files = MdoFiles::new(db, mdo_type, ids.main, ids.predefined);
-    parse_register_query(db, files)
+    let register = parse_register_query(db, files)?;
+    warn_on_stem_name_divergence(mdo_type.english_name(), &name, register.name());
+    Some(register)
 }
 
 /// Resolve a register within one config root by NAME alone (its kind is unknown
@@ -436,7 +467,9 @@ pub fn resolve_register_by_name(
     let index = config_index(db, listing);
     let (kind, ids) = index.lookup_register_by_name(&name)?;
     let files = MdoFiles::new(db, kind, ids.main, ids.predefined);
-    parse_register_query(db, files)
+    let register = parse_register_query(db, files)?;
+    warn_on_stem_name_divergence(kind.english_name(), &name, register.name());
+    Some(register)
 }
 
 /// The main XML file of a single defined type, interned so
@@ -447,20 +480,20 @@ pub struct DefinedTypeFile<'db> {
     pub main: vfs::FileId,
 }
 
-/// Parse one defined type from its main XML, read through the versioned VFS, and
-/// return its underlying type (the resolution unit; an extension overlay replaces
-/// it wholesale). The defined-type counterpart of [`parse_register_query`].
-/// Backdates on an unchanged underlying type.
+/// Parse one defined type from its main XML, read through the versioned VFS. The
+/// defined-type counterpart of [`parse_register_query`]; keeps the parsed `<Name>`
+/// so [`resolve_defined_type`] can flag a stem-vs-`<Name>` divergence, then projects
+/// to the underlying type (the resolution unit; an extension overlay replaces it
+/// wholesale). Backdates on an unchanged defined type.
 #[salsa::tracked(lru = 8192)]
 pub fn parse_defined_type_query(
     db: &dyn base_db::SourceDatabase,
     file: DefinedTypeFile<'_>,
-) -> Option<Arc<bsl_metadata::AttributeType>> {
+) -> Option<Arc<bsl_metadata::DefinedType>> {
     let _span = tracing::info_span!("parse_defined_type").entered();
 
     let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_defined_type_from_text(&main_text)
-        .map(|dt| Arc::new(dt.underlying_type().clone()))
+    bsl_metadata::parse_defined_type_from_text(&main_text).map(Arc::new)
 }
 
 /// A config root's `lowercased-name -> defined-type file` lookup, derived from its
@@ -509,7 +542,9 @@ pub fn resolve_defined_type(
     let index = defined_type_index(db, listing);
     let main = index.lookup(&name)?;
     let file = DefinedTypeFile::new(db, main);
-    parse_defined_type_query(db, file)
+    let defined_type = parse_defined_type_query(db, file)?;
+    warn_on_stem_name_divergence("DefinedType", &name, defined_type.name());
+    Some(Arc::new(defined_type.underlying_type().clone()))
 }
 
 /// The main XML file of a single common module, interned so
@@ -600,10 +635,13 @@ pub fn resolve_common_module(
 ) -> Option<Arc<bsl_metadata::CommonModule>> {
     let _span = tracing::info_span!("resolve_common_module").entered();
 
+    use bsl_metadata::traits::MdObject;
     let index = common_module_index(db, listing);
     let main = index.lookup(&name)?;
     let file = CommonModuleFile::new(db, main);
-    parse_common_module_query(db, file)
+    let module = parse_common_module_query(db, file)?;
+    warn_on_stem_name_divergence("CommonModule", &name, module.name());
+    Some(module)
 }
 
 /// Resolve the common module whose `Ext/Module.bsl` is `module_file` within one
@@ -963,7 +1001,9 @@ pub fn resolve_event_subscription(
     let index = event_subscription_index(db, listing);
     let main = index.lookup(&name)?;
     let file = EventSubscriptionFile::new(db, main);
-    parse_event_subscription_query(db, file)
+    let subscription = parse_event_subscription_query(db, file)?;
+    warn_on_stem_name_divergence("EventSubscription", &name, subscription.name());
+    Some(subscription)
 }
 
 /// The main XML file of a single scheduled job, interned so
@@ -1034,7 +1074,9 @@ pub fn resolve_scheduled_job(
     let index = scheduled_job_index(db, listing);
     let main = index.lookup(&name)?;
     let file = ScheduledJobFile::new(db, main);
-    parse_scheduled_job_query(db, file)
+    let job = parse_scheduled_job_query(db, file)?;
+    warn_on_stem_name_divergence("ScheduledJob", &name, job.name());
+    Some(job)
 }
 
 #[salsa::interned(debug)]
@@ -1101,7 +1143,9 @@ pub fn resolve_role(
     let index = role_index(db, listing);
     let ids = index.lookup(&name)?;
     let files = RoleFiles::new(db, ids.main, ids.rights);
-    parse_role_query(db, files)
+    let role = parse_role_query(db, files)?;
+    warn_on_stem_name_divergence("Role", &name, role.name());
+    Some(role)
 }
 
 /// The main XML file of a single subsystem, interned so
@@ -1174,7 +1218,9 @@ pub fn resolve_subsystem(
     let index = subsystem_index(db, listing);
     let main = index.lookup(&name)?;
     let file = SubsystemFile::new(db, main);
-    parse_subsystem_query(db, file)
+    let subsystem = parse_subsystem_query(db, file)?;
+    warn_on_stem_name_divergence("Subsystem", &name, subsystem.name());
+    Some(subsystem)
 }
 
 #[salsa::db]
@@ -1650,6 +1696,17 @@ pub(crate) fn find_integration_service_by_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stem_name_divergence_is_case_insensitive() {
+        // Equal names — including a case-only difference, since BSL folds — do not diverge.
+        assert!(!stem_name_diverges("Роль1", "Роль1"));
+        assert!(!stem_name_diverges("роль1", "Роль1"));
+        assert!(!stem_name_diverges("HTTPService", "httpservice"));
+        // A genuine stem-vs-<Name> mismatch diverges.
+        assert!(stem_name_diverges("Роль1", "Роль2"));
+        assert!(stem_name_diverges("Справочник1", "Справочник2"));
+    }
 
     #[salsa::db]
     #[derive(Default, Clone)]

@@ -189,6 +189,35 @@
 					</Method>
 				</ChildObjects>
 			</URLTemplate>
+			<URLTemplate uuid="b9a7e0c1-5d2f-4b8e-af3c-1d2e3f4a5b6c">
+				<Properties>
+					<Name>ЖурналРегистрации</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Журнал регистрации</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Template>/event-log</Template>
+				</Properties>
+				<ChildObjects>
+					<Method uuid="c0b8f1d2-6e3a-4c9f-b04d-2e3f4a5b6c7d">
+						<Properties>
+							<Name>POST</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>POST</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<HTTPMethod>POST</HTTPMethod>
+							<Handler>ЖурналРегистрацииPOST</Handler>
+						</Properties>
+					</Method>
+				</ChildObjects>
+			</URLTemplate>
 		</ChildObjects>
 	</HTTPService>
 </MetaDataObject>
