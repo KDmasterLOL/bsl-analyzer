@@ -64,38 +64,62 @@ impl McpProfile {
 
 #[derive(Deserialize, JsonSchema)]
 struct MetadataParams {
+    /// info | tree | object | form.
     action: String,
+    /// `tree`: case-insensitive substring to narrow the returned tree (optional).
     filter: Option<String>,
+    /// Metadata object type, e.g. `Документ`/`Справочник`/`ОбщийМодуль`. Required for
+    /// `object` and `form`.
     object_type: Option<String>,
+    /// Metadata object name, e.g. `ЗаказКлиента`. Required for `object`; for `form` it
+    /// selects the owner object (omit for a configuration-level common form).
     object_name: Option<String>,
+    /// `form`: managed-form name (optional; omit for the object's default form).
     form_name: Option<String>,
+    /// `tree` (filtered listing): output budget in tokens (~4 chars each); an over-budget
+    /// listing is truncated at a line boundary with a continuation note (default 6000).
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct SearchParams {
+    /// Workspace profile: `search_code` | `status`. Reference profile: `find_docs` |
+    /// `search_docs` | `status`.
     action: String,
+    /// Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
     query: Option<String>,
+    /// Cap on returned hits (default 10, max 50).
     limit: Option<usize>,
+    /// Output budget in tokens (~4 chars each); over-budget results are truncated at a hit
+    /// boundary with a note telling you to raise `limit` or narrow the query (default 6000).
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct SyntaxHelpParams {
+    /// Platform member name to look up, e.g. `СтрНайти` or a type method.
     name: String,
+    /// Owning platform type when `name` is a member of a specific type (optional).
     type_name: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct QueryParams {
+    /// validate | execute | schema.
     action: String,
     /// SDBL text — required for `validate`/`execute`, omitted for `schema`.
     query: Option<String>,
+    /// `execute`: cap on returned rows (optional).
     limit: Option<u32>,
+    /// `execute`: named SDBL query parameters (`&Param` → value) (optional).
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct ExecuteParams {
+    /// check | run | eval.
     action: String,
+    /// BSL source to `check`/`run`, or the single expression to `eval`.
     code: String,
 }
 
@@ -123,7 +147,7 @@ struct EventLogParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct GraphParams {
-    /// overview | schema | node | source | neighbors | callers | callees | resolve
+    /// overview | schema | status | node | source | neighbors | callers | callees | resolve
     action: String,
     /// Durable node id (required for node/neighbors/callers/callees).
     id: Option<String>,
@@ -158,7 +182,7 @@ struct GraphParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct DiagnosticsParams {
-    /// catalog | schema | file
+    /// catalog | schema | status | file | workspace.
     action: String,
     /// `file`: absolute or workspace-relative `.bsl` path.
     path: Option<String>,
@@ -179,30 +203,51 @@ struct DiagnosticsParams {
     max_findings: Option<usize>,
     /// `workspace`: cap on files swept (default 1000).
     max_files: Option<usize>,
+    /// `catalog`/`file`/`workspace`: output budget in tokens (~4 chars each); a truncated
+    /// response carries `budget_exhausted: true` and a `budget_hint` on how to narrow it
+    /// (tighten `codes`/`min_severity`/range or raise the budget). When omitted, no token
+    /// budget applies — only the action's own count caps (`max_findings`/`max_files`).
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct ItsHelpParams {
+    /// Natural-language question for the ITS expert help.
     question: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct DebugParams {
+    /// attach | disconnect | set_breakpoint | remove_breakpoint | continue | step |
+    /// wait_stop | stack_trace | locals | eval.
     action: String,
+    /// `attach`: debugger host (required).
     host: Option<String>,
+    /// `attach`: debugger port (default 1550).
     port: Option<u16>,
+    /// `attach`: infobase name (required).
     infobase: Option<String>,
+    /// `attach`: configuration source root (optional).
     config_root: Option<String>,
+    /// `attach`: `[name, root]` pairs for loaded extensions (optional).
     #[serde(default)]
     extensions: Vec<[String; 2]>,
+    /// `attach`: object-name patterns to auto-attach on connect (optional).
     #[serde(default)]
     auto_attach: Vec<String>,
+    /// `set_breakpoint`/`remove_breakpoint`: target module id (required).
     module: Option<String>,
+    /// `set_breakpoint`/`remove_breakpoint`: 1-based line (required).
     line: Option<u32>,
+    /// `set_breakpoint`: conditional-breakpoint expression (optional).
     condition: Option<String>,
+    /// `step`: `over`/`next`, `in`/`into`, or `out` (required).
     direction: Option<String>,
+    /// `wait_stop`: max seconds to wait for a stop event (optional).
     timeout_secs: Option<u64>,
+    /// `locals`/`eval`: stack frame level to evaluate in (optional, default top frame).
     stack_level: Option<u32>,
+    /// `eval`: BSL expression to evaluate in the current stop (required).
     expression: Option<String>,
 }
 
@@ -246,6 +291,14 @@ impl McpServer {
         self.state.background_indexing_active() || self.state.diagnostics().is_busy()
     }
 
+    /// Browse the configuration's metadata: objects, their structure, and managed forms.
+    /// Use to answer "what objects exist / what does object X contain / what is on form Y" —
+    /// attributes, tabular sections, forms, types — straight from the metadata substrate. Not
+    /// for call relationships (use `graph`) and not for finding code by meaning (use `search`).
+    /// Actions: `info` — configuration summary; `tree` — the metadata object tree (filterable);
+    /// `object` — one object's structure (needs `object_type` + `object_name`); `form` — a
+    /// managed form's layout (needs `object_type`). Reads the resident analysis host; while it
+    /// builds it returns a retry envelope, not an error.
     #[tool(name = "metadata", annotations(read_only_hint = true))]
     async fn metadata(
         &self,
@@ -298,6 +351,8 @@ impl McpServer {
         let filter = p.filter.clone();
         let object_type = p.object_type.clone();
         let object_name = p.object_name.clone();
+        let max_output_tokens =
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
 
         tokio::task::spawn_blocking(move || {
             let read = |diag: &crate::diagnostics_state::DiagnosticsState| {
@@ -310,7 +365,12 @@ impl McpServer {
                         }
                         "tree" => {
                             let (config, extensions) = tools::metadata::configs_from_db(db);
-                            tools::metadata::get_metadata_tree(&config, &extensions, filter.clone())
+                            tools::metadata::get_metadata_tree(
+                                &config,
+                                &extensions,
+                                filter.clone(),
+                                max_output_tokens,
+                            )
                         }
                         "object" => {
                             let object_type =
@@ -359,6 +419,13 @@ impl McpServer {
         .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }
 
+    /// Hybrid lexical + semantic code search across the project source. Use when you need to
+    /// find code by meaning or a free-form phrase ("where the reserve for an order is built")
+    /// or when the exact symbol name is unknown. Not for walking call relationships — that is
+    /// `graph` (callers/callees by durable id) — and not for analyzer findings — that is
+    /// `diagnostics`. Actions: `search_code` — the search (`query` required; `limit` default
+    /// 10, max 50); `status` — index readiness. While the index warms up it returns a retry
+    /// envelope; retry shortly.
     #[tool(name = "search", annotations(read_only_hint = true))]
     async fn workspace_search(
         &self,
@@ -398,6 +465,8 @@ impl McpServer {
             "search_code" => {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
+                let max_output_tokens =
+                    p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
                 let engine = self.state.search_engine().clone();
                 let semantic_runtime = self.state.semantic_runtime();
                 let workspace_search_mode = self.state.workspace_search_mode();
@@ -433,6 +502,7 @@ impl McpServer {
                         &index_progress,
                         &query,
                         limit,
+                        max_output_tokens,
                     )
                 })
                 .await
@@ -445,6 +515,12 @@ impl McpServer {
         }
     }
 
+    /// Validate or execute SDBL (the 1C query language) against the configuration schema. Use
+    /// to check a query for errors before shipping it, to run a read-only query, or to fetch
+    /// the query-language schema. Not for browsing metadata structure (use `metadata`) and not
+    /// for BSL code (use `execute`). Actions: `validate` — parse and type-check a query (`query`
+    /// required); `execute` — run it (`query` required; optional `limit`, `parameters`);
+    /// `schema` — the SDBL schema reference.
     #[tool(name = "query", annotations(read_only_hint = true))]
     async fn query(&self, params: Parameters<QueryParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -465,6 +541,11 @@ impl McpServer {
         }
     }
 
+    /// Run or syntax-check BSL code in an embedded interpreter. Use to confirm a snippet
+    /// compiles, run a small script, or evaluate a single expression. Not for querying the
+    /// database (use `query` for SDBL) and not for analyzer findings (use `diagnostics`).
+    /// Actions: `check` — syntax-check `code`; `run` — execute `code`; `eval` — evaluate the
+    /// single expression in `code`. `run`/`eval` execute code, so this tool is not read-only.
     #[tool(name = "execute")]
     async fn execute(&self, params: Parameters<ExecuteParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -479,6 +560,13 @@ impl McpServer {
         }
     }
 
+    /// Read the 1C infobase event log (журнал регистрации) through the deployed BSL_Analyzer
+    /// extension. Use to inspect runtime events — errors, authentications, data changes —
+    /// filtered by time, user, event, metadata object, or severity. Not for static analysis of
+    /// source (use `diagnostics`): this reads live runtime records from a running infobase.
+    /// Filters: `date_from`/`date_to`, `level`, `user`, `event`, `metadata`, and `contains`
+    /// (post-read substring over the newest `limit` window). `limit` is newest-first (default
+    /// 100, max 1000). Requires the extension deployed with event-log read rights.
     #[tool(name = "event_log", annotations(read_only_hint = true))]
     async fn event_log(
         &self,
@@ -501,6 +589,12 @@ impl McpServer {
         .await
     }
 
+    /// Drive a live 1C debugger session: attach, set breakpoints, step, and inspect state. Use
+    /// to debug a running infobase — attach, break, then step and read locals/eval. Not for
+    /// static analysis (use `diagnostics`) and not for running standalone code (use `execute`).
+    /// Actions: `attach`/`disconnect`; `set_breakpoint`/`remove_breakpoint`; `continue`/`step`;
+    /// `wait_stop`; `stack_trace`; `locals`; `eval`. Requires a reachable debug endpoint
+    /// (`host` + `infobase`, default port 1550).
     #[tool(name = "debug")]
     async fn debug(&self, params: Parameters<DebugParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -612,6 +706,14 @@ impl McpServer {
         }
     }
 
+    /// Whole-config semantic call graph: traverse who-calls-whom and object/metadata usage by
+    /// durable node id. Use to understand call relationships and change impact — start with
+    /// `overview` on an unfamiliar project, then `node`/`callers`/`callees`/`neighbors` on the
+    /// ids it returns. Not for finding code by meaning (use `search`) and not for analyzer
+    /// findings (use `diagnostics`). Actions: `overview`, `schema`, `status`, `resolve`
+    /// (imprecise name → node id), `node`, `source`, `neighbors`, `callers`, `callees`.
+    /// Source-bearing actions honour `max_output_tokens` and flag `budget_exhausted` on
+    /// truncation. Lazily indexes on first use; while it builds it returns a retry envelope.
     #[tool(name = "graph", annotations(read_only_hint = true))]
     async fn graph(&self, params: Parameters<GraphParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -729,6 +831,14 @@ impl McpServer {
         .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }
 
+    /// Semantic analyzer findings the compiler and grep cannot give you — unreachable code,
+    /// type mismatch, unresolved calls, and 180+ other rules. Use to check a file or the whole
+    /// config for issues, or to discover which rules exist. Not for finding code (use `search`)
+    /// and not for call relationships (use `graph`). Actions: `catalog` — list rules (start here
+    /// to learn the codes); `schema` — response shape; `status` — analysis readiness; `file` —
+    /// per-finding results for one `.bsl` path; `workspace` — a bounded per-code aggregate sweep
+    /// of the whole config. Honours `max_output_tokens`/`max_findings` and flags truncation.
+    /// Reads the resident host; while it builds it returns a retry envelope.
     #[tool(name = "diagnostics", annotations(read_only_hint = true))]
     async fn diagnostics(
         &self,
@@ -745,7 +855,7 @@ impl McpServer {
                         .map_err(|e| McpError::invalid_params(e.to_string(), None))?,
                     None => ide::Locale::default(),
                 };
-                Ok(tools::diagnostics::catalog(locale, &p.codes))
+                Ok(tools::diagnostics::catalog(locale, &p.codes, p.max_output_tokens))
             }
             // `status` reports the resident lifecycle (and kicks the lazy build) so an
             // agent can start it and poll progress instead of a flat `loading`.
@@ -810,6 +920,7 @@ impl McpServer {
             codes: p.codes,
             range,
             max_findings: p.max_findings.unwrap_or(tools::diagnostics::DEFAULT_MAX_FINDINGS),
+            max_output_tokens: p.max_output_tokens,
             detailed,
         };
 
@@ -875,6 +986,7 @@ impl McpServer {
 
         let min_severity = parse_min_severity(p.min_severity.as_deref())
             .map_err(|e| McpError::invalid_params(e, None))?;
+        let max_output_tokens = p.max_output_tokens;
         let opts = SweepOptions {
             min_severity,
             codes: p.codes,
@@ -886,7 +998,12 @@ impl McpServer {
 
         tokio::task::spawn_blocking(move || {
             let outcome = diag.read(|resident, generation| {
-                tools::diagnostics::workspace_findings(resident, &opts, generation)
+                tools::diagnostics::workspace_findings(
+                    resident,
+                    &opts,
+                    generation,
+                    max_output_tokens,
+                )
             });
             match outcome {
                 ResidentOutcome::Ready(result, freshness) => {
@@ -909,6 +1026,12 @@ impl McpServer {
 
 #[tool_router(router = reference_tool_router)]
 impl McpServer {
+    /// Search the platform reference documentation index (not project code). Use to find
+    /// platform API documentation by keyword or meaning. For project code search use the
+    /// workspace profile's `search`; for one platform member's signature use `syntax_help`.
+    /// Actions: `find_docs` / `search_docs` — doc search (`query` required; `limit` default 10,
+    /// max 50); `status` — index readiness. While the index warms up it returns a retry
+    /// envelope.
     #[tool(name = "search", annotations(read_only_hint = true))]
     async fn reference_search(
         &self,
@@ -942,6 +1065,8 @@ impl McpServer {
             "find_docs" | "search_docs" => {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
+                let max_output_tokens =
+                    p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
                 let engine = self.state.search_engine().clone();
                 let baseline = self.state.baseline_view();
                 let configured_baseline = baseline.configured;
@@ -954,6 +1079,7 @@ impl McpServer {
                         external_baseline.clone(),
                         &query,
                         limit,
+                        max_output_tokens,
                     ),
                     "search_docs" => tools::search::search_docs(
                         &engine,
@@ -961,6 +1087,7 @@ impl McpServer {
                         external_baseline,
                         &query,
                         limit,
+                        max_output_tokens,
                     ),
                     _ => unreachable!(),
                 })
@@ -974,6 +1101,11 @@ impl McpServer {
         }
     }
 
+    /// Look up one platform member's reference card — signature, parameters, and description —
+    /// from the built-in platform data. Use when you know the member name (e.g. `СтрНайти`) and
+    /// want its exact signature. For free-text doc discovery use `search`; for broader
+    /// conceptual guidance use `its_help`. Params: `name` (required), optional `type_name` when
+    /// the member belongs to a specific platform type.
     #[tool(name = "syntax_help", annotations(read_only_hint = true))]
     async fn syntax_help(
         &self,
@@ -982,6 +1114,10 @@ impl McpServer {
         tools::platform::bsl_syntax_help(&params.0.name, params.0.type_name.as_deref())
     }
 
+    /// Ask the ITS expert-help knowledge base a natural-language question about the 1C platform
+    /// and development standards. Use for conceptual "how / why" questions. For one member's
+    /// signature use `syntax_help`; for doc keyword search use `search`. Param: `question`
+    /// (required).
     #[tool(name = "its_help", annotations(read_only_hint = true))]
     async fn its_help(
         &self,
@@ -997,20 +1133,27 @@ impl ServerHandler for McpServer {
         let mut info = ServerInfo::default();
         info.instructions = Some(match self.profile {
             McpProfile::Workspace => {
-                "BSL Analyzer workspace MCP server. Provides project metadata browsing, \
-                 code search, a whole-config semantic call graph, semantic diagnostics, \
-                 SDBL query validation, code execution and debugging. Prefer the `graph` tool \
-                 over text search when you need call relationships: start with action 'overview' \
-                 on an unfamiliar project, then 'node'/'callers'/'callees'/'neighbors' using the \
-                 durable ids it returns. The `diagnostics` tool surfaces analyzer findings grep \
-                 cannot (unreachable code, type mismatch, unresolved call); start with action \
-                 'catalog' to discover the available codes. \
-                 Tools: metadata, search, graph, diagnostics, query, execute, event_log, debug."
+                "BSL Analyzer workspace MCP server for a 1C:Enterprise (BSL) configuration. \
+                 Route by task (each tool's own description carries the full contract):\n\
+                 - find code by meaning or unknown name → `search`;\n\
+                 - who-calls-whom / change impact → `graph` (durable ids; start at overview);\n\
+                 - analyzer findings (unreachable, type mismatch, unresolved) → `diagnostics` \
+                 (start at catalog to learn the codes);\n\
+                 - metadata objects / structure / forms → `metadata`;\n\
+                 - SDBL query validate/run → `query`; run/check BSL code → `execute`;\n\
+                 - live infobase runtime events → `event_log`; live debugger session → `debug`.\n\
+                 Tools whose data is built lazily (metadata, graph, diagnostics, search) return a \
+                 retry envelope while indexing rather than an error; large responses are bounded \
+                 by `max_output_tokens`/limits — JSON tools (graph, diagnostics) flag \
+                 `budget_exhausted`, text tools (search, metadata) append a truncation note."
                     .into()
             }
             McpProfile::Reference => {
-                "BSL Analyzer reference MCP server. Provides platform API reference, \
-                 platform docs search and ITS expert help. \
+                "BSL Analyzer reference MCP server for the 1C platform (no project code). \
+                 Route by task (each tool's own description carries the full contract):\n\
+                 - one platform member's signature by name → `syntax_help`;\n\
+                 - platform docs by keyword or meaning → `search`;\n\
+                 - conceptual how/why question on the platform or standards → `its_help`.\n\
                  Tools: search, syntax_help, its_help."
                     .into()
             }
@@ -1018,5 +1161,232 @@ impl ServerHandler for McpServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = rmcp::model::Implementation::from_build_env();
         info
+    }
+}
+
+#[cfg(test)]
+mod contract {
+    use super::*;
+    use expect_test::expect;
+    use std::fmt::Write;
+
+    /// Render a profile's `tools/list` into a stable text contract: every tool (sorted by
+    /// name) with its description and each parameter field's description. This is the #25
+    /// guardrail — a refactor that drops a tool description or a field doc changes this
+    /// snapshot loudly, instead of silently shipping an empty contract to agents. Rebase with
+    /// `UPDATE_EXPECT=1 cargo test -p mcp-server contract`.
+    fn render(tools: &[rmcp::model::Tool]) -> String {
+        let mut tools: Vec<&rmcp::model::Tool> = tools.iter().collect();
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut out = String::new();
+        for tool in tools {
+            let _ = writeln!(out, "## {}", tool.name);
+            let _ =
+                writeln!(out, "{}", tool.description.as_deref().unwrap_or("<MISSING DESCRIPTION>"));
+            if let Some(props) = tool.input_schema.get("properties").and_then(|v| v.as_object()) {
+                let mut keys: Vec<&String> = props.keys().collect();
+                keys.sort();
+                for key in keys {
+                    let desc = props[key]
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("<no doc>");
+                    let _ = writeln!(out, "  - {key}: {desc}");
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn workspace_tools_contract() {
+        let rendered = render(&McpServer::workspace_tool_router().list_all());
+        expect![[r###"
+            ## debug
+            Drive a live 1C debugger session: attach, set breakpoints, step, and inspect state. Use
+            to debug a running infobase — attach, break, then step and read locals/eval. Not for
+            static analysis (use `diagnostics`) and not for running standalone code (use `execute`).
+            Actions: `attach`/`disconnect`; `set_breakpoint`/`remove_breakpoint`; `continue`/`step`;
+            `wait_stop`; `stack_trace`; `locals`; `eval`. Requires a reachable debug endpoint
+            (`host` + `infobase`, default port 1550).
+              - action: attach | disconnect | set_breakpoint | remove_breakpoint | continue | step |
+            wait_stop | stack_trace | locals | eval.
+              - auto_attach: `attach`: object-name patterns to auto-attach on connect (optional).
+              - condition: `set_breakpoint`: conditional-breakpoint expression (optional).
+              - config_root: `attach`: configuration source root (optional).
+              - direction: `step`: `over`/`next`, `in`/`into`, or `out` (required).
+              - expression: `eval`: BSL expression to evaluate in the current stop (required).
+              - extensions: `attach`: `[name, root]` pairs for loaded extensions (optional).
+              - host: `attach`: debugger host (required).
+              - infobase: `attach`: infobase name (required).
+              - line: `set_breakpoint`/`remove_breakpoint`: 1-based line (required).
+              - module: `set_breakpoint`/`remove_breakpoint`: target module id (required).
+              - port: `attach`: debugger port (default 1550).
+              - stack_level: `locals`/`eval`: stack frame level to evaluate in (optional, default top frame).
+              - timeout_secs: `wait_stop`: max seconds to wait for a stop event (optional).
+
+            ## diagnostics
+            Semantic analyzer findings the compiler and grep cannot give you — unreachable code,
+            type mismatch, unresolved calls, and 180+ other rules. Use to check a file or the whole
+            config for issues, or to discover which rules exist. Not for finding code (use `search`)
+            and not for call relationships (use `graph`). Actions: `catalog` — list rules (start here
+            to learn the codes); `schema` — response shape; `status` — analysis readiness; `file` —
+            per-finding results for one `.bsl` path; `workspace` — a bounded per-code aggregate sweep
+            of the whole config. Honours `max_output_tokens`/`max_findings` and flags truncation.
+            Reads the resident host; while it builds it returns a retry envelope.
+              - action: catalog | schema | status | file | workspace.
+              - codes: `catalog`: narrow to these codes. `file`: keep only these codes.
+              - detail: `file`: concise | detailed (default concise).
+              - locale: `catalog`: ru | en (default ru) — title language.
+              - max_files: `workspace`: cap on files swept (default 1000).
+              - max_findings: `file`: cap on returned findings (default 200).
+              - max_output_tokens: `catalog`/`file`/`workspace`: output budget in tokens (~4 chars each); a truncated
+            response carries `budget_exhausted: true` and a `budget_hint` on how to narrow it
+            (tighten `codes`/`min_severity`/range or raise the budget). When omitted, no token
+            budget applies — only the action's own count caps (`max_findings`/`max_files`).
+              - min_severity: `file`: inclusive severity floor error|warning|info|hint (default warning).
+              - path: `file`: absolute or workspace-relative `.bsl` path.
+              - range_end: `file`: 0-based last line to include (optional).
+              - range_start: `file`: 0-based first line to include (optional).
+
+            ## event_log
+            Read the 1C infobase event log (журнал регистрации) through the deployed BSL_Analyzer
+            extension. Use to inspect runtime events — errors, authentications, data changes —
+            filtered by time, user, event, metadata object, or severity. Not for static analysis of
+            source (use `diagnostics`): this reads live runtime records from a running infobase.
+            Filters: `date_from`/`date_to`, `level`, `user`, `event`, `metadata`, and `contains`
+            (post-read substring over the newest `limit` window). `limit` is newest-first (default
+            100, max 1000). Requires the extension deployed with event-log read rights.
+              - contains: Case-insensitive substring filter over the comment/data columns, applied AFTER the
+            platform read — so it narrows the already-`limit`-capped newest window, it does not
+            scan the whole log. Widen `limit` if a match may lie deeper.
+              - date_from: Lower time bound (inclusive), ISO-8601, e.g. `2026-07-05T00:00:00` or `2026-07-05`.
+              - date_to: Upper time bound (inclusive), ISO-8601.
+              - event: Event name, e.g. `_$Session$_.Authentication` or a metadata event like `_$Data$_.Post`.
+              - level: Severity: Информация/Предупреждение/Ошибка/Примечание or Information/Warning/Error/Note.
+              - limit: Max records (newest first), default 100, capped at 1000.
+              - metadata: Full metadata name to filter by, e.g. `Документ.ЗаказКлиента`.
+              - user: Infobase user name (deleted users can only be matched by name).
+
+            ## execute
+            Run or syntax-check BSL code in an embedded interpreter. Use to confirm a snippet
+            compiles, run a small script, or evaluate a single expression. Not for querying the
+            database (use `query` for SDBL) and not for analyzer findings (use `diagnostics`).
+            Actions: `check` — syntax-check `code`; `run` — execute `code`; `eval` — evaluate the
+            single expression in `code`. `run`/`eval` execute code, so this tool is not read-only.
+              - action: check | run | eval.
+              - code: BSL source to `check`/`run`, or the single expression to `eval`.
+
+            ## graph
+            Whole-config semantic call graph: traverse who-calls-whom and object/metadata usage by
+            durable node id. Use to understand call relationships and change impact — start with
+            `overview` on an unfamiliar project, then `node`/`callers`/`callees`/`neighbors` on the
+            ids it returns. Not for finding code by meaning (use `search`) and not for analyzer
+            findings (use `diagnostics`). Actions: `overview`, `schema`, `status`, `resolve`
+            (imprecise name → node id), `node`, `source`, `neighbors`, `callers`, `callees`.
+            Source-bearing actions honour `max_output_tokens` and flag `budget_exhausted` on
+            truncation. Lazily indexes on first use; while it builds it returns a retry envelope.
+              - action: overview | schema | status | node | source | neighbors | callers | callees | resolve
+              - depth: Traversal depth for neighbors (default: 1).
+              - detail: names | signatures | bodies (default: signatures).
+              - dir: in | out | both — only for `neighbors` (default: in).
+              - edge_kinds: Keep only edges of these kinds (call/manager_creates/manager_access/query_ref/
+            contains/data_binding) — lets metadata-impact queries isolate e.g. only `query_ref`.
+              - id: Durable node id (required for node/neighbors/callers/callees).
+              - ids: Durable node ids (required for `source`).
+              - max_nodes: Server-side cap on returned neighbour nodes (default: 50).
+              - max_output_tokens: Output budget in tokens (~4 chars each) for source-bearing actions: `source`
+            (default 4000) and `node`/`neighbors` at `detail=bodies` (default 6000). When the
+            body output is truncated the response carries `budget_exhausted: true`.
+              - provenance: Keep only edges with these provenances (resolved/inferred/visibility_blocked/unresolved).
+              - query: Imprecise lookup string (required for `resolve`): wrong casing, a bare method/object
+            name, or a partial id.
+              - top: How many top-centrality methods to include in `overview` (default: 20).
+
+            ## metadata
+            Browse the configuration's metadata: objects, their structure, and managed forms.
+            Use to answer "what objects exist / what does object X contain / what is on form Y" —
+            attributes, tabular sections, forms, types — straight from the metadata substrate. Not
+            for call relationships (use `graph`) and not for finding code by meaning (use `search`).
+            Actions: `info` — configuration summary; `tree` — the metadata object tree (filterable);
+            `object` — one object's structure (needs `object_type` + `object_name`); `form` — a
+            managed form's layout (needs `object_type`). Reads the resident analysis host; while it
+            builds it returns a retry envelope, not an error.
+              - action: info | tree | object | form.
+              - filter: `tree`: case-insensitive substring to narrow the returned tree (optional).
+              - form_name: `form`: managed-form name (optional; omit for the object's default form).
+              - max_output_tokens: `tree` (filtered listing): output budget in tokens (~4 chars each); an over-budget
+            listing is truncated at a line boundary with a continuation note (default 6000).
+              - object_name: Metadata object name, e.g. `ЗаказКлиента`. Required for `object`; for `form` it
+            selects the owner object (omit for a configuration-level common form).
+              - object_type: Metadata object type, e.g. `Документ`/`Справочник`/`ОбщийМодуль`. Required for
+            `object` and `form`.
+
+            ## query
+            Validate or execute SDBL (the 1C query language) against the configuration schema. Use
+            to check a query for errors before shipping it, to run a read-only query, or to fetch
+            the query-language schema. Not for browsing metadata structure (use `metadata`) and not
+            for BSL code (use `execute`). Actions: `validate` — parse and type-check a query (`query`
+            required); `execute` — run it (`query` required; optional `limit`, `parameters`);
+            `schema` — the SDBL schema reference.
+              - action: validate | execute | schema.
+              - limit: `execute`: cap on returned rows (optional).
+              - parameters: `execute`: named SDBL query parameters (`&Param` → value) (optional).
+              - query: SDBL text — required for `validate`/`execute`, omitted for `schema`.
+
+            ## search
+            Hybrid lexical + semantic code search across the project source. Use when you need to
+            find code by meaning or a free-form phrase ("where the reserve for an order is built")
+            or when the exact symbol name is unknown. Not for walking call relationships — that is
+            `graph` (callers/callees by durable id) — and not for analyzer findings — that is
+            `diagnostics`. Actions: `search_code` — the search (`query` required; `limit` default
+            10, max 50); `status` — index readiness. While the index warms up it returns a retry
+            envelope; retry shortly.
+              - action: Workspace profile: `search_code` | `status`. Reference profile: `find_docs` |
+            `search_docs` | `status`.
+              - limit: Cap on returned hits (default 10, max 50).
+              - max_output_tokens: Output budget in tokens (~4 chars each); over-budget results are truncated at a hit
+            boundary with a note telling you to raise `limit` or narrow the query (default 6000).
+              - query: Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
+
+        "###]].assert_eq(&rendered);
+    }
+
+    #[test]
+    fn reference_tools_contract() {
+        let rendered = render(&McpServer::reference_tool_router().list_all());
+        expect![[r###"
+            ## its_help
+            Ask the ITS expert-help knowledge base a natural-language question about the 1C platform
+            and development standards. Use for conceptual "how / why" questions. For one member's
+            signature use `syntax_help`; for doc keyword search use `search`. Param: `question`
+            (required).
+              - question: Natural-language question for the ITS expert help.
+
+            ## search
+            Search the platform reference documentation index (not project code). Use to find
+            platform API documentation by keyword or meaning. For project code search use the
+            workspace profile's `search`; for one platform member's signature use `syntax_help`.
+            Actions: `find_docs` / `search_docs` — doc search (`query` required; `limit` default 10,
+            max 50); `status` — index readiness. While the index warms up it returns a retry
+            envelope.
+              - action: Workspace profile: `search_code` | `status`. Reference profile: `find_docs` |
+            `search_docs` | `status`.
+              - limit: Cap on returned hits (default 10, max 50).
+              - max_output_tokens: Output budget in tokens (~4 chars each); over-budget results are truncated at a hit
+            boundary with a note telling you to raise `limit` or narrow the query (default 6000).
+              - query: Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
+
+            ## syntax_help
+            Look up one platform member's reference card — signature, parameters, and description —
+            from the built-in platform data. Use when you know the member name (e.g. `СтрНайти`) and
+            want its exact signature. For free-text doc discovery use `search`; for broader
+            conceptual guidance use `its_help`. Params: `name` (required), optional `type_name` when
+            the member belongs to a specific platform type.
+              - name: Platform member name to look up, e.g. `СтрНайти` or a type method.
+              - type_name: Owning platform type when `name` is a member of a specific type (optional).
+
+        "###]].assert_eq(&rendered);
     }
 }

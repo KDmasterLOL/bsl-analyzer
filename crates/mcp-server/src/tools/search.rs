@@ -581,6 +581,7 @@ pub fn hybrid_code(
     index_progress: &IndexProgress,
     query: &str,
     limit: usize,
+    max_output_tokens: usize,
 ) -> Result<CallToolResult, McpError> {
     // Over-fetch each modality so a hit ranked just outside `limit` in one but boosted by the
     // other can still surface after fusion.
@@ -646,7 +647,12 @@ pub fn hybrid_code(
     let mut out = String::from(
         "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (cross-modal agreement).\n",
     );
-    out.push_str(&format_code_hits(&hits, workspace_root.as_deref(), graph_root));
+    out.push_str(&format_code_hits(
+        &hits,
+        workspace_root.as_deref(),
+        graph_root,
+        max_output_tokens,
+    ));
     if let Some(note) = note {
         // Append AFTER the hit lines — never before — so a client parsing `graph_id:` lines
         // positionally is not shifted.
@@ -929,6 +935,7 @@ pub fn find_docs(
     external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
+    max_output_tokens: usize,
 ) -> Result<CallToolResult, McpError> {
     ensure_reference_baseline_runtime_ready(configured_baseline, external_baseline.as_ref())?;
     let guard =
@@ -943,7 +950,7 @@ pub fn find_docs(
             match source.lexical_search(snapshot.id.0.as_str(), query, Some("platform"), limit) {
                 Ok(hits) if !hits.is_empty() => {
                     return Ok(CallToolResult::success(vec![Content::text(
-                        format_lexical_doc_hits(&hits),
+                        format_lexical_doc_hits(&hits, max_output_tokens),
                     )]));
                 }
                 Ok(_) => {
@@ -970,6 +977,7 @@ pub fn find_docs(
                 if !hits.is_empty() {
                     return Ok(CallToolResult::success(vec![Content::text(format_doc_hits(
                         &hits,
+                        max_output_tokens,
                     ))]));
                 }
                 return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
@@ -990,7 +998,7 @@ pub fn find_docs(
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
     }
 
-    Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits))]))
+    Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits, max_output_tokens))]))
 }
 
 pub fn search_docs(
@@ -999,6 +1007,7 @@ pub fn search_docs(
     external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
+    max_output_tokens: usize,
 ) -> Result<CallToolResult, McpError> {
     ensure_reference_baseline_runtime_ready(configured_baseline, external_baseline.as_ref())?;
     let guard =
@@ -1050,7 +1059,7 @@ pub fn search_docs(
             ) {
                 Ok(hits) if !hits.is_empty() => {
                     return Ok(CallToolResult::success(vec![Content::text(
-                        format_semantic_doc_hits(&hits),
+                        format_semantic_doc_hits(&hits, max_output_tokens),
                     )]));
                 }
                 Ok(_) => {
@@ -1078,7 +1087,7 @@ pub fn search_docs(
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
     }
 
-    Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits))]))
+    Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits, max_output_tokens))]))
 }
 
 #[allow(clippy::too_many_arguments, reason = "distinct status inputs, mirrored by _with_cap")]
@@ -1799,120 +1808,147 @@ fn graph_id_for_hit(
     }
 }
 
+/// Render at most as many leading hits as fit `max_output_tokens` (~4 chars/token),
+/// shrinking at hit boundaries so a positionally-parsed block is never cut mid-way, then
+/// append a one-line truncation note when hits were dropped. The note goes AFTER the hits,
+/// so a client parsing `graph_id:` lines positionally from the top is never shifted.
+fn budgeted_hits(
+    count: usize,
+    max_output_tokens: usize,
+    render_prefix: impl Fn(usize) -> String,
+) -> String {
+    let shown = crate::tools::response::fit_item_count(count, max_output_tokens, |n| {
+        render_prefix(n).len()
+    });
+    let mut out = render_prefix(shown);
+    // Note when we dropped hits OR when the single kept hit is itself over budget (the >=1 floor
+    // delivers it anyway) — either way the output is not the full, in-budget result.
+    let over_budget = out.len() > max_output_tokens.saturating_mul(4);
+    if shown < count || over_budget {
+        let _ = writeln!(
+            out,
+            "-- showing {shown} of {count} results (truncated to fit max_output_tokens; raise the budget or narrow the query) --"
+        );
+    }
+    out
+}
+
 fn format_code_hits(
     hits: &[FusedHit],
     engine_root: Option<&Path>,
     graph_root: Option<&Path>,
+    max_output_tokens: usize,
 ) -> String {
-    let mut out = String::new();
+    budgeted_hits(hits.len(), max_output_tokens, |n| {
+        let mut out = String::new();
+        for (i, fused) in hits[..n].iter().enumerate() {
+            let hit = &fused.hit;
+            let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
+            // The modality tag (L / S / L+S) carries the cross-modal signal instead of a numeric
+            // score: `L+S` means lexical and semantic both surfaced the chunk (they agreed).
+            let _ = writeln!(
+                out,
+                "#{} [{}] {}:{}-{} :: {} ({})",
+                i + 1,
+                fused.modality.tag(),
+                hit.file_path,
+                hit.line_start + 1,
+                hit.line_end,
+                name,
+                hit.kind,
+            );
+            // Bridge into the call graph: surface the durable node id so the agent
+            // can pivot to `graph` callers/callees/source.
+            if let Some(id) = graph_id_for_hit(hit, engine_root, graph_root) {
+                let _ = writeln!(out, "  graph_id: {id}");
+            }
 
-    for (i, fused) in hits.iter().enumerate() {
-        let hit = &fused.hit;
-        let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
-        // The modality tag (L / S / L+S) carries the cross-modal signal instead of a numeric
-        // score: `L+S` means lexical and semantic both surfaced the chunk (they agreed).
-        let _ = writeln!(
-            out,
-            "#{} [{}] {}:{}-{} :: {} ({})",
-            i + 1,
-            fused.modality.tag(),
-            hit.file_path,
-            hit.line_start + 1,
-            hit.line_end,
-            name,
-            hit.kind,
-        );
-        // Bridge into the call graph: surface the durable node id so the agent
-        // can pivot to `graph` callers/callees/source.
-        if let Some(id) = graph_id_for_hit(hit, engine_root, graph_root) {
-            let _ = writeln!(out, "  graph_id: {id}");
+            // Redact secrets before emitting the source snippet (same safety net as
+            // the `graph` tool's source output).
+            let snippet = crate::tools::redact::redact_secrets(&hit.text);
+            for line in snippet.lines().take(5) {
+                let _ = writeln!(out, "  │ {line}");
+            }
+            let total_lines = snippet.lines().count();
+            if total_lines > 5 {
+                let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
+            }
+            out.push('\n');
         }
-
-        // Redact secrets before emitting the source snippet (same safety net as
-        // the `graph` tool's source output).
-        let snippet = crate::tools::redact::redact_secrets(&hit.text);
-        for line in snippet.lines().take(5) {
-            let _ = writeln!(out, "  │ {line}");
-        }
-        let total_lines = snippet.lines().count();
-        if total_lines > 5 {
-            let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
-        }
-        out.push('\n');
-    }
-
-    out
+        out
+    })
 }
 
-fn format_doc_hits(hits: &[bsl_search::SearchHit]) -> String {
-    let mut out = String::new();
+fn format_doc_hits(hits: &[bsl_search::SearchHit], max_output_tokens: usize) -> String {
+    budgeted_hits(hits.len(), max_output_tokens, |n| {
+        let mut out = String::new();
+        for (i, hit) in hits[..n].iter().enumerate() {
+            let _ =
+                writeln!(out, "#{} [{:.3}] {} ({})", i + 1, hit.score, hit.symbol_name, hit.kind,);
 
-    for (i, hit) in hits.iter().enumerate() {
-        let _ = writeln!(out, "#{} [{:.3}] {} ({})", i + 1, hit.score, hit.symbol_name, hit.kind,);
-
-        for line in hit.text.lines().take(5) {
-            let _ = writeln!(out, "  │ {line}");
+            for line in hit.text.lines().take(5) {
+                let _ = writeln!(out, "  │ {line}");
+            }
+            let total_lines = hit.text.lines().count();
+            if total_lines > 5 {
+                let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
+            }
+            out.push('\n');
         }
-        let total_lines = hit.text.lines().count();
-        if total_lines > 5 {
-            let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
-        }
-        out.push('\n');
-    }
-
-    out
+        out
+    })
 }
 
-fn format_lexical_doc_hits(hits: &[LexicalHit]) -> String {
-    let mut out = String::new();
+fn format_lexical_doc_hits(hits: &[LexicalHit], max_output_tokens: usize) -> String {
+    budgeted_hits(hits.len(), max_output_tokens, |n| {
+        let mut out = String::new();
+        for (i, hit) in hits[..n].iter().enumerate() {
+            let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
+            let _ = writeln!(
+                out,
+                "#{} [{:.3}] {}:{}-{} :: {} ({})",
+                i + 1,
+                hit.rank,
+                hit.path,
+                hit.line_start + 1,
+                hit.line_end,
+                name,
+                hit.kind,
+            );
 
-    for (i, hit) in hits.iter().enumerate() {
-        let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
-        let _ = writeln!(
-            out,
-            "#{} [{:.3}] {}:{}-{} :: {} ({})",
-            i + 1,
-            hit.rank,
-            hit.path,
-            hit.line_start + 1,
-            hit.line_end,
-            name,
-            hit.kind,
-        );
-
-        for line in hit.text.lines().take(5) {
-            let _ = writeln!(out, "  │ {line}");
+            for line in hit.text.lines().take(5) {
+                let _ = writeln!(out, "  │ {line}");
+            }
+            let total_lines = hit.text.lines().count();
+            if total_lines > 5 {
+                let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
+            }
+            out.push('\n');
         }
-        let total_lines = hit.text.lines().count();
-        if total_lines > 5 {
-            let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
-        }
-        out.push('\n');
-    }
-
-    out
+        out
+    })
 }
 
-fn format_semantic_doc_hits(hits: &[SemanticHit]) -> String {
-    let mut out = String::new();
-
-    for (i, hit) in hits.iter().enumerate() {
-        let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
-        let _ = writeln!(
-            out,
-            "#{} [{:.3}] {}:{}-{} :: {} ({})",
-            i + 1,
-            hit.score,
-            hit.path,
-            hit.line_start + 1,
-            hit.line_end,
-            name,
-            hit.kind,
-        );
-        out.push('\n');
-    }
-
-    out
+fn format_semantic_doc_hits(hits: &[SemanticHit], max_output_tokens: usize) -> String {
+    budgeted_hits(hits.len(), max_output_tokens, |n| {
+        let mut out = String::new();
+        for (i, hit) in hits[..n].iter().enumerate() {
+            let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
+            let _ = writeln!(
+                out,
+                "#{} [{:.3}] {}:{}-{} :: {} ({})",
+                i + 1,
+                hit.score,
+                hit.path,
+                hit.line_start + 1,
+                hit.line_end,
+                name,
+                hit.kind,
+            );
+            out.push('\n');
+        }
+        out
+    })
 }
 
 fn format_baseline_ref(baseline: &bsl_search::BaselineRef) -> String {
@@ -2194,7 +2230,7 @@ mod tests {
                 modality: Modality::Semantic,
             },
         ];
-        let out = super::format_code_hits(&hits, None, None);
+        let out = super::format_code_hits(&hits, None, None, usize::MAX);
         assert!(out.contains("#1 [L+S]"), "both-modality hit tagged L+S: {out}");
         assert!(out.contains("#2 [L]"), "lexical-only hit tagged L: {out}");
         assert!(out.contains("#3 [S]"), "semantic-only hit tagged S: {out}");
@@ -2605,9 +2641,15 @@ mod tests {
             .unwrap(),
         );
 
-        let error =
-            search_docs(&Arc::new(Mutex::new(Some(engine))), None, Some(source), "Массив", 10)
-                .unwrap_err();
+        let error = search_docs(
+            &Arc::new(Mutex::new(Some(engine))),
+            None,
+            Some(source),
+            "Массив",
+            10,
+            usize::MAX,
+        )
+        .unwrap_err();
 
         assert!(error.message.contains("Semantic search not available"));
         assert!(!error.message.contains("centralized reference baseline"));
@@ -2643,6 +2685,7 @@ mod tests {
             None,
             "Массив",
             10,
+            usize::MAX,
         )
         .unwrap_err();
 
@@ -2675,6 +2718,7 @@ mod tests {
             None,
             "Массив",
             10,
+            usize::MAX,
         )
         .unwrap_err();
 
@@ -2871,6 +2915,7 @@ mod tests {
             &IndexProgress::new(),
             "ПроверитьИНН",
             10,
+            usize::MAX,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("text content").text.as_str();
@@ -2901,6 +2946,7 @@ mod tests {
             &IndexProgress::new(),
             "ПроверитьИНН",
             10,
+            usize::MAX,
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("text content").text.as_str();
@@ -2949,6 +2995,7 @@ mod tests {
             &IndexProgress::new(),
             "ПроверитьИНН",
             10,
+            usize::MAX,
         )
         .unwrap();
         let text = hit_result.content[0].raw.as_text().expect("text").text.as_str();
@@ -2968,6 +3015,7 @@ mod tests {
             &IndexProgress::new(),
             "несуществующийидентификатор",
             10,
+            usize::MAX,
         )
         .unwrap();
         let empty_text = empty_result.content[0].raw.as_text().expect("text").text.as_str();
@@ -3145,6 +3193,7 @@ mod tests {
             &progress,
             "ПроверитьИНН",
             10,
+            usize::MAX,
         )
         .unwrap();
 
@@ -3185,6 +3234,7 @@ mod tests {
             &progress,
             "ПроверитьИНН",
             10,
+            usize::MAX,
         )
         .unwrap();
 
@@ -3374,6 +3424,7 @@ mod tests {
             &IndexProgress::new(),
             "Процедура",
             10,
+            usize::MAX,
         )
         .unwrap_err();
 
@@ -3408,6 +3459,7 @@ mod tests {
             &IndexProgress::new(),
             "ТестоваПроцедура",
             10,
+            usize::MAX,
         )
         .unwrap_err();
 
@@ -3450,6 +3502,7 @@ mod tests {
             &IndexProgress::new(),
             "ТестоваПроцедура",
             10,
+            usize::MAX,
         )
         .unwrap_err();
 
@@ -3486,6 +3539,7 @@ mod tests {
             &IndexProgress::new(),
             "НесуществующееСлово",
             10,
+            usize::MAX,
         )
         .unwrap_err();
 
@@ -3519,9 +3573,15 @@ mod tests {
             .unwrap(),
         );
 
-        let result =
-            search_docs(&Arc::new(Mutex::new(Some(engine))), None, Some(source), "Массив", 10)
-                .unwrap_err();
+        let result = search_docs(
+            &Arc::new(Mutex::new(Some(engine))),
+            None,
+            Some(source),
+            "Массив",
+            10,
+            usize::MAX,
+        )
+        .unwrap_err();
 
         assert!(result.message.contains("Semantic search not available"));
     }
