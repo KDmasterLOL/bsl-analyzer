@@ -470,6 +470,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::TypeMismatchByDocComment => Some(&type_mismatch_by_doc_comment::METADATA),
         DiagnosticCode::UnresolvedField => Some(&unresolved_field::METADATA),
         DiagnosticCode::ReadOnlyPropertyAssignment => Some(&read_only_property::METADATA),
+
+        DiagnosticCode::UnknownSuppressionCode => Some(&crate::suppression::UNKNOWN_CODE_METADATA),
+        DiagnosticCode::SuppressionWithoutCode => Some(&crate::suppression::WITHOUT_CODE_METADATA),
     }
 }
 

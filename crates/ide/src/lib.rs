@@ -259,3 +259,67 @@ const _: fn() = || {
     assert_send::<Analysis>();
     assert_send::<WarmCachesTask>();
 };
+
+/// In-code suppression directives must be honoured by the two entry points the LSP server and
+/// the MCP server use — both route through `ide_diagnostics::file_diagnostics`, one directly and
+/// one through the salsa-tracked `file_diagnostics_query`.
+#[cfg(test)]
+mod suppression_surface_tests {
+    use super::*;
+    use ide_db::base_db::{
+        DiagnosticsConfigInput, Locale, SourceDatabase, SourceRoot, SourceRootId,
+    };
+    use ide_db::vfs::{file_set::FileSet, VfsPath};
+    use ide_db::RootDatabaseImpl;
+
+    const PLAIN: &str = "Процедура Тест()\n    А = А;\nКонецПроцедуры\n";
+    const SUPPRESSED: &str =
+        "Процедура Тест()\n    // bsl-analyzer:off SelfAssign\n    А = А;\nКонецПроцедуры\n";
+
+    fn analysis_for(code: &str) -> (Analysis, FileId) {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, code);
+        (Analysis::from_database(db), file_id)
+    }
+
+    fn has_self_assign(diags: &[Diagnostic]) -> bool {
+        diags.iter().any(|d| d.code == ide_diagnostics::DiagnosticCode::SelfAssign)
+    }
+
+    #[test]
+    fn mcp_diagnostics_honours_suppression() {
+        let config = DiagnosticsConfig::all_enabled();
+        let (plain, fid) = analysis_for(PLAIN);
+        assert!(has_self_assign(&plain.diagnostics(fid, &config)), "baseline must fire");
+        let (supp, fid) = analysis_for(SUPPRESSED);
+        assert!(!has_self_assign(&supp.diagnostics(fid, &config)), "directive must suppress");
+    }
+
+    #[test]
+    fn lsp_cached_diagnostics_honour_suppression() {
+        let input = DiagnosticsConfigInput::from_raw(
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+            Vec::<(String, String)>::new(),
+            false,
+            hir::dataflow::DEFAULT_MAX_ITERATIONS,
+            Locale::default(),
+            false,
+        );
+        let (plain, fid) = analysis_for(PLAIN);
+        assert!(
+            has_self_assign(&plain.file_diagnostics_cached(fid, input.clone())),
+            "baseline must fire"
+        );
+        let (supp, fid) = analysis_for(SUPPRESSED);
+        assert!(
+            !has_self_assign(&supp.file_diagnostics_cached(fid, input)),
+            "directive must suppress through the salsa-tracked query"
+        );
+    }
+}

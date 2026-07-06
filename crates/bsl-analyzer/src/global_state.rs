@@ -183,6 +183,7 @@ impl GlobalState {
                 false,
                 hir::dataflow::DEFAULT_MAX_ITERATIONS,
                 Locale::default(),
+                true,
             ),
             lsp_locale: None,
             position_encoding: PositionEncoding::default(),

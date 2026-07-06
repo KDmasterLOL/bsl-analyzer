@@ -190,6 +190,9 @@ pub enum DiagnosticCode {
     UnionAll,
     UsingLikeInQuery,
     VirtualTableCallWithoutParameters,
+
+    UnknownSuppressionCode,
+    SuppressionWithoutCode,
 }
 
 impl DiagnosticCode {

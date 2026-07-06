@@ -35,6 +35,14 @@ const IDENTIFIER_AWARE_CODES: &[DiagnosticCode] = &[
 
 const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
     (
+        DiagnosticCode::UnknownSuppressionCode,
+        "reports a typo'd code in a suppression comment directive; no BSL identifier lookup",
+    ),
+    (
+        DiagnosticCode::SuppressionWithoutCode,
+        "reports a code-less suppression comment directive; no BSL identifier lookup",
+    ),
+    (
         DiagnosticCode::WeavingSignatureMismatch,
         "structural signature comparison across an ext/base module pair; no identifier lookup",
     ),
@@ -577,7 +585,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 184, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 186, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]
