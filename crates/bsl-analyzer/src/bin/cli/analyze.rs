@@ -512,6 +512,22 @@ fn analyze_salsa(
                         if diagnostic_outputs.is_empty() {
                             None
                         } else {
+                            // Capture the source line per finding while the text is
+                            // still hot (this pass runs in parallel across files),
+                            // so reporters that need a line-shift-stable fingerprint
+                            // do not re-read the file or rescan its text per finding.
+                            let file_lines: Vec<&str> = file_text.lines().collect();
+                            let line_snippets = diagnostic_outputs
+                                .iter()
+                                .map(|d| {
+                                    file_lines
+                                        .get(d.start_line)
+                                        .map(|line| {
+                                            bsl_analyzer::reporters::normalize_source_line(line)
+                                        })
+                                        .unwrap_or_default()
+                                })
+                                .collect();
                             Some(FileAnalysis {
                                 path: path.clone(),
                                 relative_path: path
@@ -519,6 +535,7 @@ fn analyze_salsa(
                                     .unwrap_or(path)
                                     .to_path_buf(),
                                 diagnostics: diagnostic_outputs,
+                                line_snippets,
                             })
                         }
                     } else {
@@ -979,6 +996,7 @@ fn analyze_streaming(
                                     .unwrap_or(path)
                                     .to_path_buf(),
                                 diagnostics: filtered_diagnostics,
+                                line_snippets: Vec::new(),
                             });
                         }
                     }

@@ -250,6 +250,7 @@ version = "0.2.57"
 dependencies = [
  "anyhow",
  "base-db",
+ "blake3",
  "bsl-debug",
  "bsl-metadata",
  "bsl-platform",

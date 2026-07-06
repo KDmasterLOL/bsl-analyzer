@@ -70,6 +70,7 @@ thiserror.workspace = true
 
 walkdir.workspace = true
 tempfile.workspace = true
+blake3 = "1.8"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]

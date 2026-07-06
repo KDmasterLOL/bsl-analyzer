@@ -87,3 +87,80 @@ fn analyze_sarif_is_byte_identical_across_runs() {
 
     assert_eq!(first, second, "SARIF must be byte-identical across runs");
 }
+
+#[test]
+fn analyze_writes_codequality_report() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_dir = temp.path().join("src");
+    let output_dir = temp.path().join("reports");
+    fs::create_dir_all(&source_dir).expect("source dir");
+    fs::create_dir_all(&output_dir).expect("output dir");
+    fs::write(source_dir.join("Module.bsl"), "Процедура Тест(\n").expect("fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
+        .args(["analyze", "-s"])
+        .arg(&source_dir)
+        .args(["-r", "codequality", "-o"])
+        .arg(&output_dir)
+        .arg("-q")
+        .output()
+        .expect("run bsl-analyzer");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report_path = output_dir.join("gl-code-quality-report.json");
+    assert!(report_path.exists(), "code quality report should be written");
+
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report_path).expect("report contents"))
+            .expect("valid codequality json");
+    let entries = report.as_array().expect("codequality is an array");
+    assert!(!entries.is_empty(), "fixture must produce diagnostics");
+    let entry = &entries[0];
+    assert!(entry["fingerprint"].is_string());
+    assert!(entry["check_name"].is_string());
+    assert!(entry["location"]["path"].is_string());
+    assert!(entry["location"]["lines"]["begin"].is_u64());
+}
+
+#[test]
+fn analyze_writes_junit_report() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_dir = temp.path().join("src");
+    let output_dir = temp.path().join("reports");
+    fs::create_dir_all(&source_dir).expect("source dir");
+    fs::create_dir_all(&output_dir).expect("output dir");
+    fs::write(source_dir.join("Module.bsl"), "Процедура Тест(\n").expect("fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
+        .args(["analyze", "-s"])
+        .arg(&source_dir)
+        .args(["-r", "junit", "-o"])
+        .arg(&output_dir)
+        .arg("-q")
+        .output()
+        .expect("run bsl-analyzer");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report_path = output_dir.join("bsl-analyzer.junit.xml");
+    assert!(report_path.exists(), "junit report should be written");
+
+    let xml = fs::read_to_string(report_path).expect("report contents");
+    assert!(xml.starts_with(r#"<?xml version="1.0" encoding="UTF-8"?>"#));
+    assert!(xml.contains("<testsuites"));
+    assert!(xml.contains("</testsuites>"));
+    assert!(xml.contains("<testcase"));
+    // Every opened suite is closed → the document is well-formed enough for CI.
+    assert_eq!(xml.matches("<testsuite ").count(), xml.matches("</testsuite>").count());
+}
