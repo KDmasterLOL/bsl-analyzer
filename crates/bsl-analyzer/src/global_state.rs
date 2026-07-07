@@ -103,6 +103,10 @@ pub struct GlobalState {
     /// from the pull report, once from `publishDiagnostics`). A client that opted the
     /// feature on but cannot pull keeps push, so it is never left without diagnostics.
     pub pull_diagnostics_active: bool,
+    /// Whether the client advertised `workspace.diagnostics.refreshSupport`, so the server may
+    /// ask it to re-pull workspace diagnostics once background state changes (e.g. after the
+    /// initial workspace load finishes and results first become available).
+    pub supports_workspace_diagnostic_refresh: bool,
     /// Per-URI publish generation. Each scheduled diagnostics computation gets the
     /// next generation for ITS uri; a completed task publishes only if it is still
     /// the latest for that uri. Keyed per-uri (not a single global counter) so
@@ -201,6 +205,7 @@ impl GlobalState {
             position_encoding: PositionEncoding::default(),
             supports_insert_text_mode_adjust_indentation: false,
             pull_diagnostics_active: false,
+            supports_workspace_diagnostic_refresh: false,
             diagnostics_generation: HashMap::new(),
             pending_diagnostics_uris: Vec::new(),
             active_workspace_diagnostic: None,
@@ -375,6 +380,26 @@ impl GlobalState {
             tracing::error!("Failed to send semantic tokens refresh request: {}", e);
         } else {
             tracing::info!("Requested client to refresh semantic tokens");
+        }
+    }
+
+    /// Ask the client to re-pull all workspace diagnostics. Sent once the initial workspace load
+    /// finishes so a pull-capable client refreshes the Problems panel with now-available results
+    /// without the user re-triggering. No-op unless pull is active and the client supports it.
+    pub fn request_workspace_diagnostic_refresh(&self) {
+        if !self.pull_diagnostics_active || !self.supports_workspace_diagnostic_refresh {
+            return;
+        }
+        let id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
+        let request = lsp_server::Request::new(
+            lsp_server::RequestId::from(id),
+            "workspace/diagnostic/refresh".to_string(),
+            (),
+        );
+        if let Err(e) = self.sender.send(request.into()) {
+            tracing::error!("Failed to send workspace diagnostic refresh request: {}", e);
+        } else {
+            tracing::info!("Requested client to refresh workspace diagnostics");
         }
     }
 

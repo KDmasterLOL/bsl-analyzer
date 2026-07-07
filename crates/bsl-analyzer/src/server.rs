@@ -26,6 +26,11 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     let (initialize_id, initialize_params) =
         connection.initialize_start().context("Failed to start initialization")?;
 
+    // Keep the raw capabilities: the workspace-diagnostic refresh capability must be read from
+    // the wire directly, because the pinned `lsp-types` maps it to the key `diagnostic` while the
+    // LSP 3.17 spec (and clients like VS Code) send `diagnostics`.
+    let raw_capabilities = initialize_params.get("capabilities").cloned().unwrap_or_default();
+
     let initialize_params: InitializeParams =
         serde_json::from_value(initialize_params).context("Failed to parse InitializeParams")?;
 
@@ -82,6 +87,8 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     // that cannot pull keeps push even with the feature enabled.
     state.pull_diagnostics_active = workspace_diagnostics_scope.is_enabled()
         && client_supports_pull_diagnostics(&initialize_params.capabilities);
+    state.supports_workspace_diagnostic_refresh =
+        client_supports_workspace_diagnostic_refresh(&raw_capabilities);
 
     state.init_empty_source_root();
 
@@ -127,6 +134,16 @@ fn client_supports_insert_text_mode_adjust_indentation(
 /// suppresses push to avoid double-reporting open buffers.
 fn client_supports_pull_diagnostics(caps: &lsp_types::ClientCapabilities) -> bool {
     caps.text_document.as_ref().and_then(|td| td.diagnostic.as_ref()).is_some()
+}
+
+/// Whether the client advertised `workspace.diagnostics.refreshSupport`, so the server may ask it
+/// to re-pull workspace diagnostics after background state changes. Read from the raw capabilities
+/// and accepting both the spec key `diagnostics` and the `lsp-types` key `diagnostic`.
+fn client_supports_workspace_diagnostic_refresh(raw_capabilities: &serde_json::Value) -> bool {
+    let workspace = &raw_capabilities["workspace"];
+    ["diagnostics", "diagnostic"]
+        .iter()
+        .any(|key| workspace[key]["refreshSupport"].as_bool().unwrap_or(false))
 }
 
 fn extract_workspace_root(params: &InitializeParams) -> Option<PathBuf> {
@@ -278,6 +295,9 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     }
 
                     state.request_semantic_tokens_refresh();
+                    // Diagnostics for closed files only become available now; nudge a pull-capable
+                    // client to re-pull so the Problems panel fills without the user re-triggering.
+                    state.request_workspace_diagnostic_refresh();
 
                     tracing::info!(
                         elapsed_ms = finalize_start.elapsed().as_millis() as u64,

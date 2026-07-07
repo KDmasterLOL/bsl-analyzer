@@ -128,6 +128,7 @@ impl RequestDispatcher<'_> {
                 .global_state
                 .supports_insert_text_mode_adjust_indentation,
             task_sender: self.global_state.task_pool.pool.sender.clone(),
+            client_sender: self.global_state.sender.clone(),
             mem_docs: self.global_state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&self.global_state.vfs.read()),
         };
@@ -535,6 +536,7 @@ mod tests {
             supports_insert_text_mode_adjust_indentation: state
                 .supports_insert_text_mode_adjust_indentation,
             task_sender: state.task_pool.pool.sender.clone(),
+            client_sender: state.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: crate::frozen_context::FrozenFilePaths::freeze(&state.vfs.read()),
         };

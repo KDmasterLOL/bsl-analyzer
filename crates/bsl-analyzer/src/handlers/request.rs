@@ -639,6 +639,25 @@ pub fn handle_document_diagnostic(
     )))
 }
 
+/// Emits a `WorkDoneProgress` `End` for a started progress token on drop, so the client's progress
+/// indicator is always closed — including when the sweep unwinds on a Salsa cancellation.
+struct WorkDoneProgressGuard<'a> {
+    ctx: &'a LatencyRequestContext,
+    token: lsp_types::ProgressToken,
+}
+
+impl Drop for WorkDoneProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.ctx.send_progress(
+            &self.token,
+            serde_json::to_value(lsp_types::WorkDoneProgress::End(
+                lsp_types::WorkDoneProgressEnd { message: None },
+            ))
+            .unwrap_or_default(),
+        );
+    }
+}
+
 /// Pull-model whole-workspace diagnostics (`workspace/diagnostic`).
 ///
 /// Reports diagnostics for every in-scope BSL file in one sweep. Scope comes from
@@ -650,14 +669,18 @@ pub fn handle_document_diagnostic(
 /// with `ContentModified` until the workspace has loaded) and cancellation: a concurrent
 /// edit bumps the Salsa revision and the sweep unwinds, so the client simply re-pulls.
 /// Each file's `previousResultId` drives a tiny `Unchanged` report when nothing changed.
+///
+/// When the client supplies a `partialResultToken`, reports are streamed in chunks via
+/// `$/progress` as they are computed (so the Problems panel fills progressively instead of
+/// waiting for a minutes-long `all` sweep), and the final response is an empty report. A
+/// `workDoneToken` drives a work-done progress indicator over the same sweep.
 pub fn handle_workspace_diagnostic(
     ctx: LatencyRequestContext,
     params: lsp_types::WorkspaceDiagnosticParams,
 ) -> Result<lsp_types::WorkspaceDiagnosticReportResult> {
     use lsp_types::{
-        FullDocumentDiagnosticReport, UnchangedDocumentDiagnosticReport, WorkspaceDiagnosticReport,
-        WorkspaceDiagnosticReportResult, WorkspaceDocumentDiagnosticReport,
-        WorkspaceFullDocumentDiagnosticReport, WorkspaceUnchangedDocumentDiagnosticReport,
+        WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressReport, WorkspaceDiagnosticReport,
+        WorkspaceDiagnosticReportResult,
     };
 
     let _p = tracing::info_span!("handle_workspace_diagnostic").entered();
@@ -688,69 +711,153 @@ pub fn handle_workspace_diagnostic(
     let previous: FxHashMap<lsp_types::Url, String> =
         params.previous_result_ids.into_iter().map(|p| (p.uri, p.value)).collect();
 
-    tracing::info!(scope = ?scope, files = file_ids.len(), "workspace diagnostics sweep");
+    let total = file_ids.len();
+    tracing::info!(scope = ?scope, files = total, "workspace diagnostics sweep");
 
-    let computed = ctx.analysis.workspace_diagnostics(&file_ids, ctx.diagnostics_config.clone());
+    let partial_token = params.partial_result_params.partial_result_token;
+    let work_done_token = params.work_done_progress_params.work_done_token;
 
-    let mut items = Vec::with_capacity(computed.len());
-    for (file_id, diagnostics) in computed {
-        let url = match ctx.url_for_file_id(file_id) {
-            Ok(url) => url,
-            Err(_) => continue,
-        };
-        let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
-        // The LSP spec wants the buffer version for an open document (and `None` only for a
-        // closed one), so a client can associate or discard the report against its buffer.
-        let open_doc = ctx.mem_docs.get(&url);
-        let version = open_doc.map(|doc| doc.version() as i64);
+    // The client created the work-done token, so the server drives it directly (no create
+    // round-trip). The guard sends `End` on drop — including a Salsa-cancellation unwind — so the
+    // client's progress indicator never stays stuck if the sweep is aborted mid-flight.
+    let _work_done_guard = work_done_token.as_ref().map(|token| {
+        ctx.send_progress(
+            token,
+            serde_json::to_value(WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "Workspace diagnostics".to_string(),
+                cancellable: Some(false),
+                message: Some(format!("0/{total}")),
+                percentage: Some(0),
+            }))
+            .unwrap_or_default(),
+        );
+        WorkDoneProgressGuard { ctx: &ctx, token: token.clone() }
+    });
 
-        if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
-            items.push(WorkspaceDocumentDiagnosticReport::Unchanged(
-                WorkspaceUnchangedDocumentDiagnosticReport {
-                    uri: url,
-                    version,
-                    unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
-                        result_id,
-                    },
-                },
-            ));
-            continue;
+    // Compute in chunks so streaming clients see progress and the heavy per-file memos fall out
+    // of the Salsa LRU between chunks instead of all piling up at once.
+    const CHUNK: usize = 64;
+    let mut collected = Vec::new();
+    let mut done = 0usize;
+    for chunk in file_ids.chunks(CHUNK) {
+        let computed = ctx.analysis.workspace_diagnostics(chunk, ctx.diagnostics_config.clone());
+        let chunk_items: Vec<_> = computed
+            .into_iter()
+            .filter_map(|(file_id, diagnostics)| {
+                workspace_report_item(&ctx, file_id, &diagnostics, &previous)
+            })
+            .collect();
+        done += chunk.len();
+
+        if let Some(token) = &partial_token {
+            ctx.send_progress(token, serde_json::json!({ "items": chunk_items }));
+        } else {
+            collected.extend(chunk_items);
         }
+        if let Some(token) = &work_done_token {
+            let percentage = ((done as f64 / total.max(1) as f64) * 100.0) as u32;
+            ctx.send_progress(
+                token,
+                serde_json::to_value(WorkDoneProgress::Report(WorkDoneProgressReport {
+                    cancellable: Some(false),
+                    message: Some(format!("{done}/{total}")),
+                    percentage: Some(percentage),
+                }))
+                .unwrap_or_default(),
+            );
+        }
+    }
 
-        // An open buffer's overlay text (and cached line index) reflects unsaved edits; a closed
-        // file has neither, so fall back to the database's disk-backed text.
-        let lsp_items = match open_doc {
-            Some(doc) => crate::lsp::to_proto::diagnostics_with_encoding(
-                doc.line_index(),
-                doc.text(),
-                &diagnostics,
-                ctx.position_encoding,
-            ),
-            None => {
-                let text = ctx.analysis.file_text(file_id);
-                let line_index = LineIndex::new(&text);
-                crate::lsp::to_proto::diagnostics_with_encoding(
-                    &line_index,
-                    &text,
-                    &diagnostics,
-                    ctx.position_encoding,
-                )
-            }
-        };
+    // `End` is emitted by `_work_done_guard` on drop (here and on a cancellation unwind alike).
 
-        items.push(WorkspaceDocumentDiagnosticReport::Full(
-            WorkspaceFullDocumentDiagnosticReport {
+    // Streamed reports were already delivered via `$/progress`; the response is then an empty
+    // report. Without a partial-result token everything is returned in the response instead.
+    let items = if partial_token.is_some() { Vec::new() } else { collected };
+    Ok(WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport { items }))
+}
+
+/// Builds one `workspace/diagnostic` report entry for a computed file: an `Unchanged` stub when
+/// the client's `previousResultId` still matches, otherwise a `Full` report. Returns `None` only
+/// when the file id has no resolvable URL (it was removed from the frozen snapshot).
+fn workspace_report_item(
+    ctx: &LatencyRequestContext,
+    file_id: vfs::FileId,
+    diagnostics: &[ide::Diagnostic],
+    previous: &FxHashMap<lsp_types::Url, String>,
+) -> Option<lsp_types::WorkspaceDocumentDiagnosticReport> {
+    use lsp_types::{
+        FullDocumentDiagnosticReport, UnchangedDocumentDiagnosticReport,
+        WorkspaceDocumentDiagnosticReport, WorkspaceFullDocumentDiagnosticReport,
+        WorkspaceUnchangedDocumentDiagnosticReport,
+    };
+
+    let url = ctx.url_for_file_id(file_id).ok()?;
+    let result_id = crate::lsp::diagnostics_result_id(diagnostics);
+    // The LSP spec wants the buffer version for an open document (and `None` only for a closed
+    // one), so a client can associate or discard the report against its buffer.
+    let open_doc = ctx.mem_docs.get(&url);
+    let version = open_doc.map(|doc| doc.version() as i64);
+
+    if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
+        return Some(WorkspaceDocumentDiagnosticReport::Unchanged(
+            WorkspaceUnchangedDocumentDiagnosticReport {
                 uri: url,
                 version,
-                full_document_diagnostic_report: FullDocumentDiagnosticReport {
-                    result_id: Some(result_id),
-                    items: lsp_items,
+                unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                    result_id,
                 },
             },
         ));
     }
 
-    Ok(WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport { items }))
+    // An open buffer's overlay text (and cached line index) reflects unsaved edits; a closed
+    // file has neither, so fall back to the database's disk-backed text.
+    let lsp_items = match open_doc {
+        Some(doc) => crate::lsp::to_proto::diagnostics_with_encoding(
+            doc.line_index(),
+            doc.text(),
+            diagnostics,
+            ctx.position_encoding,
+        ),
+        None => {
+            // A closed file's disk-backed text read (and conversion) can panic if the file was
+            // deleted/rewritten mid-sweep. Catch it so one racing file does not fail the whole
+            // request (and, when streaming, discard already-sent chunks); a `salsa::Cancelled`
+            // is a real abort and must keep unwinding.
+            let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let text = ctx.analysis.file_text(file_id);
+                let line_index = LineIndex::new(&text);
+                crate::lsp::to_proto::diagnostics_with_encoding(
+                    &line_index,
+                    &text,
+                    diagnostics,
+                    ctx.position_encoding,
+                )
+            }));
+            match converted {
+                Ok(lsp_items) => lsp_items,
+                Err(payload) if payload.is::<salsa::Cancelled>() => {
+                    std::panic::resume_unwind(payload)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        file_id = file_id.0,
+                        "workspace diagnostics: skipping file after a text-read panic"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+
+    Some(WorkspaceDocumentDiagnosticReport::Full(WorkspaceFullDocumentDiagnosticReport {
+        uri: url,
+        version,
+        full_document_diagnostic_report: FullDocumentDiagnosticReport {
+            result_id: Some(result_id),
+            items: lsp_items,
+        },
+    }))
 }
 
 /// Whether a file belongs to the `workspace/diagnostic` sweep for the given scope.
@@ -1245,6 +1352,7 @@ mod tests {
             supports_insert_text_mode_adjust_indentation: state
                 .supports_insert_text_mode_adjust_indentation,
             task_sender: state.task_pool.pool.sender.clone(),
+            client_sender: state.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&state.vfs.read()),
         }

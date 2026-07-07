@@ -4,6 +4,7 @@ use std::sync::Arc;
 use base_db::DiagnosticsConfigInput;
 use crossbeam_channel::Sender;
 use ide::Analysis;
+use lsp_server::Message;
 use lsp_types::Url;
 use project_model::Project;
 use rustc_hash::FxHashMap;
@@ -82,6 +83,10 @@ pub struct LatencyRequestContext {
     /// to the cursor column.
     pub supports_insert_text_mode_adjust_indentation: bool,
     pub task_sender: Sender<Task>,
+    /// Direct channel to the client, so a long-running handler (the `workspace/diagnostic`
+    /// sweep) can stream `$/progress` notifications — partial results and work-done progress —
+    /// while it runs, instead of only returning one final response.
+    pub client_sender: Sender<Message>,
     pub mem_docs: FrozenMemDocs,
     pub file_paths: FrozenFilePaths,
 }
@@ -93,6 +98,14 @@ impl LatencyRequestContext {
 
     pub fn url_for_file_id(&self, file_id: FileId) -> anyhow::Result<Url> {
         self.file_paths.url_for_file_id(file_id)
+    }
+
+    /// Emit a `$/progress` notification carrying an arbitrary payload (a work-done progress
+    /// value or a partial-result literal) under the given client-supplied token.
+    pub fn send_progress(&self, token: &lsp_types::ProgressToken, value: serde_json::Value) {
+        let params = serde_json::json!({ "token": token, "value": value });
+        let notification = lsp_server::Notification::new("$/progress".to_string(), params);
+        self.client_sender.send(notification.into()).ok();
     }
 }
 
