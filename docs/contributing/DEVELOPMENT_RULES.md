@@ -160,6 +160,30 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 Перед использованием crate → Context7 (`resolve-library-id` + `query-docs`)
 
+### 6. Отменяемость LSP-запросов
+
+Salsa сам проверяет отмену на входе в каждый запрос, поэтому «глухие зоны» —
+только длинные циклы/fixpoint внутри **одного** запроса или в IDE-слое над
+запросами.
+
+- Любой новый LSP-обработчик класса «дорогой/многофайловый» (обход графа
+  вызовов, скан всех модулей, массовая правка файлов — `rename`,
+  `callHierarchy`, `workspace/symbol`) идёт через `on_latency` и вызывает
+  `db.unwind_if_revision_cancelled()` в каждом цикле по файлам/узлам. Так
+  `$/cancelRequest` и неявная отмена при записи (didChange) размотают работу, а
+  не досчитают её впустую.
+- Однофайловым обработчикам (`hover`, `completion`, `semanticTokens`, …)
+  отдельные точки не нужны — им хватает автоматических проверок salsa на
+  границах запросов. Вывод аудита текущих `on_latency`-обработчиков
+  (`crates/bsl-analyzer/src/handlers/request.rs`): все однофайловые, кроме
+  `textDocument/references` (свип по source root) — он уже соблюдает правило,
+  вызывая `unwind_if_revision_cancelled()` в `crates/ide/src/references.rs` и
+  `crates/hir-def/src/name_usage_index.rs`.
+- Отмена размывается в `-32800` (`RequestCanceled`) через
+  `salsa::Cancelled::catch` в `run_latency_handler`; паника (не отмена) остаётся
+  `InternalError`. Тип отмены (`local` vs `pending-write`) и elapsed логируются
+  там же.
+
 ---
 
 ## DiagnosticsContext API

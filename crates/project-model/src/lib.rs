@@ -459,16 +459,43 @@ fn default_indent_size() -> u32 {
     4
 }
 
+/// Scope of the LSP pull `workspace/diagnostic` feature.
+///
+/// `Off` (the default) keeps the server on push-only diagnostics for open buffers:
+/// no pull diagnostic provider is advertised, so there is zero behavior change.
+/// `Extensions` reports diagnostics only for files under configuration-extension
+/// roots — the base configuration stays loaded so cross-references resolve, but is
+/// not itself reported. `All` reports the whole configuration, which is expensive on
+/// large configs and therefore strictly opt-in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceDiagnosticsScope {
+    #[default]
+    Off,
+    Extensions,
+    All,
+}
+
+impl WorkspaceDiagnosticsScope {
+    /// Whether any pull diagnostic provider should be advertised at all.
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, WorkspaceDiagnosticsScope::Off)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FeaturesConfig {
     #[serde(default = "default_true", alias = "type_narrowing")]
     pub type_narrowing: bool,
+
+    #[serde(default, alias = "workspace_diagnostics")]
+    pub workspace_diagnostics: WorkspaceDiagnosticsScope,
 }
 
 impl Default for FeaturesConfig {
     fn default() -> Self {
-        Self { type_narrowing: true }
+        Self { type_narrowing: true, workspace_diagnostics: WorkspaceDiagnosticsScope::default() }
     }
 }
 
@@ -1486,7 +1513,7 @@ mod tests {
         resolve_postgres_url, resolve_workspace_branch_policy, wildcard_matches, FeaturesConfig,
         PostgresAccessMode, Project, ProjectConfig, ResolvePostgresUrlError, SearchBaselineBackend,
         SearchBaselinePolicyConfig, SearchBaselineSupportState, SearchPostgresConfig,
-        SearchPostgresCredentialHelperConfig,
+        SearchPostgresCredentialHelperConfig, WorkspaceDiagnosticsScope,
     };
     use chrono::{Duration, TimeZone, Utc};
     use std::fs;
@@ -2378,6 +2405,57 @@ type_narrowing = false
         assert!(
             !config.features.type_narrowing,
             "`[features] type_narrowing = false` in TOML must round-trip to FeaturesConfig"
+        );
+    }
+
+    #[test]
+    fn workspace_diagnostics_defaults_off() {
+        assert_eq!(FeaturesConfig::default().workspace_diagnostics, WorkspaceDiagnosticsScope::Off);
+        let omitted: ProjectConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            omitted.features.workspace_diagnostics,
+            WorkspaceDiagnosticsScope::Off,
+            "an omitted feature must leave the pull provider disabled"
+        );
+    }
+
+    #[test]
+    fn workspace_diagnostics_parses_each_scope_json() {
+        for (raw, expected) in [
+            ("off", WorkspaceDiagnosticsScope::Off),
+            ("extensions", WorkspaceDiagnosticsScope::Extensions),
+            ("all", WorkspaceDiagnosticsScope::All),
+        ] {
+            let config: ProjectConfig = serde_json::from_str(&format!(
+                r#"{{ "features": {{ "workspaceDiagnostics": "{raw}" }} }}"#
+            ))
+            .unwrap();
+            assert_eq!(config.features.workspace_diagnostics, expected, "scope {raw}");
+        }
+    }
+
+    #[test]
+    fn workspace_diagnostics_toml_camel_and_snake_aliases() {
+        for key in ["workspaceDiagnostics", "workspace_diagnostics"] {
+            let toml_str = format!("[features]\n{key} = \"extensions\"\n");
+            let config: super::TomlConfig = toml::from_str(&toml_str).unwrap();
+            assert_eq!(
+                config.features.workspace_diagnostics,
+                WorkspaceDiagnosticsScope::Extensions,
+                "both camelCase and snake_case keys must resolve ({key})"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_diagnostics_invalid_value_is_rejected_not_silently_enabled() {
+        // An unknown scope must NOT deserialize to a value that turns the feature on.
+        let err = serde_json::from_str::<ProjectConfig>(
+            r#"{ "features": { "workspaceDiagnostics": "everything" } }"#,
+        );
+        assert!(
+            err.is_err(),
+            "an invalid scope value must fail deserialization, never degrade to on"
         );
     }
 }

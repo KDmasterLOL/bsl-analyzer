@@ -7,7 +7,7 @@ use base_db::{DiagnosticsConfigInput, Locale};
 use crossbeam_channel::{Receiver, Sender};
 use ide::Analysis;
 use lsp_server::{Message, ReqQueue, Response};
-use lsp_types::Url;
+use lsp_types::{PublishDiagnosticsParams, Url};
 use parking_lot::RwLock;
 use project_model::Project;
 use rustc_hash::FxHashSet;
@@ -55,6 +55,83 @@ pub enum Task {
     /// Posted by [`AnalysisGuard`] on drop so the in-flight counter is always
     /// balanced even if the job panicked before producing its result task.
     AnalysisJobFinished,
+    /// One chunk of the deferred whole-project diagnostics batch (Stream B) finished on
+    /// a worker; the [`WorkspaceBatchOutcome`] says what to do next. The event loop
+    /// applies the push (diffed against the last one, skipping files opened since the
+    /// batch started — those belong to the interactive stream), trims the Salsa LRU (the
+    /// worker's snapshot is dropped by the time this arrives) and advances the sweep,
+    /// finalizing when the plan's file set is exhausted.
+    WorkspaceBatchChunk {
+        generation: u64,
+        outcome: WorkspaceBatchOutcome,
+    },
+}
+
+/// What a finished batch chunk carries back to the event loop.
+#[derive(Debug)]
+pub enum WorkspaceBatchOutcome {
+    /// The chunk computed; each item is a closed file's URI, the hash of its computed
+    /// diagnostics, and the LSP diagnostics.
+    Computed(Vec<WorkspaceBatchItem>),
+    /// A concurrent edit's revision bump cancelled the chunk mid-flight
+    /// (`salsa::Cancelled::PendingWrite`). The plan and cursor are kept and the SAME
+    /// chunk is retried once the edit settles, so coverage is not lost. Never counts as a
+    /// fault (an edit is not a defect), so it is retried without bound.
+    Cancelled,
+    /// A worker unwound on `salsa::Cancelled::PropagatedPanic` — ambiguous under
+    /// parallelism: it is raised both for a genuine deterministic panic in a shared query
+    /// AND for a sibling worker blocked on a query owned by a thread that unwound on a
+    /// (transient) edit cancellation. Retried like [`Self::Cancelled`] but with a bounded
+    /// budget, so a transient cascade recovers while a real deterministic panic is skipped
+    /// after the budget is spent rather than looping forever.
+    Propagated,
+    /// The chunk unwound on a stray non-cancellation panic — deterministic, so retrying
+    /// would loop forever. The chunk is skipped (cursor advanced) and its files go
+    /// uncovered until the next full sweep.
+    Failed,
+}
+
+/// One file's result within a deferred whole-project diagnostics batch (Stream B).
+#[derive(Debug)]
+pub struct WorkspaceBatchItem {
+    pub uri: Url,
+    pub result_id: String,
+    pub diagnostics: Vec<lsp_types::Diagnostic>,
+}
+
+/// An in-progress whole-project diagnostics sweep (Stream B). The file set is frozen
+/// once at the start; the event loop walks it chunk by chunk, dispatching one worker
+/// per chunk and trimming the Salsa LRU between chunks so only a single chunk's working
+/// set is resident at a time (a single long-lived snapshot never crosses a revision
+/// boundary, so Salsa would otherwise never trim — the whole reason the batch is
+/// chunked). `next_chunk` is the cursor into `file_ids`; on completion `batch_pushed`
+/// is reconciled against `batch_reported` to clear files that left scope.
+pub struct WorkspaceBatchPlan {
+    pub generation: u64,
+    pub file_ids: Arc<Vec<vfs::FileId>>,
+    pub file_paths: crate::frozen_context::FrozenFilePaths,
+    pub config: DiagnosticsConfigInput,
+    pub position_encoding: PositionEncoding,
+    pub chunk_size: usize,
+    /// Bounded rayon pool (≈ `ncpu/2`) the chunk computes on, so the batch never saturates
+    /// the cores interactive requests need. `None` if pool creation failed — the sweep
+    /// then falls back to the serial per-file loop. Shared into each chunk worker.
+    pub pool: Option<Arc<rayon::ThreadPool>>,
+    pub next_chunk: usize,
+    pub num_chunks: usize,
+    /// Chunks whose memos have not yet been trimmed. The trim is deferred while
+    /// interactive analysis is in flight (it would cancel those requests), so this can
+    /// exceed one; a force threshold bounds it. Reset to zero on each trim.
+    pub chunks_since_trim: u32,
+    /// Consecutive `PropagatedPanic` unwinds of the current chunk. That variant is
+    /// ambiguous (a transient edit-cancellation cascade or a genuine deterministic panic),
+    /// so the chunk is retried up to a budget and then skipped. Reset when the cursor
+    /// advances (a computed or skipped chunk).
+    pub chunk_retries: u32,
+    pub started_at: std::time::Instant,
+    /// Held for the batch's whole lifetime so the "Analyzing" indicator shows once for
+    /// the sweep rather than flickering per chunk; dropped when the plan is cleared.
+    pub analysis_guard: AnalysisGuard,
 }
 
 /// RAII token for one in-flight background analysis job. It is moved into the
@@ -96,6 +173,17 @@ pub struct GlobalState {
     /// `InsertTextMode::ADJUST_INDENTATION`, so completion snippet continuation
     /// lines can be indented to the cursor column by the client.
     pub supports_insert_text_mode_adjust_indentation: bool,
+    /// True when the pull diagnostic provider is advertised (config opt-in) *and* the
+    /// client advertised `textDocument/diagnostic` support — i.e. the client drives
+    /// diagnostics by pulling. In that mode push publishing is suppressed so a
+    /// pull-capable client does not render each open buffer's diagnostics twice (once
+    /// from the pull report, once from `publishDiagnostics`). A client that opted the
+    /// feature on but cannot pull keeps push, so it is never left without diagnostics.
+    pub pull_diagnostics_active: bool,
+    /// Whether the client advertised `workspace.diagnostics.refreshSupport`, so the server may
+    /// ask it to re-pull workspace diagnostics once background state changes (e.g. after the
+    /// initial workspace load finishes and results first become available).
+    pub supports_workspace_diagnostic_refresh: bool,
     /// Per-URI publish generation. Each scheduled diagnostics computation gets the
     /// next generation for ITS uri; a completed task publishes only if it is still
     /// the latest for that uri. Keyed per-uri (not a single global counter) so
@@ -115,6 +203,45 @@ pub struct GlobalState {
     pub preload_external_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
 
     pub request_tokens: HashMap<lsp_server::RequestId, salsa::CancellationToken>,
+    /// The in-flight `workspace/diagnostic` request, if any. A whole-workspace sweep can run
+    /// for minutes; letting several pile onto the shared latency pool would starve interactive
+    /// requests. Tracking the active one lets a newer sweep cancel the previous so at most one
+    /// occupies a worker at a time.
+    pub active_workspace_diagnostic: Option<lsp_server::RequestId>,
+
+    /// Deferred whole-project diagnostics batch (Stream B), rust-analyzer's
+    /// flycheck analogue: closed in-scope files are analysed off the critical path
+    /// and their diagnostics pushed, so the Problems panel fills without the open
+    /// document ever waiting on a whole-workspace sweep.
+    ///
+    /// `workspace_batch_dirty` requests a (re)run; the event loop spawns the batch
+    /// once the pool has a free worker and none is in flight. `workspace_batch_in_flight`
+    /// guards against launching a second concurrent batch. `batch_pushed` maps each
+    /// URI currently showing non-empty batch diagnostics to the hash last pushed for
+    /// it, so a re-run republishes only what changed and can clear a file that went
+    /// clean (or was opened). `workspace_batch_token` cancels the in-flight batch on
+    /// shutdown or when the feature is turned off.
+    pub workspace_batch_dirty: bool,
+    pub workspace_batch_in_flight: bool,
+    pub batch_pushed: HashMap<Url, String>,
+    pub workspace_batch_token: Option<salsa::CancellationToken>,
+    /// Monotonic id of the current batch sweep. Bumped on every spawn and on a
+    /// config-reload reset, and carried on the batch's chunks/done: the event loop
+    /// drops any chunk whose generation is stale, so a chunk computed against an old
+    /// snapshot (e.g. queued just before a reload turned the feature off) can never
+    /// republish diagnostics under the new configuration.
+    pub workspace_batch_generation: u64,
+    /// URIs the in-flight batch has reported so far (this generation). On a fully
+    /// completed sweep, any `batch_pushed` entry missing from this set no longer
+    /// exists in scope — the file was deleted or the scope narrowed — so its stale
+    /// diagnostics are cleared. Reset at the start of each sweep.
+    pub batch_reported: FxHashSet<Url>,
+    /// The in-progress sweep, if any. `Some` means a chunked batch is walking its
+    /// frozen file set; the event loop resumes it (dispatch next chunk) until the
+    /// cursor is exhausted, then clears it. A fresh sweep is only built when this is
+    /// `None` and `workspace_batch_dirty` is set. Cleared on a config-reload reset.
+    pub workspace_batch_plan: Option<WorkspaceBatchPlan>,
+
     pub last_progress_report: std::time::Instant,
 
     pub skipped_bsl: FxHashSet<paths::AbsPathBuf>,
@@ -183,12 +310,23 @@ impl GlobalState {
                 false,
                 hir::dataflow::DEFAULT_MAX_ITERATIONS,
                 Locale::default(),
+                true,
             ),
             lsp_locale: None,
             position_encoding: PositionEncoding::default(),
             supports_insert_text_mode_adjust_indentation: false,
+            pull_diagnostics_active: false,
+            supports_workspace_diagnostic_refresh: false,
             diagnostics_generation: HashMap::new(),
             pending_diagnostics_uris: Vec::new(),
+            active_workspace_diagnostic: None,
+            workspace_batch_dirty: false,
+            workspace_batch_in_flight: false,
+            batch_pushed: HashMap::new(),
+            workspace_batch_token: None,
+            workspace_batch_generation: 0,
+            batch_reported: FxHashSet::default(),
+            workspace_batch_plan: None,
             diagnostics_tokens: HashMap::new(),
             preload_tokens: HashMap::new(),
             preload_external_tokens: HashMap::new(),
@@ -231,6 +369,19 @@ impl GlobalState {
         AnalysisGuard { sender: self.task_pool.pool.sender.clone() }
     }
 
+    /// True when no interactive db snapshot is in flight — the batch LRU trim cancels
+    /// and blocks on every live snapshot, so it is deferred until this holds. Two pools
+    /// hold snapshots: background analysis jobs (per-file diagnostics, preload), counted
+    /// by `analysis_in_flight` and discounted by the batch's own plan guard; and latency
+    /// request workers (hover, completion, the `workspace/diagnostic` pull, …), each of
+    /// which owns a token in `request_tokens` for its lifetime. A request token can
+    /// linger briefly after its worker's snapshot drops, so this is conservative — it may
+    /// defer a trim that is already safe, never trim while a snapshot is live.
+    pub fn interactive_analysis_quiescent(&self) -> bool {
+        let batch_guard = u32::from(self.workspace_batch_plan.is_some());
+        self.analysis_in_flight <= batch_guard && self.request_tokens.is_empty()
+    }
+
     /// Record that a background analysis job finished. When the last one drains,
     /// end the "Analyzing" indicator if it was shown.
     pub fn note_analysis_finished(&mut self) {
@@ -259,6 +410,71 @@ impl GlobalState {
     pub fn enqueue_pending_diagnostics(&mut self, uri: Url) {
         if !self.pending_diagnostics_uris.contains(&uri) {
             self.pending_diagnostics_uris.push(uri);
+        }
+    }
+
+    /// Request a (re)run of the deferred whole-project diagnostics batch. A no-op
+    /// unless the feature is enabled; the event loop launches it once a worker is
+    /// free. Only a workspace-diagnostics scope other than `Off` arms it, so the
+    /// default push-only configuration never runs a batch.
+    pub fn mark_workspace_batch_dirty(&mut self) {
+        let enabled = self
+            .project
+            .as_ref()
+            .is_some_and(|p| p.config.features.workspace_diagnostics.is_enabled());
+        if enabled {
+            self.workspace_batch_dirty = true;
+        }
+    }
+
+    /// Hand a file off from the batch (Stream B) to the interactive stream (A) when
+    /// it is opened: if the batch had published diagnostics for it, clear them so the
+    /// open document is the sole owner (pull, or push for a non-pull client) and the
+    /// two streams never double-report the same file.
+    pub fn clear_batch_push_for(&mut self, uri: &Url) {
+        if self.batch_pushed.remove(uri).is_some() {
+            let params =
+                PublishDiagnosticsParams { uri: uri.clone(), diagnostics: vec![], version: None };
+            let notification = lsp_server::Notification::new(
+                "textDocument/publishDiagnostics".to_string(),
+                params,
+            );
+            let _ = self.sender.send(notification.into());
+        }
+    }
+
+    /// Tear down the whole-project batch's published state: cancel any in-flight
+    /// sweep and clear every file it pushed (publishing empty reports). Used when the
+    /// configuration is reloaded — the scope may have changed or been turned off, so
+    /// stale batch diagnostics must not linger. The caller re-arms the batch afterward
+    /// if the feature is still enabled.
+    pub fn reset_workspace_batch(&mut self) {
+        if let Some(token) = self.workspace_batch_token.take() {
+            token.cancel();
+        }
+        // Drop the in-progress plan so a re-arm rebuilds the file set against the new
+        // configuration/scope rather than resuming the stale one.
+        self.workspace_batch_plan = None;
+        // Invalidate any chunk still in flight from the pre-reset sweep: bumping the
+        // generation makes the event loop drop those chunks instead of republishing
+        // diagnostics that the new configuration may no longer include.
+        self.workspace_batch_generation = self.workspace_batch_generation.wrapping_add(1);
+        self.clear_all_batch_pushed();
+    }
+
+    /// Clear every file the batch has published (emit an empty report for each) and reset
+    /// the reported-set. Used on a config reset and when a fresh sweep finds nothing in
+    /// scope — a prior sweep's diagnostics for now-deleted / out-of-scope files must not
+    /// linger.
+    pub fn clear_all_batch_pushed(&mut self) {
+        self.batch_reported.clear();
+        for (uri, _) in std::mem::take(&mut self.batch_pushed) {
+            let params = PublishDiagnosticsParams { uri, diagnostics: vec![], version: None };
+            let notification = lsp_server::Notification::new(
+                "textDocument/publishDiagnostics".to_string(),
+                params,
+            );
+            let _ = self.sender.send(notification.into());
         }
     }
 
@@ -360,6 +576,26 @@ impl GlobalState {
             tracing::error!("Failed to send semantic tokens refresh request: {}", e);
         } else {
             tracing::info!("Requested client to refresh semantic tokens");
+        }
+    }
+
+    /// Ask the client to re-pull all workspace diagnostics. Sent once the initial workspace load
+    /// finishes so a pull-capable client refreshes the Problems panel with now-available results
+    /// without the user re-triggering. No-op unless pull is active and the client supports it.
+    pub fn request_workspace_diagnostic_refresh(&self) {
+        if !self.pull_diagnostics_active || !self.supports_workspace_diagnostic_refresh {
+            return;
+        }
+        let id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
+        let request = lsp_server::Request::new(
+            lsp_server::RequestId::from(id),
+            "workspace/diagnostic/refresh".to_string(),
+            (),
+        );
+        if let Err(e) = self.sender.send(request.into()) {
+            tracing::error!("Failed to send workspace diagnostic refresh request: {}", e);
+        } else {
+            tracing::info!("Requested client to refresh workspace diagnostics");
         }
     }
 

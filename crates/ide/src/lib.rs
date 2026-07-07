@@ -11,6 +11,7 @@ mod hover;
 mod references;
 mod signature_help;
 pub mod streaming;
+pub mod symbol_info;
 mod syntax_highlighting;
 
 pub use completion::{CompletionItem, CompletionItemKind};
@@ -40,6 +41,10 @@ pub use ide_diagnostics::{
     SoftwareQuality,
 };
 pub use signature_help::{ParameterInfo, SignatureHelp};
+pub use symbol_info::{
+    symbol_info, SymbolContainer, SymbolDefinition, SymbolInfoCard, SymbolInfoRequest,
+    SymbolInfoSections, SymbolMember, SymbolPosition,
+};
 pub use syntax_highlighting::{highlight, HighlightResult, HlMod, HlRange, HlTag};
 
 use ide_db::base_db::DiagnosticsConfigInput;
@@ -147,6 +152,112 @@ impl Analysis {
         let file_id_input = FileIdInput::new(&self.db, file_id);
         let config_id = DiagnosticsConfigId::new(&self.db, config);
         ide_diagnostics::file_diagnostics_query(&self.db, file_id_input, config_id)
+    }
+
+    /// Diagnostics for a whole set of files (the LSP `workspace/diagnostic` sweep).
+    ///
+    /// A thin loop over the per-file query: each file rides the same Salsa-memoized
+    /// `file_diagnostics_query` as push and single-document pull, so results are
+    /// identical and already-computed files are free. Peak memory is bounded by the
+    /// queries' own LRU caps (which evict at revision boundaries) — the caller must not
+    /// force LRU eviction from a background worker, which would contend with the live
+    /// database. Cancellation is automatic: a concurrent edit bumps the revision and the
+    /// in-flight query unwinds, so the caller's `salsa::Cancelled::catch` aborts the sweep.
+    pub fn workspace_diagnostics(
+        &self,
+        file_ids: &[FileId],
+        config: DiagnosticsConfigInput,
+    ) -> Vec<(FileId, Arc<Vec<Diagnostic>>)> {
+        file_ids
+            .iter()
+            .filter_map(|&file_id| {
+                // One file must not sink the whole sweep. A file racing a disk delete/rewrite can
+                // make `file_text_query` panic on a revision mismatch; catch it and skip that file.
+                // A `salsa::Cancelled` is a genuine revision-bump abort, not a per-file fault — it
+                // must keep unwinding so the caller's `Cancelled::catch` aborts the request.
+                let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.file_diagnostics_cached(file_id, config.clone())
+                }));
+                match computed {
+                    Ok(diagnostics) => Some((file_id, diagnostics)),
+                    Err(payload) if payload.is::<salsa::Cancelled>() => {
+                        std::panic::resume_unwind(payload)
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            file_id = file_id.0,
+                            "workspace diagnostics: skipping file after a compute panic"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Parallel variant of [`Self::workspace_diagnostics`] for the deferred whole-project
+    /// batch. Each file's Salsa-memoised `file_diagnostics_query` runs on the caller's
+    /// bounded `pool`, each rayon worker on its own `db` snapshot (`db.clone()` shares the
+    /// memo tables, so already-computed files stay free and interactive stays warm). The
+    /// pool is the caller's — sized below the core count — so the batch never saturates the
+    /// cores interactive requests need. Results are identical to the serial sweep.
+    ///
+    /// Cancellation and per-file panic handling match [`Self::workspace_diagnostics`]: a
+    /// `salsa::Cancelled` unwinds out of the pool to abort the chunk, a per-file compute
+    /// panic skips just that file.
+    pub fn workspace_diagnostics_parallel(
+        &self,
+        file_ids: &[FileId],
+        config: DiagnosticsConfigInput,
+        pool: &rayon::ThreadPool,
+    ) -> Vec<(FileId, Arc<Vec<Diagnostic>>)> {
+        use hir::ConfigsDatabase;
+        use ide_db::base_db::{DiagnosticsConfigId, FileIdInput};
+        use rayon::prelude::*;
+
+        // Nested-rayon guard: the configuration loader fans out over its own rayon scope.
+        // Warm it ONCE on this thread first so the parallel jobs below find it memoised and
+        // never open a nested scope — a stolen sibling job carrying a different `db` clone
+        // would attach a second database to a thread mid-query, which Salsa forbids.
+        // `configurations` loads every config root (base + extensions), closing the window;
+        // it runs each chunk, so a prior chunk's between-chunk LRU trim cannot leave it cold.
+        if let Some(&first) = file_ids.first() {
+            let _ = self.db.configurations(first);
+        }
+
+        // Move an owned db clone into the pool (Salsa handles are `Send` but `&Analysis`
+        // is not, so `install` cannot borrow `self`); each worker gets its own clone from it.
+        let seed = self.db.clone();
+        pool.install(move || {
+            file_ids
+                .par_iter()
+                .map_with(seed, |db, &file_id| {
+                    // Belt-and-suspenders: if a diagnostic still reaches an internally
+                    // parallel query despite the warm-up, this makes it run serially rather
+                    // than steal a sibling job onto this pool and attach a second database.
+                    let _guard = stdx::par_guard::enter_no_nested_parallelism();
+                    let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let file_id_input = FileIdInput::new(&*db, file_id);
+                        let config_id = DiagnosticsConfigId::new(&*db, config.clone());
+                        ide_diagnostics::file_diagnostics_query(&*db, file_id_input, config_id)
+                    }));
+                    match computed {
+                        Ok(diagnostics) => Some((file_id, diagnostics)),
+                        Err(payload) if payload.is::<salsa::Cancelled>() => {
+                            std::panic::resume_unwind(payload)
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                file_id = file_id.0,
+                                "workspace diagnostics: skipping file after a compute panic"
+                            );
+                            None
+                        }
+                    }
+                })
+                .filter_map(|result| result)
+                .collect()
+        })
     }
 
     pub fn warm_caches_task(&self, file_ids: &[FileId]) -> WarmCachesTask {
@@ -259,3 +370,67 @@ const _: fn() = || {
     assert_send::<Analysis>();
     assert_send::<WarmCachesTask>();
 };
+
+/// In-code suppression directives must be honoured by the two entry points the LSP server and
+/// the MCP server use — both route through `ide_diagnostics::file_diagnostics`, one directly and
+/// one through the salsa-tracked `file_diagnostics_query`.
+#[cfg(test)]
+mod suppression_surface_tests {
+    use super::*;
+    use ide_db::base_db::{
+        DiagnosticsConfigInput, Locale, SourceDatabase, SourceRoot, SourceRootId,
+    };
+    use ide_db::vfs::{file_set::FileSet, VfsPath};
+    use ide_db::RootDatabaseImpl;
+
+    const PLAIN: &str = "Процедура Тест()\n    А = А;\nКонецПроцедуры\n";
+    const SUPPRESSED: &str =
+        "Процедура Тест()\n    // bsl-analyzer:off SelfAssign\n    А = А;\nКонецПроцедуры\n";
+
+    fn analysis_for(code: &str) -> (Analysis, FileId) {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, code);
+        (Analysis::from_database(db), file_id)
+    }
+
+    fn has_self_assign(diags: &[Diagnostic]) -> bool {
+        diags.iter().any(|d| d.code == ide_diagnostics::DiagnosticCode::SelfAssign)
+    }
+
+    #[test]
+    fn mcp_diagnostics_honours_suppression() {
+        let config = DiagnosticsConfig::all_enabled();
+        let (plain, fid) = analysis_for(PLAIN);
+        assert!(has_self_assign(&plain.diagnostics(fid, &config)), "baseline must fire");
+        let (supp, fid) = analysis_for(SUPPRESSED);
+        assert!(!has_self_assign(&supp.diagnostics(fid, &config)), "directive must suppress");
+    }
+
+    #[test]
+    fn lsp_cached_diagnostics_honour_suppression() {
+        let input = DiagnosticsConfigInput::from_raw(
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+            Vec::<(String, String)>::new(),
+            false,
+            hir::dataflow::DEFAULT_MAX_ITERATIONS,
+            Locale::default(),
+            false,
+        );
+        let (plain, fid) = analysis_for(PLAIN);
+        assert!(
+            has_self_assign(&plain.file_diagnostics_cached(fid, input.clone())),
+            "baseline must fire"
+        );
+        let (supp, fid) = analysis_for(SUPPRESSED);
+        assert!(
+            !has_self_assign(&supp.file_diagnostics_cached(fid, input)),
+            "directive must suppress through the salsa-tracked query"
+        );
+    }
+}

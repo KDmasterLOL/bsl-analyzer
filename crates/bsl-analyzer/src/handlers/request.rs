@@ -565,6 +565,320 @@ pub fn handle_code_action(
     }
 }
 
+/// Pull-model single-document diagnostics (`textDocument/diagnostic`).
+///
+/// Uses the same `file_diagnostics_query` the push path uses, so a pulled report is
+/// identical to what the editor already shows — and unlike push it also serves closed
+/// files, reading their text from the disk-backed database. The `previous_result_id`
+/// fast-path returns a tiny `Unchanged` report when the diagnostics have not changed.
+///
+/// This is intentionally scope-independent: `WorkspaceDiagnosticsScope::Extensions`
+/// governs which files the bulk `workspace/diagnostic` sweep reports, not an explicit
+/// single-file request. A user who opens a base-configuration file expects its
+/// diagnostics, and computing them for that one file on demand is cheap (it does not
+/// trigger whole-base analysis).
+pub fn handle_document_diagnostic(
+    ctx: LatencyRequestContext,
+    params: lsp_types::DocumentDiagnosticParams,
+) -> Result<lsp_types::DocumentDiagnosticReportResult> {
+    use lsp_types::{
+        DocumentDiagnosticReport, DocumentDiagnosticReportResult, FullDocumentDiagnosticReport,
+        RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport,
+        UnchangedDocumentDiagnosticReport,
+    };
+
+    let uri = params.text_document.uri;
+    let _p = tracing::info_span!("handle_document_diagnostic", uri = %uri).entered();
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let ide_diagnostics =
+        ctx.analysis.file_diagnostics_cached(file_id, ctx.diagnostics_config.clone());
+    let result_id = crate::lsp::diagnostics_result_id(&ide_diagnostics);
+
+    if params.previous_result_id.as_deref() == Some(result_id.as_str()) {
+        return Ok(DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Unchanged(
+            RelatedUnchangedDocumentDiagnosticReport {
+                related_documents: None,
+                unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                    result_id,
+                },
+            },
+        )));
+    }
+
+    // An open buffer's overlay text (and its cached line index) reflects unsaved edits;
+    // a closed file has neither, so fall back to the database's disk-backed text.
+    let items = match ctx.mem_docs.get(&uri) {
+        Some(doc) => crate::lsp::to_proto::diagnostics_with_encoding(
+            doc.line_index(),
+            doc.text(),
+            &ide_diagnostics,
+            ctx.position_encoding,
+        ),
+        None => {
+            let text = ctx.analysis.file_text(file_id);
+            let line_index = LineIndex::new(&text);
+            crate::lsp::to_proto::diagnostics_with_encoding(
+                &line_index,
+                &text,
+                &ide_diagnostics,
+                ctx.position_encoding,
+            )
+        }
+    };
+
+    Ok(DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(
+        RelatedFullDocumentDiagnosticReport {
+            related_documents: None,
+            full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                result_id: Some(result_id),
+                items,
+            },
+        },
+    )))
+}
+
+/// Emits a `WorkDoneProgress` `End` for a started progress token on drop, so the client's progress
+/// indicator is always closed — including when the sweep unwinds on a Salsa cancellation.
+struct WorkDoneProgressGuard<'a> {
+    ctx: &'a LatencyRequestContext,
+    token: lsp_types::ProgressToken,
+}
+
+impl Drop for WorkDoneProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.ctx.send_progress(
+            &self.token,
+            serde_json::to_value(lsp_types::WorkDoneProgress::End(
+                lsp_types::WorkDoneProgressEnd { message: None },
+            ))
+            .unwrap_or_default(),
+        );
+    }
+}
+
+/// Pull-model whole-workspace diagnostics (`workspace/diagnostic`).
+///
+/// Reports diagnostics for every in-scope BSL file in one sweep. Scope comes from
+/// `[features] workspaceDiagnostics`: `Extensions` reports only files under a
+/// configuration-extension root (the base configuration stays loaded so cross-references
+/// resolve, but base files are not reported); `All` reports the whole configuration.
+///
+/// Runs on the task pool via `on_latency`, which also provides the boot gate (declined
+/// with `ContentModified` until the workspace has loaded) and cancellation: a concurrent
+/// edit bumps the Salsa revision and the sweep unwinds, so the client simply re-pulls.
+/// Each file's `previousResultId` drives a tiny `Unchanged` report when nothing changed.
+///
+/// When the client supplies a `partialResultToken`, reports are streamed in chunks via
+/// `$/progress` as they are computed (so the Problems panel fills progressively instead of
+/// waiting for a minutes-long `all` sweep), and the final response is an empty report. A
+/// `workDoneToken` drives a work-done progress indicator over the same sweep.
+pub fn handle_workspace_diagnostic(
+    ctx: LatencyRequestContext,
+    params: lsp_types::WorkspaceDiagnosticParams,
+) -> Result<lsp_types::WorkspaceDiagnosticReportResult> {
+    use lsp_types::{
+        WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressReport, WorkspaceDiagnosticReport,
+        WorkspaceDiagnosticReportResult,
+    };
+
+    let _p = tracing::info_span!("handle_workspace_diagnostic").entered();
+
+    let scope =
+        ctx.project.as_ref().map(|p| p.config.features.workspace_diagnostics).unwrap_or_default();
+    if !scope.is_enabled() {
+        return Ok(WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport::default()));
+    }
+
+    // Extension roots for scope filtering. For `Extensions`, only files under one of these
+    // are reported; `All` reports every BSL file.
+    let ext_roots: Vec<&std::path::Path> = ctx
+        .project
+        .as_ref()
+        .map(|p| p.extension_paths().iter().map(|(_, path)| path.as_path()).collect())
+        .unwrap_or_default();
+
+    let mut file_ids: Vec<vfs::FileId> = ctx
+        .file_paths
+        .iter()
+        .filter(|(_, path)| path_in_workspace_scope(path, scope, &ext_roots))
+        .map(|(file_id, _)| file_id)
+        .collect();
+    // Stable report order across pulls (protocol-agnostic, but keeps diffs/logs sane).
+    file_ids.sort_by_key(|f| f.0);
+
+    let previous: FxHashMap<lsp_types::Url, String> =
+        params.previous_result_ids.into_iter().map(|p| (p.uri, p.value)).collect();
+
+    let total = file_ids.len();
+    tracing::info!(scope = ?scope, files = total, "workspace diagnostics sweep");
+
+    let partial_token = params.partial_result_params.partial_result_token;
+    let work_done_token = params.work_done_progress_params.work_done_token;
+
+    // The client created the work-done token, so the server drives it directly (no create
+    // round-trip). The guard sends `End` on drop — including a Salsa-cancellation unwind — so the
+    // client's progress indicator never stays stuck if the sweep is aborted mid-flight.
+    let _work_done_guard = work_done_token.as_ref().map(|token| {
+        ctx.send_progress(
+            token,
+            serde_json::to_value(WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "Workspace diagnostics".to_string(),
+                cancellable: Some(false),
+                message: Some(format!("0/{total}")),
+                percentage: Some(0),
+            }))
+            .unwrap_or_default(),
+        );
+        WorkDoneProgressGuard { ctx: &ctx, token: token.clone() }
+    });
+
+    // Compute in chunks so streaming clients see progress and the heavy per-file memos fall out
+    // of the Salsa LRU between chunks instead of all piling up at once.
+    const CHUNK: usize = 64;
+    let mut collected = Vec::new();
+    let mut done = 0usize;
+    for chunk in file_ids.chunks(CHUNK) {
+        let computed = ctx.analysis.workspace_diagnostics(chunk, ctx.diagnostics_config.clone());
+        let chunk_items: Vec<_> = computed
+            .into_iter()
+            .filter_map(|(file_id, diagnostics)| {
+                workspace_report_item(&ctx, file_id, &diagnostics, &previous)
+            })
+            .collect();
+        done += chunk.len();
+
+        if let Some(token) = &partial_token {
+            ctx.send_progress(token, serde_json::json!({ "items": chunk_items }));
+        } else {
+            collected.extend(chunk_items);
+        }
+        if let Some(token) = &work_done_token {
+            let percentage = ((done as f64 / total.max(1) as f64) * 100.0) as u32;
+            ctx.send_progress(
+                token,
+                serde_json::to_value(WorkDoneProgress::Report(WorkDoneProgressReport {
+                    cancellable: Some(false),
+                    message: Some(format!("{done}/{total}")),
+                    percentage: Some(percentage),
+                }))
+                .unwrap_or_default(),
+            );
+        }
+    }
+
+    // `End` is emitted by `_work_done_guard` on drop (here and on a cancellation unwind alike).
+
+    // Streamed reports were already delivered via `$/progress`; the response is then an empty
+    // report. Without a partial-result token everything is returned in the response instead.
+    let items = if partial_token.is_some() { Vec::new() } else { collected };
+    Ok(WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport { items }))
+}
+
+/// Builds one `workspace/diagnostic` report entry for a computed file: an `Unchanged` stub when
+/// the client's `previousResultId` still matches, otherwise a `Full` report. Returns `None` only
+/// when the file id has no resolvable URL (it was removed from the frozen snapshot).
+fn workspace_report_item(
+    ctx: &LatencyRequestContext,
+    file_id: vfs::FileId,
+    diagnostics: &[ide::Diagnostic],
+    previous: &FxHashMap<lsp_types::Url, String>,
+) -> Option<lsp_types::WorkspaceDocumentDiagnosticReport> {
+    use lsp_types::{
+        FullDocumentDiagnosticReport, UnchangedDocumentDiagnosticReport,
+        WorkspaceDocumentDiagnosticReport, WorkspaceFullDocumentDiagnosticReport,
+        WorkspaceUnchangedDocumentDiagnosticReport,
+    };
+
+    let url = ctx.url_for_file_id(file_id).ok()?;
+    let result_id = crate::lsp::diagnostics_result_id(diagnostics);
+    // The LSP spec wants the buffer version for an open document (and `None` only for a closed
+    // one), so a client can associate or discard the report against its buffer.
+    let open_doc = ctx.mem_docs.get(&url);
+    let version = open_doc.map(|doc| doc.version() as i64);
+
+    if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
+        return Some(WorkspaceDocumentDiagnosticReport::Unchanged(
+            WorkspaceUnchangedDocumentDiagnosticReport {
+                uri: url,
+                version,
+                unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                    result_id,
+                },
+            },
+        ));
+    }
+
+    // An open buffer's overlay text (and cached line index) reflects unsaved edits; a closed
+    // file has neither, so fall back to the database's disk-backed text.
+    let lsp_items = match open_doc {
+        Some(doc) => crate::lsp::to_proto::diagnostics_with_encoding(
+            doc.line_index(),
+            doc.text(),
+            diagnostics,
+            ctx.position_encoding,
+        ),
+        None => {
+            // A closed file's disk-backed text read (and conversion) can panic if the file was
+            // deleted/rewritten mid-sweep. Catch it so one racing file does not fail the whole
+            // request (and, when streaming, discard already-sent chunks); a `salsa::Cancelled`
+            // is a real abort and must keep unwinding.
+            let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let text = ctx.analysis.file_text(file_id);
+                let line_index = LineIndex::new(&text);
+                crate::lsp::to_proto::diagnostics_with_encoding(
+                    &line_index,
+                    &text,
+                    diagnostics,
+                    ctx.position_encoding,
+                )
+            }));
+            match converted {
+                Ok(lsp_items) => lsp_items,
+                Err(payload) if payload.is::<salsa::Cancelled>() => {
+                    std::panic::resume_unwind(payload)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        file_id = file_id.0,
+                        "workspace diagnostics: skipping file after a text-read panic"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+
+    Some(WorkspaceDocumentDiagnosticReport::Full(WorkspaceFullDocumentDiagnosticReport {
+        uri: url,
+        version,
+        full_document_diagnostic_report: FullDocumentDiagnosticReport {
+            result_id: Some(result_id),
+            items: lsp_items,
+        },
+    }))
+}
+
+/// Whether a file belongs to the `workspace/diagnostic` sweep for the given scope.
+/// Only BSL source files are ever in scope; `Extensions` additionally requires the file
+/// to live under one of the configuration-extension roots.
+pub(crate) fn path_in_workspace_scope(
+    path: &std::path::Path,
+    scope: project_model::WorkspaceDiagnosticsScope,
+    ext_roots: &[&std::path::Path],
+) -> bool {
+    use project_model::WorkspaceDiagnosticsScope as S;
+    if !project_model::is_bsl_source_path(path) {
+        return false;
+    }
+    match scope {
+        S::All => true,
+        S::Extensions => ext_roots.iter().any(|root| path.starts_with(root)),
+        S::Off => false,
+    }
+}
+
 fn convert_document_symbol(
     line_index: &LineIndex,
     text: &str,
@@ -964,6 +1278,31 @@ mod tests {
     use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
     use crate::global_state::GlobalState;
 
+    #[test]
+    fn workspace_scope_filters_by_extension_root() {
+        use project_model::WorkspaceDiagnosticsScope::{All, Extensions, Off};
+        use std::path::Path;
+
+        let ext_root = Path::new("/proj/src/cfe/ExtA");
+        let ext_roots = [ext_root];
+        let ext_file = Path::new("/proj/src/cfe/ExtA/CommonModules/M/Ext/Module.bsl");
+        let base_file = Path::new("/proj/src/cf/CommonModules/M/Ext/Module.bsl");
+        let xml_file = Path::new("/proj/src/cfe/ExtA/Configuration.xml");
+
+        // Extensions: only BSL files under an extension root.
+        assert!(path_in_workspace_scope(ext_file, Extensions, &ext_roots));
+        assert!(!path_in_workspace_scope(base_file, Extensions, &ext_roots));
+        assert!(!path_in_workspace_scope(xml_file, Extensions, &ext_roots), "non-BSL excluded");
+
+        // All: every BSL file, extension or base.
+        assert!(path_in_workspace_scope(ext_file, All, &ext_roots));
+        assert!(path_in_workspace_scope(base_file, All, &ext_roots));
+        assert!(!path_in_workspace_scope(xml_file, All, &ext_roots), "non-BSL still excluded");
+
+        // Off: nothing (defensive — the handler returns early before this).
+        assert!(!path_in_workspace_scope(ext_file, Off, &ext_roots));
+    }
+
     fn snippet_item(insert_text: &str) -> ide::CompletionItem {
         ide::CompletionItem {
             label: "Если".into(),
@@ -1013,6 +1352,7 @@ mod tests {
             supports_insert_text_mode_adjust_indentation: state
                 .supports_insert_text_mode_adjust_indentation,
             task_sender: state.task_pool.pool.sender.clone(),
+            client_sender: state.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&state.vfs.read()),
         }

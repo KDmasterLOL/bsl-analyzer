@@ -125,6 +125,8 @@ pub struct DiagnosticsConfigInput {
     pub dataflow_max_iterations: usize,
 
     pub locale: crate::Locale,
+
+    pub bslls_suppression_compat: bool,
 }
 
 impl DiagnosticsConfigInput {
@@ -135,6 +137,7 @@ impl DiagnosticsConfigInput {
         ordinary_app_support: bool,
         dataflow_max_iterations: usize,
         locale: crate::Locale,
+        bslls_suppression_compat: bool,
     ) -> Self {
         let mut disabled: Vec<String> = disabled.into_iter().collect();
         disabled.sort();
@@ -155,6 +158,7 @@ impl DiagnosticsConfigInput {
             ordinary_app_support,
             dataflow_max_iterations,
             locale,
+            bslls_suppression_compat,
         }
     }
 

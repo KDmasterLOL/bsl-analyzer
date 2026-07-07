@@ -26,6 +26,7 @@ impl GlobalState {
                         false,
                         hir::dataflow::DEFAULT_MAX_ITERATIONS,
                         locale,
+                        true,
                     )
                 },
             );
@@ -74,6 +75,7 @@ impl GlobalState {
             config.ordinary_app_support,
             config.dataflow_max_iterations,
             locale,
+            config.bslls_suppression_compat,
         )
     }
 }

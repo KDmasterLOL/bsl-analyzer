@@ -22,7 +22,7 @@ pub(super) fn build_user_params(
                 name: SmolStr::new(name_str),
                 types,
                 is_optional: p.has_default,
-                default_value: None,
+                default_value: p.default_value.clone(),
                 description: doc.and_then(joined_descriptions),
                 is_val: p.is_val,
             }

@@ -2,8 +2,10 @@ use std::path::{Path, PathBuf};
 
 use ide::DiagnosticOutput;
 
+pub mod codequality;
 pub mod console;
 pub mod json;
+pub mod junit;
 pub mod sarif;
 
 #[derive(Debug, Clone)]
@@ -22,6 +24,22 @@ pub struct FileAnalysis {
     pub path: PathBuf,
     pub relative_path: PathBuf,
     pub diagnostics: Vec<DiagnosticOutput>,
+
+    /// Normalized source line for each entry of `diagnostics`, index-aligned.
+    ///
+    /// Captured once at analysis time, where the file text is already loaded, so
+    /// the Code Quality reporter can build a line-shift-stable fingerprint without
+    /// re-reading the file (a third read of every module) or rescanning its text
+    /// per finding. Empty when the producer did not supply snippets; the reporter
+    /// then falls back to a path/code/occurrence fingerprint.
+    pub line_snippets: Vec<String>,
+}
+
+/// Collapses surrounding and repeated whitespace in a source line so that
+/// cosmetic reformatting around a finding does not change its Code Quality
+/// fingerprint. Shared by the producer (analysis) and the fingerprint contract.
+pub fn normalize_source_line(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub trait Reporter: Send + Sync {
@@ -41,6 +59,8 @@ impl ReporterRegistry {
                 Box::new(console::ConsoleReporter),
                 Box::new(json::JsonReporter),
                 Box::new(sarif::SarifReporter),
+                Box::new(codequality::CodeQualityReporter),
+                Box::new(junit::JunitReporter),
             ],
         }
     }
@@ -65,8 +85,11 @@ mod tests {
     use super::ReporterRegistry;
 
     #[test]
-    fn registry_contains_sarif_reporter() {
+    fn registry_contains_expected_reporters() {
         let registry = ReporterRegistry::new();
-        assert!(registry.keys().contains(&"sarif"));
+        let keys = registry.keys();
+        for expected in ["console", "json", "sarif", "codequality", "junit"] {
+            assert!(keys.contains(&expected), "missing reporter: {expected}");
+        }
     }
 }

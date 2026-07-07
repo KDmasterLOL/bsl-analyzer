@@ -130,6 +130,13 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
 pub(crate) const WEAVING_DIAGNOSTICS: &[DiagnosticCode] =
     &[DiagnosticCode::WeavingSignatureMismatch, DiagnosticCode::WeavingAnnotationNotApplicable];
 
+/// Diagnostics emitted by the in-code suppression pass (`crate::suppression`), which runs from
+/// `apply_extension_merge` rather than a collector. Only the coverage-invariant test consumes this
+/// (unlike `WEAVING_DIAGNOSTICS`, which the merge pass also reads at runtime), so it is test-only.
+#[cfg(test)]
+pub(crate) const SUPPRESSION_DIAGNOSTICS: &[DiagnosticCode] =
+    &[DiagnosticCode::UnknownSuppressionCode, DiagnosticCode::SuppressionWithoutCode];
+
 pub fn run_diagnostic<F>(
     name: &'static str,
     ctx: &DiagnosticsContext,
@@ -603,6 +610,7 @@ mod tests {
             ("METADATA_DIAGNOSTICS", crate::metadata_dispatch::METADATA_DIAGNOSTICS),
             ("INFERENCE_DIAGNOSTICS", crate::hir_inference_dispatch::INFERENCE_DIAGNOSTICS),
             ("WEAVING_DIAGNOSTICS", WEAVING_DIAGNOSTICS),
+            ("SUPPRESSION_DIAGNOSTICS", SUPPRESSION_DIAGNOSTICS),
         ];
 
         let mut code_to_arrays: HashMap<DiagnosticCode, Vec<&str>> = HashMap::new();

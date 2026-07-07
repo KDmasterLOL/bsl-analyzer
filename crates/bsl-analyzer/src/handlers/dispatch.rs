@@ -128,6 +128,7 @@ impl RequestDispatcher<'_> {
                 .global_state
                 .supports_insert_text_mode_adjust_indentation,
             task_sender: self.global_state.task_pool.pool.sender.clone(),
+            client_sender: self.global_state.sender.clone(),
             mem_docs: self.global_state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&self.global_state.vfs.read()),
         };
@@ -275,14 +276,53 @@ where
     R::Result: Serialize,
 {
     let inner_id = id.clone();
+    let started = std::time::Instant::now();
     let inner = move || -> Response {
         match salsa::Cancelled::catch(AssertUnwindSafe(|| f(ctx, params))) {
             Ok(result) => result_to_response::<R>(inner_id, result),
-            Err(_cancelled) => Response::new_err(
-                inner_id,
-                ErrorCode::RequestCanceled as i32,
-                "request cancelled".to_string(),
-            ),
+            Err(cancelled) => {
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                match cancelled {
+                    // Not a cancellation: a thread this query was blocked on
+                    // panicked. Surface it as an internal error instead of
+                    // hiding a real panic behind a `-32800` cancel.
+                    salsa::Cancelled::PropagatedPanic => {
+                        tracing::error!(
+                            request_id = ?inner_id,
+                            method = R::METHOD,
+                            elapsed_ms,
+                            "async LSP request aborted: a thread it was blocked on panicked"
+                        );
+                        Response::new_err(
+                            inner_id,
+                            ErrorCode::InternalError as i32,
+                            "internal handler panic".to_string(),
+                        )
+                    }
+                    // Distinguish a client `$/cancelRequest` (Local) from an
+                    // implicit cancel by a concurrent VFS write (PendingWrite),
+                    // and report elapsed so logs show how much work was saved.
+                    cancelled => {
+                        let cancel_kind = match cancelled {
+                            salsa::Cancelled::Local => "local",
+                            salsa::Cancelled::PendingWrite => "pending-write",
+                            _ => "other",
+                        };
+                        tracing::info!(
+                            request_id = ?inner_id,
+                            method = R::METHOD,
+                            elapsed_ms,
+                            cancel_kind,
+                            "async LSP request unwound (cancelled)"
+                        );
+                        Response::new_err(
+                            inner_id,
+                            ErrorCode::RequestCanceled as i32,
+                            "request cancelled".to_string(),
+                        )
+                    }
+                }
+            }
         }
     };
 
@@ -474,5 +514,115 @@ mod tests {
         let current =
             state.request_tokens.get(&id).expect("second dispatch must register a new token");
         assert!(!current.is_cancelled(), "new token must still be live");
+    }
+
+    /// Builds a `LatencyRequestContext` whose db handle shares its cancellation
+    /// token with the returned token — the same wiring `on_latency` sets up, so
+    /// cancelling the token unwinds queries run through `ctx.analysis`.
+    fn latency_ctx_with_token(
+        state: &GlobalState,
+    ) -> (crate::frozen_context::LatencyRequestContext, salsa::CancellationToken) {
+        use salsa::Database as _;
+
+        let db = state.analysis_host.raw_database().clone();
+        let token = db.cancellation_token();
+        let analysis = ide::Analysis::from_database(db);
+        let ctx = crate::frozen_context::LatencyRequestContext {
+            analysis,
+            workspace_root: state.workspace_root.clone(),
+            project: state.project.clone(),
+            diagnostics_config: state.diagnostics_config().clone(),
+            position_encoding: state.position_encoding,
+            supports_insert_text_mode_adjust_indentation: state
+                .supports_insert_text_mode_adjust_indentation,
+            task_sender: state.task_pool.pool.sender.clone(),
+            client_sender: state.sender.clone(),
+            mem_docs: state.mem_docs.freeze(),
+            file_paths: crate::frozen_context::FrozenFilePaths::freeze(&state.vfs.read()),
+        };
+        (ctx, token)
+    }
+
+    #[test]
+    fn run_latency_handler_unwinds_cancelled_to_request_canceled() {
+        use salsa::Database as _;
+
+        let (sender, _receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
+
+        let (ctx, token) = latency_ctx_with_token(&state);
+        // Client cancelled while the request is in flight: the token fires
+        // before the handler reaches its cancellation checkpoint.
+        token.cancel();
+
+        let id = lsp_server::RequestId::from(11);
+        let response =
+            run_latency_handler::<HoverRequest>(id.clone(), ctx, hover_params(), |ctx, _p| {
+                // Stand-in for the salsa auto-check at a query boundary (or a manual
+                // `unwind_if_revision_cancelled()` inside a multi-file loop): a live
+                // handler that observes a cancelled token must unwind, not finish.
+                ctx.analysis.database().unwind_if_revision_cancelled();
+                Ok(None)
+            });
+
+        assert_eq!(response.id, id);
+        let err = response.error.expect("a cancelled handler must produce an error response");
+        assert_eq!(
+            err.code,
+            ErrorCode::RequestCanceled as i32,
+            "an unwound cancellation must map to RequestCanceled, not InternalError"
+        );
+    }
+
+    #[test]
+    fn late_cancel_after_completion_is_noop() {
+        let (sender, _receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
+
+        let id = lsp_server::RequestId::from(12);
+        let req = Request::new(
+            id.clone(),
+            HoverRequest::METHOD.to_string(),
+            serde_json::to_value(hover_params()).unwrap(),
+        );
+
+        let receiver = state.task_pool.receiver.clone();
+        RequestDispatcher { req: Some(req), global_state: &mut state }
+            .on_latency::<HoverRequest>(|_ctx, _p| Ok(None))
+            .finish();
+
+        // The handler completes once, producing exactly one Ok response.
+        let task = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("task pool did not produce RequestResult");
+        let Task::RequestResult { response } = task else {
+            panic!("expected RequestResult, got {task:?}");
+        };
+        assert_eq!(response.id, id);
+        assert!(response.error.is_none(), "a completed handler must return Ok, not cancelled");
+
+        // The server evicts the token when it dispatches the response
+        // (server.rs, on RequestResult). Model that here.
+        let token = state.request_tokens.remove(&id).expect("token registered while in flight");
+
+        // A `$/cancelRequest` that races in *after* completion now finds no
+        // token: it must take the no-op branch, not panic, and produce no work.
+        crate::handlers::notification::handle_cancel(
+            &mut state,
+            lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(12) },
+        )
+        .unwrap();
+
+        // No second response was produced by the late cancel.
+        assert!(receiver.try_recv().is_err(), "a late cancel must not conjure a second response");
+
+        // The already-consumed token is one-shot: a late `cancel()` (and a
+        // duplicate) is harmless and idempotent.
+        assert!(!token.is_cancelled());
+        token.cancel();
+        token.cancel();
+        assert!(token.is_cancelled());
     }
 }

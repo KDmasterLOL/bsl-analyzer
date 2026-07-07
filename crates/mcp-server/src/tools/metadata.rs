@@ -40,9 +40,10 @@ pub fn get_metadata_tree(
     config: &Configuration,
     extensions: &[(String, Configuration)],
     filter: Option<String>,
+    max_output_tokens: usize,
 ) -> Result<CallToolResult, McpError> {
     if let Some(ref category) = filter {
-        format_filtered_tree(config, category)
+        format_filtered_tree(config, category, max_output_tokens)
     } else {
         let mut result = format_summary_tree(config)?;
         if !extensions.is_empty() {
@@ -159,6 +160,7 @@ fn normalize_filter_category(raw: &str) -> String {
 fn format_filtered_tree(
     config: &Configuration,
     raw_category: &str,
+    max_output_tokens: usize,
 ) -> Result<CallToolResult, McpError> {
     let category = normalize_filter_category(raw_category);
     let category = category.as_str();
@@ -253,6 +255,14 @@ fn format_filtered_tree(
             None,
         ));
     }
+
+    // A category listing on a large config (e.g. every Справочник in ERP) can be thousands of
+    // lines; cap it to the output budget at a line boundary so the response stays bounded.
+    crate::tools::response::truncate_text_to_budget(
+        &mut out,
+        max_output_tokens,
+        "\n-- список усечён под max_output_tokens; повысьте бюджет или запросите объект действием `object` --\n",
+    );
 
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
@@ -1050,7 +1060,7 @@ mod tests {
     #[test]
     fn test_metadata_tree_summary() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, &[], None).unwrap();
+        let result = get_metadata_tree(&config, &[], None, usize::MAX).unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("дерево метаданных"), "should have header");
@@ -1062,7 +1072,8 @@ mod tests {
     #[test]
     fn test_metadata_tree_filter_catalogs() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, &[], Some("Справочник".into())).unwrap();
+        let result =
+            get_metadata_tree(&config, &[], Some("Справочник".into()), usize::MAX).unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("Справочник"), "should have category name");
@@ -1090,7 +1101,7 @@ mod tests {
         let config = fixture_config();
         for input in ["Catalogs", "Справочники", "Справочник.Справочник1"]
         {
-            let result = get_metadata_tree(&config, &[], Some(input.into())).unwrap();
+            let result = get_metadata_tree(&config, &[], Some(input.into()), usize::MAX).unwrap();
             let text = extract_text(&result);
             assert!(
                 text.contains("Справочник1"),
@@ -1102,7 +1113,8 @@ mod tests {
     #[test]
     fn test_metadata_tree_filter_common_modules() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, &[], Some("ОбщиеМодули".into())).unwrap();
+        let result =
+            get_metadata_tree(&config, &[], Some("ОбщиеМодули".into()), usize::MAX).unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("ОбщиеМодули"), "should have category name");
@@ -1111,7 +1123,8 @@ mod tests {
     #[test]
     fn test_metadata_tree_filter_invalid() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, &[], Some("НесуществующаяКатегория".into()));
+        let result =
+            get_metadata_tree(&config, &[], Some("НесуществующаяКатегория".into()), usize::MAX);
 
         assert!(result.is_err(), "should return error for unknown category");
     }
@@ -1244,7 +1257,8 @@ mod tests {
     #[test]
     fn metadata_tree_filter_lists_http_services_explicitly() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, &[], Some("HTTPСервис".into())).unwrap();
+        let result =
+            get_metadata_tree(&config, &[], Some("HTTPСервис".into()), usize::MAX).unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("HTTPСервис1"), "filter must enumerate http services: {text}");
@@ -1257,7 +1271,7 @@ mod tests {
     #[test]
     fn metadata_tree_filter_lists_web_services_explicitly() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, &[], Some("WebСервис".into())).unwrap();
+        let result = get_metadata_tree(&config, &[], Some("WebСервис".into()), usize::MAX).unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("WebСервис1"), "filter must enumerate web services: {text}");
@@ -1269,7 +1283,8 @@ mod tests {
         // `Метаданные.СервисыИнтеграции` plural), but the MCP enumeration surface must
         // still list integration services as a discrete category for agent discovery.
         let config = fixture_config();
-        let result = get_metadata_tree(&config, &[], Some("СервисИнтеграции".into())).unwrap();
+        let result =
+            get_metadata_tree(&config, &[], Some("СервисИнтеграции".into()), usize::MAX).unwrap();
         let text = extract_text(&result);
 
         assert!(

@@ -41,7 +41,7 @@ mod tests {
         let mut db = RootDatabaseImpl::new();
         assert!(db.type_narrowing_enabled(), "fresh database defaults to narrowing on");
 
-        let disabled = FeaturesConfig { type_narrowing: false };
+        let disabled = FeaturesConfig { type_narrowing: false, ..FeaturesConfig::default() };
         apply_features_to_db(&mut db, &disabled);
         assert!(!db.type_narrowing_enabled(), "apply must flip the Salsa input to false");
 

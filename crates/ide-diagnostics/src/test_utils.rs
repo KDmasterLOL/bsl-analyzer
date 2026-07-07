@@ -190,6 +190,25 @@ pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
     check_ast_diagnostic(code, crate::diagnostics)
 }
 
+/// Like [`check_hir_diagnostic`] but through the full `file_diagnostics` pipeline, so the
+/// `apply_extension_merge` stage — where in-code suppression directives are applied — runs.
+pub fn check_file_diagnostics(code: &str) -> Vec<Diagnostic> {
+    check_file_diagnostics_with_config(code, crate::DiagnosticsConfig::all_enabled())
+}
+
+pub fn check_file_diagnostics_with_config(
+    code: &str,
+    config: crate::DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    let (db, file_id) = create_test_db(code);
+    crate::file_diagnostics(&db, file_id, &config)
+}
+
+pub fn check_file_diagnostics_snapshot(source: &str, expected: expect_test::Expect) {
+    let diagnostics = check_file_diagnostics(source);
+    expected.assert_eq(&format_diags(source, &diagnostics));
+}
+
 pub fn format_diags(source: &str, diags: &[Diagnostic]) -> String {
     let mut entries = diags
         .iter()

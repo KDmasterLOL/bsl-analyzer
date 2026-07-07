@@ -17,6 +17,8 @@ pub struct ModuleIndex {
     object_modules: FxHashMap<(MdoType, String), FileId>,
 
     record_set_modules: FxHashMap<(MdoType, String), FileId>,
+
+    forms: FxHashMap<(Option<(MdoType, String)>, String), FileId>,
 }
 
 impl ModuleIndex {
@@ -29,6 +31,14 @@ impl ModuleIndex {
 
         for (file_id, path) in paths {
             let normalized = path.replace('\\', "/");
+
+            if let Some(form_key) = parse_form_module_path(&normalized) {
+                let owner = form_key
+                    .owner
+                    .map(|(mdo_type, object)| (mdo_type, object.as_str().fold_lower()));
+                index.forms.insert((owner, form_key.form_name.as_str().fold_lower()), file_id);
+                continue;
+            }
 
             let Some((module_type, name, file_kind)) = parse_module_path(&normalized) else {
                 continue;
@@ -91,6 +101,15 @@ impl ModuleIndex {
 
     pub fn resolve_record_set_module(&self, mdo_type: MdoType, name: &Name) -> Option<FileId> {
         self.record_set_modules.get(&(mdo_type, name.as_str().fold_lower())).copied()
+    }
+
+    pub fn resolve_form_module(
+        &self,
+        owner: Option<(MdoType, &Name)>,
+        form_name: &Name,
+    ) -> Option<FileId> {
+        let owner_key = owner.map(|(mdo_type, name)| (mdo_type, name.as_str().fold_lower()));
+        self.forms.get(&(owner_key, form_name.as_str().fold_lower())).copied()
     }
 
     pub fn common_module_count(&self) -> usize {
@@ -617,6 +636,53 @@ mod tests {
         // The legacy ordinary-form `FormModule.bsl` shape (no `Ext/Form/Module.bsl`)
         // does not load form metadata, so it is not a graph form module either.
         assert_eq!(parse_form_module_path("Documents/Х/Forms/Ф/Ext/FormModule.bsl"), None,);
+    }
+
+    #[test]
+    fn resolve_form_module_returns_object_form_file_id_when_path_is_managed_form_module() {
+        // Given: a real designer-style managed form module path under an owning document.
+        let file_id = FileId::from_raw(77);
+        let index = ModuleIndex::build_from_paths(
+            [(file_id, "Documents/Документ1/Forms/ФормаДокумента/Ext/Form/Module.bsl")].into_iter(),
+        );
+
+        // When: resolving the same owner/form through the path-derived index.
+        let resolved = index.resolve_form_module(
+            Some((MdoType::Document, &Name::new("документ1"))),
+            &Name::new("формаДокумента"),
+        );
+
+        // Then: object and form names match case-insensitively and return the form module FileId.
+        assert_eq!(resolved, Some(file_id));
+        assert_eq!(
+            index.resolve_form_module(
+                Some((MdoType::Catalog, &Name::new("Документ1"))),
+                &Name::new("ФормаДокумента"),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn resolve_form_module_returns_common_form_file_id_when_owner_is_absent() {
+        // Given: a common managed form module path.
+        let file_id = FileId::from_raw(78);
+        let index = ModuleIndex::build_from_paths(
+            [(file_id, "CommonForms/ТестоваяФорма/Ext/Form/Module.bsl")].into_iter(),
+        );
+
+        // When: resolving by common-form name.
+        let resolved = index.resolve_form_module(None, &Name::new("тестоваяформа"));
+
+        // Then: the common form resolves and object-owned lookup does not alias it.
+        assert_eq!(resolved, Some(file_id));
+        assert_eq!(
+            index.resolve_form_module(
+                Some((MdoType::Document, &Name::new("ТестоваяФорма"))),
+                &Name::new("ТестоваяФорма"),
+            ),
+            None,
+        );
     }
 
     #[test]

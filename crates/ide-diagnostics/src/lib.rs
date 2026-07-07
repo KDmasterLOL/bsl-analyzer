@@ -10,6 +10,7 @@ mod metadata_dispatch;
 mod query;
 mod runner;
 mod single_pass;
+mod suppression;
 mod types;
 
 pub mod common_module_helpers;
@@ -140,8 +141,11 @@ pub fn apply_extension_merge<'db>(
         .and_then(|eid| hir::effective_module_text(db, eid).map(|effmod| (eid, effmod)));
 
     // Ordinary module (and any extension file with no resolvable base): byte-identical to the
-    // standalone pass.
+    // standalone pass, minus any in-code suppression directives.
     if weaving.is_none() && effective.is_none() {
+        if suppression::apply(db, file_id, config, &mut standalone) {
+            normalize_diagnostics(&mut standalone);
+        }
         return standalone;
     }
 
@@ -211,6 +215,7 @@ pub fn apply_extension_merge<'db>(
         standalone.extend(effective::remap_inserted(eff_inference, &effmod.segments));
     }
 
+    suppression::apply(db, file_id, config, &mut standalone);
     normalize_diagnostics(&mut standalone);
     standalone
 }

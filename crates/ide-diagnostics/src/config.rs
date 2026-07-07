@@ -56,6 +56,10 @@ pub struct DiagnosticsConfig {
     pub metadata_overrides: HashMap<DiagnosticCode, MetadataOverride>,
     pub only_enabled: Option<Vec<DiagnosticCode>>,
     pub locale: Locale,
+    /// Recognise bsl-language-server suppression directives (`// BSLLS:Код-off` …) as aliases of
+    /// the native ones, so migrating a project does not require rewriting suppression comments.
+    /// On by default; set `bsllsSuppressionCompat = false` in the project config to disable.
+    pub bslls_suppression_compat: bool,
 }
 
 impl Default for DiagnosticsConfig {
@@ -69,6 +73,7 @@ impl Default for DiagnosticsConfig {
             metadata_overrides: HashMap::new(),
             only_enabled: None,
             locale: Locale::default(),
+            bslls_suppression_compat: true,
         }
     }
 }
@@ -125,6 +130,7 @@ impl DiagnosticsConfig {
             metadata_overrides: HashMap::new(),
             only_enabled: None,
             locale: Locale::default(),
+            bslls_suppression_compat: true,
         }
     }
 
@@ -166,6 +172,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                 let mut parameters = HashMap::new();
                 let mut ordinary_app_support = false;
                 let mut dataflow_max_iterations = hir::dataflow::DEFAULT_MAX_ITERATIONS;
+                let mut bslls_suppression_compat = true;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -174,6 +181,9 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                         }
                         "dataflowMaxIterations" => {
                             dataflow_max_iterations = map.next_value()?;
+                        }
+                        "bsllsSuppressionCompat" => {
+                            bslls_suppression_compat = map.next_value()?;
                         }
                         "parameters" => {
                             let params: HashMap<String, serde_json::Value> = map.next_value()?;
@@ -210,6 +220,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                     metadata_overrides: HashMap::new(),
                     only_enabled: None,
                     locale: Locale::default(),
+                    bslls_suppression_compat,
                 })
             }
         }
@@ -303,6 +314,7 @@ impl DiagnosticsConfig {
             metadata_overrides: HashMap::new(),
             only_enabled: None,
             locale: input.locale,
+            bslls_suppression_compat: input.bslls_suppression_compat,
         }
     }
 

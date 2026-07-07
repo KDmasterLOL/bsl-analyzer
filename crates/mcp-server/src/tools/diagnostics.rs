@@ -24,7 +24,7 @@ use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
 use crate::diagnostics_state::{DiagnosticsResident, Freshness, StatusReport, SweepOptions};
-use crate::tools::response::structured;
+use crate::tools::response::{structured, trim_items_to_budget};
 
 /// Server-side cap on returned findings, honouring Anthropic's tool-response budget.
 /// `counts` still reports the full severity histogram, so a capped response is honest.
@@ -51,6 +51,9 @@ pub(crate) struct FileFilters {
     pub range: Option<(usize, usize)>,
     /// Cap on `findings` length.
     pub max_findings: usize,
+    /// Optional output budget in tokens (~4 chars each). When set, `findings` is trimmed
+    /// to fit after the `max_findings` cap, and the response flags `budget_exhausted`.
+    pub max_output_tokens: Option<usize>,
     /// Detailed mode adds `internal_severity` (7-grade) and the fix label per finding.
     pub detailed: bool,
 }
@@ -58,7 +61,11 @@ pub(crate) struct FileFilters {
 /// The static catalog of diagnostic codes in `locale`, optionally narrowed to
 /// `codes`. Unparseable / unknown requested codes are reported back in
 /// `unknown_codes` rather than silently dropped, so the agent can correct itself.
-pub fn catalog(locale: Locale, codes: &[String]) -> CallToolResult {
+pub fn catalog(
+    locale: Locale,
+    codes: &[String],
+    max_output_tokens: Option<usize>,
+) -> CallToolResult {
     let (entries, unknown): (Vec<_>, Vec<String>) = if codes.is_empty() {
         (diagnostic_catalog(locale), Vec::new())
     } else {
@@ -73,12 +80,27 @@ pub fn catalog(locale: Locale, codes: &[String]) -> CallToolResult {
         (entries, unknown)
     };
 
+    // `diagnostic_catalog` / the `codes` walk both emit a deterministic, stable order, so a
+    // budget-trimmed catalog drops a stable tail rather than a random subset.
+    let total = entries.len();
+    let mut entries: Vec<Value> =
+        entries.iter().map(|e| serde_json::to_value(e).unwrap_or(Value::Null)).collect();
+    let exhausted =
+        max_output_tokens.map(|budget| trim_items_to_budget(&mut entries, budget)).unwrap_or(false);
+
     let mut body = json!({
         "action": "catalog",
         "locale": locale_str(locale),
         "count": entries.len(),
         "entries": entries,
     });
+    if exhausted {
+        body["total"] = json!(total);
+        body["budget_exhausted"] = json!(true);
+        body["budget_hint"] = json!(
+            "catalog truncated to fit max_output_tokens; narrow with `codes` or raise the budget"
+        );
+    }
     if !unknown.is_empty() {
         body["unknown_codes"] = json!(unknown);
     }
@@ -199,7 +221,9 @@ pub(crate) fn file_findings(
 
     let mut counts = Counts::default();
     let mut findings: Vec<Value> = Vec::new();
-    let mut truncated = false;
+    // `count_capped`: the `max_findings` count cap dropped findings — distinct from the byte
+    // budget, because raising `max_output_tokens` alone cannot recover past the count cap.
+    let mut count_capped = false;
 
     for diag in &diagnostics {
         let out = diag.to_output(&file_text);
@@ -219,20 +243,39 @@ pub(crate) fn file_findings(
             continue;
         }
         if findings.len() >= filters.max_findings {
-            truncated = true;
+            count_capped = true;
             continue;
         }
         let graph_id = graph_id_for(diag.range, &methods, path, resident.workspace_root());
         findings.push(finding_value(diag, &out, bucket, graph_id, filters.detailed));
     }
 
-    json!({
+    // Byte budget on top of the `max_findings` count cap: a file of small findings stays
+    // within `max_findings`, but a handful of long messages can still blow the response
+    // budget, so trim to fit and flag it. `counts` stays the full honest histogram.
+    let budget_exhausted = filters
+        .max_output_tokens
+        .map(|budget| trim_items_to_budget(&mut findings, budget))
+        .unwrap_or(false);
+
+    let mut body = json!({
         "result_id": result_id(path, generation, &file_text),
         "kind": "full",
         "counts": counts.to_value(),
-        "truncated": truncated,
+        "truncated": count_capped || budget_exhausted,
         "findings": findings,
-    })
+    });
+    if budget_exhausted {
+        body["budget_exhausted"] = json!(true);
+        // When the count cap also fired, say so: raising `max_output_tokens` alone stops at
+        // `max_findings`, so the agent must lift both to see the rest.
+        body["budget_hint"] = json!(if count_capped {
+            "findings truncated by both max_output_tokens and the max_findings cap; narrow with `codes`/`min_severity`/range, or raise BOTH max_output_tokens and max_findings"
+        } else {
+            "findings truncated to fit max_output_tokens; narrow with `codes`/`min_severity`/range or raise the budget"
+        });
+    }
+    body
 }
 
 /// The `workspace` action's result body: whole-config diagnostics aggregated per code
@@ -242,9 +285,10 @@ pub(crate) fn workspace_findings(
     resident: &DiagnosticsResident,
     opts: &SweepOptions,
     generation: u64,
+    max_output_tokens: Option<usize>,
 ) -> Value {
     let sweep = resident.workspace_aggregates(resident.config(), opts);
-    let aggregates: Vec<Value> = sweep
+    let mut aggregates: Vec<Value> = sweep
         .aggregates
         .iter()
         .map(|a| {
@@ -256,13 +300,25 @@ pub(crate) fn workspace_findings(
             })
         })
         .collect();
-    json!({
+    // `aggregates` is already sorted most-severe-first; a budget trim drops the least-severe
+    // tail. `files_swept`/`files_total`/`truncated` still describe the whole sweep.
+    let budget_exhausted = max_output_tokens
+        .map(|budget| trim_items_to_budget(&mut aggregates, budget))
+        .unwrap_or(false);
+
+    let mut body = json!({
         "result_id": format!("workspace@{generation}"),
         "files_swept": sweep.files_swept,
         "files_total": sweep.files_total,
-        "truncated": sweep.truncated,
+        "truncated": sweep.truncated || budget_exhausted,
         "aggregates": aggregates,
-    })
+    });
+    if budget_exhausted {
+        body["budget_exhausted"] = json!(true);
+        body["budget_hint"] =
+            json!("aggregates truncated to fit max_output_tokens; narrow with `codes`/`min_severity` or raise the budget");
+    }
+    body
 }
 
 fn finding_value(
@@ -511,7 +567,7 @@ mod tests {
 
     #[test]
     fn catalog_lists_every_code_with_required_fields() {
-        let result = catalog(Locale::Ru, &[]);
+        let result = catalog(Locale::Ru, &[], None);
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
         assert_eq!(body["action"], "catalog");
@@ -529,7 +585,7 @@ mod tests {
 
     #[test]
     fn catalog_filters_to_requested_codes() {
-        let result = catalog(Locale::En, &["CyclomaticComplexity".to_string()]);
+        let result = catalog(Locale::En, &["CyclomaticComplexity".to_string()], None);
         let body = body_of(&result);
         assert_eq!(body["count"], 1);
         assert_eq!(body["entries"][0]["code"], "CyclomaticComplexity");
@@ -538,8 +594,11 @@ mod tests {
 
     #[test]
     fn catalog_reports_unknown_codes() {
-        let result =
-            catalog(Locale::Ru, &["CyclomaticComplexity".to_string(), "NoSuchCode".to_string()]);
+        let result = catalog(
+            Locale::Ru,
+            &["CyclomaticComplexity".to_string(), "NoSuchCode".to_string()],
+            None,
+        );
         let body = body_of(&result);
         assert_eq!(body["count"], 1, "only the valid code yields an entry");
         let unknown = body["unknown_codes"].as_array().unwrap();
@@ -624,6 +683,7 @@ mod tests {
                 codes: Vec::new(),
                 range: None,
                 max_findings: DEFAULT_MAX_FINDINGS,
+                max_output_tokens: None,
                 detailed: false,
             }
         }
@@ -721,7 +781,7 @@ mod tests {
         }
 
         fn run_workspace(state: &DiagnosticsState, opts: &SweepOptions) -> Value {
-            match state.read(|resident, gen| workspace_findings(resident, opts, gen)) {
+            match state.read(|resident, gen| workspace_findings(resident, opts, gen, None)) {
                 ResidentOutcome::Ready(v, _) => v,
                 _ => panic!("expected Ready outcome"),
             }
