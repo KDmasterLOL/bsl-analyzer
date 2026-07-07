@@ -174,8 +174,21 @@ impl Ctx {
 
                 let is_val = p.val_keyword().is_some();
                 let has_default = p.default_value();
+                // Capture the default expression's source text so a declaration renders faithfully
+                // as `Имя = Неопределено` rather than dropping it. Only a multi-line default is
+                // whitespace-collapsed (to keep the declaration one line); a single-line default is
+                // taken verbatim so spaces inside a string literal (`= "Иван  Петров"`) survive.
+                let default_value = p.default_value_expr().map(|n| {
+                    let text = n.text().to_string();
+                    let normalized = if text.contains('\n') {
+                        text.split_whitespace().collect::<Vec<_>>().join(" ")
+                    } else {
+                        text.trim().to_string()
+                    };
+                    smol_str::SmolStr::new(normalized)
+                });
 
-                Param { name, is_val, has_default, name_range }
+                Param { name, is_val, has_default, default_value, name_range }
             })
             .collect()
     }

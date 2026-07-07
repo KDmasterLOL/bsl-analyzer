@@ -181,6 +181,32 @@ struct GraphParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct SymbolInfoParams {
+    /// Qualified name of the symbol (primary input): a common-module method
+    /// (`ОбщегоНазначения.ЗначениеРеквизитаОбъекта`), a metadata object (`Справочник.Товары`)
+    /// or its attribute (`Справочник.Товары.Артикул`), an object/manager module method
+    /// (`Документ.ЗаказКлиента.Провести`), or a platform member (`СтрНайти`, `Массив.Добавить`).
+    /// Case-insensitive; the MdoType keyword accepts singular or plural, RU or EN.
+    symbol: Option<String>,
+    /// Positional fallback for locals/parameters that have no qualified name: absolute or
+    /// workspace-relative `.bsl` path. Requires `line`.
+    path: Option<String>,
+    /// `path`: 0-based line of the symbol occurrence.
+    line: Option<u32>,
+    /// `path`: 0-based character offset within the line of the symbol occurrence (default 0).
+    column: Option<u32>,
+    /// Card sections to include: any of `definition` | `type` | `doc`. Empty = all. `usages`
+    /// is always a summary and is added when the call graph is ready.
+    #[serde(default)]
+    include: Vec<String>,
+    /// Type/label language: `ru` (default) or `en`.
+    locale: Option<String>,
+    /// Output budget in tokens (~4 chars each); an over-budget member list is trimmed and the
+    /// response carries `truncated: true` with a `budget_hint` (default 6000).
+    max_output_tokens: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct DiagnosticsParams {
     /// catalog | schema | status | file | workspace.
     action: String,
@@ -831,6 +857,142 @@ impl McpServer {
         .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }
 
+    /// One symbol's consolidated card: kind, signature, type, doc, definition site, and a
+    /// usages summary — by qualified name. Use to answer "what is X / where is it defined / what
+    /// does it return / who calls it" for a single symbol in ONE call, instead of chaining
+    /// hover + definition + references. Pass `symbol` (a common-module method
+    /// `ОбщегоНазначения.ЗначениеРеквизитаОбъекта`, a metadata object `Справочник.Товары` or its
+    /// attribute `Справочник.Товары.Артикул`, an object/manager method
+    /// `Документ.ЗаказКлиента.Провести`, or a platform member `СтрНайти`); for a local/parameter
+    /// with no qualified name pass `path`+`line` instead. An imprecise `symbol` returns candidate
+    /// ids (not an error) — resolve one, or open it in `graph`. Not for finding code by meaning
+    /// (use `search`), whole-object browsing (use `metadata`), or the full caller list (use
+    /// `graph` with the returned `graph_id`). Reads the resident host; while it builds it returns
+    /// a retry envelope. The `usages` summary needs the call graph; if it is still indexing the
+    /// core card is still served with `usages_unavailable`.
+    #[tool(name = "symbol_info", annotations(read_only_hint = true))]
+    async fn symbol_info(
+        &self,
+        params: Parameters<SymbolInfoParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome};
+
+        let p = params.0;
+        if p.symbol.is_none() && p.path.is_none() {
+            return Err(McpError::invalid_params(
+                "one of 'symbol' or 'path'+'line' is required",
+                None,
+            ));
+        }
+
+        // The core card resolves on the resident host — mirror `metadata`'s lazy-load lifecycle
+        // so an evicted/building resident degrades to a retry envelope, never a hard error.
+        let diag = self.state.diagnostics().clone();
+        diag.ensure_loading();
+        match diag.status() {
+            DiagnosticsStatus::Disabled => {
+                return Err(McpError::invalid_params(
+                    "symbol_info is only available in the workspace profile",
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Failed(msg) => {
+                return Err(McpError::internal_error(
+                    format!("symbol_info database load failed: {msg}"),
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
+                return Ok(tools::metadata::loading(&diag.status_report()))
+            }
+            DiagnosticsStatus::Ready { .. } => {}
+        }
+
+        let sections = tools::symbol_info::sections_from(&p.include);
+        let locale = tools::symbol_info::locale_from(p.locale.as_deref())?;
+        let max_output_tokens =
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
+        let symbol = p.symbol.clone();
+        let path = p.path.clone();
+        let line = p.line;
+        let column = p.column;
+
+        // The graph is enrichment only (usages + fuzzy candidates on a resident miss). Take a
+        // best-effort snapshot: `None` when it is not `Ready`, in which case the core card is
+        // still served (with `usages_unavailable`).
+        let graph = self.state.graph().clone();
+        graph.ensure_loading();
+
+        tokio::task::spawn_blocking(move || {
+            let read = |diag: &crate::diagnostics_state::DiagnosticsState| {
+                diag.read(|resident, _generation| {
+                    tools::symbol_info::resolve_card(
+                        resident,
+                        symbol.as_deref(),
+                        path.as_deref(),
+                        line,
+                        column,
+                        sections,
+                        locale,
+                    )
+                })
+            };
+
+            let mut outcome = read(&diag);
+            // A resident miss on a well-formed qualified name may be a symbol added since the
+            // last throttled drift scan: force ONE storm-guarded re-scan and retry, matching the
+            // `metadata object` miss path.
+            if let ResidentOutcome::Ready(Ok(None), _) = &outcome {
+                if symbol.is_some() {
+                    diag.force_rescan();
+                    outcome = read(&diag);
+                }
+            }
+
+            let card = match outcome {
+                ResidentOutcome::Ready(result, _freshness) => result?,
+                ResidentOutcome::Loading => {
+                    return Ok(tools::metadata::loading(&diag.status_report()))
+                }
+                ResidentOutcome::Disabled => {
+                    return Err(McpError::invalid_params(
+                        "symbol_info is only available in the workspace profile",
+                        None,
+                    ))
+                }
+                ResidentOutcome::Failed(msg) => {
+                    return Err(McpError::internal_error(
+                        format!("symbol_info database: {msg}"),
+                        None,
+                    ))
+                }
+            };
+
+            let snapshot = graph.snapshot();
+            let gdb = snapshot.as_ref().map(|s| &*s.graph);
+
+            match card {
+                Some(card) => Ok(tools::symbol_info::render_card(
+                    &card,
+                    gdb,
+                    tools::symbol_info::DEFAULT_TOP_MODULES,
+                    max_output_tokens,
+                )),
+                None => {
+                    // Resident miss: offer graph candidates for an imprecise qualified name.
+                    let symbol = symbol.as_deref().unwrap_or_default();
+                    Ok(tools::symbol_info::render_not_found(
+                        symbol,
+                        gdb,
+                        tools::symbol_info::DEFAULT_CANDIDATE_LIMIT,
+                    ))
+                }
+            }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
     /// Semantic analyzer findings the compiler and grep cannot give you — unreachable code,
     /// type mismatch, unresolved calls, and 180+ other rules. Use to check a file or the whole
     /// config for issues, or to discover which rules exist. Not for finding code (use `search`)
@@ -1137,6 +1299,7 @@ impl ServerHandler for McpServer {
                  Route by task (each tool's own description carries the full contract):\n\
                  - find code by meaning or unknown name → `search`;\n\
                  - who-calls-whom / change impact → `graph` (durable ids; start at overview);\n\
+                 - one symbol's kind/signature/type/doc/definition/usages by name → `symbol_info`;\n\
                  - analyzer findings (unreachable, type mismatch, unresolved) → `diagnostics` \
                  (start at catalog to learn the codes);\n\
                  - metadata objects / structure / forms → `metadata`;\n\
@@ -1349,6 +1512,35 @@ mod contract {
               - max_output_tokens: Output budget in tokens (~4 chars each); over-budget results are truncated at a hit
             boundary with a note telling you to raise `limit` or narrow the query (default 6000).
               - query: Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
+
+            ## symbol_info
+            One symbol's consolidated card: kind, signature, type, doc, definition site, and a
+            usages summary — by qualified name. Use to answer "what is X / where is it defined / what
+            does it return / who calls it" for a single symbol in ONE call, instead of chaining
+            hover + definition + references. Pass `symbol` (a common-module method
+            `ОбщегоНазначения.ЗначениеРеквизитаОбъекта`, a metadata object `Справочник.Товары` or its
+            attribute `Справочник.Товары.Артикул`, an object/manager method
+            `Документ.ЗаказКлиента.Провести`, or a platform member `СтрНайти`); for a local/parameter
+            with no qualified name pass `path`+`line` instead. An imprecise `symbol` returns candidate
+            ids (not an error) — resolve one, or open it in `graph`. Not for finding code by meaning
+            (use `search`), whole-object browsing (use `metadata`), or the full caller list (use
+            `graph` with the returned `graph_id`). Reads the resident host; while it builds it returns
+            a retry envelope. The `usages` summary needs the call graph; if it is still indexing the
+            core card is still served with `usages_unavailable`.
+              - column: `path`: 0-based character offset within the line of the symbol occurrence (default 0).
+              - include: Card sections to include: any of `definition` | `type` | `doc`. Empty = all. `usages`
+            is always a summary and is added when the call graph is ready.
+              - line: `path`: 0-based line of the symbol occurrence.
+              - locale: Type/label language: `ru` (default) or `en`.
+              - max_output_tokens: Output budget in tokens (~4 chars each); an over-budget member list is trimmed and the
+            response carries `truncated: true` with a `budget_hint` (default 6000).
+              - path: Positional fallback for locals/parameters that have no qualified name: absolute or
+            workspace-relative `.bsl` path. Requires `line`.
+              - symbol: Qualified name of the symbol (primary input): a common-module method
+            (`ОбщегоНазначения.ЗначениеРеквизитаОбъекта`), a metadata object (`Справочник.Товары`)
+            or its attribute (`Справочник.Товары.Артикул`), an object/manager module method
+            (`Документ.ЗаказКлиента.Провести`), or a platform member (`СтрНайти`, `Массив.Добавить`).
+            Case-insensitive; the MdoType keyword accepts singular or plural, RU or EN.
 
         "###]].assert_eq(&rendered);
     }

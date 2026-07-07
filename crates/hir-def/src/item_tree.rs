@@ -1,5 +1,7 @@
 pub mod lower;
 
+use smol_str::SmolStr;
+
 use crate::Name;
 use base_db::RootQueryDb;
 use la_arena::{Arena, Idx};
@@ -127,6 +129,10 @@ pub struct Param {
     pub name: Name,
     pub is_val: bool,
     pub has_default: bool,
+    /// Source text of the default-value expression (`= <expr>`), whitespace-collapsed, when the
+    /// parameter is optional — so a declaration can be rendered faithfully as `Имя = Неопределено`.
+    /// `None` for a required parameter or when the default expression is absent/unparsable.
+    pub default_value: Option<SmolStr>,
     pub name_range: TextRange,
 }
 
@@ -166,6 +172,7 @@ pub(crate) fn item_tree_heap(v: &Arc<ItemTree>) -> usize {
         bytes += vec_bytes::<Param>(proc.params.len());
         for param in proc.params.iter() {
             bytes += name_bytes(&param.name);
+            bytes += param.default_value.as_ref().map_or(0, |s| s.len());
         }
         bytes += vec_bytes::<Annotation>(proc.annotations.len());
     }
@@ -176,6 +183,7 @@ pub(crate) fn item_tree_heap(v: &Arc<ItemTree>) -> usize {
         bytes += vec_bytes::<Param>(func.params.len());
         for param in func.params.iter() {
             bytes += name_bytes(&param.name);
+            bytes += param.default_value.as_ref().map_or(0, |s| s.len());
         }
         bytes += vec_bytes::<Annotation>(func.annotations.len());
     }
@@ -240,12 +248,14 @@ mod tests {
                     name: Name::new("Параметр1"),
                     is_val: true,
                     has_default: false,
+                    default_value: None,
                     name_range: TextRange::new(0.into(), 10.into()),
                 },
                 Param {
                     name: Name::new("Параметр2"),
                     is_val: false,
                     has_default: true,
+                    default_value: Some(SmolStr::new_static("Неопределено")),
                     name_range: TextRange::new(12.into(), 22.into()),
                 },
             ]),

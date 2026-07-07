@@ -11,6 +11,7 @@ mod hover;
 mod references;
 mod signature_help;
 pub mod streaming;
+pub mod symbol_info;
 mod syntax_highlighting;
 
 pub use completion::{CompletionItem, CompletionItemKind};
@@ -40,6 +41,10 @@ pub use ide_diagnostics::{
     SoftwareQuality,
 };
 pub use signature_help::{ParameterInfo, SignatureHelp};
+pub use symbol_info::{
+    symbol_info, SymbolContainer, SymbolDefinition, SymbolInfoCard, SymbolInfoRequest,
+    SymbolInfoSections, SymbolMember, SymbolPosition,
+};
 pub use syntax_highlighting::{highlight, HighlightResult, HlMod, HlRange, HlTag};
 
 use ide_db::base_db::DiagnosticsConfigInput;

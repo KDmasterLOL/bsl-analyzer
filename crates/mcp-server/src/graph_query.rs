@@ -152,6 +152,16 @@ pub struct GraphDb {
     conn: Connection,
 }
 
+/// The graph-derived usage summary for a symbol: total inbound edges and the top calling
+/// modules (module id → number of calling methods), produced by [`GraphDb::usages`].
+pub(crate) struct SymbolUsages {
+    pub(crate) count: usize,
+    pub(crate) top_modules: Vec<(String, usize)>,
+    /// `true` when the caller cap dropped some inbound callers, so `top_modules` is aggregated
+    /// from a sample of `count` rather than every caller.
+    pub(crate) top_modules_sampled: bool,
+}
+
 impl GraphDb {
     /// Open `path` read-only and validate it is a complete build of the current
     /// schema. A truncated build (e.g. a crash mid-write, which leaves no `meta`
@@ -465,6 +475,45 @@ impl GraphDb {
         let (candidates, total) =
             ide::rank_resolve_candidates(candidates.into_iter(), query, limit);
         Ok(ide::ResolveResult::new(query, candidates, total))
+    }
+
+    /// Usage summary for a durable node id: the inbound-edge count plus the top calling
+    /// modules. Enrichment for the `symbol_info` tool — a resident-resolved symbol is bridged
+    /// to the graph by id, and this returns its fan-in and where it is called from. `top_modules`
+    /// caps the returned module aggregate. Returns `None` for an id absent from the graph.
+    pub(crate) fn usages(
+        &self,
+        id: &str,
+        top_modules: usize,
+    ) -> anyhow::Result<Option<SymbolUsages>> {
+        if self.fetch_node(id)?.is_none() && self.synthesize_module_node(id)?.is_none() {
+            return Ok(None);
+        }
+        let count = self.in_degree(id)?;
+        let params = NeighborsParams {
+            id,
+            dir: Direction::In,
+            depth: 1,
+            max_nodes: 200,
+            detail: GraphDetail::Names,
+            provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
+        };
+        let mut by_module: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        let mut sampled = false;
+        if let Ok(result) = self.neighbors(&params)? {
+            sampled = result.dropped_count > 0;
+            for node in &result.nodes {
+                if let Some(module) = &node.module {
+                    *by_module.entry(module.clone()).or_default() += 1;
+                }
+            }
+        }
+        let mut modules: Vec<(String, usize)> = by_module.into_iter().collect();
+        modules.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        modules.truncate(top_modules);
+        Ok(Some(SymbolUsages { count, top_modules: modules, top_modules_sampled: sampled }))
     }
 
     fn in_degree(&self, id: &str) -> anyhow::Result<usize> {
