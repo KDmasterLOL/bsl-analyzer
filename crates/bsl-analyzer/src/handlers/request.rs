@@ -639,6 +639,139 @@ pub fn handle_document_diagnostic(
     )))
 }
 
+/// Pull-model whole-workspace diagnostics (`workspace/diagnostic`).
+///
+/// Reports diagnostics for every in-scope BSL file in one sweep. Scope comes from
+/// `[features] workspaceDiagnostics`: `Extensions` reports only files under a
+/// configuration-extension root (the base configuration stays loaded so cross-references
+/// resolve, but base files are not reported); `All` reports the whole configuration.
+///
+/// Runs on the task pool via `on_latency`, which also provides the boot gate (declined
+/// with `ContentModified` until the workspace has loaded) and cancellation: a concurrent
+/// edit bumps the Salsa revision and the sweep unwinds, so the client simply re-pulls.
+/// Each file's `previousResultId` drives a tiny `Unchanged` report when nothing changed.
+pub fn handle_workspace_diagnostic(
+    ctx: LatencyRequestContext,
+    params: lsp_types::WorkspaceDiagnosticParams,
+) -> Result<lsp_types::WorkspaceDiagnosticReportResult> {
+    use lsp_types::{
+        FullDocumentDiagnosticReport, UnchangedDocumentDiagnosticReport, WorkspaceDiagnosticReport,
+        WorkspaceDiagnosticReportResult, WorkspaceDocumentDiagnosticReport,
+        WorkspaceFullDocumentDiagnosticReport, WorkspaceUnchangedDocumentDiagnosticReport,
+    };
+
+    let _p = tracing::info_span!("handle_workspace_diagnostic").entered();
+
+    let scope =
+        ctx.project.as_ref().map(|p| p.config.features.workspace_diagnostics).unwrap_or_default();
+    if !scope.is_enabled() {
+        return Ok(WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport::default()));
+    }
+
+    // Extension roots for scope filtering. For `Extensions`, only files under one of these
+    // are reported; `All` reports every BSL file.
+    let ext_roots: Vec<&std::path::Path> = ctx
+        .project
+        .as_ref()
+        .map(|p| p.extension_paths().iter().map(|(_, path)| path.as_path()).collect())
+        .unwrap_or_default();
+
+    let mut file_ids: Vec<vfs::FileId> = ctx
+        .file_paths
+        .iter()
+        .filter(|(_, path)| path_in_workspace_scope(path, scope, &ext_roots))
+        .map(|(file_id, _)| file_id)
+        .collect();
+    // Stable report order across pulls (protocol-agnostic, but keeps diffs/logs sane).
+    file_ids.sort_by_key(|f| f.0);
+
+    let previous: FxHashMap<lsp_types::Url, String> =
+        params.previous_result_ids.into_iter().map(|p| (p.uri, p.value)).collect();
+
+    tracing::info!(scope = ?scope, files = file_ids.len(), "workspace diagnostics sweep");
+
+    let computed = ctx.analysis.workspace_diagnostics(&file_ids, ctx.diagnostics_config.clone());
+
+    let mut items = Vec::with_capacity(computed.len());
+    for (file_id, diagnostics) in computed {
+        let url = match ctx.url_for_file_id(file_id) {
+            Ok(url) => url,
+            Err(_) => continue,
+        };
+        let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
+        // The LSP spec wants the buffer version for an open document (and `None` only for a
+        // closed one), so a client can associate or discard the report against its buffer.
+        let open_doc = ctx.mem_docs.get(&url);
+        let version = open_doc.map(|doc| doc.version() as i64);
+
+        if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
+            items.push(WorkspaceDocumentDiagnosticReport::Unchanged(
+                WorkspaceUnchangedDocumentDiagnosticReport {
+                    uri: url,
+                    version,
+                    unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                        result_id,
+                    },
+                },
+            ));
+            continue;
+        }
+
+        // An open buffer's overlay text (and cached line index) reflects unsaved edits; a closed
+        // file has neither, so fall back to the database's disk-backed text.
+        let lsp_items = match open_doc {
+            Some(doc) => crate::lsp::to_proto::diagnostics_with_encoding(
+                doc.line_index(),
+                doc.text(),
+                &diagnostics,
+                ctx.position_encoding,
+            ),
+            None => {
+                let text = ctx.analysis.file_text(file_id);
+                let line_index = LineIndex::new(&text);
+                crate::lsp::to_proto::diagnostics_with_encoding(
+                    &line_index,
+                    &text,
+                    &diagnostics,
+                    ctx.position_encoding,
+                )
+            }
+        };
+
+        items.push(WorkspaceDocumentDiagnosticReport::Full(
+            WorkspaceFullDocumentDiagnosticReport {
+                uri: url,
+                version,
+                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                    result_id: Some(result_id),
+                    items: lsp_items,
+                },
+            },
+        ));
+    }
+
+    Ok(WorkspaceDiagnosticReportResult::Report(WorkspaceDiagnosticReport { items }))
+}
+
+/// Whether a file belongs to the `workspace/diagnostic` sweep for the given scope.
+/// Only BSL source files are ever in scope; `Extensions` additionally requires the file
+/// to live under one of the configuration-extension roots.
+fn path_in_workspace_scope(
+    path: &std::path::Path,
+    scope: project_model::WorkspaceDiagnosticsScope,
+    ext_roots: &[&std::path::Path],
+) -> bool {
+    use project_model::WorkspaceDiagnosticsScope as S;
+    if !project_model::is_bsl_source_path(path) {
+        return false;
+    }
+    match scope {
+        S::All => true,
+        S::Extensions => ext_roots.iter().any(|root| path.starts_with(root)),
+        S::Off => false,
+    }
+}
+
 fn convert_document_symbol(
     line_index: &LineIndex,
     text: &str,
@@ -1037,6 +1170,31 @@ mod tests {
 
     use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
     use crate::global_state::GlobalState;
+
+    #[test]
+    fn workspace_scope_filters_by_extension_root() {
+        use project_model::WorkspaceDiagnosticsScope::{All, Extensions, Off};
+        use std::path::Path;
+
+        let ext_root = Path::new("/proj/src/cfe/ExtA");
+        let ext_roots = [ext_root];
+        let ext_file = Path::new("/proj/src/cfe/ExtA/CommonModules/M/Ext/Module.bsl");
+        let base_file = Path::new("/proj/src/cf/CommonModules/M/Ext/Module.bsl");
+        let xml_file = Path::new("/proj/src/cfe/ExtA/Configuration.xml");
+
+        // Extensions: only BSL files under an extension root.
+        assert!(path_in_workspace_scope(ext_file, Extensions, &ext_roots));
+        assert!(!path_in_workspace_scope(base_file, Extensions, &ext_roots));
+        assert!(!path_in_workspace_scope(xml_file, Extensions, &ext_roots), "non-BSL excluded");
+
+        // All: every BSL file, extension or base.
+        assert!(path_in_workspace_scope(ext_file, All, &ext_roots));
+        assert!(path_in_workspace_scope(base_file, All, &ext_roots));
+        assert!(!path_in_workspace_scope(xml_file, All, &ext_roots), "non-BSL still excluded");
+
+        // Off: nothing (defensive — the handler returns early before this).
+        assert!(!path_in_workspace_scope(ext_file, Off, &ext_roots));
+    }
 
     fn snippet_item(insert_text: &str) -> ide::CompletionItem {
         ide::CompletionItem {

@@ -63,6 +63,12 @@ impl FrozenFilePaths {
     pub fn is_empty(&self) -> bool {
         self.reverse.is_empty()
     }
+
+    /// All files in the frozen snapshot as `(FileId, path)` pairs. Used by the
+    /// `workspace/diagnostic` sweep to enumerate its in-scope file set.
+    pub fn iter(&self) -> impl Iterator<Item = (FileId, &std::path::Path)> {
+        self.reverse.iter().map(|(&file_id, path)| (file_id, path.as_path()))
+    }
 }
 
 pub struct LatencyRequestContext {

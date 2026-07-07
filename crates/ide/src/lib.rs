@@ -154,6 +154,47 @@ impl Analysis {
         ide_diagnostics::file_diagnostics_query(&self.db, file_id_input, config_id)
     }
 
+    /// Diagnostics for a whole set of files (the LSP `workspace/diagnostic` sweep).
+    ///
+    /// A thin loop over the per-file query: each file rides the same Salsa-memoized
+    /// `file_diagnostics_query` as push and single-document pull, so results are
+    /// identical and already-computed files are free. Peak memory is bounded by the
+    /// queries' own LRU caps (which evict at revision boundaries) — the caller must not
+    /// force LRU eviction from a background worker, which would contend with the live
+    /// database. Cancellation is automatic: a concurrent edit bumps the revision and the
+    /// in-flight query unwinds, so the caller's `salsa::Cancelled::catch` aborts the sweep.
+    pub fn workspace_diagnostics(
+        &self,
+        file_ids: &[FileId],
+        config: DiagnosticsConfigInput,
+    ) -> Vec<(FileId, Arc<Vec<Diagnostic>>)> {
+        file_ids
+            .iter()
+            .filter_map(|&file_id| {
+                // One file must not sink the whole sweep. A file racing a disk delete/rewrite can
+                // make `file_text_query` panic on a revision mismatch; catch it and skip that file.
+                // A `salsa::Cancelled` is a genuine revision-bump abort, not a per-file fault — it
+                // must keep unwinding so the caller's `Cancelled::catch` aborts the request.
+                let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.file_diagnostics_cached(file_id, config.clone())
+                }));
+                match computed {
+                    Ok(diagnostics) => Some((file_id, diagnostics)),
+                    Err(payload) if payload.is::<salsa::Cancelled>() => {
+                        std::panic::resume_unwind(payload)
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            file_id = file_id.0,
+                            "workspace diagnostics: skipping file after a compute panic"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
     pub fn warm_caches_task(&self, file_ids: &[FileId]) -> WarmCachesTask {
         WarmCachesTask { db: self.db.clone(), file_ids: file_ids.to_vec() }
     }

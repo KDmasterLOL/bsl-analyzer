@@ -122,6 +122,11 @@ pub struct GlobalState {
     pub preload_external_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
 
     pub request_tokens: HashMap<lsp_server::RequestId, salsa::CancellationToken>,
+    /// The in-flight `workspace/diagnostic` request, if any. A whole-workspace sweep can run
+    /// for minutes; letting several pile onto the shared latency pool would starve interactive
+    /// requests. Tracking the active one lets a newer sweep cancel the previous so at most one
+    /// occupies a worker at a time.
+    pub active_workspace_diagnostic: Option<lsp_server::RequestId>,
     pub last_progress_report: std::time::Instant,
 
     pub skipped_bsl: FxHashSet<paths::AbsPathBuf>,
@@ -198,6 +203,7 @@ impl GlobalState {
             pull_diagnostics_active: false,
             diagnostics_generation: HashMap::new(),
             pending_diagnostics_uris: Vec::new(),
+            active_workspace_diagnostic: None,
             diagnostics_tokens: HashMap::new(),
             preload_tokens: HashMap::new(),
             preload_external_tokens: HashMap::new(),

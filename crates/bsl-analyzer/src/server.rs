@@ -589,11 +589,25 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
         CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
         DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
-        OnTypeFormatting, RangeFormatting, References, SemanticTokensFullRequest,
-        SignatureHelpRequest,
+        OnTypeFormatting, RangeFormatting, References, Request as _, SemanticTokensFullRequest,
+        SignatureHelpRequest, WorkspaceDiagnosticRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
+
+    // A whole-workspace sweep can run for minutes; keep at most one in-flight so several do not
+    // monopolize the shared latency pool and starve interactive requests. A newer sweep cancels
+    // the previous one's token, which unwinds it (via Salsa) and frees its worker.
+    let workspace_diagnostic_id =
+        (req.method == WorkspaceDiagnosticRequest::METHOD).then(|| req.id.clone());
+    if workspace_diagnostic_id.is_some() {
+        if let Some(prev) = state.active_workspace_diagnostic.take() {
+            if let Some(token) = state.request_tokens.get(&prev) {
+                tracing::info!(prev_id = ?prev, "superseding previous workspace/diagnostic sweep");
+                token.cancel();
+            }
+        }
+    }
 
     RequestDispatcher { req: Some(req), global_state: state }
         .on_sync_mut::<Shutdown>(|state, ()| {
@@ -610,11 +624,19 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_latency::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
         .on_latency::<CodeActionRequest>(crate::handlers::handle_code_action)
         .on_latency::<DocumentDiagnosticRequest>(crate::handlers::handle_document_diagnostic)
+        .on_latency::<WorkspaceDiagnosticRequest>(crate::handlers::handle_workspace_diagnostic)
         .on_latency::<SignatureHelpRequest>(crate::handlers::handle_signature_help)
         .on_sync::<Formatting>(crate::handlers::handle_formatting)
         .on_sync::<RangeFormatting>(crate::handlers::handle_range_formatting)
         .on_sync::<OnTypeFormatting>(crate::handlers::handle_on_type_formatting)
         .finish();
+
+    // Record the now-dispatched sweep as the active one (its token was registered by
+    // `on_latency`), so the next sweep can supersede it. A declined request leaves a stale id
+    // whose token lookup simply misses — harmless.
+    if let Some(id) = workspace_diagnostic_id {
+        state.active_workspace_diagnostic = Some(id);
+    }
 
     Ok(())
 }
@@ -650,13 +672,13 @@ fn server_capabilities(
 
     // Only advertise the pull diagnostic provider when the feature is enabled; when
     // `Off` the field stays `None` and the server behaves exactly as before (push-only).
-    // `workspace_diagnostics` stays false until the `workspace/diagnostic` handler lands;
-    // for now this advertises single-document pull (`textDocument/diagnostic`) only.
+    // Both single-document (`textDocument/diagnostic`) and whole-workspace
+    // (`workspace/diagnostic`) pull are served, with the workspace sweep scoped by config.
     let diagnostic_provider = workspace_diagnostics_scope.is_enabled().then(|| {
         DiagnosticServerCapabilities::Options(DiagnosticOptions {
             identifier: Some("bsl".to_string()),
             inter_file_dependencies: true,
-            workspace_diagnostics: false,
+            workspace_diagnostics: true,
             work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
         })
     });
@@ -752,8 +774,7 @@ mod tests {
         );
         assert!(off.diagnostic_provider.is_none());
 
-        // Enabled: single-document pull is advertised; workspace pull stays off until
-        // its handler lands.
+        // Enabled: both single-document and whole-workspace pull are advertised.
         let on = server_capabilities(
             PositionEncoding::Utf8,
             project_model::WorkspaceDiagnosticsScope::Extensions,
@@ -761,7 +782,7 @@ mod tests {
         match on.diagnostic_provider {
             Some(DiagnosticServerCapabilities::Options(opts)) => {
                 assert!(opts.inter_file_dependencies);
-                assert!(!opts.workspace_diagnostics);
+                assert!(opts.workspace_diagnostics);
                 assert_eq!(opts.identifier.as_deref(), Some("bsl"));
             }
             other => panic!("expected diagnostic options, got {other:?}"),
