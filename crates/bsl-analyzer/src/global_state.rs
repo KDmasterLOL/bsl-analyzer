@@ -96,6 +96,13 @@ pub struct GlobalState {
     /// `InsertTextMode::ADJUST_INDENTATION`, so completion snippet continuation
     /// lines can be indented to the cursor column by the client.
     pub supports_insert_text_mode_adjust_indentation: bool,
+    /// True when the pull diagnostic provider is advertised (config opt-in) *and* the
+    /// client advertised `textDocument/diagnostic` support — i.e. the client drives
+    /// diagnostics by pulling. In that mode push publishing is suppressed so a
+    /// pull-capable client does not render each open buffer's diagnostics twice (once
+    /// from the pull report, once from `publishDiagnostics`). A client that opted the
+    /// feature on but cannot pull keeps push, so it is never left without diagnostics.
+    pub pull_diagnostics_active: bool,
     /// Per-URI publish generation. Each scheduled diagnostics computation gets the
     /// next generation for ITS uri; a completed task publishes only if it is still
     /// the latest for that uri. Keyed per-uri (not a single global counter) so
@@ -188,6 +195,7 @@ impl GlobalState {
             lsp_locale: None,
             position_encoding: PositionEncoding::default(),
             supports_insert_text_mode_adjust_indentation: false,
+            pull_diagnostics_active: false,
             diagnostics_generation: HashMap::new(),
             pending_diagnostics_uris: Vec::new(),
             diagnostics_tokens: HashMap::new(),

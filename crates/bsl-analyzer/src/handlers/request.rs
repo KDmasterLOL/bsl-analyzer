@@ -565,6 +565,80 @@ pub fn handle_code_action(
     }
 }
 
+/// Pull-model single-document diagnostics (`textDocument/diagnostic`).
+///
+/// Uses the same `file_diagnostics_query` the push path uses, so a pulled report is
+/// identical to what the editor already shows — and unlike push it also serves closed
+/// files, reading their text from the disk-backed database. The `previous_result_id`
+/// fast-path returns a tiny `Unchanged` report when the diagnostics have not changed.
+///
+/// This is intentionally scope-independent: `WorkspaceDiagnosticsScope::Extensions`
+/// governs which files the bulk `workspace/diagnostic` sweep reports, not an explicit
+/// single-file request. A user who opens a base-configuration file expects its
+/// diagnostics, and computing them for that one file on demand is cheap (it does not
+/// trigger whole-base analysis).
+pub fn handle_document_diagnostic(
+    ctx: LatencyRequestContext,
+    params: lsp_types::DocumentDiagnosticParams,
+) -> Result<lsp_types::DocumentDiagnosticReportResult> {
+    use lsp_types::{
+        DocumentDiagnosticReport, DocumentDiagnosticReportResult, FullDocumentDiagnosticReport,
+        RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport,
+        UnchangedDocumentDiagnosticReport,
+    };
+
+    let uri = params.text_document.uri;
+    let _p = tracing::info_span!("handle_document_diagnostic", uri = %uri).entered();
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let ide_diagnostics =
+        ctx.analysis.file_diagnostics_cached(file_id, ctx.diagnostics_config.clone());
+    let result_id = crate::lsp::diagnostics_result_id(&ide_diagnostics);
+
+    if params.previous_result_id.as_deref() == Some(result_id.as_str()) {
+        return Ok(DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Unchanged(
+            RelatedUnchangedDocumentDiagnosticReport {
+                related_documents: None,
+                unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                    result_id,
+                },
+            },
+        )));
+    }
+
+    // An open buffer's overlay text (and its cached line index) reflects unsaved edits;
+    // a closed file has neither, so fall back to the database's disk-backed text.
+    let items = match ctx.mem_docs.get(&uri) {
+        Some(doc) => crate::lsp::to_proto::diagnostics_with_encoding(
+            doc.line_index(),
+            doc.text(),
+            &ide_diagnostics,
+            ctx.position_encoding,
+        ),
+        None => {
+            let text = ctx.analysis.file_text(file_id);
+            let line_index = LineIndex::new(&text);
+            crate::lsp::to_proto::diagnostics_with_encoding(
+                &line_index,
+                &text,
+                &ide_diagnostics,
+                ctx.position_encoding,
+            )
+        }
+    };
+
+    Ok(DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(
+        RelatedFullDocumentDiagnosticReport {
+            related_documents: None,
+            full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                result_id: Some(result_id),
+                items,
+            },
+        },
+    )))
+}
+
 fn convert_document_symbol(
     line_index: &LineIndex,
     text: &str,

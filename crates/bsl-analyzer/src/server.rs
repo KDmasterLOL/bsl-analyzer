@@ -6,9 +6,10 @@ use lsp_server::{Connection, Message, Notification, Request};
 use lsp_types::{
     notification::{Exit, Notification as _},
     request::Shutdown,
-    CodeActionProviderCapability, FoldingRangeProviderCapability, InitializeParams,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensServerCapabilities,
-    ServerCapabilities, SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
+    CodeActionProviderCapability, DiagnosticOptions, DiagnosticServerCapabilities,
+    FoldingRangeProviderCapability, InitializeParams, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities,
+    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
     WorkDoneProgressOptions,
 };
 
@@ -37,7 +38,18 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     let supports_insert_text_mode_adjust_indentation =
         client_supports_insert_text_mode_adjust_indentation(&initialize_params.capabilities);
 
-    let server_capabilities = server_capabilities(position_encoding);
+    // The pull diagnostic provider is opt-in per configuration, so the scope must be
+    // known before capabilities are advertised — before the VFS loader (and its own
+    // config load) starts. Read it directly from the workspace root; `Off` leaves the
+    // server on push-only diagnostics with no provider advertised.
+    let workspace_root = extract_workspace_root(&initialize_params);
+    let workspace_diagnostics_scope = workspace_root
+        .as_ref()
+        .and_then(|root| project_model::ProjectConfig::load(root))
+        .map(|config| config.features.workspace_diagnostics)
+        .unwrap_or_default();
+
+    let server_capabilities = server_capabilities(position_encoding, workspace_diagnostics_scope);
 
     let initialize_result = lsp_types::InitializeResult {
         capabilities: server_capabilities,
@@ -65,6 +77,11 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     state.position_encoding = position_encoding;
     state.supports_insert_text_mode_adjust_indentation =
         supports_insert_text_mode_adjust_indentation;
+    // Suppress push publishing only when the client will actually pull, so a
+    // pull-capable client does not render open-buffer diagnostics twice; a client
+    // that cannot pull keeps push even with the feature enabled.
+    state.pull_diagnostics_active = workspace_diagnostics_scope.is_enabled()
+        && client_supports_pull_diagnostics(&initialize_params.capabilities);
 
     state.init_empty_source_root();
 
@@ -72,8 +89,6 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     if let Some(locale) = state.lsp_locale {
         tracing::info!(?locale, "client supplied LSP locale");
     }
-
-    let workspace_root = extract_workspace_root(&initialize_params);
 
     if let Some(ref root) = workspace_root {
         state.set_workspace_root(root.clone());
@@ -105,6 +120,13 @@ fn client_supports_insert_text_mode_adjust_indentation(
         .and_then(|c| c.completion_item.as_ref())
         .and_then(|ci| ci.insert_text_mode_support.as_ref())
         .is_some_and(|s| s.value_set.contains(&lsp_types::InsertTextMode::ADJUST_INDENTATION))
+}
+
+/// Whether the client advertised pull-diagnostics support (`textDocument/diagnostic`).
+/// When it did and the feature is enabled, the server serves diagnostics by pull and
+/// suppresses push to avoid double-reporting open buffers.
+fn client_supports_pull_diagnostics(caps: &lsp_types::ClientCapabilities) -> bool {
+    caps.text_document.as_ref().and_then(|td| td.diagnostic.as_ref()).is_some()
 }
 
 fn extract_workspace_root(params: &InitializeParams) -> Option<PathBuf> {
@@ -565,9 +587,10 @@ fn handle_vfs_msg(
 
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
-        CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
-        FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest, OnTypeFormatting,
-        RangeFormatting, References, SemanticTokensFullRequest, SignatureHelpRequest,
+        CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
+        DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
+        OnTypeFormatting, RangeFormatting, References, SemanticTokensFullRequest,
+        SignatureHelpRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -586,6 +609,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_latency::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
         .on_latency::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
         .on_latency::<CodeActionRequest>(crate::handlers::handle_code_action)
+        .on_latency::<DocumentDiagnosticRequest>(crate::handlers::handle_document_diagnostic)
         .on_latency::<SignatureHelpRequest>(crate::handlers::handle_signature_help)
         .on_sync::<Formatting>(crate::handlers::handle_formatting)
         .on_sync::<RangeFormatting>(crate::handlers::handle_range_formatting)
@@ -618,10 +642,28 @@ fn handle_notification(state: &mut GlobalState, not: Notification) -> Result<()>
     Ok(())
 }
 
-fn server_capabilities(position_encoding: PositionEncoding) -> ServerCapabilities {
+fn server_capabilities(
+    position_encoding: PositionEncoding,
+    workspace_diagnostics_scope: project_model::WorkspaceDiagnosticsScope,
+) -> ServerCapabilities {
     let legend = crate::lsp::semantic_tokens_legend();
 
+    // Only advertise the pull diagnostic provider when the feature is enabled; when
+    // `Off` the field stays `None` and the server behaves exactly as before (push-only).
+    // `workspace_diagnostics` stays false until the `workspace/diagnostic` handler lands;
+    // for now this advertises single-document pull (`textDocument/diagnostic`) only.
+    let diagnostic_provider = workspace_diagnostics_scope.is_enabled().then(|| {
+        DiagnosticServerCapabilities::Options(DiagnosticOptions {
+            identifier: Some("bsl".to_string()),
+            inter_file_dependencies: true,
+            workspace_diagnostics: false,
+            work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
+        })
+    });
+
     ServerCapabilities {
+        diagnostic_provider,
+
         position_encoding: Some(position_encoding.as_lsp_kind()),
 
         text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -683,7 +725,10 @@ mod tests {
 
     #[test]
     fn test_server_capabilities() {
-        let caps = server_capabilities(PositionEncoding::Utf8);
+        let caps = server_capabilities(
+            PositionEncoding::Utf8,
+            project_model::WorkspaceDiagnosticsScope::Off,
+        );
 
         assert_eq!(caps.position_encoding, Some(PositionEncoding::Utf8.as_lsp_kind()));
 
@@ -696,6 +741,31 @@ mod tests {
 
         assert_eq!(caps.document_highlight_provider, Some(lsp_types::OneOf::Left(true)));
         assert_eq!(caps.folding_range_provider, Some(FoldingRangeProviderCapability::Simple(true)));
+    }
+
+    #[test]
+    fn diagnostic_provider_gated_by_config() {
+        // Off (default): push-only, no pull provider advertised.
+        let off = server_capabilities(
+            PositionEncoding::Utf8,
+            project_model::WorkspaceDiagnosticsScope::Off,
+        );
+        assert!(off.diagnostic_provider.is_none());
+
+        // Enabled: single-document pull is advertised; workspace pull stays off until
+        // its handler lands.
+        let on = server_capabilities(
+            PositionEncoding::Utf8,
+            project_model::WorkspaceDiagnosticsScope::Extensions,
+        );
+        match on.diagnostic_provider {
+            Some(DiagnosticServerCapabilities::Options(opts)) => {
+                assert!(opts.inter_file_dependencies);
+                assert!(!opts.workspace_diagnostics);
+                assert_eq!(opts.identifier.as_deref(), Some("bsl"));
+            }
+            other => panic!("expected diagnostic options, got {other:?}"),
+        }
     }
 
     #[test]

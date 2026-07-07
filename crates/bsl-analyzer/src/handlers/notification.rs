@@ -18,6 +18,13 @@ fn is_handled_uri(uri: &Url) -> bool {
 }
 
 pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
+    // A pull-capable client with the feature enabled drives diagnostics via
+    // `textDocument/diagnostic`; publishing here too would double-report open buffers.
+    if state.pull_diagnostics_active {
+        tracing::debug!(%uri, "push diagnostics suppressed: client pulls diagnostics");
+        return;
+    }
+
     // While the workspace is still loading, the source root and metadata
     // substrate are incomplete: a result computed now is either cancelled by
     // the next streamed VFS batch (each drain bumps the Salsa revision) or
@@ -484,6 +491,39 @@ mod tests {
 
         assert_eq!(state.diagnostics_generation.get(&params.text_document.uri).copied(), Some(1));
         assert!(state.diagnostics_tokens.contains_key(&params.text_document.uri));
+    }
+
+    #[test]
+    fn push_suppressed_when_client_pulls_diagnostics() {
+        let (mut state, _receiver) = create_test_state();
+        state.pull_diagnostics_active = true;
+
+        let uri = lsp_types::Url::parse("file:///test.bsl").unwrap();
+        handle_did_open(
+            &mut state,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "bsl".to_string(),
+                    version: 1,
+                    text: "Процедура Тест() КонецПроцедуры".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        // The buffer is tracked, but no push diagnostics were scheduled: the client
+        // will pull them instead, so publishing here would double-report.
+        assert!(state.mem_docs.contains(&uri), "open buffer must still be tracked");
+        assert!(
+            !state.diagnostics_tokens.contains_key(&uri),
+            "no push diagnostics token when the client pulls"
+        );
+        assert_eq!(
+            state.diagnostics_generation.get(&uri).copied(),
+            None,
+            "suppressed push must not advance the publish generation"
+        );
     }
 
     #[test]
