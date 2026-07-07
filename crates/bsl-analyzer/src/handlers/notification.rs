@@ -192,6 +192,11 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     }
     let preload_dispatch_ms = preload_start.elapsed().as_millis() as u64;
 
+    // Hand the file off from the deferred batch (Stream B) to the interactive stream:
+    // if the batch had pushed diagnostics for it, clear them so the open document is
+    // the sole owner and the two streams never double-report it.
+    state.clear_batch_push_for(&uri);
+
     schedule_diagnostics(state, &uri);
 
     tracing::info!(
@@ -398,6 +403,10 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
 
     state.sender.send(notification.into())?;
 
+    // The file is closed again, so it is eligible for the deferred batch (Stream B):
+    // re-arm so the next sweep repopulates its diagnostics from disk-backed text.
+    state.mark_workspace_batch_dirty();
+
     tracing::debug!("Document closed successfully: {}", uri);
 
     Ok(())
@@ -410,6 +419,7 @@ pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParam
 
     tracing::debug!("Document saved: {}", uri);
 
+    let mut config_reloaded = false;
     if let Ok(path) = uri.to_file_path() {
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if (name == "bsl-analyzer.toml"
@@ -417,12 +427,24 @@ pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParam
                 || name == ".bsl-language-server.json")
                 && state.reload_project_config()
             {
+                config_reloaded = true;
                 for uri in state.opened_document_uris() {
                     schedule_diagnostics(state, &uri);
                 }
             }
         }
     }
+
+    if config_reloaded {
+        // The workspace-diagnostics scope may have changed (or been turned off): drop
+        // every file the batch pushed before re-running under the new configuration.
+        state.reset_workspace_batch();
+    }
+
+    // A save writes new bytes to disk, which can change diagnostics in closed files
+    // (directly, or via inter-file dependencies); re-arm the batch. Salsa memoization
+    // keeps the re-run cheap — only the changed file and its dependents recompute.
+    state.mark_workspace_batch_dirty();
 
     Ok(())
 }
@@ -917,6 +939,35 @@ mod tests {
 
         assert!(token.is_cancelled());
         assert!(!state.request_tokens.contains_key(&id));
+    }
+
+    #[test]
+    fn did_open_hands_file_off_from_batch_push() {
+        let (mut state, _receiver) = create_test_state();
+        let uri = lsp_types::Url::parse("file:///mod.bsl").unwrap();
+
+        // The deferred batch had pushed diagnostics for this (then closed) file.
+        state.batch_pushed.insert(uri.clone(), "h1".to_string());
+
+        handle_did_open(
+            &mut state,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "bsl".to_string(),
+                    version: 1,
+                    text: "Процедура Тест() КонецПроцедуры".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        // Opening it hands ownership to the interactive stream: the batch push is
+        // cleared so the two streams never double-report the same file.
+        assert!(
+            !state.batch_pushed.contains_key(&uri),
+            "opening a batch-pushed file must clear its batch entry"
+        );
     }
 
     #[test]

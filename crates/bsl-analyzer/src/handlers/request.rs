@@ -863,7 +863,7 @@ fn workspace_report_item(
 /// Whether a file belongs to the `workspace/diagnostic` sweep for the given scope.
 /// Only BSL source files are ever in scope; `Extensions` additionally requires the file
 /// to live under one of the configuration-extension roots.
-fn path_in_workspace_scope(
+pub(crate) fn path_in_workspace_scope(
     path: &std::path::Path,
     scope: project_model::WorkspaceDiagnosticsScope,
     ext_roots: &[&std::path::Path],

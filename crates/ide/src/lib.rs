@@ -195,6 +195,71 @@ impl Analysis {
             .collect()
     }
 
+    /// Parallel variant of [`Self::workspace_diagnostics`] for the deferred whole-project
+    /// batch. Each file's Salsa-memoised `file_diagnostics_query` runs on the caller's
+    /// bounded `pool`, each rayon worker on its own `db` snapshot (`db.clone()` shares the
+    /// memo tables, so already-computed files stay free and interactive stays warm). The
+    /// pool is the caller's — sized below the core count — so the batch never saturates the
+    /// cores interactive requests need. Results are identical to the serial sweep.
+    ///
+    /// Cancellation and per-file panic handling match [`Self::workspace_diagnostics`]: a
+    /// `salsa::Cancelled` unwinds out of the pool to abort the chunk, a per-file compute
+    /// panic skips just that file.
+    pub fn workspace_diagnostics_parallel(
+        &self,
+        file_ids: &[FileId],
+        config: DiagnosticsConfigInput,
+        pool: &rayon::ThreadPool,
+    ) -> Vec<(FileId, Arc<Vec<Diagnostic>>)> {
+        use hir::ConfigsDatabase;
+        use ide_db::base_db::{DiagnosticsConfigId, FileIdInput};
+        use rayon::prelude::*;
+
+        // Nested-rayon guard: the configuration loader fans out over its own rayon scope.
+        // Warm it ONCE on this thread first so the parallel jobs below find it memoised and
+        // never open a nested scope — a stolen sibling job carrying a different `db` clone
+        // would attach a second database to a thread mid-query, which Salsa forbids.
+        // `configurations` loads every config root (base + extensions), closing the window;
+        // it runs each chunk, so a prior chunk's between-chunk LRU trim cannot leave it cold.
+        if let Some(&first) = file_ids.first() {
+            let _ = self.db.configurations(first);
+        }
+
+        // Move an owned db clone into the pool (Salsa handles are `Send` but `&Analysis`
+        // is not, so `install` cannot borrow `self`); each worker gets its own clone from it.
+        let seed = self.db.clone();
+        pool.install(move || {
+            file_ids
+                .par_iter()
+                .map_with(seed, |db, &file_id| {
+                    // Belt-and-suspenders: if a diagnostic still reaches an internally
+                    // parallel query despite the warm-up, this makes it run serially rather
+                    // than steal a sibling job onto this pool and attach a second database.
+                    let _guard = stdx::par_guard::enter_no_nested_parallelism();
+                    let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let file_id_input = FileIdInput::new(&*db, file_id);
+                        let config_id = DiagnosticsConfigId::new(&*db, config.clone());
+                        ide_diagnostics::file_diagnostics_query(&*db, file_id_input, config_id)
+                    }));
+                    match computed {
+                        Ok(diagnostics) => Some((file_id, diagnostics)),
+                        Err(payload) if payload.is::<salsa::Cancelled>() => {
+                            std::panic::resume_unwind(payload)
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                file_id = file_id.0,
+                                "workspace diagnostics: skipping file after a compute panic"
+                            );
+                            None
+                        }
+                    }
+                })
+                .filter_map(|result| result)
+                .collect()
+        })
+    }
+
     pub fn warm_caches_task(&self, file_ids: &[FileId]) -> WarmCachesTask {
         WarmCachesTask { db: self.db.clone(), file_ids: file_ids.to_vec() }
     }

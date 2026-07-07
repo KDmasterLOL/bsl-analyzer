@@ -194,6 +194,12 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
                 crate::handlers::schedule_diagnostics(state, &uri);
             }
         }
+
+        // Launch the deferred whole-project diagnostics batch (Stream B) once a
+        // worker frees up. Interactive per-file scheduling above is drained first so
+        // the batch never contends ahead of the file the user is editing; its own
+        // guards make this a no-op unless a run is pending and the pool has capacity.
+        crate::handlers::spawn_workspace_batch(state);
     }
 
     Ok(())
@@ -296,8 +302,12 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
 
                     state.request_semantic_tokens_refresh();
                     // Diagnostics for closed files only become available now; nudge a pull-capable
-                    // client to re-pull so the Problems panel fills without the user re-triggering.
+                    // client to re-pull the open document (workspace pull stays unadvertised so a
+                    // long-poll client does not stall the open file behind a whole-workspace sweep).
                     state.request_workspace_diagnostic_refresh();
+                    // Whole-project coverage for closed files ships as a deferred push batch
+                    // (Stream B), started off the critical path now that analysis is ready.
+                    state.mark_workspace_batch_dirty();
 
                     tracing::info!(
                         elapsed_ms = finalize_start.elapsed().as_millis() as u64,
@@ -503,6 +513,205 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
         Task::AnalysisJobFinished => {
             state.note_analysis_finished();
         }
+        Task::WorkspaceBatchChunk { generation, outcome } => {
+            apply_workspace_batch_completion(state, generation, outcome)?;
+        }
+    }
+    Ok(())
+}
+
+/// Chunks the batch may leave un-trimmed while interactive analysis is in flight before
+/// forcing a trim anyway, so resident memory stays bounded even under sustained load.
+const WORKSPACE_BATCH_FORCE_TRIM_CHUNKS: u32 = 2;
+
+/// How many times a chunk may unwind on `PropagatedPanic` before it is skipped. A
+/// transient edit-cancellation cascade clears within a retry or two once the edit settles;
+/// a genuine deterministic panic keeps unwinding and is skipped once the budget is spent,
+/// rather than looping forever.
+const WORKSPACE_BATCH_MAX_PROPAGATED_RETRIES: u32 = 3;
+
+/// Handle one chunk of the deferred whole-project batch (Stream B) completing on a
+/// worker. On a computed chunk: publish its diffed diagnostics and advance the sweep. On
+/// a cancellation: keep the plan and retry the same chunk. On a deterministic failure:
+/// skip the chunk. See [`WorkspaceBatchOutcome`].
+fn apply_workspace_batch_completion(
+    state: &mut GlobalState,
+    generation: u64,
+    outcome: crate::global_state::WorkspaceBatchOutcome,
+) -> Result<()> {
+    use crate::global_state::WorkspaceBatchOutcome;
+
+    // The chunk worker has returned, so its snapshot is dropped and the singleton
+    // in-flight flag/token are free again — clear them regardless of the outcome so the
+    // batch never wedges.
+    state.workspace_batch_in_flight = false;
+    state.workspace_batch_token = None;
+
+    // Drop a chunk from a superseded sweep (a reset bumped the generation): the plan is
+    // already gone or replaced, so there is nothing to advance and applying it could
+    // republish diagnostics the new configuration no longer includes.
+    if generation != state.workspace_batch_generation || state.workspace_batch_plan.is_none() {
+        return Ok(());
+    }
+
+    match outcome {
+        // A concurrent edit cancelled this chunk. Keep the plan and cursor; the
+        // bottom-of-loop dispatch retries the SAME chunk once the edit settles. Salsa
+        // memoization resumes it cheaply. `PendingWrite` is transient, so this cannot
+        // loop forever — a deterministic unwind arrives as `Failed` instead.
+        WorkspaceBatchOutcome::Cancelled => Ok(()),
+        // Ambiguous under parallelism: a transient edit-cancellation cascade (retry) or a
+        // real deterministic panic in a shared query (skip). Disambiguate by budget — retry
+        // a few times, and if it keeps unwinding treat it as deterministic and skip.
+        WorkspaceBatchOutcome::Propagated => {
+            let over_budget = {
+                let plan = state.workspace_batch_plan.as_mut().expect("plan present after gate");
+                plan.chunk_retries += 1;
+                plan.chunk_retries > WORKSPACE_BATCH_MAX_PROPAGATED_RETRIES
+            };
+            if over_budget {
+                tracing::warn!(
+                    "workspace batch chunk exceeded propagated-panic retry budget; skipping"
+                );
+                advance_workspace_batch(state)
+            } else {
+                Ok(())
+            }
+        }
+        // A deterministic panic: skip the chunk (its files go uncovered until the next
+        // full sweep) rather than retry it forever. Advance as if it had computed empty.
+        WorkspaceBatchOutcome::Failed => advance_workspace_batch(state),
+        WorkspaceBatchOutcome::Computed(items) => {
+            apply_workspace_batch_chunk(state, generation, items)?;
+            advance_workspace_batch(state)
+        }
+    }
+}
+
+/// Advance the sweep past a completed (or skipped) chunk: move the cursor, trim the Salsa
+/// LRU + parser caches (deferred while interactive analysis is in flight — the trim
+/// cancels those requests — but forced periodically and always on finish), and finalize
+/// when the file set is exhausted.
+fn advance_workspace_batch(state: &mut GlobalState) -> Result<()> {
+    // `enforce_lru` cancels any in-flight interactive request exactly like an edit and
+    // blocks until their snapshots drop, so only trim when no interactive analysis is in
+    // flight — unless the sweep just finished (final cleanup) or too many chunks have
+    // gone un-trimmed (memory valve). Computed before the mutable plan borrow below.
+    let quiescent = state.interactive_analysis_quiescent();
+
+    let (finished, do_trim) = {
+        let plan = state.workspace_batch_plan.as_mut().expect("plan present after gate");
+        plan.next_chunk += 1;
+        plan.chunk_retries = 0;
+        plan.chunks_since_trim += 1;
+        let finished = plan.next_chunk >= plan.num_chunks;
+        let do_trim =
+            finished || quiescent || plan.chunks_since_trim >= WORKSPACE_BATCH_FORCE_TRIM_CHUNKS;
+        if do_trim {
+            plan.chunks_since_trim = 0;
+        }
+        (finished, do_trim)
+    };
+
+    if do_trim {
+        // The worker's snapshot is dropped (its return value is the task just handled),
+        // so the exclusive `&mut db` borrow is free. Salsa only trims at a revision
+        // boundary, so without this a whole-corpus sweep accumulates every file's memos
+        // and OOMs. Also release the parser's thread-local green-node cache on this
+        // thread (the worker released its own before returning).
+        state.analysis_host.raw_database_mut().enforce_lru();
+        syntax::clear_shared_node_cache();
+    }
+
+    if finished {
+        let (files, elapsed_ms) = {
+            let plan = state.workspace_batch_plan.as_ref().expect("plan present");
+            (plan.file_ids.len(), plan.started_at.elapsed().as_millis() as u64)
+        };
+        finalize_workspace_batch(state)?;
+        state.workspace_batch_plan = None;
+        tracing::info!(files, elapsed_ms, "workspace diagnostics batch complete");
+    }
+
+    Ok(())
+}
+
+/// Reconcile a fully completed sweep: any file we had pushed but that this sweep never
+/// reported is gone from scope (deleted or the scope narrowed), so clear its stale
+/// diagnostics. Then reset the reported-set for the next sweep.
+fn finalize_workspace_batch(state: &mut GlobalState) -> Result<()> {
+    let stale: Vec<lsp_types::Url> = state
+        .batch_pushed
+        .keys()
+        .filter(|uri| !state.batch_reported.contains(*uri))
+        .cloned()
+        .collect();
+    for uri in stale {
+        state.batch_pushed.remove(&uri);
+        let params =
+            lsp_types::PublishDiagnosticsParams { uri, diagnostics: vec![], version: None };
+        let notification = Notification::new("textDocument/publishDiagnostics".to_string(), params);
+        state.sender.send(notification.into())?;
+    }
+    state.batch_reported.clear();
+    Ok(())
+}
+
+/// Apply one chunk of the deferred whole-project batch (Stream B) on the event-loop
+/// thread, where `mem_docs` and `batch_pushed` are authoritative. A file opened since
+/// the batch started is skipped (the interactive stream owns it); otherwise the file is
+/// pushed only when its diagnostics hash changed, and cleared when it went clean.
+fn apply_workspace_batch_chunk(
+    state: &mut GlobalState,
+    generation: u64,
+    items: Vec<crate::global_state::WorkspaceBatchItem>,
+) -> Result<()> {
+    // Drop a chunk from a superseded sweep (a reset or a newer batch bumped the
+    // generation): applying it could republish diagnostics the current configuration
+    // no longer includes.
+    if generation != state.workspace_batch_generation {
+        return Ok(());
+    }
+    for item in items {
+        // Record every file this sweep reported, so the completion reconcile can clear
+        // entries that vanished from scope (deleted / scope narrowed) between sweeps.
+        state.batch_reported.insert(item.uri.clone());
+
+        // Handoff: a file opened mid-batch is served live by the interactive stream.
+        // Skipping here (and never recording it) keeps the two streams from
+        // double-reporting; `handle_did_open` already cleared any earlier batch push.
+        if state.mem_docs.contains(&item.uri) {
+            continue;
+        }
+
+        if item.diagnostics.is_empty() {
+            // Publish an empty report only to clear a file that previously had some;
+            // never spam clean files that never carried batch diagnostics.
+            if state.batch_pushed.remove(&item.uri).is_some() {
+                let params = lsp_types::PublishDiagnosticsParams {
+                    uri: item.uri,
+                    diagnostics: vec![],
+                    version: None,
+                };
+                let notification =
+                    Notification::new("textDocument/publishDiagnostics".to_string(), params);
+                state.sender.send(notification.into())?;
+            }
+            continue;
+        }
+
+        // Diff-push: republish only when the diagnostics hash moved since the last batch.
+        if state.batch_pushed.get(&item.uri) == Some(&item.result_id) {
+            continue;
+        }
+        state.batch_pushed.insert(item.uri.clone(), item.result_id);
+        let params = lsp_types::PublishDiagnosticsParams {
+            uri: item.uri,
+            diagnostics: item.diagnostics,
+            version: None,
+        };
+        let notification = Notification::new("textDocument/publishDiagnostics".to_string(), params);
+        state.sender.send(notification.into())?;
     }
     Ok(())
 }
@@ -592,6 +801,14 @@ fn handle_vfs_msg(
     // their diagnostics reflect the new disk state. Open files are filtered out of
     // this batch above (their editor buffer is authoritative), so this fires only
     // for genuine external changes, not for saves of open buffers.
+    // A config reload may have changed or disabled the workspace-diagnostics scope. Tear
+    // down the batch's published state first — this clears stale pushes even when the new
+    // scope is `off`, where `mark_workspace_batch_dirty` below would no-op and leave them
+    // lingering — then re-arm below if the feature is still enabled. Mirrors the save path.
+    if outcome.config_file_changed {
+        state.reset_workspace_batch();
+    }
+
     if outcome.config_file_changed || outcome.affects_open_documents {
         tracing::info!(
             config_file_changed = outcome.config_file_changed,
@@ -600,6 +817,10 @@ fn handle_vfs_msg(
         for uri in state.opened_document_uris() {
             crate::handlers::notification::schedule_diagnostics(state, &uri);
         }
+        // A `.bsl`/metadata change on disk (e.g. `git pull`) can alter diagnostics for
+        // closed in-scope files too; re-arm the deferred batch so its coverage — not
+        // just open documents — reflects the new disk state.
+        state.mark_workspace_batch_dirty();
     }
 
     Ok(())
@@ -692,13 +913,19 @@ fn server_capabilities(
 
     // Only advertise the pull diagnostic provider when the feature is enabled; when
     // `Off` the field stays `None` and the server behaves exactly as before (push-only).
-    // Both single-document (`textDocument/diagnostic`) and whole-workspace
-    // (`workspace/diagnostic`) pull are served, with the workspace sweep scoped by config.
+    //
+    // `workspace_diagnostics: false` mirrors rust-analyzer: advertising it makes
+    // long-poll clients (Neovim) collapse to a single whole-workspace pull and stop
+    // pulling the open document, so first paint waits for the entire sweep instead of
+    // lighting up the edited file instantly. Whole-project coverage is delivered out of
+    // band as a deferred push batch; the open document is served live via
+    // `textDocument/diagnostic`. The `workspace/diagnostic` handler still answers an
+    // explicit request (e.g. VS Code's background channel), it is just not solicited.
     let diagnostic_provider = workspace_diagnostics_scope.is_enabled().then(|| {
         DiagnosticServerCapabilities::Options(DiagnosticOptions {
             identifier: Some("bsl".to_string()),
             inter_file_dependencies: true,
-            workspace_diagnostics: true,
+            workspace_diagnostics: false,
             work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
         })
     });
@@ -764,6 +991,7 @@ fn server_capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::global_state::Task;
 
     #[test]
     fn test_server_capabilities() {
@@ -794,7 +1022,10 @@ mod tests {
         );
         assert!(off.diagnostic_provider.is_none());
 
-        // Enabled: both single-document and whole-workspace pull are advertised.
+        // Enabled: the single-document pull provider is advertised, but workspace pull
+        // stays off so long-poll clients keep pulling the open document instead of
+        // collapsing to a whole-workspace sweep. Whole-project coverage ships as a
+        // deferred push batch, not a solicited workspace pull.
         let on = server_capabilities(
             PositionEncoding::Utf8,
             project_model::WorkspaceDiagnosticsScope::Extensions,
@@ -802,7 +1033,7 @@ mod tests {
         match on.diagnostic_provider {
             Some(DiagnosticServerCapabilities::Options(opts)) => {
                 assert!(opts.inter_file_dependencies);
-                assert!(opts.workspace_diagnostics);
+                assert!(!opts.workspace_diagnostics);
                 assert_eq!(opts.identifier.as_deref(), Some("bsl"));
             }
             other => panic!("expected diagnostic options, got {other:?}"),
@@ -898,5 +1129,356 @@ mod tests {
             receiver.try_recv().is_err(),
             "diagnostics for a closed document must not be published"
         );
+    }
+
+    /// Decode the URI + diagnostic count of a `textDocument/publishDiagnostics`
+    /// notification pulled off the client channel; panics on anything else.
+    fn recv_publish(receiver: &crossbeam_channel::Receiver<Message>) -> (lsp_types::Url, usize) {
+        match receiver.try_recv().expect("expected a publishDiagnostics notification") {
+            Message::Notification(n) => {
+                assert_eq!(n.method, "textDocument/publishDiagnostics");
+                let params: lsp_types::PublishDiagnosticsParams =
+                    serde_json::from_value(n.params).unwrap();
+                (params.uri, params.diagnostics.len())
+            }
+            other => panic!("expected a notification, got {other:?}"),
+        }
+    }
+
+    fn dummy_diagnostic() -> lsp_types::Diagnostic {
+        lsp_types::Diagnostic {
+            range: lsp_types::Range::default(),
+            message: "x".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn batch_item(
+        uri: &lsp_types::Url,
+        result_id: &str,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+    ) -> crate::global_state::WorkspaceBatchItem {
+        crate::global_state::WorkspaceBatchItem {
+            uri: uri.clone(),
+            result_id: result_id.to_string(),
+            diagnostics,
+        }
+    }
+
+    /// Install a minimal active sweep plan so `handle_task` will apply chunks: the
+    /// completion path drops any chunk that arrives with no plan. `num_chunks` controls
+    /// when the sweep finalizes — after that many non-aborted chunks the reconcile runs
+    /// and the plan is cleared. Bumps the generation and marks the batch in flight, as a
+    /// real dispatch does.
+    fn install_test_plan(state: &mut crate::global_state::GlobalState, num_chunks: usize) {
+        state.workspace_batch_generation = state.workspace_batch_generation.wrapping_add(1);
+        state.batch_reported.clear();
+        let analysis_guard = state.note_analysis_spawned();
+        state.workspace_batch_in_flight = true;
+        state.workspace_batch_plan = Some(crate::global_state::WorkspaceBatchPlan {
+            generation: state.workspace_batch_generation,
+            file_ids: std::sync::Arc::new(Vec::new()),
+            file_paths: crate::frozen_context::FrozenFilePaths::default(),
+            config: state.diagnostics_config().clone(),
+            position_encoding: state.position_encoding,
+            chunk_size: 500,
+            pool: None,
+            next_chunk: 0,
+            num_chunks,
+            chunks_since_trim: 0,
+            chunk_retries: 0,
+            started_at: std::time::Instant::now(),
+            analysis_guard,
+        });
+    }
+
+    /// Wrap a computed chunk in the state's current generation so `handle_task` applies it.
+    fn current_chunk(
+        state: &crate::global_state::GlobalState,
+        items: Vec<crate::global_state::WorkspaceBatchItem>,
+    ) -> Task {
+        Task::WorkspaceBatchChunk {
+            generation: state.workspace_batch_generation,
+            outcome: crate::global_state::WorkspaceBatchOutcome::Computed(items),
+        }
+    }
+
+    #[test]
+    fn workspace_batch_chunk_pushes_and_diffs() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        // A many-chunk sweep so applying several chunks never trips the finalize.
+        install_test_plan(&mut state, 100);
+        let uri = lsp_types::Url::parse("file:///a.bsl").unwrap();
+
+        // First report for a closed file with diagnostics: published and recorded.
+        let chunk = current_chunk(&state, vec![batch_item(&uri, "h1", vec![dummy_diagnostic()])]);
+        handle_task(&mut state, chunk).unwrap();
+        assert_eq!(recv_publish(&receiver), (uri.clone(), 1));
+        assert_eq!(state.batch_pushed.get(&uri).map(String::as_str), Some("h1"));
+
+        // Same hash again: diff-push skips the republish.
+        let chunk = current_chunk(&state, vec![batch_item(&uri, "h1", vec![dummy_diagnostic()])]);
+        handle_task(&mut state, chunk).unwrap();
+        assert!(receiver.try_recv().is_err(), "unchanged hash must not republish");
+
+        // Changed hash: republished and the recorded hash advances.
+        let chunk = current_chunk(
+            &state,
+            vec![batch_item(&uri, "h2", vec![dummy_diagnostic(), dummy_diagnostic()])],
+        );
+        handle_task(&mut state, chunk).unwrap();
+        assert_eq!(recv_publish(&receiver), (uri.clone(), 2));
+        assert_eq!(state.batch_pushed.get(&uri).map(String::as_str), Some("h2"));
+    }
+
+    #[test]
+    fn workspace_batch_chunk_from_a_stale_generation_is_dropped() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        state.workspace_batch_generation = 5;
+        let uri = lsp_types::Url::parse("file:///a.bsl").unwrap();
+
+        // A chunk tagged with an older generation (its sweep was superseded by a
+        // config reset) must never publish or record anything.
+        handle_task(
+            &mut state,
+            Task::WorkspaceBatchChunk {
+                generation: 4,
+                outcome: crate::global_state::WorkspaceBatchOutcome::Computed(vec![batch_item(
+                    &uri,
+                    "h1",
+                    vec![dummy_diagnostic()],
+                )]),
+            },
+        )
+        .unwrap();
+        assert!(receiver.try_recv().is_err(), "a stale-generation chunk must not publish");
+        assert!(state.batch_pushed.is_empty(), "a stale-generation chunk must not record state");
+    }
+
+    #[test]
+    fn workspace_batch_completion_clears_files_that_left_scope() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        // A single-chunk sweep: the one chunk both reports and finalizes.
+        install_test_plan(&mut state, 1);
+        let gone = lsp_types::Url::parse("file:///gone.bsl").unwrap();
+        let kept = lsp_types::Url::parse("file:///kept.bsl").unwrap();
+
+        // Two files were pushed by an earlier sweep.
+        state.batch_pushed.insert(gone.clone(), "h1".to_string());
+        state.batch_pushed.insert(kept.clone(), "h1".to_string());
+
+        // The final (only) chunk reports just `kept` (unchanged hash → no republish);
+        // reaching the cursor end reconciles: `gone`, never reported, is cleared.
+        let chunk = current_chunk(&state, vec![batch_item(&kept, "h1", vec![dummy_diagnostic()])]);
+        handle_task(&mut state, chunk).unwrap();
+        assert_eq!(recv_publish(&receiver), (gone.clone(), 0), "a vanished file is cleared");
+        assert!(!state.batch_pushed.contains_key(&gone));
+        assert!(state.batch_pushed.contains_key(&kept), "a still-reported file is retained");
+        assert!(state.workspace_batch_plan.is_none(), "a finalized sweep clears its plan");
+        assert!(!state.workspace_batch_in_flight);
+    }
+
+    #[test]
+    fn workspace_batch_abort_keeps_pushed_files_and_resumes_the_same_chunk() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        install_test_plan(&mut state, 5);
+        let uri = lsp_types::Url::parse("file:///a.bsl").unwrap();
+        state.batch_pushed.insert(uri.clone(), "h1".to_string());
+
+        // A cancelled chunk (a concurrent edit cancelled it) reported nothing: it must
+        // NOT clear the pushed file, must keep the plan, and must NOT advance the cursor
+        // (the same chunk is retried), while freeing the in-flight slot for the retry.
+        let gen = state.workspace_batch_generation;
+        handle_task(
+            &mut state,
+            Task::WorkspaceBatchChunk {
+                generation: gen,
+                outcome: crate::global_state::WorkspaceBatchOutcome::Cancelled,
+            },
+        )
+        .unwrap();
+        assert!(receiver.try_recv().is_err(), "a cancelled chunk must not clear pushed files");
+        assert!(state.batch_pushed.contains_key(&uri));
+        assert!(!state.workspace_batch_in_flight, "the in-flight slot is freed for the retry");
+        let plan = state.workspace_batch_plan.as_ref().expect("the plan is kept for resume");
+        assert_eq!(plan.next_chunk, 0, "an aborted chunk is retried, not skipped");
+        assert!(!state.workspace_batch_dirty, "resume is driven by the plan, not a dirty re-arm");
+    }
+
+    #[test]
+    fn workspace_batch_chunk_clears_a_file_that_went_clean() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        install_test_plan(&mut state, 100);
+        let uri = lsp_types::Url::parse("file:///a.bsl").unwrap();
+
+        // Prime a pushed file, then re-report it clean: one empty publish clears it.
+        state.batch_pushed.insert(uri.clone(), "h1".to_string());
+        let chunk = current_chunk(&state, vec![batch_item(&uri, "h0", vec![])]);
+        handle_task(&mut state, chunk).unwrap();
+        assert_eq!(
+            recv_publish(&receiver),
+            (uri.clone(), 0),
+            "clean file is cleared with an empty report"
+        );
+        assert!(!state.batch_pushed.contains_key(&uri));
+
+        // A clean file that was never pushed produces no notification.
+        let chunk = current_chunk(&state, vec![batch_item(&uri, "h0", vec![])]);
+        handle_task(&mut state, chunk).unwrap();
+        assert!(receiver.try_recv().is_err(), "a never-pushed clean file must not be published");
+    }
+
+    #[test]
+    fn workspace_batch_chunk_skips_files_opened_since_the_batch_started() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        install_test_plan(&mut state, 100);
+        let uri = lsp_types::Url::parse("file:///open.bsl").unwrap();
+
+        // The file was opened while the batch was computing: the interactive stream
+        // owns it, so the batch result is dropped and never recorded.
+        state.mem_docs.insert(uri.clone(), "Процедура Т() КонецПроцедуры".to_string(), 1);
+        let chunk = current_chunk(&state, vec![batch_item(&uri, "h1", vec![dummy_diagnostic()])]);
+        handle_task(&mut state, chunk).unwrap();
+        assert!(receiver.try_recv().is_err(), "an open file must not be batch-pushed");
+        assert!(!state.batch_pushed.contains_key(&uri));
+    }
+
+    #[test]
+    fn workspace_batch_completion_clears_plan_without_rearming() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+
+        // A completed single-chunk sweep clears the in-flight flag and the plan and does
+        // not re-arm.
+        install_test_plan(&mut state, 1);
+        let chunk = current_chunk(&state, Vec::new());
+        handle_task(&mut state, chunk).unwrap();
+        assert!(!state.workspace_batch_in_flight);
+        assert!(state.workspace_batch_plan.is_none(), "a completed sweep clears its plan");
+        assert!(!state.workspace_batch_dirty, "a completed sweep does not re-arm");
+
+        // A cancelled chunk keeps the plan (for resume) and frees the in-flight slot.
+        install_test_plan(&mut state, 2);
+        let gen = state.workspace_batch_generation;
+        handle_task(
+            &mut state,
+            Task::WorkspaceBatchChunk {
+                generation: gen,
+                outcome: crate::global_state::WorkspaceBatchOutcome::Cancelled,
+            },
+        )
+        .unwrap();
+        assert!(!state.workspace_batch_in_flight);
+        assert!(state.workspace_batch_plan.is_some(), "a cancelled chunk keeps the plan for retry");
+        assert_eq!(
+            state.workspace_batch_plan.as_ref().unwrap().next_chunk,
+            0,
+            "a cancelled chunk is retried, not skipped"
+        );
+    }
+
+    #[test]
+    fn workspace_batch_failed_chunk_is_skipped_not_retried() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+
+        // A deterministically failing chunk advances the cursor (skipped) instead of
+        // looping forever on it — a two-chunk sweep finalizes after one failure + one
+        // more completion.
+        install_test_plan(&mut state, 2);
+        let gen = state.workspace_batch_generation;
+        handle_task(
+            &mut state,
+            Task::WorkspaceBatchChunk {
+                generation: gen,
+                outcome: crate::global_state::WorkspaceBatchOutcome::Failed,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.workspace_batch_plan.as_ref().expect("plan still active").next_chunk,
+            1,
+            "a failed chunk advances the cursor rather than retrying"
+        );
+
+        // The final chunk finalizes the sweep.
+        let chunk = current_chunk(&state, Vec::new());
+        handle_task(&mut state, chunk).unwrap();
+        assert!(state.workspace_batch_plan.is_none(), "the sweep finalizes after the last chunk");
+    }
+
+    #[test]
+    fn workspace_batch_propagated_panic_retries_within_budget_then_skips() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        // A two-chunk sweep; the first chunk keeps unwinding on a propagated panic.
+        install_test_plan(&mut state, 2);
+        let gen = state.workspace_batch_generation;
+
+        // Within budget: the cursor holds (retry the same chunk).
+        for _ in 0..WORKSPACE_BATCH_MAX_PROPAGATED_RETRIES {
+            handle_task(
+                &mut state,
+                Task::WorkspaceBatchChunk {
+                    generation: gen,
+                    outcome: crate::global_state::WorkspaceBatchOutcome::Propagated,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                state.workspace_batch_plan.as_ref().expect("plan active").next_chunk,
+                0,
+                "a propagated panic within budget retries the same chunk"
+            );
+        }
+
+        // Budget exhausted: the chunk is skipped (cursor advances).
+        handle_task(
+            &mut state,
+            Task::WorkspaceBatchChunk {
+                generation: gen,
+                outcome: crate::global_state::WorkspaceBatchOutcome::Propagated,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.workspace_batch_plan.as_ref().expect("plan still active").next_chunk,
+            1,
+            "an over-budget propagated panic skips the chunk"
+        );
+
+        // A subsequent computed chunk reset the retry counter and finalizes the sweep.
+        let chunk = current_chunk(&state, Vec::new());
+        handle_task(&mut state, chunk).unwrap();
+        assert!(state.workspace_batch_plan.is_none(), "the sweep finalizes after the last chunk");
+    }
+
+    #[test]
+    fn interactive_quiescence_accounts_for_pending_requests() {
+        use salsa::Database as _;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+
+        // Idle: the trim may run.
+        assert!(state.interactive_analysis_quiescent());
+
+        // A pending latency request (hover, the workspace/diagnostic pull, …) holds a db
+        // snapshot the trim would block on, so quiescence must report false.
+        let token = state.analysis_host.raw_database().cancellation_token();
+        let id = lsp_server::RequestId::from(1);
+        state.request_tokens.insert(id.clone(), token);
+        assert!(
+            !state.interactive_analysis_quiescent(),
+            "a pending request must defer the batch trim"
+        );
+
+        state.request_tokens.remove(&id);
+        assert!(state.interactive_analysis_quiescent());
     }
 }
