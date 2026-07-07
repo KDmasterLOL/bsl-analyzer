@@ -75,7 +75,15 @@ pub(crate) fn resolve_card(
         return Err(McpError::invalid_params("one of 'symbol' or 'path'+'line' is required", None));
     }
 
-    let req = SymbolInfoRequest { symbol: symbol.map(str::to_string), position, locale, sections };
+    let req = SymbolInfoRequest {
+        symbol: symbol.map(str::to_string),
+        position,
+        locale,
+        sections,
+        // The graph was built against the resident's workspace root; a form handler's path-fallback
+        // graph id must be encoded relative to it (NOT the config root) to resolve its usages.
+        workspace_root: Some(resident.workspace_root().to_path_buf()),
+    };
     Ok(ide::symbol_info(resident.db(), &req))
 }
 

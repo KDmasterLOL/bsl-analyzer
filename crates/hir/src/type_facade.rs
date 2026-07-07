@@ -1,4 +1,4 @@
-use bsl_metadata::MdoType;
+use bsl_metadata::{Form, FormElement, MdoType};
 use bsl_platform::{PlatformData, PlatformMethod};
 use bsl_types::builders::Builders;
 use bsl_types::display::{display_name as kernel_display, Locale as KernelLocale, PlainDisplayCtx};
@@ -273,6 +273,15 @@ fn field_from_info(info: FieldInfo) -> Field {
 
 pub fn module_implicit_fields<DB: hir_ty::db::HirDatabase>(db: &DB, file_id: FileId) -> Vec<Field> {
     hir_ty::module_implicit_fields(db, file_id).into_iter().map(field_from_info).collect()
+}
+
+pub fn form_element_type<DB: hir_ty::db::HirDatabase>(
+    db: &DB,
+    file_id: FileId,
+    form: &Form,
+    element: &FormElement,
+) -> TypeId {
+    hir_ty::lower_form_element_for_file(db, file_id, form, element)
 }
 
 /// Lowercased ru/en names of the module's implicit context fields, for

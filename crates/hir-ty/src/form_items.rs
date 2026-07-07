@@ -11,6 +11,7 @@ use bsl_types::testing::RootConfigCtx;
 use hir_def::resolver::Resolver;
 use hir_def::ty::MetadataKind;
 use hir_def::Name;
+use vfs::FileId;
 
 use crate::db::HirDatabase;
 use crate::field_enum::{FieldInfo, FieldOrigin};
@@ -67,6 +68,16 @@ pub(crate) fn lower_form_element(
         .filter(|dp| !dp.starts_with('~'))
         .and_then(|dp| resolve_data_path(db, dp, form, resolver));
     db.mk_form_control(element.kind, binding)
+}
+
+pub fn lower_form_element_for_file(
+    db: &dyn HirDatabase,
+    file_id: FileId,
+    form: &Form,
+    element: &FormElement,
+) -> TypeId {
+    let obj_resolver = crate::object_resolver::DbObjectResolver::new(db, file_id);
+    lower_form_element(db, form, element, &obj_resolver)
 }
 
 fn row_typeid_of_tabular_section_target(

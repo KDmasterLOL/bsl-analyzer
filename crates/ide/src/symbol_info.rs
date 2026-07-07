@@ -7,6 +7,8 @@
 //! applies the output budget, and serializes. Resolution is resident-led: the card is servable
 //! whenever the resident host is `Ready`, independent of the call graph.
 
+mod form;
+
 use bsl_metadata::MdoType;
 use hir::{
     compute_execution_context, kernel_type_label, method_return_type, DefDatabase, Definition,
@@ -56,6 +58,13 @@ pub struct SymbolInfoRequest {
     pub position: Option<SymbolPosition>,
     pub locale: Locale,
     pub sections: SymbolInfoSections,
+    /// The root the call graph was built against (the resident's `workspace_root` / the MCP
+    /// server's `source_dir`), used to encode a form event-handler's path-fallback
+    /// `method/file/<rel>::<name>` graph id byte-identically to the graph builder. This is NOT the
+    /// config root (`db.all_config_paths()` — e.g. `<workspace>/src/cf`): the graph strips the
+    /// workspace root, so using the config root would mint a mismatched, non-resolving id and drop
+    /// form-handler usages. `None` disables the form-handler `graph_id` (usages) only.
+    pub workspace_root: Option<std::path::PathBuf>,
 }
 
 /// The container a symbol lives in (its owning module or metadata object).
@@ -153,6 +162,9 @@ fn resolve_qualified(
     req: &SymbolInfoRequest,
 ) -> Option<SymbolInfoCard> {
     let segments: Vec<&str> = symbol.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if let Some(card) = form::resolve_form(db, symbol, &segments, req) {
+        return Some(card);
+    }
     match segments.as_slice() {
         [one] => resolve_single(db, symbol, one, req),
         [a, b] => resolve_pair(db, symbol, a, b, req),
@@ -660,6 +672,10 @@ fn method_return_type_label(
     locale: Locale,
 ) -> Option<String> {
     let ty = method_return_type(db, method_id);
+    type_label(db, ty, locale)
+}
+
+fn type_label(db: &RootDatabaseImpl, ty: hir::TypeId, locale: Locale) -> Option<String> {
     let label = kernel_type_label(db, ty, locale, false);
     (!label.is_empty()).then_some(label)
 }
