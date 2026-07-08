@@ -15,18 +15,33 @@ issue_body() {
   local issue=$1
   local analysis=$2
   local marker=$3
-  "$JQ_BIN" -n --argjson issue "$issue" --argjson analysis "$analysis" --arg marker "$marker" '
-    [
-      $marker, "", "## Что произошло",
-      ("Sonar issue закрыт программистом: `" + $issue.issue_key + "`."),
-      ("Rule: `" + $issue.rule_key + "`, status: `" + $issue.status + "`, resolution: `" + $issue.resolution + "`."),
-      "", "## Оценка opencode", ("Confidence: `" + $analysis.confidence + "`."),
-      ("Classification: `" + $analysis.classification + "`."), $analysis.summary,
-      "", "## Контекст Sonar", ("Project: `" + $issue.server + "/" + $issue.project_key + "`."),
-      ("Component: `" + $issue.component + "`, line: `" + ($issue.line|tostring) + "`."),
-      "", "```bsl", ($issue.snippet // ""), "```", "", "## Что неизвестно",
-      (($analysis.unknowns // []) | map("- " + .) | join("\n"))
-    ] | join("\n")'
+  "$JQ_BIN" -rn --argjson issue "$issue" --argjson analysis "$analysis" --arg marker "$marker" '
+    ("<!-- " + $marker + " -->") as $hidden
+    | (($issue.snippet // "") | rtrimstr("\n")) as $snip
+    | (
+        [
+          $hidden, "",
+          "## Что произошло", "",
+          ("Sonar issue закрыт программистом: `" + $issue.issue_key + "`."), "",
+          ("- **Rule:** `" + $issue.rule_key + "`"),
+          ("- **Status:** `" + $issue.status + "`"),
+          ("- **Resolution:** `" + $issue.resolution + "`"), "",
+          "## Оценка opencode", "",
+          ("- **Confidence:** `" + $analysis.confidence + "`"),
+          ("- **Classification:** `" + $analysis.classification + "`"), "",
+          $analysis.summary, "",
+          "## Контекст Sonar", "",
+          ("- **Project:** `" + $issue.server + "/" + $issue.project_key + "`"),
+          ("- **Component:** `" + $issue.component + "`"),
+          ("- **Line:** `" + ($issue.line | tostring) + "`"), ""
+        ]
+        + (if $snip == "" then [] else ["```bsl", $snip, "```", ""] end)
+        + [
+          "## Что неизвестно", "",
+          (($analysis.unknowns // []) | map("- " + .) | join("\n"))
+        ]
+      )
+    | join("\n")'
 }
 
 load_existing_gitlab_issues() {
