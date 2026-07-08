@@ -16,6 +16,9 @@ TRIAGE_RESOLUTIONS=${TRIAGE_RESOLUTIONS:-FALSE-POSITIVE}
 TRIAGE_PROJECTS=${TRIAGE_PROJECTS:-}
 TRIAGE_GITLAB_REPO=${TRIAGE_GITLAB_REPO:-}
 TRIAGE_SKIP_OPENCODE=${TRIAGE_SKIP_OPENCODE:-0}
+TRIAGE_SRC_ROOTS=${TRIAGE_SRC_ROOTS:-"$HOME/src $HOME/src/pt"}
+TRIAGE_PROJECT_MAP=${TRIAGE_PROJECT_MAP:-"$HOME/.config/bsl-sonar-triage/projects.map"}
+TRIAGE_REFRESH_CLONES=${TRIAGE_REFRESH_CLONES:-0}
 TRIAGE_INCLUDE_SNIPPETS=${TRIAGE_INCLUDE_SNIPPETS:-0}
 if [[ "${TRIAGE_SKIP_SNIPPETS:-}" == 0 ]]; then
   TRIAGE_INCLUDE_SNIPPETS=1
@@ -55,6 +58,7 @@ Options:
   --max N                   Max issues to collect across all servers. Default: 50. Use 0 for no cap.
   --run-id ID               Existing run id for analyze/plan/apply.
   --include-snippets        Store downstream source snippets in run artifacts and GitLab bodies.
+  --refresh-clones          git pull --ff-only clean local clones before analyze.
   --live                    Allow apply to write via glab.
   --confirm-live            Required together with --live.
 
@@ -64,6 +68,9 @@ Environment:
   Optional TRIAGE_GITLAB_REPO forces glab --repo; otherwise current repo is used.
   Optional TRIAGE_RESOLUTIONS comma list. Default: FALSE-POSITIVE. FIXED closures
     are mostly style compliance, not analyzer bugs; add them only deliberately.
+  Optional TRIAGE_SRC_ROOTS space list of parents searched for a <project> clone.
+    Default: "~/src ~/src/pt". A cloned project lets opencode read the real code.
+  Optional TRIAGE_PROJECT_MAP file with `projectKey=/path` lines for odd layouts.
 
 Idempotency:
   A live apply records every triaged issue (create and skip alike) into a local
@@ -79,6 +86,7 @@ parse_common_args() {
       --max) TRIAGE_MAX_ISSUES=${2:?--max requires a value}; shift 2 ;;
       --run-id) RUN_ID=${2:?--run-id requires a value}; shift 2 ;;
       --include-snippets) TRIAGE_INCLUDE_SNIPPETS=1; shift ;;
+      --refresh-clones) TRIAGE_REFRESH_CLONES=1; shift ;;
       *) die "unknown option: $1" ;;
     esac
   done

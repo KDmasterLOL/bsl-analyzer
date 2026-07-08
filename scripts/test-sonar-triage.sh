@@ -113,6 +113,10 @@ export TRIAGE_STATE_DIR="$STATE_DIR"
 export TRIAGE_REPO_ROOT="$ROOT"
 export TRIAGE_PROJECTS="runsystems:bsl-analyzer-fixture"
 export TRIAGE_MAX_ISSUES=0
+export TRIAGE_SRC_ROOTS="$TMP/clones"
+export TRIAGE_PROJECT_MAP="$TMP/no-such-map"
+mkdir -p "$TMP/clones/bsl-analyzer-fixture/src/CommonModules"
+printf 'Процедура Тест(Элемент)\n\tВозврат;\nКонецПроцедуры\n' > "$TMP/clones/bsl-analyzer-fixture/src/CommonModules/M.bsl"
 export SONAR_RUNSYSTEMS_TOKEN=inherited-should-not-use
 export SONAR_TOKEN=generic-should-not-leak
 
@@ -128,6 +132,12 @@ TRIAGE_SKIP_OPENCODE=0 "$ROOT/scripts/sonar-triage.sh" collect --run-id opencode
 TRIAGE_SKIP_OPENCODE=0 "$ROOT/scripts/sonar-triage.sh" analyze --run-id opencode-run
 key=$(jq -r '.[0].analysis.problem_key' "$STATE_DIR/runs/opencode-run/analysis.json")
 [[ "$key" == "unused-parameters-event-handler" ]] || { echo "expected opencode problem_key, got $key" >&2; exit 1; }
+
+# Local clone resolution: the issue whose file exists locally gets downstream_local.
+local_ctx=$(jq -s '[.[].downstream_local.available] | map(select(. == true)) | length' "$STATE_DIR/runs/opencode-run"/opencode-input-*.json)
+[[ "$local_ctx" == 1 ]] || { echo "expected one issue with local source context, got $local_ctx" >&2; exit 1; }
+local_path=$(jq -r 'select(.downstream_local.available == true) | .downstream_local.path' "$STATE_DIR/runs/opencode-run"/opencode-input-*.json | head -1)
+[[ "$local_path" == "$TMP/clones/bsl-analyzer-fixture/src/CommonModules/M.bsl" ]] || { echo "wrong local path: $local_path" >&2; exit 1; }
 
 # --- Grouping: two same-rule false positives collapse into one issue ---
 TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" run-dry --run-id fixture-run --since 2026-01-01

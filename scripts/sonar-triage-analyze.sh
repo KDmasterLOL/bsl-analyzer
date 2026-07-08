@@ -66,11 +66,12 @@ analyze_issue() {
   local dir=$2
   local idx=$3
   local known_groups=$4
-  local issue_file raw prompt rule
+  local issue_file raw prompt rule local_ctx
   rule=$("$JQ_BIN" -r '.rule_key' <<< "$issue")
+  local_ctx=$(resolve_downstream_local "$issue")
   issue_file="$dir/opencode-input-$idx.json"
-  "$JQ_BIN" -n --argjson issue "$issue" --arg repo_root "$REPO_ROOT" --slurpfile groups "$known_groups" \
-    '{task:"triage_closed_sonar_issue", repo_root:$repo_root, sonar_issue:$issue, existing_problems:($groups[0] // [])}' > "$issue_file"
+  "$JQ_BIN" -n --argjson issue "$issue" --arg repo_root "$REPO_ROOT" --slurpfile groups "$known_groups" --argjson local "$local_ctx" \
+    '{task:"triage_closed_sonar_issue", analyzer_repo:$repo_root, sonar_issue:$issue, downstream_local:$local, existing_problems:($groups[0] // [])}' > "$issue_file"
   if [[ "$TRIAGE_SKIP_OPENCODE" == 1 ]]; then
     default_low_analysis "$rule"
     return
@@ -106,12 +107,32 @@ remember_group() {
   mv "$tmp" "$known_groups"
 }
 
+refresh_clones() {
+  local dir=$1
+  local project root seen=" "
+  while IFS= read -r project; do
+    [[ -n "$project" ]] || continue
+    case "$seen" in *" $project "*) continue ;; esac
+    seen+="$project "
+    root=$(local_root_for_project "$project") || continue
+    if [[ -n "$(git -C "$root" status --porcelain 2>/dev/null)" ]]; then
+      log "clone dirty, not refreshing: $root"
+    elif timeout 120 git -C "$root" pull --ff-only >/dev/null 2>&1; then
+      log "refreshed clone: $root"
+    else
+      log "clone refresh skipped (non-ff, offline, or timed out): $root"
+    fi
+  done < <("$JQ_BIN" -r '.[].project_key' "$dir/issues.json" | sort -u)
+}
+
 analyze() {
-  local dir issue parsed idx manifest_tmp known_groups key title action
+  local dir issue parsed idx manifest_tmp known_groups key title action local_hits
   dir=$(run_dir)
   [[ -f "$dir/issues.json" ]] || die "issues.json not found for run $RUN_ID"
+  [[ "$TRIAGE_REFRESH_CLONES" == 1 ]] && refresh_clones "$dir"
   known_groups="$dir/known-groups.json"
   seed_known_groups > "$known_groups"
+  rm -f "$dir"/opencode-input-*.json "$dir"/opencode-output-*.txt
   : > "$dir/analysis.ndjson"
   idx=0
   while IFS= read -r issue; do
@@ -126,8 +147,10 @@ analyze() {
     idx=$((idx + 1))
   done < <("$JQ_BIN" -c '.[]' "$dir/issues.json")
   "$JQ_BIN" -s '.' "$dir/analysis.ndjson" > "$dir/analysis.json"
+  local_hits=$("$JQ_BIN" -s '[.[].downstream_local.available // false] | map(select(. == true)) | length' "$dir"/opencode-input-*.json 2>/dev/null || printf '0')
   manifest_tmp="$dir/manifest.json.tmp"
-  "$JQ_BIN" --argjson analyzed_count "$idx" '.stage="analyzed" | .analyzed_count=$analyzed_count' "$dir/manifest.json" > "$manifest_tmp"
+  "$JQ_BIN" --argjson analyzed_count "$idx" --argjson local_hits "${local_hits:-0}" \
+    '.stage="analyzed" | .analyzed_count=$analyzed_count | .local_context=$local_hits' "$dir/manifest.json" > "$manifest_tmp"
   mv "$manifest_tmp" "$dir/manifest.json"
-  log "analysis report: $dir/analysis.json"
+  log "analysis report: $dir/analysis.json ($local_hits/$idx with local source context)"
 }

@@ -63,6 +63,55 @@ issue_marker() {
   "$JQ_BIN" -r '"bsl-sonar-triage-id: \(.server)/\(.project_key)/\(.issue_key)"'
 }
 
+# Resolve a Sonar project key to a local clone directory. An explicit map wins;
+# otherwise each TRIAGE_SRC_ROOTS entry is probed for a <root>/<project> dir.
+local_root_for_project() {
+  local project=$1
+  local mapped root
+  if [[ -f "$TRIAGE_PROJECT_MAP" ]]; then
+    mapped=$(awk -F= -v k="$project" '$1 == k {print substr($0, length($1) + 2); exit}' "$TRIAGE_PROJECT_MAP")
+    if [[ -n "$mapped" ]]; then
+      mapped="${mapped/#\~/$HOME}"
+      [[ -d "$mapped" ]] && { printf '%s' "$mapped"; return 0; }
+    fi
+  fi
+  for root in $TRIAGE_SRC_ROOTS; do
+    [[ -d "$root/$project" ]] && { printf '%s' "$root/$project"; return 0; }
+  done
+  return 1
+}
+
+# Locate the actual source file for a normalized issue inside its local clone.
+# Emits a downstream_local object for the opencode input. The relative path comes
+# from an external Sonar component, so it is constrained to stay inside the clone.
+resolve_downstream_local() {
+  local issue=$1
+  local project component rel root abs
+  project=$("$JQ_BIN" -r '.project_key' <<< "$issue")
+  component=$("$JQ_BIN" -r '.component' <<< "$issue")
+  if [[ "$component" == "$project:"* ]]; then
+    rel="${component#"$project":}"
+  else
+    rel="${component#*:}"
+  fi
+  if [[ -z "$rel" || "$rel" == /* || "$rel" == ".."* || "$rel" == *"/.."* ]]; then
+    "$JQ_BIN" -n --arg rel "$rel" '{available:false, rel:$rel, reason:"unsafe relative path"}'
+    return
+  fi
+  if ! root=$(local_root_for_project "$project"); then
+    "$JQ_BIN" -n '{available:false}'
+    return
+  fi
+  abs="$root/$rel"
+  if [[ -f "$abs" ]]; then
+    "$JQ_BIN" -n --arg root "$root" --arg path "$abs" --arg rel "$rel" \
+      '{available:true, repo_root:$root, path:$path, rel:$rel}'
+  else
+    "$JQ_BIN" -n --arg root "$root" --arg rel "$rel" \
+      '{available:false, repo_root:$root, rel:$rel, reason:"file not found in clone"}'
+  fi
+}
+
 ledger_has_marker() {
   local marker=$1
   [[ -f "$PROCESSED_LEDGER" ]] || return 1

@@ -1,10 +1,12 @@
 You are triaging a closed Sonar issue for the bsl-analyzer project.
 
-The attached JSON contains a Sonar issue snapshot, a small source snippet from the analyzed downstream project, and `existing_problems` — analyzer-problem groups already tracked in GitLab. The local working directory is the bsl-analyzer repository; inspect the analyzer implementation, diagnostic metadata, docs, and tests when useful.
+The attached JSON contains a Sonar issue snapshot, a small source snippet from the analyzed downstream project, `existing_problems` (analyzer-problem groups already tracked in GitLab), and `downstream_local`. The working directory is the bsl-analyzer repository; inspect the analyzer implementation, diagnostic metadata, docs, and tests when useful.
+
+When `downstream_local.available` is true, its `path` is the real downstream source file on disk and `repo_root` is the checked-out project. READ `downstream_local.path` around `sonar_issue.line` and navigate `repo_root` (the enclosing procedure, other handlers of the same form/module, called methods, metadata) to judge the closure against the actual code — this is far more reliable than the Sonar snippet. Fall back to `sonar_issue.snippet` only when `downstream_local.available` is false. The local checkout may be newer than the Sonar analysis, so match by structure, not exact line numbers.
 
 Important constraints:
 
-- Context may be incomplete. Do not invent a root cause when the snippet is insufficient.
+- Context may be incomplete. Do not invent a root cause when neither the local file nor the snippet is sufficient.
 - The goal is to preserve a useful signal for future diagnostic fixes, not to solve the bug completely now.
 - Never mention tokens, environment files, or authentication details.
 - Return only one compact JSON object. No markdown, no code fences, no prose outside JSON.
