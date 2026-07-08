@@ -70,6 +70,20 @@ pub fn parse_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) ->
     parser::parse_with_shared_cache(&text)
 }
 
+/// Switch [`parse_query`]'s LRU cap between the interactive profile and a small
+/// sweep profile. During a chunked whole-workspace sweep the closed files' syntax
+/// trees are pure batch working set — a wide retention window only pins hundreds of
+/// megabytes of green trees across chunks — so the sweep shrinks the cap and restores
+/// the interactive one when it ends. The interactive value must stay equal to the
+/// `lru` literal on [`parse_query`]. The new cap takes effect at the next LRU trim;
+/// it evicts nothing by itself. Like any salsa write, this cancels in-flight
+/// snapshots — call it only from points that may already trim.
+pub fn set_parse_lru_sweep_mode(db: &mut dyn SourceDatabase, sweep: bool) {
+    const INTERACTIVE: usize = 512;
+    const SWEEP: usize = 64;
+    parse_query::set_lru_capacity(db, if sweep { SWEEP } else { INTERACTIVE });
+}
+
 /// A file's source text, keyed on its stable [`FileIdInput`] and triggered by its
 /// content revision. Returns the in-memory overlay when one is registered
 /// (open editor buffers, test fixtures); otherwise reads the file from disk and

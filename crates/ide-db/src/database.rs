@@ -177,6 +177,30 @@ impl RootDatabaseImpl {
         salsa::Database::trigger_lru_eviction(self);
     }
 
+    /// Run one deep LRU trim: evict with the heaviest per-file caps (parse trees,
+    /// lowered bodies) shrunk to a small sweep profile, then restore the interactive
+    /// caps — restoring evicts nothing, the wide window simply repopulates on
+    /// demand. For a whole-workspace sweep's final cleanup, where the swept files'
+    /// memos are working set nothing will read again: a plain [`Self::enforce_lru`]
+    /// would leave a full interactive window of them resident. The shrink/restore
+    /// pair lives inside this method so no caller can strand the shrunk caps on the
+    /// long-lived database. Same exclusivity contract as [`Self::enforce_lru`].
+    pub fn enforce_lru_deep(&mut self) {
+        self.set_sweep_lru(true);
+        self.enforce_lru();
+        self.set_sweep_lru(false);
+    }
+
+    /// Switch the heaviest per-file LRU caps between the interactive profile and the
+    /// small sweep profile. The caps take effect at the next eviction; switching
+    /// evicts nothing by itself. Like any salsa write this cancels in-flight
+    /// snapshots — private on purpose, so the only user is the shrink/evict/restore
+    /// sequence of [`Self::enforce_lru_deep`].
+    fn set_sweep_lru(&mut self, sweep: bool) {
+        base_db::set_parse_lru_sweep_mode(self, sweep);
+        hir::set_module_bodies_lru_sweep_mode(self, sweep);
+    }
+
     /// Per-ingredient memory snapshot for diagnostics tooling, via salsa's
     /// `memory_usage` introspection (the `salsa_unstable` feature). Each tuple is
     /// `(ingredient name, live entry count, salsa metadata bytes, field stack bytes,

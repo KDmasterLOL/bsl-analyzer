@@ -520,8 +520,10 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
     Ok(())
 }
 
-/// Chunks the batch may leave un-trimmed while interactive analysis is in flight before
-/// forcing a trim anyway, so resident memory stays bounded even under sustained load.
+/// Chunks the batch may leave un-trimmed while over the memory budget with interactive
+/// analysis in flight, before forcing a trim anyway — so resident memory stays bounded
+/// even under sustained load. Boundaries under budget do not count: skipping their trim
+/// is the intended steady state, not a deferral.
 const WORKSPACE_BATCH_FORCE_TRIM_CHUNKS: u32 = 2;
 
 /// How many times a chunk may unwind on `PropagatedPanic` before it is skipped. A
@@ -589,37 +591,48 @@ fn apply_workspace_batch_completion(
 }
 
 /// Advance the sweep past a completed (or skipped) chunk: move the cursor, trim the Salsa
-/// LRU + parser caches (deferred while interactive analysis is in flight — the trim
-/// cancels those requests — but forced periodically and always on finish), and finalize
-/// when the file set is exhausted.
+/// LRU + parser caches when the process is over the sweep's memory budget (deferred
+/// while interactive analysis is in flight — the trim cancels those requests — but
+/// forced periodically and always on finish), and finalize when the file set is
+/// exhausted. The final trim runs once on the shrunk sweep LRU profile, leaving a lean
+/// post-sweep resident set.
 fn advance_workspace_batch(state: &mut GlobalState) -> Result<()> {
     // `enforce_lru` cancels any in-flight interactive request exactly like an edit and
     // blocks until their snapshots drop, so only trim when no interactive analysis is in
-    // flight — unless the sweep just finished (final cleanup) or too many chunks have
-    // gone un-trimmed (memory valve). Computed before the mutable plan borrow below.
+    // flight — unless the sweep just finished (final cleanup) or too many over-budget
+    // chunks have gone un-trimmed (memory valve). Computed before the mutable plan
+    // borrow below.
     let quiescent = state.interactive_analysis_quiescent();
+    let over_budget = {
+        let plan = state.workspace_batch_plan.as_ref().expect("plan present after gate");
+        crate::handlers::workspace_batch::over_mem_budget(plan.mem_budget_mb)
+    };
 
     let (finished, do_trim) = {
         let plan = state.workspace_batch_plan.as_mut().expect("plan present after gate");
-        plan.next_chunk += 1;
-        plan.chunk_retries = 0;
-        plan.chunks_since_trim += 1;
-        let finished = plan.next_chunk >= plan.num_chunks;
-        let do_trim =
-            finished || quiescent || plan.chunks_since_trim >= WORKSPACE_BATCH_FORCE_TRIM_CHUNKS;
-        if do_trim {
-            plan.chunks_since_trim = 0;
-        }
-        (finished, do_trim)
+        advance_plan_cursor(plan, over_budget, quiescent)
     };
 
     if do_trim {
         // The worker's snapshot is dropped (its return value is the task just handled),
         // so the exclusive `&mut db` borrow is free. Salsa only trims at a revision
         // boundary, so without this a whole-corpus sweep accumulates every file's memos
-        // and OOMs. Also release the parser's thread-local green-node cache on this
-        // thread (the worker released its own before returning).
-        state.analysis_host.raw_database_mut().enforce_lru();
+        // and OOMs (the budget upstream decides *whether* memory needs releasing; this
+        // block is *how*). Also release the parser's thread-local green-node cache on
+        // this thread (the worker released its own before returning).
+        let db = state.analysis_host.raw_database_mut();
+        if finished {
+            // Deep final trim: the sweep's parse trees and lowered bodies are pure
+            // batch working set nothing will read again, so this leaves a lean
+            // post-sweep resident set instead of a full interactive window of dead
+            // files. Mid-sweep trims deliberately stay on the interactive caps:
+            // running the whole sweep on the shrunk profile was measured to cost
+            // several percent of wall time (each trim evicts hot shared parses that
+            // the next chunk re-derives) for only a marginal peak reduction.
+            db.enforce_lru_deep();
+        } else {
+            db.enforce_lru();
+        }
         syntax::clear_shared_node_cache();
     }
 
@@ -634,6 +647,35 @@ fn advance_workspace_batch(state: &mut GlobalState) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Move the sweep cursor past one completed (or skipped) chunk and decide whether this
+/// boundary trims: always on finish (final cleanup), otherwise only while over the
+/// memory budget — immediately when interactive analysis is quiescent, else once the
+/// deferral valve fills. Boundaries under budget skip the trim by design (the retained
+/// memos accelerate later chunks) and reset the valve rather than counting toward it.
+/// Pure state transition on the plan, so the scheduling matrix is testable with an
+/// injected budget/quiescence signal.
+fn advance_plan_cursor(
+    plan: &mut crate::global_state::WorkspaceBatchPlan,
+    over_budget: bool,
+    quiescent: bool,
+) -> (bool, bool) {
+    plan.next_chunk += 1;
+    plan.chunk_retries = 0;
+    if over_budget {
+        plan.chunks_since_trim += 1;
+    } else {
+        plan.chunks_since_trim = 0;
+    }
+    let finished = plan.next_chunk >= plan.num_chunks;
+    let do_trim = finished
+        || (over_budget
+            && (quiescent || plan.chunks_since_trim >= WORKSPACE_BATCH_FORCE_TRIM_CHUNKS));
+    if do_trim {
+        plan.chunks_since_trim = 0;
+    }
+    (finished, do_trim)
 }
 
 /// Reconcile a fully completed sweep: any file we had pushed but that this sweep never
@@ -1169,7 +1211,8 @@ mod tests {
     /// completion path drops any chunk that arrives with no plan. `num_chunks` controls
     /// when the sweep finalizes — after that many non-aborted chunks the reconcile runs
     /// and the plan is cleared. Bumps the generation and marks the batch in flight, as a
-    /// real dispatch does.
+    /// real dispatch does. The zero memory budget makes every boundary read as over
+    /// budget, so trim scheduling is deterministic regardless of the test process' heap.
     fn install_test_plan(state: &mut crate::global_state::GlobalState, num_chunks: usize) {
         state.workspace_batch_generation = state.workspace_batch_generation.wrapping_add(1);
         state.batch_reported.clear();
@@ -1185,6 +1228,7 @@ mod tests {
             pool: None,
             next_chunk: 0,
             num_chunks,
+            mem_budget_mb: 0,
             chunks_since_trim: 0,
             chunk_retries: 0,
             started_at: std::time::Instant::now(),
@@ -1480,5 +1524,67 @@ mod tests {
 
         state.request_tokens.remove(&id);
         assert!(state.interactive_analysis_quiescent());
+    }
+
+    #[test]
+    fn workspace_batch_boundary_under_budget_skips_trim() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        install_test_plan(&mut state, 100);
+        let plan = state.workspace_batch_plan.as_mut().unwrap();
+
+        // Under budget: no trim even when fully quiescent, and the valve stays empty.
+        assert_eq!(advance_plan_cursor(plan, false, true), (false, false));
+        assert_eq!(plan.chunks_since_trim, 0);
+
+        // Over budget but interactive analysis in flight: deferred once, then the
+        // valve forces the trim on the next over-budget boundary.
+        assert_eq!(advance_plan_cursor(plan, true, false), (false, false));
+        assert_eq!(plan.chunks_since_trim, 1);
+        assert_eq!(advance_plan_cursor(plan, true, false), (false, true));
+        assert_eq!(plan.chunks_since_trim, 0);
+
+        // Over budget and quiescent: trims immediately.
+        assert_eq!(advance_plan_cursor(plan, true, true), (false, true));
+
+        // Dropping back under budget resets a partially filled valve.
+        assert_eq!(advance_plan_cursor(plan, true, false), (false, false));
+        assert_eq!(plan.chunks_since_trim, 1);
+        assert_eq!(advance_plan_cursor(plan, false, false), (false, false));
+        assert_eq!(plan.chunks_since_trim, 0);
+    }
+
+    #[test]
+    fn workspace_batch_final_boundary_trims_regardless_of_budget() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        install_test_plan(&mut state, 1);
+        let plan = state.workspace_batch_plan.as_mut().unwrap();
+        assert_eq!(
+            advance_plan_cursor(plan, false, false),
+            (true, true),
+            "the finish must trim even under budget with interactive analysis in flight"
+        );
+    }
+
+    #[test]
+    fn workspace_batch_trimmed_boundaries_walk_and_finalize() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        install_test_plan(&mut state, 2);
+
+        // A trimmed boundary (zero budget = always over) walks the real trim path —
+        // eviction on the live database — and keeps the plan advancing.
+        let chunk = current_chunk(&state, vec![]);
+        handle_task(&mut state, chunk).unwrap();
+        assert!(state.workspace_batch_plan.is_some());
+        assert_eq!(state.workspace_batch_plan.as_ref().unwrap().next_chunk, 1);
+
+        // The final boundary runs the deep trim (sweep caps for one eviction, then
+        // restored) and finalizes the sweep.
+        state.workspace_batch_in_flight = true;
+        let chunk = current_chunk(&state, vec![]);
+        handle_task(&mut state, chunk).unwrap();
+        assert!(state.workspace_batch_plan.is_none(), "the sweep must finalize on the last chunk");
     }
 }

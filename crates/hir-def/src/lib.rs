@@ -68,9 +68,9 @@ pub use method_body::{method_body_query, method_body_with_source_map_query};
 pub use queries::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
     method_outbound_facts, module_bodies_query, module_call_summary_query, module_data_query,
-    module_index_query, region_tree_query, resolved_module_summary_query, symbol_tree_query,
-    workspace_call_graph_query, workspace_index_query, workspace_symbols_query, ManagerRef,
-    MethodOutboundFacts,
+    module_index_query, region_tree_query, resolved_module_summary_query,
+    set_module_bodies_lru_sweep_mode, symbol_tree_query, workspace_call_graph_query,
+    workspace_index_query, workspace_symbols_query, ManagerRef, MethodOutboundFacts,
 };
 
 #[salsa::db]

@@ -16,7 +16,8 @@ pub fn salsa_memory_rows(db: &ide::RootDatabaseImpl) -> Vec<SalsaMemoryRow> {
     rows
 }
 
-fn proc_kb(key: &str) -> Option<u64> {
+/// Read one `/proc/self/status` field in kilobytes (e.g. `"VmRSS:"`); `None` off Linux.
+pub(crate) fn proc_kb(key: &str) -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     status
         .lines()

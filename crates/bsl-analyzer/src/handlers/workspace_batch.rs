@@ -9,11 +9,19 @@
 //!
 //! The sweep is **chunked and event-loop-driven**. The file set is frozen once; the
 //! event loop dispatches one worker per chunk, and between chunks — on the main thread,
-//! with the worker's Salsa snapshot already dropped — it trims the Salsa LRU and
-//! releases the worker's parser green-node cache. This bounds resident memory: a single
+//! with the worker's Salsa snapshot already dropped — it may trim the Salsa LRU and
+//! release the worker's parser green-node cache. This bounds resident memory: a single
 //! long-lived snapshot never crosses a revision boundary, so Salsa would never trim it
 //! and the memos of every file in the corpus would pile up (OOM on a large `all`
 //! sweep). Chunking makes the trim points, mirroring the CLI's chunked analyze.
+//!
+//! A boundary's trim can be **budget-gated**: with a non-zero [`batch_mem_budget_mb`]
+//! a boundary trims only while the process is over the budget (a trim cancels
+//! in-flight interactive requests and evicts shared memos later chunks re-derive, so
+//! skipping it buys time at the price of working set stacking). The final trim runs
+//! once on the shrunk sweep LRU profile (parse / lowered-body caps — the sweep's
+//! trees are pure batch working set nothing will read again), leaving a lean
+//! post-sweep resident set; the interactive caps are restored immediately after.
 //!
 //! The diff against the last push and the "is this file still closed" handoff check are
 //! applied on the event-loop thread against authoritative state, so a file opened
@@ -33,15 +41,49 @@ use crate::global_state::{
 };
 use crate::lsp::PositionEncoding;
 
-/// Files analysed per chunk. Large by default so the between-chunk trim (which cancels
-/// any in-flight interactive request, exactly like an edit) is amortised over many
-/// files; overridable via `BSL_BATCH_CHUNK`. Mirrors the CLI's `BSL_SALSA_CHUNK`.
+/// Files analysed per chunk, overridable via `BSL_BATCH_CHUNK` (mirrors the CLI's
+/// `BSL_SALSA_CHUNK`). The chunk is the sweep's memory-vs-time dial: a boundary is
+/// where a trim *can* run, so a smaller chunk caps the peak lower (less working set
+/// accumulates between trims) but pays more boundary overhead and re-derivation of
+/// evicted shared memos — measured ≈ +7% wall for ≈ −20% peak at half this size on a
+/// 21k-file corpus. The default favours wall time; lower it on memory-tight machines.
 fn batch_chunk_size() -> usize {
     std::env::var("BSL_BATCH_CHUNK")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(500)
+}
+
+/// Memory budget in megabytes the sweep keeps the process under, overridable via
+/// `BSL_BATCH_MEM_BUDGET_MB`. Chunk boundaries under budget skip the trim, which
+/// buys wall time (skipped evictions, no re-derivation of shared memos, no
+/// interactive cancellations) at the price of working set stacking across the
+/// skipped boundaries: RSS overshoots the budget by several chunks' worth before
+/// the next trim lands, and once RSS crosses the corpus' durable floor the tail
+/// trims every boundary anyway. Measured on a 21k-file corpus: ≈ −3% wall for
+/// ≈ +27% peak. That trade is opt-in — the `0` default trims at every boundary,
+/// keeping the peak deterministic at roughly one chunk's working set above the
+/// post-trim floor.
+fn batch_mem_budget_mb() -> usize {
+    std::env::var("BSL_BATCH_MEM_BUDGET_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0)
+}
+
+/// Whether the process is over the sweep's memory budget. Measures RSS where
+/// readable — the number the user (and the OOM killer) actually sees — falling back
+/// to the allocator's live bytes, which trail RSS by the allocator's retention. A
+/// zero budget always reads as over (trim at every opportunity), and so does an
+/// unreadable measurement (platforms with neither source), degrading to the
+/// always-trim behaviour rather than to unbounded growth.
+pub(crate) fn over_mem_budget(budget_mb: usize) -> bool {
+    if budget_mb == 0 {
+        return true;
+    }
+    if let Some(rss_kb) = crate::mem_report::proc_kb("VmRSS:") {
+        return (rss_kb / 1024) as usize > budget_mb;
+    }
+    let allocated_mb = profile::memory_usage().allocated.megabytes();
+    allocated_mb <= 0 || allocated_mb as usize > budget_mb
 }
 
 /// Threads the batch's bounded rayon pool uses. Defaults to half the cores (rounded down,
@@ -152,6 +194,7 @@ fn build_batch_plan(state: &mut GlobalState) -> Option<WorkspaceBatchPlan> {
         pool,
         next_chunk: 0,
         num_chunks,
+        mem_budget_mb: batch_mem_budget_mb(),
         chunks_since_trim: 0,
         chunk_retries: 0,
         started_at: Instant::now(),
@@ -195,10 +238,12 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
 
         // Release the parser green-node cache (a thread-local not owned by Salsa) so the
         // chunk's parsed trees are not pinned across chunks. Clear both this driver thread
-        // and — since the parallel compute parses on the pool's threads — every pool worker.
-        // The Salsa parse memos are trimmed separately by the event loop via `enforce_lru`,
-        // which needs the exclusive `&mut` this snapshot blocks — hence it runs there, after
-        // this worker (and its snapshots) are gone.
+        // and — since the parallel compute parses on the pool's threads — every pool
+        // worker. Carrying these caches across chunks was measured a wash on compute time
+        // while inflating the peak by pinning every chunk's trees since the last trim.
+        // The Salsa parse memos are trimmed separately by the event loop via
+        // `enforce_lru`, which needs the exclusive `&mut` this snapshot blocks — hence it
+        // runs there, after this worker (and its snapshots) are gone.
         syntax::clear_shared_node_cache();
         if let Some(pool) = pool.as_deref() {
             pool.broadcast(|_| syntax::clear_shared_node_cache());
