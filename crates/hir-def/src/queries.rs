@@ -88,6 +88,7 @@ mod heap_estimate {
         for r in &s.set_action_regs {
             bytes += name_bytes(&r.handler_name);
         }
+        bytes += vec_bytes::<u32>(s.name_literal_refs.len());
         bytes += vec_bytes::<FormEventEntry>(s.form_entries.len());
         for f in &s.form_entries {
             bytes += f.event_type.capacity() + name_bytes(&f.handler_name);
@@ -132,6 +133,21 @@ pub fn module_bodies_query<'db>(
     let result = crate::lower_module_bodies(db, module_id);
 
     Arc::new(result)
+}
+
+/// Switch [`module_bodies_query`]'s LRU cap between the interactive profile and a
+/// small sweep profile. Lowered bodies are the second-largest retained value after
+/// parse trees (megabytes per module), and during a chunked whole-workspace sweep a
+/// closed file's bodies are needed only while its own chunk is analyzed — so the
+/// sweep shrinks the cap and restores the interactive one when it ends. The
+/// interactive value must stay equal to the `lru` literal on [`module_bodies_query`].
+/// The new cap takes effect at the next LRU trim; it evicts nothing by itself. Like
+/// any salsa write, this cancels in-flight snapshots — call it only from points that
+/// may already trim.
+pub fn set_module_bodies_lru_sweep_mode(db: &mut dyn DefDatabase, sweep: bool) {
+    const INTERACTIVE: usize = 128;
+    const SWEEP: usize = 16;
+    module_bodies_query::set_lru_capacity(db, if sweep { SWEEP } else { INTERACTIVE });
 }
 
 #[salsa::tracked(lru = 16)]

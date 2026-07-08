@@ -119,9 +119,16 @@ pub struct WorkspaceBatchPlan {
     pub pool: Option<Arc<rayon::ThreadPool>>,
     pub next_chunk: usize,
     pub num_chunks: usize,
-    /// Chunks whose memos have not yet been trimmed. The trim is deferred while
-    /// interactive analysis is in flight (it would cancel those requests), so this can
-    /// exceed one; a force threshold bounds it. Reset to zero on each trim.
+    /// Memory budget in megabytes the sweep tries to stay under, measured as process
+    /// RSS where readable (allocator live bytes as the fallback). A chunk boundary
+    /// trims only while the measurement exceeds this (a boundary under budget is
+    /// nearly free, and the retained memos accelerate later chunks); `0` trims at
+    /// every opportunity.
+    pub mem_budget_mb: usize,
+    /// Chunks that completed over the memory budget without a trim. The trim is
+    /// deferred while interactive analysis is in flight (it would cancel those
+    /// requests), so this can exceed one; a force threshold bounds it. Reset to zero
+    /// on each trim and whenever the heap drops back under budget.
     pub chunks_since_trim: u32,
     /// Consecutive `PropagatedPanic` unwinds of the current chunk. That variant is
     /// ambiguous (a transient edit-cancellation cascade or a genuine deterministic panic),

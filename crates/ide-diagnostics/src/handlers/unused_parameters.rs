@@ -74,6 +74,22 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             fixed_signature_handlers.insert(reg.callback_name.as_str().fold_lower());
         }
     }
+    // A form-module procedure bound at runtime — `УстановитьДействие` directly, or by
+    // name through a code-created command / a helper in another module — has a
+    // platform-fixed signature the author cannot trim. `set_action_regs` is the typed,
+    // receiver-checked fact; `name_literal_refs` is a deliberately broad name-match that
+    // also covers indirect bindings, accepting that string data coinciding with a method
+    // name exempts that method's parameters too.
+    if metadata.module_type == bsl_metadata::ModuleType::FormModule {
+        for reg in &summary.set_action_regs {
+            fixed_signature_handlers.insert(reg.handler_name.as_str().fold_lower());
+        }
+        for local_id in &summary.name_literal_refs {
+            if let Some(method) = summary.methods.iter().find(|m| m.local_id == *local_id) {
+                fixed_signature_handlers.insert(method.name.as_str().fold_lower());
+            }
+        }
+    }
 
     for (local_id, _) in module_bodies.iter_bodies() {
         if let Some(name) = get_method_name(&item_tree, local_id) {
@@ -369,6 +385,126 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
 
         assert_eq!(unused.len(), 0);
+    }
+
+    fn form_module_metadata() -> hir::ModuleMetadata {
+        hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::FormModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: None,
+            http_service: None,
+            web_service: None,
+            integration_service: None,
+        }
+    }
+
+    #[test]
+    fn test_set_action_handler_params_no_diagnostic() {
+        // `УстановитьДействие` binds the procedure as a platform event handler; its
+        // signature is fixed by the platform, so an untouched `Элемент` is not unused.
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Элементы.Валюта.УстановитьДействие("ПриИзменении", "ВалютаПриИзменении");
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ВалютаПриИзменении(Элемент)
+    Сообщить("х");
+КонецПроцедуры
+"#;
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(
+            form_module_metadata(),
+            code,
+            |_metadata, ctx| super::check(ctx),
+        );
+        let unused: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UnusedParameters)
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            !unused.iter().any(|m| m.contains("Элемент")),
+            "SetAction-bound handler keeps its fixed signature: {unused:?}"
+        );
+    }
+
+    #[test]
+    fn test_name_literal_handler_params_no_diagnostic() {
+        // The handler is bound inside a helper module fed a parameter structure; the
+        // name literal in this module fixes the signature. A regular method's unused
+        // parameter must stay flagged.
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Параметры = Новый Структура("ИмяСобытия, ИмяПроцедурыОбработчика", "ПриИзменении", "ВесБруттоПриИзменении");
+    Помощники.ДобавитьПолеФормы(ЭтаФорма, Параметры);
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ВесБруттоПриИзменении(Элемент)
+    Сообщить("х");
+КонецПроцедуры
+
+Процедура Обычная(Лишний)
+    Сообщить("х");
+КонецПроцедуры
+"#;
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(
+            form_module_metadata(),
+            code,
+            |_metadata, ctx| super::check(ctx),
+        );
+        let unused: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UnusedParameters)
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            !unused.iter().any(|m| m.contains("Элемент")),
+            "name-literal-bound handler keeps its fixed signature: {unused:?}"
+        );
+        assert!(
+            unused.iter().any(|m| m.contains("Лишний")),
+            "an ordinary unused parameter must stay flagged: {unused:?}"
+        );
+    }
+
+    #[test]
+    fn test_name_literal_params_flagged_outside_form_module() {
+        let code = r#"Процедура Настроить() Экспорт
+    Имя = "Обработчик";
+КонецПроцедуры
+
+Процедура Обработчик(Параметр)
+    Сообщить("х");
+КонецПроцедуры
+"#;
+        let metadata = hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::CommonModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: None,
+            http_service: None,
+            web_service: None,
+            integration_service: None,
+        };
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                super::check(ctx)
+            });
+        let unused: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UnusedParameters)
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            unused.iter().any(|m| m.contains("Параметр")),
+            "name literals fix signatures only in form modules: {unused:?}"
+        );
     }
 
     #[test]

@@ -6,6 +6,8 @@ Modules should not contain local procedures and functions that are never called.
 
 Unused methods make the code harder to navigate and often indicate unfinished refactoring or dead logic. The diagnostic skips several categories that are expected to be called indirectly, such as exported methods, extension methods, platform handlers, and attachable methods with configured prefixes.
 
+In form modules the diagnostic also treats a method as used when an identifier-shaped string literal in the same module names it. Dynamic handler binding — `УстановитьДействие`, a command created in code with `Действие = "Name"`, or a helper module fed a parameter structure — always leaves the handler's name as such a literal. The flip side: string *data* that happens to coincide with a method name also exempts that method, so a genuinely dead form-module method whose name appears in an unrelated string will not be reported.
+
 ## Sources
 
 * [Standard: Module texts (RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
