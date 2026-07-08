@@ -55,7 +55,7 @@ JSON
     ;;
   *api/issues/search*)
     cat > "$out" <<'JSON'
-{"paging":{"pageIndex":1,"pageSize":500,"total":3},"issues":[{"key":"ISSUE-1","rule":"bsl:MagicNumber","status":"RESOLVED","resolution":"FALSE-POSITIVE","message":"Magic number in allowed context","component":"bsl-analyzer-fixture:src/CommonModules/M.bsl","line":7,"severity":"MAJOR","type":"CODE_SMELL","creationDate":"2026-01-01T00:00:00+0000","updateDate":"2026-01-02T00:00:00+0000","closeDate":"2026-01-02T00:00:00+0000"},{"key":"ISSUE-2","rule":"bsl:UnusedParameters","status":"RESOLVED","resolution":"WONTFIX","message":"Unused parameter is intentional","component":"bsl-analyzer-fixture:src/CommonModules/N.bsl","line":11,"severity":"MINOR","type":"CODE_SMELL","creationDate":"2026-01-01T00:00:00+0000","updateDate":"2026-01-02T00:00:00+0000","closeDate":"2026-01-02T00:00:00+0000"},{"key":"ISSUE-3","rule":"bsl:OnlyCreationDate","status":"RESOLVED","resolution":"WONTFIX","message":"Creation date alone should not pass since filter","component":"bsl-analyzer-fixture:src/CommonModules/O.bsl","line":13,"severity":"MINOR","type":"CODE_SMELL","creationDate":"2026-01-03T00:00:00+0000","updateDate":"","closeDate":""}]}
+{"paging":{"pageIndex":1,"pageSize":500,"total":3},"issues":[{"key":"ISSUE-1","rule":"bsl:UnusedParameters","status":"RESOLVED","resolution":"FALSE-POSITIVE","message":"Unused parameter Element in event handler","component":"bsl-analyzer-fixture:src/CommonModules/M.bsl","line":7,"severity":"MAJOR","type":"CODE_SMELL","creationDate":"2026-01-01T00:00:00+0000","updateDate":"2026-01-02T00:00:00+0000","closeDate":"2026-01-02T00:00:00+0000"},{"key":"ISSUE-2","rule":"bsl:UnusedParameters","status":"RESOLVED","resolution":"FALSE-POSITIVE","message":"Unused parameter Command in event handler","component":"bsl-analyzer-fixture:src/CommonModules/N.bsl","line":11,"severity":"MINOR","type":"CODE_SMELL","creationDate":"2026-01-01T00:00:00+0000","updateDate":"2026-01-02T00:00:00+0000","closeDate":"2026-01-02T00:00:00+0000"},{"key":"ISSUE-3","rule":"bsl:OnlyCreationDate","status":"RESOLVED","resolution":"WONTFIX","message":"Creation date alone should not pass since filter","component":"bsl-analyzer-fixture:src/CommonModules/O.bsl","line":13,"severity":"MINOR","type":"CODE_SMELL","creationDate":"2026-01-03T00:00:00+0000","updateDate":"","closeDate":""}]}
 JSON
     ;;
   *api/sources/issue_snippets*)
@@ -74,15 +74,16 @@ set -euo pipefail
 printf '%s\n' "\$*" >> "$LOG_FILE"
 if [[ "\$*" == auth\ status* ]]; then exit 0; fi
 if [[ "\$*" == issue\ list* ]]; then
-  if [[ "\$*" == *ISSUE-2* ]]; then
-    printf '[]\n'
-    exit 0
-  fi
-  printf '[{"iid":42,"title":"existing sonar triage","description":"bsl-sonar-triage-id: runsystems/bsl-analyzer-fixture/ISSUE-1"}]\n'
+  printf '[]\n'
   exit 0
 fi
-if [[ "\$*" == issue\ create* || "\$*" == issue\ note* || "\$*" == issue\ update* ]]; then
+if [[ "\$*" == issue\ create* ]]; then
   cat >/dev/null
+  printf 'WRITE %s\n' "\$*" >> "$LOG_FILE"
+  printf 'http://gitlab.test/fixture/bsl-analyzer/-/issues/100\n'
+  exit 0
+fi
+if [[ "\$*" == issue\ note* ]]; then
   printf 'WRITE %s\n' "\$*" >> "$LOG_FILE"
   exit 0
 fi
@@ -98,7 +99,7 @@ if env | grep -q '^SONAR_.*TOKEN='; then
   printf 'TOKEN ENV LEAK\n' >> "${TRIAGE_TEST_LOG_FILE:?}"
 fi
 cat <<'JSON'
-{"confidence":"low","classification":"unknown","summary":"Недостаточно контекста, фиксируем сигнал.","evidence":["fixture opencode"],"unknowns":["нет полного downstream проекта"],"recommended_gitlab_action":"create_issue"}
+{"confidence":"low","classification":"analyzer_gap","summary":"Недостаточно контекста, фиксируем сигнал.","evidence":["fixture opencode"],"unknowns":["нет полного downstream проекта"],"problem_key":"unused-parameters-event-handler","problem_title":"UnusedParameters на обработчике события","recommended_gitlab_action":"create_issue"}
 JSON
 EOF
 chmod +x "$BIN_DIR/opencode"
@@ -111,7 +112,7 @@ export TRIAGE_ENV_FILE="$ENV_FILE"
 export TRIAGE_STATE_DIR="$STATE_DIR"
 export TRIAGE_REPO_ROOT="$ROOT"
 export TRIAGE_PROJECTS="runsystems:bsl-analyzer-fixture"
-export TRIAGE_MAX_ISSUES=3
+export TRIAGE_MAX_ISSUES=0
 export SONAR_RUNSYSTEMS_TOKEN=inherited-should-not-use
 export SONAR_TOKEN=generic-should-not-leak
 
@@ -122,76 +123,81 @@ if "$ROOT/scripts/sonar-triage.sh" apply --run-id ../bad >/dev/null 2>&1; then
   exit 1
 fi
 
+# --- opencode path passes the problem_key through analysis (before ledger writes) ---
+TRIAGE_SKIP_OPENCODE=0 "$ROOT/scripts/sonar-triage.sh" collect --run-id opencode-run --since 2026-01-01
+TRIAGE_SKIP_OPENCODE=0 "$ROOT/scripts/sonar-triage.sh" analyze --run-id opencode-run
+key=$(jq -r '.[0].analysis.problem_key' "$STATE_DIR/runs/opencode-run/analysis.json")
+[[ "$key" == "unused-parameters-event-handler" ]] || { echo "expected opencode problem_key, got $key" >&2; exit 1; }
+
+# --- Grouping: two same-rule false positives collapse into one issue ---
 TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" run-dry --run-id fixture-run --since 2026-01-01
 
 RUN_DIR="$STATE_DIR/runs/fixture-run"
-[[ -f "$RUN_DIR/issues.json" ]]
-[[ -f "$RUN_DIR/analysis.json" ]]
-[[ -f "$RUN_DIR/actions.json" ]]
-[[ -f "$RUN_DIR/dry-run.md" ]]
+[[ -f "$RUN_DIR/issues.json" && -f "$RUN_DIR/analysis.json" && -f "$RUN_DIR/actions.json" && -f "$RUN_DIR/dry-run.md" ]]
 
 collected=$(jq 'length' "$RUN_DIR/issues.json")
-[[ "$collected" == 2 ]] || { echo "expected two collected issues after close/update date filter, got $collected" >&2; exit 1; }
+[[ "$collected" == 2 ]] || { echo "expected two collected issues, got $collected" >&2; exit 1; }
+
+actions=$(jq 'length' "$RUN_DIR/actions.json")
+[[ "$actions" == 1 ]] || { echo "expected one grouped action, got $actions" >&2; exit 1; }
+
+kind=$(jq -r '.[0].kind' "$RUN_DIR/actions.json")
+[[ "$kind" == create ]] || { echo "expected a create action, got $kind" >&2; exit 1; }
+
+examples=$(jq '.[0].markers | length' "$RUN_DIR/actions.json")
+[[ "$examples" == 2 ]] || { echo "expected two grouped examples, got $examples" >&2; exit 1; }
 
 if grep -q 'secret-runsystems-token\|secret-primeit-token' "$RUN_DIR/dry-run.md" "$LOG_FILE"; then
   echo "token leaked into dry-run artifacts" >&2
   exit 1
 fi
-
 if grep -q '^WRITE ' "$LOG_FILE"; then
   echo "dry-run executed a GitLab write" >&2
   exit 1
 fi
 
-actions=$(jq 'length' "$RUN_DIR/actions.json")
-[[ "$actions" == 1 ]] || { echo "expected one planned action, got $actions" >&2; exit 1; }
+# --- Live create records both example markers under one problem/iid ---
+TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" collect --run-id live1 --since 2026-01-01
+TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" analyze --run-id live1
+TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" plan --run-id live1
+TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" apply --run-id live1 --live --confirm-live
 
-notes=$(jq '[.[] | select(.kind == "note")] | length' "$RUN_DIR/actions.json")
-[[ "$notes" == 0 ]] || { echo "expected zero planned notes, got $notes" >&2; exit 1; }
+creates=$(grep -c '^WRITE issue create' "$LOG_FILE")
+[[ "$creates" == 1 ]] || { echo "expected one grouped create write, got $creates" >&2; exit 1; }
 
-creates=$(jq '[.[] | select(.kind == "create")] | length' "$RUN_DIR/actions.json")
-[[ "$creates" == 1 ]] || { echo "expected one planned create, got $creates" >&2; exit 1; }
+ledger_entries=$(wc -l < "$STATE_DIR/processed.ndjson")
+[[ "$ledger_entries" == 2 ]] || { echo "expected two ledger entries after grouped create, got $ledger_entries" >&2; exit 1; }
+distinct_keys=$(jq -r '.problem_key' "$STATE_DIR/processed.ndjson" | sort -u | wc -l)
+[[ "$distinct_keys" == 1 ]] || { echo "expected both examples under one problem_key, got $distinct_keys" >&2; exit 1; }
+iids=$(jq -r '.gitlab_iid' "$STATE_DIR/processed.ndjson" | sort -u | tr '\n' ' ')
+[[ "$iids" == "100 " ]] || { echo "expected both examples to carry iid 100, got '$iids'" >&2; exit 1; }
 
-list_calls=$(grep -c '^issue list' "$LOG_FILE")
-[[ "$list_calls" == 1 ]] || { echo "expected one GitLab issue list call, got $list_calls" >&2; exit 1; }
+# --- Ledger dedup: the same closures are not re-collected next run ---
+TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" collect --run-id live2 --since 2026-01-01
+after=$(jq 'length' "$STATE_DIR/runs/live2/issues.json")
+[[ "$after" == 0 ]] || { echo "expected zero issues after ledger dedup, got $after" >&2; exit 1; }
+skipped=$(jq '.skipped_processed' "$STATE_DIR/runs/live2/manifest.json")
+[[ "$skipped" == 2 ]] || { echo "expected two skipped-processed, got $skipped" >&2; exit 1; }
 
-LIVE_RUN_DIR="$STATE_DIR/runs/live-loop-run"
-mkdir -p "$LIVE_RUN_DIR"
-cat > "$LIVE_RUN_DIR/actions.json" <<'JSON'
+# --- Idempotency: re-applying the same run creates nothing new ---
+TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" apply --run-id live1 --live --confirm-live
+creates_again=$(grep -c '^WRITE issue create' "$LOG_FILE")
+[[ "$creates_again" == 1 ]] || { echo "repeat apply created a duplicate, creates=$creates_again" >&2; exit 1; }
+
+# --- Note path: create + append-example both execute on a manual plan ---
+NOTE_DIR="$STATE_DIR/runs/note-run"
+mkdir -p "$NOTE_DIR"
+cat > "$NOTE_DIR/actions.json" <<'JSON'
 [
-  {"kind":"create","title":"one","body":"body one","labels":"sonar-triage","marker":"m1"},
-  {"kind":"create","title":"two","body":"body two","labels":"sonar-triage","marker":"m2"}
+  {"kind":"create","title":"[sonar-triage] one","body":"body one","labels":"sonar-triage","problem_key":"manual-create-key","problem_title":"one","markers":["bsl-sonar-triage-id: s/p/CREATE-1"]},
+  {"kind":"note","iid":200,"body":"body note","problem_key":"manual-note-key","problem_title":"two","marker":"bsl-sonar-triage-id: s/p/NOTE-1"}
 ]
 JSON
-TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" apply --run-id live-loop-run --live --confirm-live
-write_calls=$(grep -c '^WRITE ' "$LOG_FILE")
-[[ "$write_calls" == 2 ]] || { echo "expected two fake GitLab writes, got $write_calls" >&2; exit 1; }
-
-TRIAGE_SKIP_OPENCODE=0 "$ROOT/scripts/sonar-triage.sh" collect --run-id opencode-run --since 2026-01-01
-TRIAGE_SKIP_OPENCODE=0 "$ROOT/scripts/sonar-triage.sh" analyze --run-id opencode-run
-analysis_count=$(jq 'length' "$STATE_DIR/runs/opencode-run/analysis.json")
-[[ "$analysis_count" == 2 ]] || { echo "expected two analyzed issues, got $analysis_count" >&2; exit 1; }
-confidence=$(jq -r '.[0].analysis.confidence' "$STATE_DIR/runs/opencode-run/analysis.json")
-[[ "$confidence" == low ]] || { echo "expected fake opencode confidence low, got $confidence" >&2; exit 1; }
-
-# A live apply records processed markers so the next collect drops them before analyze.
-TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" collect --run-id ledger-a --since 2026-01-01
-before_ledger=$(jq 'length' "$STATE_DIR/runs/ledger-a/issues.json")
-[[ "$before_ledger" == 2 ]] || { echo "expected two issues before ledger apply, got $before_ledger" >&2; exit 1; }
-TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" analyze --run-id ledger-a
-TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" plan --run-id ledger-a
-TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" apply --run-id ledger-a --live --confirm-live
-[[ -f "$STATE_DIR/processed.ndjson" ]] || { echo "ledger not written after live apply" >&2; exit 1; }
-for k in ISSUE-1 ISSUE-2; do
-  jq -e --arg k "$k" -s 'any(.[]; .marker | endswith("/" + $k))' "$STATE_DIR/processed.ndjson" >/dev/null \
-    || { echo "ledger missing marker for $k after live apply" >&2; exit 1; }
-done
-
-TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" collect --run-id ledger-b --since 2026-01-01
-after_ledger=$(jq 'length' "$STATE_DIR/runs/ledger-b/issues.json")
-[[ "$after_ledger" == 0 ]] || { echo "expected zero issues after ledger dedup, got $after_ledger" >&2; exit 1; }
-skipped_processed=$(jq '.skipped_processed' "$STATE_DIR/runs/ledger-b/manifest.json")
-[[ "$skipped_processed" == 2 ]] || { echo "expected two skipped-processed, got $skipped_processed" >&2; exit 1; }
+TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" apply --run-id note-run --live --confirm-live
+creates_after_note=$(grep -c '^WRITE issue create' "$LOG_FILE")
+[[ "$creates_after_note" == 2 ]] || { echo "expected a second create from manual plan, got $creates_after_note" >&2; exit 1; }
+notes=$(grep -c '^WRITE issue note' "$LOG_FILE")
+[[ "$notes" == 1 ]] || { echo "expected one appended example note, got $notes" >&2; exit 1; }
 
 if grep -q 'TOKEN ENV LEAK\|INHERITED TOKEN USED' "$LOG_FILE"; then
   echo "token leaked to child process or inherited env token was used" >&2

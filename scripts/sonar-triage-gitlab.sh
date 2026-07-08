@@ -7,39 +7,65 @@ labels_for_confidence() {
   esac
 }
 
-issue_title() {
-  "$JQ_BIN" -r '"[sonar-triage] \(.rule_key): \(.message | gsub("\\n"; " ") | .[0:100])"'
+problem_marker_for() {
+  printf 'bsl-sonar-problem: %s' "$1"
 }
 
-issue_body() {
-  local issue=$1
-  local analysis=$2
-  local marker=$3
-  "$JQ_BIN" -rn --argjson issue "$issue" --argjson analysis "$analysis" --arg marker "$marker" '
-    ("<!-- " + $marker + " -->") as $hidden
-    | (($issue.snippet // "") | rtrimstr("\n")) as $snip
+# Body of a freshly created problem issue: description of the analyzer problem
+# plus every collected example. members = JSON array of {issue, analysis}.
+group_body() {
+  local key=$1
+  local title=$2
+  local members=$3
+  "$JQ_BIN" -rn --arg key "$key" --arg title "$title" --argjson members "$members" '
+    ($members[0].analysis) as $repr
+    | ($members[0].issue) as $ri
     | (
         [
-          $hidden, "",
-          "## Что произошло", "",
-          ("Sonar issue закрыт программистом: `" + $issue.issue_key + "`."), "",
-          ("- **Rule:** `" + $issue.rule_key + "`"),
-          ("- **Status:** `" + $issue.status + "`"),
-          ("- **Resolution:** `" + $issue.resolution + "`"), "",
-          "## Оценка opencode", "",
-          ("- **Confidence:** `" + $analysis.confidence + "`"),
-          ("- **Classification:** `" + $analysis.classification + "`"), "",
-          $analysis.summary, "",
-          "## Контекст Sonar", "",
-          ("- **Project:** `" + $issue.server + "/" + $issue.project_key + "`"),
-          ("- **Component:** `" + $issue.component + "`"),
-          ("- **Line:** `" + ($issue.line | tostring) + "`"), ""
+          "<!-- bsl-sonar-problem: " + $key + " -->", "",
+          "## Проблема", "",
+          $title, "",
+          "- **Rule:** `" + $ri.rule_key + "`",
+          "- **Classification:** `" + $repr.classification + "`",
+          "- **Confidence:** `" + $repr.confidence + "`", "",
+          $repr.summary, "",
+          "## Примеры (" + ($members | length | tostring) + ")", ""
         ]
-        + (if $snip == "" then [] else ["```bsl", $snip, "```", ""] end)
-        + [
-          "## Что неизвестно", "",
-          (($analysis.unknowns // []) | map("- " + .) | join("\n"))
+        + ( [ $members | to_entries[] as $e
+              | ($e.value.issue) as $is
+              | (($is.snippet // "") | rtrimstr("\n")) as $snip
+              | (
+                  [
+                    "### " + (($e.key + 1) | tostring) + ". `" + $is.component + "`:" + ($is.line | tostring) + "  (" + $is.server + "/" + $is.project_key + ")",
+                    "",
+                    "<!-- bsl-sonar-triage-id: " + $is.server + "/" + $is.project_key + "/" + $is.issue_key + " -->",
+                    "",
+                    "> " + ($is.message | gsub("\n"; " ")),
+                    ""
+                  ]
+                  + (if $snip == "" then [] else ["```bsl", $snip, "```", ""] end)
+                )
+            ] | add )
+      )
+    | join("\n")'
+}
+
+# Body of a comment that appends one more example to an existing problem issue.
+example_note_body() {
+  local issue=$1
+  "$JQ_BIN" -rn --argjson is "$issue" '
+    (($is.snippet // "") | rtrimstr("\n")) as $snip
+    | (
+        [
+          "Ещё пример этой проблемы (закрыто как FALSE-POSITIVE):", "",
+          "<!-- bsl-sonar-triage-id: " + $is.server + "/" + $is.project_key + "/" + $is.issue_key + " -->",
+          "",
+          "**" + $is.server + "/" + $is.project_key + "** `" + $is.component + "`:" + ($is.line | tostring),
+          "",
+          "> " + ($is.message | gsub("\n"; " ")),
+          ""
         ]
+        + (if $snip == "" then [] else ["```bsl", $snip, "```"] end)
       )
     | join("\n")'
 }
@@ -61,44 +87,49 @@ existing_issue_for_marker() {
   ' "$cache"
 }
 
-planned_action_for_item() {
-  local item=$1
-  local existing_cache=$2
-  local issue analysis recommended marker existing confidence labels title body
-  issue=$("$JQ_BIN" -c '.issue' <<< "$item")
-  analysis=$("$JQ_BIN" -c '.analysis' <<< "$item")
-  recommended=$("$JQ_BIN" -r '.recommended_gitlab_action' <<< "$analysis")
-  [[ "$recommended" == skip ]] && return 2
-  marker=$(issue_marker <<< "$issue")
-  existing=$(existing_issue_for_marker "$existing_cache" "$marker")
-  [[ -n "$existing" ]] && return 2
-  confidence=$("$JQ_BIN" -r '.confidence' <<< "$analysis")
-  labels=$(labels_for_confidence "$confidence")
-  body=$(issue_body "$issue" "$analysis" "$marker")
-  title=$(issue_title <<< "$issue")
-  "$JQ_BIN" -n --arg kind create --arg title "$title" --arg body "$body" --arg labels "$labels" --arg marker "$marker" \
-    '{kind:$kind, title:$title, body:$body, labels:$labels, marker:$marker}'
+existing_gitlab_iid_for_problem() {
+  local cache=$1
+  local key=$2
+  "$JQ_BIN" -r --arg m "bsl-sonar-problem: $key" '
+    map(select((((.description // .body) // "")) | contains($m))) | (.[0].iid // empty)
+  ' "$cache"
 }
 
 plan_gitlab() {
-  local dir existing_cache item action
+  local dir existing_cache key members iid confidence labels title member marker note_body body markers status
   dir=$(run_dir)
   [[ -f "$dir/analysis.json" ]] || die "analysis.json not found for run $RUN_ID"
   load_existing_gitlab_issues "$dir"
   existing_cache="$dir/gitlab-issues.json"
   : > "$dir/actions.ndjson"
-  while IFS= read -r item; do
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    members=$("$JQ_BIN" -c --arg k "$key" '[.[] | select(.analysis.recommended_gitlab_action != "skip" and .analysis.problem_key == $k)]' "$dir/analysis.json")
+    title=$("$JQ_BIN" -r '.[0].analysis.problem_title' <<< "$members")
+    confidence=$("$JQ_BIN" -r '.[0].analysis.confidence' <<< "$members")
+    labels=$(labels_for_confidence "$confidence")
+    iid=""
     set +e
-    action=$(planned_action_for_item "$item" "$existing_cache")
-    status=$?
+    iid=$(ledger_iid_for_key "$key")
     set -e
-    case "$status" in
-      0) ;;
-      2) continue ;;
-      *) return "$status" ;;
-    esac
-    "$JQ_BIN" -c '.' <<< "$action" >> "$dir/actions.ndjson"
-  done < <("$JQ_BIN" -c '.[]' "$dir/analysis.json")
+    [[ -z "$iid" ]] && iid=$(existing_gitlab_iid_for_problem "$existing_cache" "$key")
+    if [[ -n "$iid" ]]; then
+      while IFS= read -r member; do
+        [[ -n "$member" ]] || continue
+        marker=$(issue_marker <<< "$("$JQ_BIN" -c '.issue' <<< "$member")")
+        ledger_has_marker "$marker" && continue
+        [[ -n "$(existing_issue_for_marker "$existing_cache" "$marker")" ]] && continue
+        note_body=$(example_note_body "$("$JQ_BIN" -c '.issue' <<< "$member")")
+        "$JQ_BIN" -n -c --argjson iid "$iid" --arg body "$note_body" --arg key "$key" --arg title "$title" --arg marker "$marker" \
+          '{kind:"note", iid:$iid, body:$body, problem_key:$key, problem_title:$title, marker:$marker}' >> "$dir/actions.ndjson"
+      done < <("$JQ_BIN" -c '.[]' <<< "$members")
+    else
+      body=$(group_body "$key" "$title" "$members")
+      markers=$("$JQ_BIN" -c '[.[].issue | "bsl-sonar-triage-id: \(.server)/\(.project_key)/\(.issue_key)"]' <<< "$members")
+      "$JQ_BIN" -n -c --arg title "$title" --arg body "$body" --arg labels "$labels" --arg key "$key" --argjson markers "$markers" \
+        '{kind:"create", title:("[sonar-triage] " + $title), body:$body, labels:$labels, problem_key:$key, problem_title:$title, markers:$markers}' >> "$dir/actions.ndjson"
+    fi
+  done < <("$JQ_BIN" -r '[.[] | select(.analysis.recommended_gitlab_action != "skip") | .analysis.problem_key] | unique[]' "$dir/analysis.json")
   "$JQ_BIN" -s '.' "$dir/actions.ndjson" > "$dir/actions.json"
   log "planned $("$JQ_BIN" 'length' "$dir/actions.json") GitLab action(s): $dir/actions.json"
 }
@@ -112,43 +143,91 @@ render_dry_run() {
     printf 'GitLab writes disabled.\n\n'
     printf 'Issues collected: %s\n\n' "$("$JQ_BIN" 'length' "$dir/issues.json")"
     printf 'Planned GitLab actions: %s\n\n' "$("$JQ_BIN" 'length' "$dir/actions.json")"
-    "$JQ_BIN" -r '.[] | "- " + .kind + ": " + .title + " (" + .marker + ")"' "$dir/actions.json"
+    "$JQ_BIN" -r '.[] | if .kind == "create"
+      then "- create [" + .problem_key + "] " + .problem_title + " (" + ((.markers | length) | tostring) + " examples)"
+      else "- note -> #" + (.iid | tostring) + " [" + .problem_key + "] " + .marker end' "$dir/actions.json"
   } > "$report"
   printf '%s\n' "$report"
 }
 
-apply_live_action() {
-  local action=$1
-  local kind args title body labels
-  kind=$("$JQ_BIN" -r '.kind' <<< "$action")
-  args=()
+gitlab_create_issue() {
+  local title=$1
+  local body=$2
+  local labels=$3
+  local args=()
   [[ -n "$TRIAGE_GITLAB_REPO" ]] && args+=(--repo "$TRIAGE_GITLAB_REPO")
-  case "$kind" in
-    create)
-      title=$("$JQ_BIN" -r '.title' <<< "$action")
-      body=$("$JQ_BIN" -r '.body' <<< "$action")
-      labels=$("$JQ_BIN" -r '.labels' <<< "$action")
-      "$GLAB_BIN" issue create "${args[@]}" --title "$title" --description "$body" --label "$labels" --yes </dev/null
-      ;;
-    *) die "unsupported action kind: $kind" ;;
-  esac
+  "$GLAB_BIN" issue create "${args[@]}" --title "$title" --description "$body" --label "$labels" --yes </dev/null
+}
+
+gitlab_note_issue() {
+  local iid=$1
+  local body=$2
+  local args=()
+  [[ -n "$TRIAGE_GITLAB_REPO" ]] && args+=(--repo "$TRIAGE_GITLAB_REPO")
+  "$GLAB_BIN" issue note "$iid" "${args[@]}" --message "$body" </dev/null
+}
+
+apply_create_action() {
+  local action=$1
+  local key title body labels url iid marker
+  key=$("$JQ_BIN" -r '.problem_key' <<< "$action")
+  if ledger_has_created_problem "$key"; then
+    log "skip already-created problem: $key"
+    return 0
+  fi
+  title=$("$JQ_BIN" -r '.title' <<< "$action")
+  body=$("$JQ_BIN" -r '.body' <<< "$action")
+  labels=$("$JQ_BIN" -r '.labels' <<< "$action")
+  url=$(gitlab_create_issue "$title" "$body" "$labels")
+  # The issue is already created; never abort here on an unexpected output shape,
+  # or a repeat apply would create a duplicate. A missing iid only disables note
+  # append until the group is rediscovered via its bsl-sonar-problem marker.
+  iid=$(printf '%s\n' "$url" | grep -oE '/issues/[0-9]+' | grep -oE '[0-9]+' | tail -1 || true)
+  [[ -n "$iid" ]] || log "WARN: could not parse created issue iid from glab output: $url"
+  while IFS= read -r marker; do
+    [[ -n "$marker" ]] || continue
+    ledger_record "$marker" create_issue "$key" "$("$JQ_BIN" -r '.problem_title' <<< "$action")" "$iid" "$RUN_ID"
+  done < <("$JQ_BIN" -r '.markers[]' <<< "$action")
+}
+
+apply_note_action() {
+  local action=$1
+  local iid marker body key
+  marker=$("$JQ_BIN" -r '.marker' <<< "$action")
+  ledger_has_marker "$marker" && { log "skip already-applied example: $marker"; return 0; }
+  iid=$("$JQ_BIN" -r '.iid' <<< "$action")
+  body=$("$JQ_BIN" -r '.body' <<< "$action")
+  key=$("$JQ_BIN" -r '.problem_key' <<< "$action")
+  gitlab_note_issue "$iid" "$body"
+  ledger_record "$marker" note "$key" "$("$JQ_BIN" -r '.problem_title' <<< "$action")" "$iid" "$RUN_ID"
 }
 
 record_processed_from_analysis() {
   local dir=$1
-  local item marker verdict
+  local item marker verdict key title iid
   [[ -f "$dir/analysis.json" ]] || return 0
   while IFS= read -r item; do
     marker=$("$JQ_BIN" -r '.issue | "bsl-sonar-triage-id: \(.server)/\(.project_key)/\(.issue_key)"' <<< "$item")
+    ledger_has_marker "$marker" && continue
     verdict=$("$JQ_BIN" -r '.analysis.recommended_gitlab_action' <<< "$item")
-    ledger_has_marker "$marker" || ledger_record "$marker" "$verdict" "$RUN_ID"
+    key=$("$JQ_BIN" -r '.analysis.problem_key' <<< "$item")
+    title=$("$JQ_BIN" -r '.analysis.problem_title' <<< "$item")
+    # Inherit the group iid recorded by this run's create/note so members already
+    # present in an existing issue still carry problem_key -> iid in the ledger.
+    iid=""
+    if [[ "$verdict" != skip ]]; then
+      set +e
+      iid=$(ledger_iid_for_key "$key")
+      set -e
+    fi
+    ledger_record "$marker" "$verdict" "$key" "$title" "$iid" "$RUN_ID"
   done < <("$JQ_BIN" -c '.[]' "$dir/analysis.json")
 }
 
 apply_actions() {
   local live=$1
   local confirm=$2
-  local dir action
+  local dir action kind
   dir=$(run_dir)
   [[ -f "$dir/actions.json" ]] || die "actions.json not found for run $RUN_ID"
   if [[ "$live" != 1 ]]; then
@@ -157,15 +236,13 @@ apply_actions() {
   fi
   [[ "$confirm" == 1 ]] || die "live apply requires --confirm-live"
   "$GLAB_BIN" auth status >/dev/null 2>&1
-  local marker
   while IFS= read -r action; do
-    marker=$("$JQ_BIN" -r '.marker' <<< "$action")
-    if ledger_has_marker "$marker"; then
-      log "skip already-applied action: $marker"
-      continue
-    fi
-    apply_live_action "$action"
-    ledger_record "$marker" create_issue "$RUN_ID"
+    kind=$("$JQ_BIN" -r '.kind' <<< "$action")
+    case "$kind" in
+      create) apply_create_action "$action" ;;
+      note) apply_note_action "$action" ;;
+      *) die "unsupported action kind: $kind" ;;
+    esac
   done < <("$JQ_BIN" -c '.[]' "$dir/actions.json")
   record_processed_from_analysis "$dir"
   "$JQ_BIN" -n --arg run_id "$RUN_ID" --arg completed_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \

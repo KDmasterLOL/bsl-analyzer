@@ -72,10 +72,35 @@ ledger_has_marker() {
 ledger_record() {
   local marker=$1
   local verdict=$2
-  local run_id=$3
-  "$JQ_BIN" -n -c --arg marker "$marker" --arg verdict "$verdict" --arg run "$run_id" \
-    '{marker:$marker, verdict:$verdict, run_id:$run}' >> "$PROCESSED_LEDGER"
+  local problem_key=$3
+  local problem_title=$4
+  local gitlab_iid=$5
+  local run_id=$6
+  "$JQ_BIN" -n -c --arg marker "$marker" --arg verdict "$verdict" --arg key "$problem_key" \
+    --arg title "$problem_title" --arg iid "$gitlab_iid" --arg run "$run_id" \
+    '{marker:$marker, verdict:$verdict, problem_key:$key, problem_title:$title,
+      gitlab_iid:(if $iid == "" then null else ($iid | tonumber? // $iid) end), run_id:$run}' >> "$PROCESSED_LEDGER"
   chmod 600 "$PROCESSED_LEDGER" 2>/dev/null || true
+}
+
+ledger_iid_for_key() {
+  local key=$1
+  [[ -f "$PROCESSED_LEDGER" ]] || return 1
+  local iid
+  iid=$("$JQ_BIN" -rs --arg k "$key" \
+    '[.[] | select(.problem_key == $k and .gitlab_iid != null)]
+     | if length == 0 then "" else (.[-1].gitlab_iid | tostring) end' "$PROCESSED_LEDGER")
+  [[ -n "$iid" ]] || return 1
+  printf '%s' "$iid"
+}
+
+# A problem group is "created" once any of its examples is recorded with the
+# create verdict — independent of whether the issue iid was parsed. This is the
+# idempotency guard against a duplicate create when a live apply is repeated.
+ledger_has_created_problem() {
+  local key=$1
+  [[ -f "$PROCESSED_LEDGER" ]] || return 1
+  "$JQ_BIN" -e -s --arg k "$key" 'any(.[]; .problem_key == $k and .verdict == "create_issue")' "$PROCESSED_LEDGER" >/dev/null 2>&1
 }
 
 sonar_get() {
