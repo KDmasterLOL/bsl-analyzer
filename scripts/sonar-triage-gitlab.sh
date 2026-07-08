@@ -104,7 +104,13 @@ plan_gitlab() {
   : > "$dir/actions.ndjson"
   while IFS= read -r key; do
     [[ -n "$key" ]] || continue
-    members=$("$JQ_BIN" -c --arg k "$key" '[.[] | select(.analysis.recommended_gitlab_action != "skip" and .analysis.problem_key == $k)]' "$dir/analysis.json")
+    # A group is anchored by its create_issue members; closures opencode marks as
+    # duplicate carry the same problem_key and are attached as extra examples
+    # rather than dropped. Create members sort first so one represents the group.
+    members=$("$JQ_BIN" -c --arg k "$key" '[.[]
+      | select(.analysis.problem_key == $k
+        and (.analysis.recommended_gitlab_action == "create_issue" or .analysis.classification == "duplicate"))]
+      | sort_by(.analysis.recommended_gitlab_action != "create_issue")' "$dir/analysis.json")
     title=$("$JQ_BIN" -r '.[0].analysis.problem_title' <<< "$members")
     confidence=$("$JQ_BIN" -r '.[0].analysis.confidence' <<< "$members")
     labels=$(labels_for_confidence "$confidence")
@@ -129,7 +135,7 @@ plan_gitlab() {
       "$JQ_BIN" -n -c --arg title "$title" --arg body "$body" --arg labels "$labels" --arg key "$key" --argjson markers "$markers" \
         '{kind:"create", title:("[sonar-triage] " + $title), body:$body, labels:$labels, problem_key:$key, problem_title:$title, markers:$markers}' >> "$dir/actions.ndjson"
     fi
-  done < <("$JQ_BIN" -r '[.[] | select(.analysis.recommended_gitlab_action != "skip") | .analysis.problem_key] | unique[]' "$dir/analysis.json")
+  done < <("$JQ_BIN" -r '[.[] | select(.analysis.recommended_gitlab_action == "create_issue") | .analysis.problem_key] | unique[]' "$dir/analysis.json")
   "$JQ_BIN" -s '.' "$dir/actions.ndjson" > "$dir/actions.json"
   log "planned $("$JQ_BIN" 'length' "$dir/actions.json") GitLab action(s): $dir/actions.json"
 }

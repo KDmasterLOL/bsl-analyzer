@@ -209,6 +209,25 @@ creates_after_note=$(grep -c '^WRITE issue create' "$LOG_FILE")
 notes=$(grep -c '^WRITE issue note' "$LOG_FILE")
 [[ "$notes" == 1 ]] || { echo "expected one appended example note, got $notes" >&2; exit 1; }
 
+# --- Duplicate closures attach as extra examples; genuine skips do not ---
+DUP_DIR="$STATE_DIR/runs/dup-run"
+mkdir -p "$DUP_DIR"
+cat > "$DUP_DIR/analysis.json" <<'JSON'
+[
+  {"issue":{"server":"s","project_key":"p","issue_key":"C1","rule_key":"bsl:R","status":"RESOLVED","resolution":"FALSE-POSITIVE","message":"anchor","component":"p:a.bsl","line":1,"snippet":""},"analysis":{"recommended_gitlab_action":"create_issue","classification":"analyzer_gap","problem_key":"k1","problem_title":"T1","confidence":"high","summary":"s1","unknowns":[]}},
+  {"issue":{"server":"s","project_key":"p","issue_key":"D1","rule_key":"bsl:R","status":"RESOLVED","resolution":"FALSE-POSITIVE","message":"dup","component":"p:b.bsl","line":2,"snippet":""},"analysis":{"recommended_gitlab_action":"skip","classification":"duplicate","problem_key":"k1","problem_title":"T1","confidence":"medium","summary":"s2","unknowns":[]}},
+  {"issue":{"server":"s","project_key":"p","issue_key":"S1","rule_key":"bsl:R","status":"RESOLVED","resolution":"FALSE-POSITIVE","message":"stale","component":"p:c.bsl","line":3,"snippet":""},"analysis":{"recommended_gitlab_action":"skip","classification":"stale_issue","problem_key":"k2","problem_title":"T2","confidence":"low","summary":"s3","unknowns":[]}}
+]
+JSON
+TRIAGE_SKIP_OPENCODE=1 "$ROOT/scripts/sonar-triage.sh" plan --run-id dup-run
+dup_actions=$(jq 'length' "$DUP_DIR/actions.json")
+[[ "$dup_actions" == 1 ]] || { echo "expected one group (skip not anchored), got $dup_actions" >&2; exit 1; }
+dup_examples=$(jq '.[0].markers | length' "$DUP_DIR/actions.json")
+[[ "$dup_examples" == 2 ]] || { echo "expected duplicate attached as example (2), got $dup_examples" >&2; exit 1; }
+if jq -e '[.[].markers[]] | any(. | contains("S1"))' "$DUP_DIR/actions.json" >/dev/null; then
+  echo "genuine skip S1 must not be attached as an example" >&2; exit 1
+fi
+
 if grep -q 'TOKEN ENV LEAK\|INHERITED TOKEN USED' "$LOG_FILE"; then
   echo "token leaked to child process or inherited env token was used" >&2
   exit 1
