@@ -1,5 +1,5 @@
 use bsl_metadata::MdoType;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use stdx::case::CaseExt;
 use syntax::{TextRange, TextSize};
 
@@ -18,6 +18,15 @@ pub struct ModuleCallSummary {
     pub notify_regs: Vec<NotifyReg>,
     pub idle_handler_regs: Vec<IdleReg>,
     pub set_action_regs: Vec<SetActionReg>,
+    /// Local ids of methods named by an identifier-shaped string literal somewhere in
+    /// the module. Dynamic handler binding always carries the target's name as a
+    /// string — directly (`УстановитьДействие`), through a command's `Действие`
+    /// property, or through a helper in another module fed a parameter structure —
+    /// and that literal sits in the same module as the handler. Recording every such
+    /// literal covers all those shapes without cross-module flow analysis, at the
+    /// cost of also matching string *data* that coincides with a method name.
+    /// Sorted and deduplicated.
+    pub name_literal_refs: Vec<u32>,
     pub form_entries: Vec<FormEventEntry>,
 }
 
@@ -553,6 +562,7 @@ pub fn extract_call_summary(
     let mut notify_regs = Vec::new();
     let mut idle_handler_regs = Vec::new();
     let mut set_action_regs = Vec::new();
+    let mut name_literals: FxHashSet<u32> = FxHashSet::default();
 
     let mut sorted_ids: Vec<u32> = module_bodies.iter_lower_results().map(|(id, _)| id).collect();
     sorted_ids.sort_unstable();
@@ -571,6 +581,7 @@ pub fn extract_call_summary(
             &mut notify_regs,
             &mut idle_handler_regs,
             &mut set_action_regs,
+            &mut name_literals,
         );
     }
 
@@ -584,8 +595,12 @@ pub fn extract_call_summary(
             &mut notify_regs,
             &mut idle_handler_regs,
             &mut set_action_regs,
+            &mut name_literals,
         );
     }
+
+    let mut name_literal_refs: Vec<u32> = name_literals.into_iter().collect();
+    name_literal_refs.sort_unstable();
 
     let form_entries = form_event_handlers
         .iter()
@@ -601,6 +616,7 @@ pub fn extract_call_summary(
         notify_regs,
         idle_handler_regs,
         set_action_regs,
+        name_literal_refs,
         form_entries,
     }
 }
@@ -618,10 +634,16 @@ fn extract_from_body(
     notify_regs: &mut Vec<NotifyReg>,
     idle_handler_regs: &mut Vec<IdleReg>,
     set_action_regs: &mut Vec<SetActionReg>,
+    name_literals: &mut FxHashSet<u32>,
 ) {
     let common_bindings = crate::common_module_ref::common_module_var_bindings(body);
     for (expr_id, expr) in body.exprs_iter() {
         match expr {
+            Expr::Literal(Literal::String(s)) if is_identifier_like(s) => {
+                if let Some(&local_id) = local_method_ids.get(&s.fold_lower()) {
+                    name_literals.insert(local_id);
+                }
+            }
             Expr::Call { callee, args } => {
                 let callee_expr = body.expr_idx(*callee);
                 let range = source_map.expr_range(expr_id).unwrap_or(TextRange::empty(0.into()));
@@ -715,6 +737,20 @@ fn is_attach_idle_handler(name_lower: &str) -> bool {
 
 fn is_set_action(name_lower: &str) -> bool {
     name_lower == "установитьдействие" || name_lower == "setaction"
+}
+
+/// Whether a string literal is shaped like a BSL identifier and could therefore name a
+/// method. Filters message texts and data values out of [`ModuleCallSummary::name_literal_refs`]
+/// before the (case-folded) comparison against local method names. Mirrors the lexer's
+/// identifier grammar: leading Unicode letter or `_`, then letters, ASCII digits, or `_`
+/// (the lexer accepts only `0-9` after the first char, not other Unicode digit classes).
+fn is_identifier_like(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_alphabetic() || c.is_ascii_digit() || c == '_')
 }
 
 fn is_notify_description(name: &Name) -> bool {
@@ -1781,6 +1817,86 @@ EndProcedure
 "#;
         let summary = parse_and_extract(code);
         assert!(summary.set_action_regs.is_empty());
+    }
+
+    #[test]
+    fn test_name_literal_refs_extracted() {
+        // The handler name reaches `УстановитьДействие` only inside a helper module; the
+        // sole same-module trace is the string literal, in a structure argument or in a
+        // code-created command's `Действие` assignment.
+        let code = r#"
+&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Параметры = Новый Структура("ИмяСобытия, ИмяПроцедурыОбработчика", "ПриИзменении", "ВесБруттоПриИзменении");
+    Помощники.ДобавитьПолеФормы(ЭтаФорма, Параметры);
+    НоваяКоманда = Команды.Добавить("Дозагруз");
+    НоваяКоманда.Действие = "ДозагрузКоманда";
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ВесБруттоПриИзменении(Элемент)
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ДозагрузКоманда(Команда)
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        let names: Vec<&str> = summary
+            .name_literal_refs
+            .iter()
+            .filter_map(|id| summary.methods.iter().find(|m| m.local_id == *id))
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["ВесБруттоПриИзменении", "ДозагрузКоманда"],
+            "only literals naming a local method are recorded"
+        );
+    }
+
+    #[test]
+    fn test_name_literal_refs_ignore_concatenation() {
+        // A concatenated handler name is not a single literal; neither part alone names
+        // a local method, so nothing is recorded and the method stays unreferenced.
+        let code = r#"
+&НаКлиенте
+Процедура Настроить()
+    Элементы.Валюта.УстановитьДействие("ПриИзменении", "Валюта" + "ПриИзменении");
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ВалютаПриИзменении(Элемент)
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert!(summary.name_literal_refs.is_empty());
+    }
+
+    #[test]
+    fn test_name_literal_refs_identifier_shape_and_dedup() {
+        let code = r#"
+&НаКлиенте
+Процедура Настроить()
+    Текст = "Вызовите ОбработчикСобытия вручную";
+    Имя1 = "обработчикСобытия";
+    Имя2 = "ОбработчикСобытия";
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ОбработчикСобытия()
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        // The message text is not identifier-shaped (substrings do not count); the two
+        // case variants resolve to the same local method.
+        assert_eq!(summary.name_literal_refs.len(), 1);
+        let method = summary
+            .methods
+            .iter()
+            .find(|m| m.local_id == summary.name_literal_refs[0])
+            .expect("recorded id must resolve to a local method");
+        assert_eq!(method.name, Name::new("ОбработчикСобытия"));
     }
 
     #[test]

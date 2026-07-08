@@ -88,6 +88,7 @@ mod heap_estimate {
         for r in &s.set_action_regs {
             bytes += name_bytes(&r.handler_name);
         }
+        bytes += vec_bytes::<u32>(s.name_literal_refs.len());
         bytes += vec_bytes::<FormEventEntry>(s.form_entries.len());
         for f in &s.form_entries {
             bytes += f.event_type.capacity() + name_bytes(&f.handler_name);

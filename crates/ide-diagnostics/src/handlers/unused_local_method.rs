@@ -104,6 +104,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         for reg in &summary.set_action_regs {
             called_methods.insert(reg.handler_name.as_str().fold_lower());
         }
+        // Handler names also reach `УстановитьДействие`/`Действие` indirectly — through a
+        // command created in code or a parameter structure handed to a helper in another
+        // module — where the only same-module trace is the name literal itself. Any
+        // identifier-shaped literal naming a local method counts as a use; scoped to form
+        // modules, where dynamic binding is idiomatic and worth the missed-dead-code risk.
+        for local_id in &summary.name_literal_refs {
+            if let Some(method) = summary.methods.iter().find(|m| m.local_id == *local_id) {
+                called_methods.insert(method.name.as_str().fold_lower());
+            }
+        }
     }
 
     if let Some(ref form) = metadata.form {
@@ -639,10 +649,13 @@ mod tests {
     }
 
     #[test]
-    fn test_set_action_on_manager_receiver_flagged_in_form() {
-        // `УстановитьДействие` is not reserved. A form may call an exported manager method
-        // of that name (`Справочники.X.УстановитьДействие("Опция", "Имя")`) where the second
-        // string is data, not a handler — so a same-named dead local must stay flagged.
+    fn test_name_literal_collision_suppresses_local_in_form() {
+        // Documents an intentional precision tradeoff. In a form module, any
+        // identifier-shaped string literal naming a local method counts as a use —
+        // dynamic handler binding (code-created commands, helper modules fed a
+        // parameter structure) leaves the literal as its only same-module trace. The
+        // price: string *data* that happens to name a dead local exempts it, as with
+        // this manager-method call whose second argument is not a handler.
         let code = r#"
 &НаСервере
 Процедура Настроить()
@@ -674,8 +687,85 @@ mod tests {
             .map(|d| d.message.clone())
             .collect();
         assert!(
-            names.iter().any(|m| m.contains("НеИспользуемая")),
-            "manager-method SetAction must not exempt a dead local in a form: {names:?}"
+            !names.iter().any(|m| m.contains("НеИспользуемая")),
+            "a name literal matching a local method exempts it in a form module: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_name_literal_bound_handler_not_flagged_in_form() {
+        // The handler name reaches `УстановитьДействие` only inside a helper from
+        // another module — via a parameter structure or a code-created command — so
+        // the same-module name literal is what marks the handler as reachable.
+        let code = r#"
+&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Параметры = Новый Структура("ИмяСобытия, ИмяПроцедурыОбработчика", "ПриИзменении", "ВесБруттоПриИзменении");
+    Помощники.ДобавитьПолеФормы(ЭтаФорма, Параметры);
+    Помощники.СоздатьКоманду(ЭтаФорма, "Дозагруз", "Дозагруз", "ДозагрузКоманда");
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ВесБруттоПриИзменении(Элемент)
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ДозагрузКоманда(Команда)
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ЛишняяПроцедура()
+КонецПроцедуры
+"#;
+        let metadata = hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::FormModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: None,
+            http_service: None,
+            web_service: None,
+            integration_service: None,
+        };
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                super::check(ctx)
+            });
+        let names: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UnusedLocalMethod)
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            !names.iter().any(|m| m.contains("ВесБруттоПриИзменении")),
+            "structure-bound handler must not be flagged: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|m| m.contains("ДозагрузКоманда")),
+            "helper-created command action must not be flagged: {names:?}"
+        );
+        assert!(
+            names.iter().any(|m| m.contains("ЛишняяПроцедура")),
+            "genuinely unused method must stay flagged: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_name_literal_does_not_exempt_outside_form_module() {
+        let code = r#"
+Процедура Настроить() Экспорт
+    Имя = "Обработчик";
+КонецПроцедуры
+
+Процедура Обработчик()
+КонецПроцедуры
+"#;
+        let diags = unused_in_module(bsl_metadata::ModuleType::CommonModule, code);
+        let names: Vec<_> = diags.iter().map(|d| d.message.clone()).collect();
+        assert!(
+            names.iter().any(|m| m.contains("Обработчик")),
+            "name literals exempt locals only in form modules: {names:?}"
         );
     }
 
