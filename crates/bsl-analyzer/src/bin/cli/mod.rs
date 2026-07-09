@@ -1,4 +1,5 @@
 pub mod analyze;
+pub mod bench;
 pub mod check_config;
 pub mod dap;
 pub mod deps;

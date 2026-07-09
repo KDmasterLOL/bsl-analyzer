@@ -357,13 +357,13 @@ fn emit_text_report(report: &SmokeReport) {
     }
 }
 
-struct SmokeBootstrap {
-    state: GlobalState,
-    _drain_handle: std::thread::JoinHandle<()>,
-    boot: BootResult,
+pub(crate) struct SmokeBootstrap {
+    pub(crate) state: GlobalState,
+    pub(crate) _drain_handle: std::thread::JoinHandle<()>,
+    pub(crate) boot: BootResult,
 }
 
-fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
+pub(crate) fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
     let (sender, receiver) = crossbeam_channel::unbounded::<lsp_server::Message>();
     let drain_handle = std::thread::spawn(move || while receiver.recv().is_ok() {});
 

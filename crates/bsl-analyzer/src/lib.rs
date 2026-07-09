@@ -6,6 +6,7 @@ pub mod tracing {
 }
 
 pub mod analysis_host;
+pub mod bench;
 pub mod diagnostics_state;
 pub mod diff_filter;
 pub mod features_state;
