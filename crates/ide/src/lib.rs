@@ -18,6 +18,7 @@ mod signature_help;
 pub mod streaming;
 pub mod symbol_info;
 mod syntax_highlighting;
+mod type_definition;
 mod workspace_symbols;
 
 pub use call_hierarchy::{CallHierarchyCall, CallHierarchyItem};
@@ -92,6 +93,11 @@ impl Analysis {
     pub fn find_references(&self, file_id: FileId, offset: u32) -> Vec<Location> {
         let offset = TextSize::from(offset);
         references::find_references(&self.db, file_id, offset)
+    }
+
+    pub fn type_definition(&self, file_id: FileId, offset: u32) -> Option<NavigationTarget> {
+        let offset = TextSize::from(offset);
+        type_definition::type_definition(&self.db, file_id, offset)
     }
 
     pub fn prepare_call_hierarchy(

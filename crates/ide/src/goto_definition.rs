@@ -36,7 +36,7 @@ pub fn goto_definition<DB: RootDatabase>(
     goto_extension_annotation_target(db, file_id, offset)
 }
 
-fn metadata_reference_to_navigation_target<DB: RootDatabase>(
+pub(crate) fn metadata_reference_to_navigation_target<DB: RootDatabase>(
     db: &DB,
     from_file_id: FileId,
     ty: hir::TypeId,
@@ -149,7 +149,7 @@ fn subsystem_xml_relative_path<'a>(
     Some(path)
 }
 
-fn metadata_reference_name_range<DB: RootDatabase>(
+pub(crate) fn metadata_reference_name_range<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
     name: &str,

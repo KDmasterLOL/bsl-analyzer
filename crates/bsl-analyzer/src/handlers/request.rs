@@ -96,6 +96,55 @@ pub fn handle_goto_definition(
     }
 }
 
+pub fn handle_type_definition(
+    ctx: LatencyRequestContext,
+    params: GotoDefinitionParams,
+) -> Result<Option<GotoDefinitionResponse>> {
+    let _p = tracing::info_span!(
+        "handle_type_definition",
+        uri = %params.text_document_position_params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let source_doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = source_doc.text();
+    let line_index = source_doc.line_index();
+
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+
+    let Some(nav_target) = ctx.analysis.type_definition(file_id, offset.into()) else {
+        return Ok(None);
+    };
+
+    let target_url = ctx.url_for_file_id(nav_target.file_id)?;
+    let target_text: String = if nav_target.file_id == file_id {
+        text.to_string()
+    } else if let Some(doc) = ctx.mem_docs.get(&target_url) {
+        doc.text().to_string()
+    } else {
+        ctx.analysis.file_text(nav_target.file_id)
+    };
+    let target_line_index = LineIndex::new(&target_text);
+    let target_range = crate::lsp::range_with_encoding(
+        &target_line_index,
+        &target_text,
+        nav_target.range,
+        ctx.position_encoding,
+    )
+    .ok_or_else(|| anyhow::anyhow!("Failed to convert range"))?;
+
+    Ok(Some(GotoDefinitionResponse::Scalar(Location { uri: target_url, range: target_range })))
+}
+
 pub fn handle_find_references(
     ctx: LatencyRequestContext,
     params: ReferenceParams,
@@ -2178,6 +2227,31 @@ mod tests {
             OneOf::Left(loc) => assert_eq!(loc.uri, uri),
             OneOf::Right(_) => panic!("expected a full location with range"),
         }
+    }
+
+    #[test]
+    fn type_definition_returns_none_for_platform_typed_value() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///td.bsl").unwrap();
+        let source = "Процедура Тест()\n    Счётчик = 1;\n    Сообщить(Счётчик);\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line: 1, character: 4 }, // on the number-typed "Счётчик"
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        // A platform primitive (Число) has no navigable type definition; the
+        // handler must decline cleanly rather than error or panic.
+        let result = handle_type_definition(ctx, params);
+        assert!(result.is_err() || result.unwrap().is_none());
     }
 
     #[test]

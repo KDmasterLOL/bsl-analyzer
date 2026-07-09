@@ -887,9 +887,9 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
         CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
         CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
-        DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
-        InlayHintRequest, OnTypeFormatting, PrepareRenameRequest, RangeFormatting, References,
-        Rename, Request as _, SelectionRangeRequest, SemanticTokensFullRequest,
+        DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, GotoTypeDefinition,
+        HoverRequest, InlayHintRequest, OnTypeFormatting, PrepareRenameRequest, RangeFormatting,
+        References, Rename, Request as _, SelectionRangeRequest, SemanticTokensFullRequest,
         SignatureHelpRequest, WorkspaceDiagnosticRequest, WorkspaceSymbolRequest,
     };
 
@@ -915,6 +915,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
             Ok(())
         })
         .on_latency::<GotoDefinition>(crate::handlers::handle_goto_definition)
+        .on_latency::<GotoTypeDefinition>(crate::handlers::handle_type_definition)
         .on_latency::<References>(crate::handlers::handle_find_references)
         .on_latency::<PrepareRenameRequest>(crate::handlers::handle_prepare_rename)
         .on_latency::<Rename>(crate::handlers::handle_rename)
@@ -1073,6 +1074,8 @@ fn server_capabilities(
 
         selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(true)),
 
+        type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
+
         ..Default::default()
     }
 }
@@ -1120,6 +1123,11 @@ mod tests {
         assert_eq!(
             caps.selection_range_provider,
             Some(lsp_types::SelectionRangeProviderCapability::Simple(true))
+        );
+
+        assert_eq!(
+            caps.type_definition_provider,
+            Some(lsp_types::TypeDefinitionProviderCapability::Simple(true))
         );
     }
 
