@@ -17,7 +17,8 @@ use lsp_types::{
     Location, MarkupContent, MarkupKind, OneOf, OptionalVersionedTextDocumentIdentifier,
     PrepareRenameResponse, Range, ReferenceParams, RenameParams, SemanticTokens,
     SemanticTokensParams, SemanticTokensResult, SignatureHelpParams, SymbolKind, TextDocumentEdit,
-    TextDocumentPositionParams, TextEdit, WorkspaceEdit,
+    TextDocumentPositionParams, TextEdit, WorkspaceEdit, WorkspaceSymbol as LspWorkspaceSymbol,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use rustc_hash::FxHashMap;
 use vfs::FileId;
@@ -762,6 +763,52 @@ pub fn handle_document_symbol(
         .collect();
 
     Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
+}
+
+pub fn handle_workspace_symbol(
+    ctx: LatencyRequestContext,
+    params: WorkspaceSymbolParams,
+) -> Result<Option<WorkspaceSymbolResponse>> {
+    let _p = tracing::info_span!("handle_workspace_symbol", query = %params.query).entered();
+
+    let symbols = ctx.analysis.workspace_symbols(&params.query);
+    if symbols.is_empty() {
+        return Ok(None);
+    }
+
+    // Reuse the per-file text/line-index cache; the "source" file is just the
+    // first result's file, fetched the same overlay-or-disk way the converter
+    // itself uses for the rest.
+    let source_file = symbols[0].file_id;
+    let source_uri = ctx.url_for_file_id(source_file)?;
+    let source_text = match ctx.mem_docs.get(&source_uri) {
+        Some(doc) => doc.text().to_string(),
+        None => ctx.analysis.file_text(source_file),
+    };
+    let mut converter = ReferenceLocationConverter::new(&ctx, source_file, &source_text);
+
+    let mut result = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let location =
+            converter.convert(IdeLocation { file_id: symbol.file_id, range: symbol.range })?;
+        result.push(LspWorkspaceSymbol {
+            name: symbol.name,
+            kind: workspace_symbol_kind(symbol.kind),
+            tags: None,
+            container_name: None,
+            location: OneOf::Left(location),
+            data: None,
+        });
+    }
+    Ok(Some(WorkspaceSymbolResponse::Nested(result)))
+}
+
+fn workspace_symbol_kind(kind: ide::SymbolKind) -> SymbolKind {
+    match kind {
+        ide::SymbolKind::Procedure | ide::SymbolKind::Function => SymbolKind::FUNCTION,
+        ide::SymbolKind::Variable => SymbolKind::VARIABLE,
+        ide::SymbolKind::Region => SymbolKind::NAMESPACE,
+    }
 }
 
 pub fn handle_signature_help(
@@ -2050,6 +2097,37 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].from.name, "Первый");
         assert_eq!(calls[0].from_ranges.len(), 1);
+    }
+
+    #[test]
+    fn workspace_symbol_finds_exported_method() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///ws.bsl").unwrap();
+        let source =
+            "Функция ОбщийРасчёт() Экспорт\nКонецФункции\n\nФункция Приватный()\nКонецФункции\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = WorkspaceSymbolParams {
+            partial_result_params: Default::default(),
+            work_done_progress_params: Default::default(),
+            query: "Общий".to_string(),
+        };
+
+        let response = handle_workspace_symbol(ctx, params).unwrap().unwrap();
+        let symbols = match response {
+            WorkspaceSymbolResponse::Nested(s) => s,
+            other => panic!("expected nested workspace symbols, got {other:?}"),
+        };
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "ОбщийРасчёт");
+        assert_eq!(symbols[0].kind, SymbolKind::FUNCTION);
+        match &symbols[0].location {
+            OneOf::Left(loc) => assert_eq!(loc.uri, uri),
+            OneOf::Right(_) => panic!("expected a full location with range"),
+        }
     }
 
     #[test]

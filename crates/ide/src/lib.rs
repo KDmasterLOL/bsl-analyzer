@@ -17,6 +17,7 @@ mod signature_help;
 pub mod streaming;
 pub mod symbol_info;
 mod syntax_highlighting;
+mod workspace_symbols;
 
 pub use call_hierarchy::{CallHierarchyCall, CallHierarchyItem};
 pub use completion::{CompletionItem, CompletionItemKind};
@@ -53,6 +54,7 @@ pub use symbol_info::{
     SymbolInfoSections, SymbolMember, SymbolPosition,
 };
 pub use syntax_highlighting::{highlight, HighlightResult, HlMod, HlRange, HlTag};
+pub use workspace_symbols::WorkspaceSymbol;
 
 use ide_db::base_db::DiagnosticsConfigInput;
 use std::path::PathBuf;
@@ -136,6 +138,11 @@ impl Analysis {
 
     pub fn inlay_hints(&self, file_id: FileId, range: TextRange) -> Vec<InlayHint> {
         inlay_hints::inlay_hints(&self.db, file_id, range)
+    }
+
+    pub fn workspace_symbols(&self, query: &str) -> Vec<WorkspaceSymbol> {
+        use ide_db::base_db::SourceRootId;
+        workspace_symbols::workspace_symbols(&self.db, SourceRootId(0), query)
     }
 
     pub fn completions(
