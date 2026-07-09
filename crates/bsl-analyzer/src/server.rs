@@ -885,6 +885,7 @@ fn handle_vfs_msg(
 
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
+        CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
         CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
         DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
         OnTypeFormatting, PrepareRenameRequest, RangeFormatting, References, Rename, Request as _,
@@ -916,6 +917,9 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_latency::<References>(crate::handlers::handle_find_references)
         .on_latency::<PrepareRenameRequest>(crate::handlers::handle_prepare_rename)
         .on_latency::<Rename>(crate::handlers::handle_rename)
+        .on_latency::<CallHierarchyPrepare>(crate::handlers::handle_prepare_call_hierarchy)
+        .on_latency::<CallHierarchyIncomingCalls>(crate::handlers::handle_call_hierarchy_incoming)
+        .on_latency::<CallHierarchyOutgoingCalls>(crate::handlers::handle_call_hierarchy_outgoing)
         .on_latency::<DocumentHighlightRequest>(crate::handlers::handle_document_highlight)
         .on_latency::<FoldingRangeRequest>(crate::handlers::handle_folding_range)
         .on_latency::<HoverRequest>(crate::handlers::handle_hover)
@@ -1057,6 +1061,8 @@ fn server_capabilities(
             work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
         })),
 
+        call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
+
         ..Default::default()
     }
 }
@@ -1091,6 +1097,11 @@ mod tests {
             }
             _ => panic!("Expected rename provider with prepare support"),
         }
+
+        assert_eq!(
+            caps.call_hierarchy_provider,
+            Some(lsp_types::CallHierarchyServerCapability::Simple(true))
+        );
     }
 
     #[test]

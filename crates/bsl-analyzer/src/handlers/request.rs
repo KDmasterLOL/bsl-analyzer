@@ -5,6 +5,8 @@ use ide::{
 };
 use line_index::{LineIndex, TextSize};
 use lsp_types::{
+    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
+    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem,
     CompletionItemKind, CompletionParams, CompletionResponse, DocumentChanges,
     DocumentHighlight as LspDocumentHighlight, DocumentHighlightKind as LspDocumentHighlightKind,
@@ -12,9 +14,9 @@ use lsp_types::{
     FoldingRange as LspFoldingRange, FoldingRangeKind as LspFoldingRangeKind, FoldingRangeParams,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
     MarkupContent, MarkupKind, OneOf, OptionalVersionedTextDocumentIdentifier,
-    PrepareRenameResponse, ReferenceParams, RenameParams, SemanticTokens, SemanticTokensParams,
-    SemanticTokensResult, SignatureHelpParams, TextDocumentEdit, TextDocumentPositionParams,
-    TextEdit, WorkspaceEdit,
+    PrepareRenameResponse, Range, ReferenceParams, RenameParams, SemanticTokens,
+    SemanticTokensParams, SemanticTokensResult, SignatureHelpParams, SymbolKind, TextDocumentEdit,
+    TextDocumentPositionParams, TextEdit, WorkspaceEdit,
 };
 use rustc_hash::FxHashMap;
 use vfs::FileId;
@@ -243,6 +245,152 @@ pub fn handle_rename(
     };
 
     Ok(Some(edit))
+}
+
+pub fn handle_prepare_call_hierarchy(
+    ctx: LatencyRequestContext,
+    params: CallHierarchyPrepareParams,
+) -> Result<Option<Vec<CallHierarchyItem>>> {
+    let _p = tracing::info_span!(
+        "handle_prepare_call_hierarchy",
+        uri = %params.text_document_position_params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+
+    let Some(ide_item) = ctx.analysis.prepare_call_hierarchy(file_id, offset.into()) else {
+        return Ok(None);
+    };
+
+    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, text);
+    let item = to_lsp_call_hierarchy_item(&mut converter, ide_item)?;
+    Ok(Some(vec![item]))
+}
+
+pub fn handle_call_hierarchy_incoming(
+    ctx: LatencyRequestContext,
+    params: CallHierarchyIncomingCallsParams,
+) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+    let _p =
+        tracing::info_span!("handle_call_hierarchy_incoming", uri = %params.item.uri).entered();
+
+    let item = params.item;
+    let file_id = ctx.file_id_for_url(&item.uri)?;
+    let text = call_hierarchy_anchor_text(&ctx, &item.uri, file_id);
+    let line_index = LineIndex::new(&text);
+
+    let offset = crate::lsp::offset_with_encoding(
+        &line_index,
+        &text,
+        item.selection_range.start,
+        ctx.position_encoding,
+    )?;
+
+    let calls = ctx.analysis.call_hierarchy_incoming(file_id, offset.into());
+    if calls.is_empty() {
+        return Ok(None);
+    }
+
+    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, &text);
+    let mut result = Vec::with_capacity(calls.len());
+    for call in calls {
+        // Incoming call sites live in the caller's own file.
+        let caller_file = call.item.file_id;
+        let from = to_lsp_call_hierarchy_item(&mut converter, call.item)?;
+        let from_ranges = convert_call_ranges(&mut converter, caller_file, call.ranges)?;
+        result.push(CallHierarchyIncomingCall { from, from_ranges });
+    }
+    Ok(Some(result))
+}
+
+pub fn handle_call_hierarchy_outgoing(
+    ctx: LatencyRequestContext,
+    params: CallHierarchyOutgoingCallsParams,
+) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+    let _p =
+        tracing::info_span!("handle_call_hierarchy_outgoing", uri = %params.item.uri).entered();
+
+    let item = params.item;
+    let file_id = ctx.file_id_for_url(&item.uri)?;
+    let text = call_hierarchy_anchor_text(&ctx, &item.uri, file_id);
+    let line_index = LineIndex::new(&text);
+
+    let offset = crate::lsp::offset_with_encoding(
+        &line_index,
+        &text,
+        item.selection_range.start,
+        ctx.position_encoding,
+    )?;
+
+    let calls = ctx.analysis.call_hierarchy_outgoing(file_id, offset.into());
+    if calls.is_empty() {
+        return Ok(None);
+    }
+
+    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, &text);
+    let mut result = Vec::with_capacity(calls.len());
+    for call in calls {
+        let to = to_lsp_call_hierarchy_item(&mut converter, call.item)?;
+        // Outgoing call sites live in the anchor method's file, not the callee's.
+        let from_ranges = convert_call_ranges(&mut converter, file_id, call.ranges)?;
+        result.push(CallHierarchyOutgoingCall { to, from_ranges });
+    }
+    Ok(Some(result))
+}
+
+fn call_hierarchy_anchor_text(
+    ctx: &LatencyRequestContext,
+    uri: &lsp_types::Url,
+    file_id: FileId,
+) -> String {
+    match ctx.mem_docs.get(uri) {
+        Some(doc) => doc.text().to_string(),
+        None => ctx.analysis.file_text(file_id),
+    }
+}
+
+fn to_lsp_call_hierarchy_item(
+    converter: &mut ReferenceLocationConverter,
+    item: ide::CallHierarchyItem,
+) -> Result<CallHierarchyItem> {
+    let range = converter.convert(IdeLocation { file_id: item.file_id, range: item.range })?;
+    let selection =
+        converter.convert(IdeLocation { file_id: item.file_id, range: item.selection_range })?;
+    Ok(CallHierarchyItem {
+        name: item.name,
+        kind: if item.is_function { SymbolKind::FUNCTION } else { SymbolKind::METHOD },
+        tags: None,
+        detail: item.detail,
+        uri: range.uri,
+        range: range.range,
+        selection_range: selection.range,
+        data: None,
+    })
+}
+
+fn convert_call_ranges(
+    converter: &mut ReferenceLocationConverter,
+    file_id: FileId,
+    ranges: Vec<ide::TextRange>,
+) -> Result<Vec<Range>> {
+    ranges
+        .into_iter()
+        .map(|range| Ok(converter.convert(IdeLocation { file_id, range })?.range))
+        .collect()
 }
 
 pub fn handle_document_highlight(
@@ -1757,6 +1905,88 @@ mod tests {
         };
 
         assert!(handle_rename(ctx, params).is_err());
+    }
+
+    fn call_hierarchy_item_at(
+        state: &GlobalState,
+        uri: &lsp_types::Url,
+        position: Position,
+    ) -> CallHierarchyItem {
+        let ctx = latency_ctx(state);
+        let params = CallHierarchyPrepareParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let mut items = handle_prepare_call_hierarchy(ctx, params).unwrap().unwrap();
+        assert_eq!(items.len(), 1);
+        items.pop().unwrap()
+    }
+
+    #[test]
+    fn prepare_call_hierarchy_reports_method_item() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///ch.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        assert_eq!(item.name, "Помощник");
+        assert_eq!(item.kind, SymbolKind::METHOD);
+        assert_eq!(item.selection_range.start, Position { line: 0, character: 10 });
+    }
+
+    #[test]
+    fn call_hierarchy_outgoing_reports_callee_and_ranges() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///ch.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        // Anchor on Первый (line 3), which calls Помощник once.
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 3, character: 10 });
+
+        let ctx = latency_ctx(&state);
+        let params = CallHierarchyOutgoingCallsParams {
+            item,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let calls = handle_call_hierarchy_outgoing(ctx, params).unwrap().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].to.name, "Помощник");
+        assert_eq!(calls[0].from_ranges.len(), 1);
+        // The call site sits on line 4 inside Первый's body.
+        assert_eq!(calls[0].from_ranges[0].start.line, 4);
+    }
+
+    #[test]
+    fn call_hierarchy_incoming_reports_callers() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///ch.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+
+        let ctx = latency_ctx(&state);
+        let params = CallHierarchyIncomingCallsParams {
+            item,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let calls = handle_call_hierarchy_incoming(ctx, params).unwrap().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].from.name, "Первый");
+        assert_eq!(calls[0].from_ranges.len(), 1);
     }
 
     #[test]

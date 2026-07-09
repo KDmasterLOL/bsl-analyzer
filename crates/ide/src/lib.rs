@@ -1,4 +1,5 @@
 pub mod batch_fixes;
+mod call_hierarchy;
 mod completion;
 pub mod config_finder;
 pub mod diagnostics_catalog;
@@ -16,6 +17,7 @@ pub mod streaming;
 pub mod symbol_info;
 mod syntax_highlighting;
 
+pub use call_hierarchy::{CallHierarchyCall, CallHierarchyItem};
 pub use completion::{CompletionItem, CompletionItemKind};
 pub use diagnostics_catalog::{catalog_entry, diagnostic_catalog, CatalogEntry, SeverityBucket};
 pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
@@ -85,6 +87,25 @@ impl Analysis {
     pub fn find_references(&self, file_id: FileId, offset: u32) -> Vec<Location> {
         let offset = TextSize::from(offset);
         references::find_references(&self.db, file_id, offset)
+    }
+
+    pub fn prepare_call_hierarchy(
+        &self,
+        file_id: FileId,
+        offset: u32,
+    ) -> Option<CallHierarchyItem> {
+        let offset = TextSize::from(offset);
+        call_hierarchy::prepare_call_hierarchy(&self.db, file_id, offset)
+    }
+
+    pub fn call_hierarchy_incoming(&self, file_id: FileId, offset: u32) -> Vec<CallHierarchyCall> {
+        let offset = TextSize::from(offset);
+        call_hierarchy::incoming_calls(&self.db, file_id, offset)
+    }
+
+    pub fn call_hierarchy_outgoing(&self, file_id: FileId, offset: u32) -> Vec<CallHierarchyCall> {
+        let offset = TextSize::from(offset);
+        call_hierarchy::outgoing_calls(&self.db, file_id, offset)
     }
 
     pub fn prepare_rename(&self, file_id: FileId, offset: u32) -> Option<RenameTarget> {
