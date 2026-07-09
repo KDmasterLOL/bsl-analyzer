@@ -40,6 +40,11 @@ pub enum BenchCommands {
               value_parser = clap::value_parser!(u32).range(1..))]
         warm_iterations: u32,
 
+        /// Mode `memory` only: settle time after the allocator purge before
+        /// reading trimmed RSS (jemalloc returns pages asynchronously).
+        #[arg(long = "trim-settle-ms", default_value = "2000")]
+        trim_settle_ms: u64,
+
         /// Report output path; stdout if omitted.
         #[arg(long = "json")]
         json: Option<PathBuf>,
@@ -90,21 +95,28 @@ pub fn run_bench(command: BenchCommands) -> ! {
             point,
             mode,
             warm_iterations,
+            trim_settle_ms,
             json,
             boot_budget_ms,
         } => {
-            if !matches!(mode, BenchMode::Latency) {
-                eprintln!(
-                    "bench run: mode `{mode:?}` is not implemented yet; only `latency` is available"
-                );
-                std::process::exit(EXIT_OTHER);
-            }
+            let mode = match mode {
+                BenchMode::Latency => bsl_analyzer::bench::runner::RunMode::Latency,
+                BenchMode::Recompute => {
+                    // The event callback is installed at database construction,
+                    // which happens during boot — the flag must be set first.
+                    std::env::set_var("BSL_SALSA_EVENTS", "1");
+                    bsl_analyzer::bench::runner::RunMode::Recompute
+                }
+                BenchMode::Memory => bsl_analyzer::bench::runner::RunMode::Memory,
+            };
             let args = bsl_analyzer::bench::runner::RunArgs {
                 source_dir,
                 manifest_path: manifest,
                 point_id: point,
+                mode,
                 warm_iterations: warm_iterations as usize,
                 boot_budget_ms,
+                trim_settle_ms,
             };
             match bsl_analyzer::bench::runner::run_point(&args) {
                 Ok(report) => {

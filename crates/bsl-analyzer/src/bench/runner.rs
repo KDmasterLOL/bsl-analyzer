@@ -21,7 +21,10 @@ use lsp_types::Url;
 use syntax::{TextRange, TextSize};
 
 use crate::bench::manifest::{self, EditPatch, FeatureSpec, Target};
-use crate::bench::report::{percentile_ns, EditPhases, PointReport, REPORT_SCHEMA_VERSION};
+use crate::bench::report::{
+    percentile_ns, EditPhases, FamilyChurn, MemoryReport, PointReport, RecomputeReport,
+    MODULES_CAP, REPORT_SCHEMA_VERSION,
+};
 use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
 use crate::global_state::GlobalState;
 use crate::handlers::{notification, request};
@@ -50,13 +53,40 @@ impl std::fmt::Display for RunError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    /// Uninstrumented nanosecond latency (cold + warm repeats).
+    Latency,
+    /// Salsa churn window (`BSL_SALSA_EVENTS=1` must be set before boot;
+    /// timings are instrumented and must not be compared with latency runs).
+    Recompute,
+    /// RSS bracketing with a phase-local sampler and the normative trim
+    /// protocol.
+    Memory,
+}
+
+impl RunMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunMode::Latency => "latency",
+            RunMode::Recompute => "recompute",
+            RunMode::Memory => "memory",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunArgs {
     pub source_dir: PathBuf,
     pub manifest_path: PathBuf,
     pub point_id: String,
+    pub mode: RunMode,
     pub warm_iterations: usize,
     pub boot_budget_ms: u64,
+    /// Settle time after allocator purge before reading trimmed RSS. The
+    /// normative value is 2000 ms (jemalloc returns pages asynchronously);
+    /// tests shrink it.
+    pub trim_settle_ms: u64,
 }
 
 /// A feature invocation's observable outcome: result cardinality plus a
@@ -168,11 +198,346 @@ pub fn run_point(args: &RunArgs) -> Result<PointReport, RunError> {
     let mut env = boot(&args.source_dir, args.boot_budget_ms)?;
     let resolved = resolve_target(&env, &target.relative_path, Some(&target.file_hash))?;
 
+    match args.mode {
+        RunMode::Latency => match &target.spec {
+            FeatureSpec::Edit { patch, edit_kind, followup } => {
+                run_edit_point(args, &mut env, &target, &resolved, patch, *edit_kind, followup)
+            }
+            spec => run_plain_point(args, &mut env, &target, &resolved, spec),
+        },
+        RunMode::Recompute => run_recompute_point(args, &mut env, &target, &resolved),
+        RunMode::Memory => run_memory_point(args, &mut env, &target, &resolved),
+    }
+}
+
+/// Mode B: open a fresh salsa-event window around exactly the observed work.
+/// Plain specs profile the cold execution (what a cold feature recomputes);
+/// edit specs profile the post-`didChange` request (the incremental churn).
+/// The window report is read before any further revision bump, so every key
+/// decodes in the revision that produced it.
+fn run_recompute_point(
+    args: &RunArgs,
+    env: &mut BenchEnv,
+    target: &Target,
+    resolved: &ResolvedTarget,
+) -> Result<PointReport, RunError> {
+    if !env.state.analysis_host.raw_database().salsa_events_reset() {
+        return Err(RunError::Other(
+            "recompute mode needs salsa event counters: set BSL_SALSA_EVENTS=1 before boot \
+             (the CLI does this automatically for --mode recompute)"
+                .to_string(),
+        ));
+    }
+
     match &target.spec {
         FeatureSpec::Edit { patch, edit_kind, followup } => {
-            run_edit_point(args, &mut env, &target, &resolved, patch, *edit_kind, followup)
+            let (start, end) = (patch.range.start as usize, patch.range.end as usize);
+            let text = &resolved.text;
+            if end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                return Err(RunError::Manifest(format!(
+                    "patch range {start}..{end} out of bounds or splits a UTF-8 char (file len {})",
+                    text.len()
+                )));
+            }
+            open_document(env, resolved)?;
+            ensure_overlay(env, resolved, followup)?;
+            // Settle to a steady warm state so the window sees only
+            // edit-caused churn, not first-request cache fills.
+            for _ in 0..3 {
+                let _ = execute_once(env, resolved, followup)?;
+            }
+
+            let mut patched = String::with_capacity(text.len() + patch.new_text.len());
+            patched.push_str(&text[..start]);
+            patched.push_str(&patch.new_text);
+            patched.push_str(&text[end..]);
+            let change_params = lsp_types::DidChangeTextDocumentParams {
+                text_document: lsp_types::VersionedTextDocumentIdentifier {
+                    uri: resolved.url.clone(),
+                    version: 2,
+                },
+                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: patched.clone(),
+                }],
+            };
+
+            env.state.analysis_host.raw_database().salsa_events_reset();
+            let window_start = Instant::now();
+            notification::handle_did_change(&mut env.state, change_params)
+                .map_err(|e| RunError::Other(format!("didChange failed: {e}")))?;
+            env.frozen_paths = None;
+            if env.state.mem_docs.get(&resolved.url).as_deref() != Some(patched.as_str()) {
+                return Err(RunError::Other(
+                    "didChange did not apply: document text differs from the patched text"
+                        .to_string(),
+                ));
+            }
+            let post = ResolvedTarget {
+                file_id: resolved.file_id,
+                url: resolved.url.clone(),
+                text: patched,
+            };
+            let (_, obs) = execute_once(env, &post, followup)?;
+            let window_ns = window_start.elapsed().as_nanos() as u64;
+
+            let recompute = collect_recompute(env)?;
+            // Only the whole-window duration is meaningful here; the
+            // per-phase latency split belongs to mode A.
+            let phases = EditPhases {
+                edit_kind: edit_kind.as_str().to_string(),
+                warm_before_p50_ns: None,
+                edit_apply_ns: None,
+                after_edit_ns: window_ns,
+            };
+            finish_mode_report(
+                args,
+                env,
+                target,
+                &obs,
+                window_ns,
+                Some(phases),
+                Some(recompute),
+                None,
+            )
         }
-        spec => run_plain_point(args, &mut env, &target, &resolved, spec),
+        spec => {
+            // First-request-after-boot profile: boot may already have memoized
+            // parts of the pipeline (dependency preload), and that is exactly
+            // what a real first request sees. Reuse shows up as `validate`
+            // counts in `families`; `distinct_keys`/`modules` cover only what
+            // actually re-executed. A sparse key set therefore means "mostly
+            // served from boot-warm memos", not a broken window.
+            ensure_overlay(env, resolved, spec)?;
+            env.state.analysis_host.raw_database().salsa_events_reset();
+            let (ns, obs) = execute_once(env, resolved, spec)?;
+            let recompute = collect_recompute(env)?;
+            finish_mode_report(args, env, target, &obs, ns, None, Some(recompute), None)
+        }
+    }
+}
+
+fn collect_recompute(env: &BenchEnv) -> Result<RecomputeReport, RunError> {
+    let db = env.state.analysis_host.raw_database();
+    // Counter reads come first: key-name resolution below touches only salsa
+    // inputs today, but if it ever grows a tracked-query read, taking the
+    // per-family/global snapshots beforehand keeps them clean by construction.
+    let rows = db
+        .salsa_event_report()
+        .ok_or_else(|| RunError::Other("salsa event report unavailable".to_string()))?;
+    let global = db
+        .salsa_event_global()
+        .ok_or_else(|| RunError::Other("salsa global counters unavailable".to_string()))?;
+    let window = db
+        .salsa_key_event_window()
+        .ok_or_else(|| RunError::Other("salsa event window unavailable".to_string()))?;
+
+    let families: Vec<FamilyChurn> = rows
+        .into_iter()
+        .filter(|r| r.execute + r.validate + r.did_discard + r.discard_stale + r.intern_new > 0)
+        .map(|r| FamilyChurn {
+            name: r.name,
+            execute: r.execute,
+            validate: r.validate,
+            did_discard: r.did_discard,
+            discard_stale: r.discard_stale,
+            intern_new: r.intern_new,
+            intern_reuse: r.intern_reuse,
+            intern_validate: r.intern_validate,
+            block_on: r.block_on,
+        })
+        .collect();
+
+    // Key names render as `query(<path>[#m<local>])`; the path between the
+    // parens is the module attribution. Fallback-rendered keys (no decodable
+    // path) are simply not module-attributable and are skipped here — they
+    // still count in `distinct_keys`.
+    let mut modules: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for row in &window.rows {
+        if let Some(open) = row.name.find('(') {
+            if let Some(close) = row.name.rfind(')') {
+                if close > open + 1 {
+                    let inner = &row.name[open + 1..close];
+                    // Fallback keys render as `name(Id(n))` today; the digit
+                    // guard also survives a Debug-format change to `name(n)`.
+                    let is_fallback =
+                        inner.starts_with("Id(") || inner.chars().all(|c| c.is_ascii_digit());
+                    if !is_fallback && !inner.is_empty() {
+                        let path = inner.split('#').next().unwrap_or(inner);
+                        modules.insert(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let distinct_modules = modules.len();
+    let mut modules: Vec<String> = modules.into_iter().collect();
+    let modules_truncated = modules.len() > MODULES_CAP;
+    modules.truncate(MODULES_CAP);
+
+    Ok(RecomputeReport {
+        families,
+        distinct_keys: window.distinct_keys,
+        distinct_modules,
+        modules,
+        modules_truncated,
+        check_cancellation: global.check_cancellation,
+        set_cancellation: global.set_cancellation,
+        discard_accumulated: global.discard_accumulated,
+    })
+}
+
+/// Mode C: bracket one execution with RSS readings — before, phase-local peak
+/// (in-process sampler), after — then the normative trim protocol.
+fn run_memory_point(
+    args: &RunArgs,
+    env: &mut BenchEnv,
+    target: &Target,
+    resolved: &ResolvedTarget,
+) -> Result<PointReport, RunError> {
+    let rss_before = read_rss_checked()?;
+
+    // The sampler is stopped before any error propagates — a leaked sampler
+    // thread would spin every 5 ms until process exit.
+    let (result, (phase_peak, sample_count)) = match &target.spec {
+        FeatureSpec::Edit { patch, followup, .. } => {
+            let (start, end) = (patch.range.start as usize, patch.range.end as usize);
+            let text = &resolved.text;
+            if end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                return Err(RunError::Manifest(format!(
+                    "patch range {start}..{end} out of bounds (file len {})",
+                    text.len()
+                )));
+            }
+            open_document(env, resolved)?;
+            ensure_overlay(env, resolved, followup)?;
+            let _ = execute_once(env, resolved, followup)?;
+            let mut patched = String::with_capacity(text.len() + patch.new_text.len());
+            patched.push_str(&text[..start]);
+            patched.push_str(&patch.new_text);
+            patched.push_str(&text[end..]);
+            let change_params = lsp_types::DidChangeTextDocumentParams {
+                text_document: lsp_types::VersionedTextDocumentIdentifier {
+                    uri: resolved.url.clone(),
+                    version: 2,
+                },
+                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: patched.clone(),
+                }],
+            };
+            let sampler = RssSampler::start();
+            let t = Instant::now();
+            let result = notification::handle_did_change(&mut env.state, change_params)
+                .map_err(|e| RunError::Other(format!("didChange failed: {e}")))
+                .and_then(|()| {
+                    env.frozen_paths = None;
+                    let post = ResolvedTarget {
+                        file_id: resolved.file_id,
+                        url: resolved.url.clone(),
+                        text: patched,
+                    };
+                    execute_once(env, &post, followup)
+                });
+            let ns = t.elapsed().as_nanos() as u64;
+            (result.map(|(_, obs)| (ns, obs)), sampler.stop())
+        }
+        spec => {
+            ensure_overlay(env, resolved, spec)?;
+            let sampler = RssSampler::start();
+            let result = execute_once(env, resolved, spec);
+            (result, sampler.stop())
+        }
+    };
+    let (ns, obs) = result?;
+    let rss_after = read_rss_checked()?;
+    let ingredient_counts: Vec<(String, usize)> =
+        crate::mem_report::salsa_memory_rows(env.state.analysis_host.raw_database())
+            .into_iter()
+            .take(20)
+            .map(|(name, count, ..)| (name.to_string(), count))
+            .collect();
+
+    let rss_after_trim = trim_and_settle(env, false, args.trim_settle_ms)?;
+    let rss_after_deep_trim = trim_and_settle(env, true, args.trim_settle_ms)?;
+    let vm_hwm = crate::mem_report::proc_kb("VmHWM:").map(|kb| kb * 1024);
+
+    let memory = MemoryReport {
+        rss_before_bytes: rss_before,
+        phase_peak_bytes: phase_peak,
+        sample_count,
+        peak_is_lower_bound: sample_count < 3,
+        rss_after_bytes: rss_after,
+        rss_after_trim_bytes: rss_after_trim,
+        rss_after_deep_trim_bytes: rss_after_deep_trim,
+        vm_hwm_bytes: vm_hwm,
+        ingredient_counts,
+    };
+    finish_mode_report(args, env, target, &obs, ns, None, None, Some(memory))
+}
+
+fn read_rss_checked() -> Result<u64, RunError> {
+    crate::smoke::read_rss_bytes()
+        .ok_or_else(|| RunError::Other("cannot read VmRSS from /proc (non-Linux?)".to_string()))
+}
+
+/// The normative trim protocol: close overlays, trim salsa (`enforce_lru` or
+/// `enforce_lru_deep`), release the shared green-node arena on the main and
+/// every rayon worker thread, purge the allocator, then let the async page
+/// return settle before reading RSS.
+fn trim_and_settle(env: &mut BenchEnv, deep: bool, settle_ms: u64) -> Result<u64, RunError> {
+    for uri in env.state.mem_docs.uris() {
+        env.state.mem_docs.remove(&uri);
+    }
+    let db = env.state.analysis_host.raw_database_mut();
+    if deep {
+        db.enforce_lru_deep();
+    } else {
+        db.enforce_lru();
+    }
+    syntax::clear_shared_node_cache();
+    rayon::broadcast(|_| syntax::clear_shared_node_cache());
+    profile::purge_allocator();
+    std::thread::sleep(std::time::Duration::from_millis(settle_ms));
+    read_rss_checked()
+}
+
+/// In-process VmRSS sampler: a dedicated thread polling `/proc/self/status`
+/// every 5 ms while the measured phase runs. 1 Hz external sampling misses
+/// short-lived peaks; even 5 ms only bounds them from below, which the report
+/// makes explicit via `sample_count` / `peak_is_lower_bound`.
+pub(crate) struct RssSampler {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: std::thread::JoinHandle<(u64, u64)>,
+}
+
+impl RssSampler {
+    fn start() -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_flag = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let mut max = 0u64;
+            let mut count = 0u64;
+            loop {
+                if let Some(rss) = crate::smoke::read_rss_bytes() {
+                    max = max.max(rss);
+                    count += 1;
+                }
+                if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            (max, count)
+        });
+        RssSampler { stop, handle }
+    }
+
+    fn stop(self) -> (u64, u64) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.handle.join().unwrap_or((0, 0))
     }
 }
 
@@ -198,7 +563,7 @@ fn run_plain_point(
         warm_ns.push(ns);
     }
 
-    finish_report(env, target, &cold_obs, cold_ns, warm_ns, None)
+    finish_report(args, env, target, &cold_obs, cold_ns, warm_ns, None)
 }
 
 #[allow(clippy::too_many_arguments, reason = "one call site; grouping would only rename the args")]
@@ -286,14 +651,29 @@ fn run_edit_point(
 
     let phases = EditPhases {
         edit_kind: edit_kind.as_str().to_string(),
-        warm_before_p50_ns: percentile_ns(&warm_before, 50),
-        edit_apply_ns,
+        warm_before_p50_ns: Some(percentile_ns(&warm_before, 50)),
+        edit_apply_ns: Some(edit_apply_ns),
         after_edit_ns,
     };
-    finish_report(env, target, &after_obs, after_edit_ns, warm_after, Some(phases))
+    finish_report(args, env, target, &after_obs, after_edit_ns, warm_after, Some(phases))
+}
+
+#[allow(clippy::too_many_arguments, reason = "flat report assembly; grouping would only rename")]
+fn finish_mode_report(
+    args: &RunArgs,
+    env: &BenchEnv,
+    target: &Target,
+    observation: &Observation,
+    cold_ns: u64,
+    edit: Option<EditPhases>,
+    recompute: Option<RecomputeReport>,
+    memory: Option<MemoryReport>,
+) -> Result<PointReport, RunError> {
+    build_report(args, env, target, observation, cold_ns, Vec::new(), edit, recompute, memory)
 }
 
 fn finish_report(
+    args: &RunArgs,
     env: &BenchEnv,
     target: &Target,
     observation: &Observation,
@@ -301,13 +681,28 @@ fn finish_report(
     warm_ns: Vec<u64>,
     edit: Option<EditPhases>,
 ) -> Result<PointReport, RunError> {
+    build_report(args, env, target, observation, cold_ns, warm_ns, edit, None, None)
+}
+
+#[allow(clippy::too_many_arguments, reason = "flat report assembly; grouping would only rename")]
+fn build_report(
+    args: &RunArgs,
+    env: &BenchEnv,
+    target: &Target,
+    observation: &Observation,
+    cold_ns: u64,
+    warm_ns: Vec<u64>,
+    edit: Option<EditPhases>,
+    recompute: Option<RecomputeReport>,
+    memory: Option<MemoryReport>,
+) -> Result<PointReport, RunError> {
     let digest = observation.digest_hex();
     let invariant = target.expect.check(observation.count, &digest);
     let report = PointReport {
         schema_version: REPORT_SCHEMA_VERSION,
         point_id: target.id.clone(),
         feature: target.spec.feature_name().to_string(),
-        mode: "latency".to_string(),
+        mode: args.mode.as_str().to_string(),
         workspace_root: env.workspace_root.display().to_string(),
         relative_path: target.relative_path.clone(),
         boot_ms: env.boot_ms,
@@ -321,6 +716,8 @@ fn finish_report(
         invariant_ok: invariant.is_ok(),
         invariant_error: invariant.as_ref().err().cloned(),
         edit,
+        recompute,
+        memory,
     };
     match invariant {
         Ok(()) => Ok(report),

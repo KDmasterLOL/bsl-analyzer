@@ -20,7 +20,7 @@ mod tests {
         Target, SCHEMA_VERSION,
     };
     use super::report::PointReport;
-    use super::runner::{run_point, RunArgs, RunError};
+    use super::runner::{run_point, RunArgs, RunError, RunMode};
 
     const FIXTURE: &str = "\
 Перем МодульнаяПеременная Экспорт;
@@ -46,10 +46,11 @@ mod tests {
         tmp
     }
 
-    fn run_one_with_hash(
+    fn run_one_full(
         spec: FeatureSpec,
         expect: Expect,
         file_hash: String,
+        mode: RunMode,
     ) -> Result<PointReport, RunError> {
         let tmp = write_fixture();
         let manifest = BenchManifest {
@@ -71,13 +72,31 @@ mod tests {
             source_dir: tmp.path().to_path_buf(),
             manifest_path,
             point_id: "t/01".to_string(),
+            mode,
             warm_iterations: 2,
             boot_budget_ms: 60_000,
+            trim_settle_ms: 10,
         })
+    }
+
+    fn run_one_with_hash(
+        spec: FeatureSpec,
+        expect: Expect,
+        file_hash: String,
+    ) -> Result<PointReport, RunError> {
+        run_one_full(spec, expect, file_hash, RunMode::Latency)
     }
 
     fn run_one(spec: FeatureSpec, expect: Expect) -> Result<PointReport, RunError> {
         run_one_with_hash(spec, expect, hash_text(FIXTURE))
+    }
+
+    fn run_one_mode(
+        spec: FeatureSpec,
+        expect: Expect,
+        mode: RunMode,
+    ) -> Result<PointReport, RunError> {
+        run_one_full(spec, expect, hash_text(FIXTURE), mode)
     }
 
     fn assert_measured(report: &PointReport) {
@@ -254,8 +273,88 @@ mod tests {
         assert_measured(&r);
         let phases = r.edit.expect("edit point must report phases");
         assert_eq!(phases.edit_kind, "body");
-        assert!(phases.edit_apply_ns > 0);
+        assert!(phases.edit_apply_ns.expect("mode A reports apply time") > 0);
+        assert!(phases.warm_before_p50_ns.is_some());
         assert_eq!(phases.after_edit_ns, r.cold_ns);
+    }
+
+    fn body_edit_spec() -> FeatureSpec {
+        let end = FIXTURE.len() as u32;
+        FeatureSpec::Edit {
+            patch: EditPatch {
+                range: OffsetRange { start: end, end },
+                new_text: "\n// бенч-правка\n".to_string(),
+            },
+            edit_kind: EditKind::Body,
+            followup: Box::new(FeatureSpec::Hover { offset: off("Сообщить") }),
+        }
+    }
+
+    fn signature_edit_spec() -> FeatureSpec {
+        // Insert a defaulted parameter right before the closing paren of the
+        // non-export procedure's signature.
+        let paren = off("Пар2 = 0)") + "Пар2 = 0".len() as u32;
+        FeatureSpec::Edit {
+            patch: EditPatch {
+                range: OffsetRange { start: paren, end: paren },
+                new_text: ", ПарНовый = Неопределено".to_string(),
+            },
+            edit_kind: EditKind::Signature,
+            followup: Box::new(FeatureSpec::Hover { offset: off("Внутренняя") }),
+        }
+    }
+
+    #[test]
+    fn recompute_mode_reports_churn_for_both_edit_kinds() {
+        // The event callback is installed at database construction; the flag
+        // must be visible before boot. Process-global and never unset — other
+        // tests at most gain inert counters.
+        std::env::set_var("BSL_SALSA_EVENTS", "1");
+
+        for (spec, kind) in [(body_edit_spec(), "body"), (signature_edit_spec(), "signature")] {
+            let r = run_one_mode(spec, Expect::NonEmpty, RunMode::Recompute).unwrap();
+            assert_eq!(r.mode, "recompute");
+            let churn = r.recompute.as_ref().expect("mode B must attach a recompute report");
+            assert!(churn.distinct_keys >= 1, "{kind}: an edit must recompute something");
+            assert!(!churn.families.is_empty(), "{kind}: query families must be attributed");
+            assert!(
+                churn.distinct_modules >= 1 && !churn.modules.is_empty(),
+                "{kind}: keys must resolve to module paths"
+            );
+            assert!(!churn.modules_truncated);
+            let phases = r.edit.expect("edit point keeps its kind in mode B");
+            assert_eq!(phases.edit_kind, kind);
+            assert!(phases.edit_apply_ns.is_none(), "no uninstrumented split in mode B");
+        }
+    }
+
+    #[test]
+    fn recompute_mode_profiles_cold_execution_of_plain_points() {
+        std::env::set_var("BSL_SALSA_EVENTS", "1");
+        let r = run_one_mode(FeatureSpec::DocumentSymbol, Expect::NonEmpty, RunMode::Recompute)
+            .unwrap();
+        let churn = r.recompute.expect("mode B must attach a recompute report");
+        assert!(churn.distinct_keys >= 1, "a cold call must execute queries");
+        assert!(churn.families.iter().any(|f| f.execute > 0));
+        assert!(r.warm_ns.is_empty(), "mode B takes no warm latency samples");
+    }
+
+    #[test]
+    fn memory_mode_brackets_the_execution_with_rss_points() {
+        let r =
+            run_one_mode(FeatureSpec::DocumentSymbol, Expect::NonEmpty, RunMode::Memory).unwrap();
+        assert_eq!(r.mode, "memory");
+        let mem = r.memory.expect("mode C must attach a memory report");
+        assert!(mem.rss_before_bytes > 0);
+        assert!(mem.rss_after_bytes > 0);
+        assert!(mem.rss_after_trim_bytes > 0);
+        assert!(mem.rss_after_deep_trim_bytes > 0);
+        assert!(
+            mem.phase_peak_bytes > 0 || mem.peak_is_lower_bound,
+            "a zero peak is only acceptable when flagged as a lower bound"
+        );
+        assert_eq!(mem.peak_is_lower_bound, mem.sample_count < 3);
+        assert!(!mem.ingredient_counts.is_empty());
     }
 
     #[test]
@@ -319,8 +418,10 @@ mod tests {
             source_dir: tmp.path().to_path_buf(),
             manifest_path,
             point_id: "absent/01".to_string(),
+            mode: RunMode::Latency,
             warm_iterations: 1,
             boot_budget_ms: 60_000,
+            trim_settle_ms: 10,
         })
         .unwrap_err();
         assert!(matches!(err, RunError::Manifest(_)), "{err}");
@@ -347,8 +448,10 @@ mod tests {
             source_dir: tmp.path().to_path_buf(),
             manifest_path,
             point_id: first,
+            mode: RunMode::Latency,
             warm_iterations: 1,
             boot_budget_ms: 60_000,
+            trim_settle_ms: 10,
         })
         .unwrap();
         assert!(report.invariant_ok, "{:?}", report.invariant_error);

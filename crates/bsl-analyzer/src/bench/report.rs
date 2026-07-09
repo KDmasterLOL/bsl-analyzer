@@ -35,6 +35,67 @@ pub struct PointReport {
     pub invariant_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edit: Option<EditPhases>,
+    /// Mode B only. Timings in a recompute report are instrumented (the event
+    /// callback adds overhead) and must never be compared with mode-A samples.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recompute: Option<RecomputeReport>,
+    /// Mode C only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryReport>,
+}
+
+/// Salsa churn observed in one measurement window (mode B).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecomputeReport {
+    /// Per query-family counters, non-zero rows only, hottest first.
+    pub families: Vec<FamilyChurn>,
+    /// Exact number of distinct query keys that executed in the window.
+    pub distinct_keys: usize,
+    /// Exact number of distinct modules the executed keys resolved to.
+    pub distinct_modules: usize,
+    /// Sorted module paths, capped at [`MODULES_CAP`]; `modules_truncated`
+    /// makes the cap explicit (never a silent truncation).
+    pub modules: Vec<String>,
+    pub modules_truncated: bool,
+    pub check_cancellation: u64,
+    pub set_cancellation: u64,
+    pub discard_accumulated: u64,
+}
+
+pub const MODULES_CAP: usize = 200;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FamilyChurn {
+    pub name: String,
+    pub execute: u64,
+    pub validate: u64,
+    pub did_discard: u64,
+    pub discard_stale: u64,
+    pub intern_new: u64,
+    pub intern_reuse: u64,
+    pub intern_validate: u64,
+    pub block_on: u64,
+}
+
+/// RSS bracketing of one feature execution (mode C), all values in bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryReport {
+    pub rss_before_bytes: u64,
+    /// Phase-local max(VmRSS) observed by the in-process sampler while the
+    /// feature ran. With fewer than 3 samples the peak is only a lower bound.
+    pub phase_peak_bytes: u64,
+    pub sample_count: u64,
+    pub peak_is_lower_bound: bool,
+    pub rss_after_bytes: u64,
+    /// After the normative trim protocol (close overlays → enforce_lru →
+    /// green-node cache clear on main + rayon → allocator purge → 2 s settle).
+    pub rss_after_trim_bytes: u64,
+    /// After `enforce_lru_deep` plus the same clear/purge/settle steps.
+    pub rss_after_deep_trim_bytes: u64,
+    /// Lifetime process high-water mark — sanity only (dominated by boot).
+    pub vm_hwm_bytes: Option<u64>,
+    /// Top salsa ingredients by live entry count at `rss_after_bytes` time.
+    pub ingredient_counts: Vec<(String, usize)>,
 }
 
 /// Extra timings recorded for `edit` points.
@@ -43,10 +104,15 @@ pub struct EditPhases {
     /// `body` or `signature` — which invalidation class the patch models.
     pub edit_kind: String,
     /// p50 of the followup feature *before* the edit (steady warm baseline).
-    pub warm_before_p50_ns: u64,
+    /// Mode A only — a recompute window has no uninstrumented baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_before_p50_ns: Option<u64>,
     /// Applying the `didChange` itself (mem_docs + VFS + `process_changes`).
-    pub edit_apply_ns: u64,
+    /// Mode A only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_apply_ns: Option<u64>,
     /// First followup invocation after the edit (same value as `cold_ns`).
+    /// In mode B this is the whole instrumented apply+request window.
     pub after_edit_ns: u64,
 }
 
@@ -104,6 +170,8 @@ mod tests {
             invariant_ok: true,
             invariant_error: None,
             edit: None,
+            recompute: None,
+            memory: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: PointReport = serde_json::from_str(&json).unwrap();
