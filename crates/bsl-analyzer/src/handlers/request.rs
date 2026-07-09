@@ -5,14 +5,14 @@ use ide::{
 };
 use line_index::{LineIndex, TextSize};
 use lsp_types::{
-    CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem, CompletionItemKind,
-    CompletionParams, CompletionResponse, DocumentHighlight as LspDocumentHighlight,
-    DocumentHighlightKind as LspDocumentHighlightKind, DocumentHighlightParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange as LspFoldingRange,
-    FoldingRangeKind as LspFoldingRangeKind, FoldingRangeParams, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, MarkupContent, MarkupKind,
-    ReferenceParams, SemanticTokens, SemanticTokensParams, SemanticTokensResult,
-    SignatureHelpParams,
+    CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem,
+    CompletionItemKind, CompletionParams, CompletionResponse,
+    DocumentHighlight as LspDocumentHighlight, DocumentHighlightKind as LspDocumentHighlightKind,
+    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
+    FoldingRange as LspFoldingRange, FoldingRangeKind as LspFoldingRangeKind, FoldingRangeParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
+    MarkupContent, MarkupKind, ReferenceParams, SemanticTokens, SemanticTokensParams,
+    SemanticTokensResult, SignatureHelpParams,
 };
 use rustc_hash::FxHashMap;
 use vfs::FileId;
@@ -535,26 +535,71 @@ pub fn handle_code_action(
     )?;
 
     let diagnostics = ctx.analysis.file_diagnostics_cached(file_id, ctx.diagnostics_config.clone());
+    let only = &params.context.only;
 
     let mut actions = Vec::new();
-    for diag in diagnostics.iter() {
-        if diag.fixes.is_empty() {
-            continue;
+
+    // Individual quick fixes for the diagnostics touching the requested range, plus a
+    // "fix all occurrences of code X" batch (once per code) for codes with ≥2 safe fixes.
+    if kind_requested(CodeActionKind::QUICKFIX.as_str(), only) {
+        for diag in diagnostics.iter() {
+            if diag.fixes.is_empty() || diag.range.intersect(range).is_none() {
+                continue;
+            }
+            for fix in &diag.fixes {
+                if let Some(action) = crate::lsp::to_proto::code_action_with_encoding(
+                    line_index,
+                    text,
+                    &uri,
+                    diag,
+                    fix,
+                    ctx.position_encoding,
+                ) {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+            }
         }
-        if diag.range.intersect(range).is_none() {
-            continue;
-        }
-        for fix in &diag.fixes {
-            if let Some(action) = crate::lsp::to_proto::code_action_with_encoding(
+
+        // "Fix all occurrences of code X" — offered only for a code visible in the
+        // requested range (like a normal quick fix), but merging every occurrence
+        // of it in the file.
+        let mut seen_codes = rustc_hash::FxHashSet::default();
+        for diag in diagnostics.iter() {
+            if diag.range.intersect(range).is_none() || !seen_codes.insert(diag.code) {
+                continue;
+            }
+            if let Some(action) = fix_all_occurrences_action(
                 line_index,
                 text,
                 &uri,
-                diag,
-                fix,
+                &diagnostics,
+                diag.code,
                 ctx.position_encoding,
             ) {
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
+        }
+    }
+
+    // Whole-file `source.fixAll`: every safe fix in the file, merged without overlaps.
+    // Scoped to the whole file (not the request range) as the action title promises.
+    if kind_requested(crate::lsp::to_proto::FIX_ALL_BSL, only) {
+        let merged = ide::batch_fixes::merge_fixes(
+            diagnostics
+                .iter()
+                .flat_map(|diag| diag.fixes.iter())
+                .filter(|fix| fix.safe_for_fix_all),
+        );
+        if let Some(action) = crate::lsp::to_proto::aggregate_code_action(
+            line_index,
+            text,
+            &uri,
+            "Исправить все безопасные замечания в файле".to_string(),
+            CodeActionKind::new(crate::lsp::to_proto::FIX_ALL_BSL),
+            &merged,
+            ctx.position_encoding,
+        ) {
+            actions.push(CodeActionOrCommand::CodeAction(action));
         }
     }
 
@@ -563,6 +608,52 @@ pub fn handle_code_action(
     } else {
         Ok(Some(actions))
     }
+}
+
+/// An action kind is requested when the client sends no `only` filter, or lists a kind
+/// equal to or a super-kind (dotted prefix) of it — so `source.fixAll` matches the
+/// server's `source.fixAll.bsl-analyzer`.
+fn kind_requested(action_kind: &str, only: &Option<Vec<CodeActionKind>>) -> bool {
+    match only {
+        None => true,
+        Some(list) => list.iter().any(|requested| {
+            let requested = requested.as_str();
+            action_kind == requested || action_kind.starts_with(&format!("{requested}."))
+        }),
+    }
+}
+
+/// A batched quick fix that applies every safe fix of one diagnostic code in the file.
+/// Emitted only when at least two such fixes exist.
+fn fix_all_occurrences_action(
+    line_index: &LineIndex,
+    text: &str,
+    uri: &lsp_types::Url,
+    diagnostics: &[ide::Diagnostic],
+    code: ide::DiagnosticCode,
+    encoding: crate::lsp::PositionEncoding,
+) -> Option<lsp_types::CodeAction> {
+    let safe_fixes = || {
+        diagnostics
+            .iter()
+            .filter(|diag| diag.code == code)
+            .flat_map(|diag| diag.fixes.iter())
+            .filter(|fix| fix.safe_for_fix_all && !fix.edits.is_empty())
+    };
+    if safe_fixes().count() < 2 {
+        return None;
+    }
+
+    let merged = ide::batch_fixes::merge_fixes(safe_fixes());
+    crate::lsp::to_proto::aggregate_code_action(
+        line_index,
+        text,
+        uri,
+        format!("Исправить все «{}» в файле", code.as_str()),
+        CodeActionKind::QUICKFIX,
+        &merged,
+        encoding,
+    )
 }
 
 /// Pull-model single-document diagnostics (`textDocument/diagnostic`).
@@ -1517,6 +1608,129 @@ mod tests {
         assert_eq!(result[2].start_line, 2);
         assert_eq!(result[2].end_line, 4);
         assert_eq!(result[2].kind, None);
+    }
+
+    fn setup_code_action_doc(source: &str) -> (GlobalState, lsp_types::Url) {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///fixall.bsl").unwrap();
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        let open_file_id = state.vfs_file_for_url(&uri).unwrap();
+        state.open_files.insert(open_file_id);
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+        (state, uri)
+    }
+
+    fn code_action_params(
+        uri: lsp_types::Url,
+        only: Option<Vec<CodeActionKind>>,
+    ) -> CodeActionParams {
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri },
+            range: lsp_types::Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 4, character: 0 },
+            },
+            context: lsp_types::CodeActionContext { diagnostics: vec![], only, trigger_kind: None },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }
+    }
+
+    fn actions_of_kind<'a>(
+        actions: &'a [CodeActionOrCommand],
+        kind: &str,
+    ) -> Vec<&'a lsp_types::CodeAction> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                CodeActionOrCommand::CodeAction(ca)
+                    if ca.kind.as_ref().is_some_and(|k| k.as_str() == kind) =>
+                {
+                    Some(ca)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn code_action_offers_source_fix_all_over_the_whole_file() {
+        let source =
+            "Процедура Тест()\n    ЭтаФорма.Закрыть();\n    ЭтаФорма.Открыть();\nКонецПроцедуры\n";
+        let (state, uri) = setup_code_action_doc(source);
+        let ctx = latency_ctx(&state);
+
+        let result = handle_code_action(ctx, code_action_params(uri, None)).unwrap().unwrap();
+
+        // Two individual quick fixes (one per `ЭтаФорма`).
+        let quickfixes = actions_of_kind(&result, "quickfix");
+        assert!(
+            quickfixes.iter().filter(|ca| ca.diagnostics.is_some()).count() >= 2,
+            "expected a quick fix per occurrence, got {result:#?}"
+        );
+
+        // One aggregate `source.fixAll` action covering both occurrences.
+        let fix_all = actions_of_kind(&result, crate::lsp::to_proto::FIX_ALL_BSL);
+        assert_eq!(fix_all.len(), 1, "expected exactly one source.fixAll action");
+        let edits = fix_all[0]
+            .edit
+            .as_ref()
+            .and_then(|we| we.changes.as_ref())
+            .and_then(|c| c.values().next())
+            .expect("fixAll must carry edits");
+        assert_eq!(edits.len(), 2, "fixAll must merge both occurrences");
+        assert!(edits.iter().all(|e| e.new_text == "ЭтотОбъект"));
+
+        // One "fix all occurrences of this code" batched quick fix (kind quickfix, no diag).
+        let batched = quickfixes.iter().filter(|ca| ca.diagnostics.is_none()).count();
+        assert_eq!(batched, 1, "expected one 'fix all occurrences' batch");
+    }
+
+    #[test]
+    fn code_action_only_source_fix_all_suppresses_quick_fixes() {
+        let source =
+            "Процедура Тест()\n    ЭтаФорма.Закрыть();\n    ЭтаФорма.Открыть();\nКонецПроцедуры\n";
+        let (state, uri) = setup_code_action_doc(source);
+        let ctx = latency_ctx(&state);
+
+        let only = Some(vec![CodeActionKind::SOURCE_FIX_ALL]);
+        let result = handle_code_action(ctx, code_action_params(uri, only)).unwrap().unwrap();
+
+        assert!(
+            actions_of_kind(&result, "quickfix").is_empty(),
+            "quick fixes must be filtered out"
+        );
+        assert_eq!(
+            actions_of_kind(&result, crate::lsp::to_proto::FIX_ALL_BSL).len(),
+            1,
+            "requesting source.fixAll must still match the bsl-analyzer subkind"
+        );
+    }
+
+    #[test]
+    fn code_action_only_quickfix_suppresses_source_fix_all() {
+        let source =
+            "Процедура Тест()\n    ЭтаФорма.Закрыть();\n    ЭтаФорма.Открыть();\nКонецПроцедуры\n";
+        let (state, uri) = setup_code_action_doc(source);
+        let ctx = latency_ctx(&state);
+
+        let only = Some(vec![CodeActionKind::QUICKFIX]);
+        let result = handle_code_action(ctx, code_action_params(uri, only)).unwrap().unwrap();
+
+        assert!(
+            actions_of_kind(&result, crate::lsp::to_proto::FIX_ALL_BSL).is_empty(),
+            "source.fixAll must be filtered out when only quickfix is requested"
+        );
+        assert!(!actions_of_kind(&result, "quickfix").is_empty(), "quick fixes must remain");
     }
 
     #[test]

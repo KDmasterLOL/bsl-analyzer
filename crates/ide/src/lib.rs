@@ -1,3 +1,4 @@
+pub mod batch_fixes;
 mod completion;
 pub mod config_finder;
 pub mod diagnostics_catalog;
@@ -38,7 +39,7 @@ pub use ide_diagnostics::{
     file_diagnostics, file_diagnostics_query, get_metadata, CleanCodeAttribute, Diagnostic,
     DiagnosticCode, DiagnosticOutput, DiagnosticSeverityLevel, DiagnosticTag, DiagnosticType,
     DiagnosticsConfig, DiagnosticsContext, Fix, ImpactSeverity, MetadataTag, Severity,
-    SoftwareQuality,
+    SoftwareQuality, TextEdit,
 };
 pub use signature_help::{ParameterInfo, SignatureHelp};
 pub use symbol_info::{

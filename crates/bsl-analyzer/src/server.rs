@@ -1009,7 +1009,16 @@ fn server_capabilities(
 
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
 
-        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Options(
+            lsp_types::CodeActionOptions {
+                code_action_kinds: Some(vec![
+                    lsp_types::CodeActionKind::QUICKFIX,
+                    lsp_types::CodeActionKind::new(crate::lsp::to_proto::FIX_ALL_BSL),
+                ]),
+                work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
+                resolve_provider: None,
+            },
+        )),
 
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
