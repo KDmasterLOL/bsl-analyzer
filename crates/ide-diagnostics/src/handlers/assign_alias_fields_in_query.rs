@@ -26,24 +26,24 @@ pub(crate) fn build_alias_fix(
     match (field_name, raw_name) {
         (None, Some(name)) => {
             let insert = bsl_range.end();
-            vec![Fix {
-                label: format!("Добавить псевдоним КАК {}", name),
-                edits: vec![TextEdit {
+            vec![Fix::safe(
+                format!("Добавить псевдоним КАК {}", name),
+                vec![TextEdit {
                     range: TextRange::new(insert, insert),
                     new_text: format!(" КАК {}", name),
                 }],
-            }]
+            )]
         }
         (Some(name), _) => {
             let alias_byte_len = name.len() as u32;
             let insert = bsl_range.end() - line_index::TextSize::from(alias_byte_len);
-            vec![Fix {
-                label: format!("Добавить ключевое слово КАК перед '{}'", name),
-                edits: vec![TextEdit {
+            vec![Fix::safe(
+                format!("Добавить ключевое слово КАК перед '{}'", name),
+                vec![TextEdit {
                     range: TextRange::new(insert, insert),
                     new_text: "КАК ".to_string(),
                 }],
-            }]
+            )]
         }
         _ => vec![],
     }

@@ -99,13 +99,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                         severity: ctx.severity(code),
                         range: token.text_range(),
                         tags: ctx.tags(code),
-                        fixes: vec![Fix {
-                            label: "Добавить пробел после //".to_string(),
-                            edits: vec![TextEdit {
+                        fixes: vec![Fix::safe(
+                            "Добавить пробел после //",
+                            vec![TextEdit {
                                 range: ide_db::TextRange::new(insert_pos, insert_pos),
                                 new_text: " ".to_string(),
                             }],
-                        }],
+                        )],
                     });
                 }
             }

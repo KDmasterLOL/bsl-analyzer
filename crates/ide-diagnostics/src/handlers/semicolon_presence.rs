@@ -30,13 +30,13 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),
-        fixes: vec![Fix {
-            label: "Добавить точку с запятой".to_string(),
-            edits: vec![TextEdit {
+        fixes: vec![Fix::safe(
+            "Добавить точку с запятой",
+            vec![TextEdit {
                 range: TextRange::new(range.end(), range.end()),
                 new_text: ";".to_string(),
             }],
-        }],
+        )],
     })
 }
 

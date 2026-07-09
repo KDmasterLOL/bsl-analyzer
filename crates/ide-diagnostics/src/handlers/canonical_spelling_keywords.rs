@@ -206,10 +206,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     severity: ctx.severity(code),
                     range,
                     tags: ctx.tags(code),
-                    fixes: vec![Fix {
-                        label: format!("Заменить на '{}'", canonical),
-                        edits: vec![TextEdit { range, new_text: canonical }],
-                    }],
+                    fixes: vec![Fix::safe(
+                        format!("Заменить на '{}'", canonical),
+                        vec![TextEdit { range, new_text: canonical }],
+                    )],
                 });
             }
         }

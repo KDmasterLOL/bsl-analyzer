@@ -283,6 +283,61 @@ pub fn check_diagnostics_snapshot_for(
     expected.assert_eq(&format_diags_for(source, &diagnostics, code_filter));
 }
 
+/// Apply a fix's edits to `source` and return the resulting text. Edits are spliced
+/// left-to-right by their byte ranges (fixes never emit overlapping edits).
+pub fn apply_edits(source: &str, edits: &[crate::TextEdit]) -> String {
+    let mut sorted: Vec<&crate::TextEdit> = edits.iter().collect();
+    sorted.sort_by_key(|edit| edit.range.start());
+
+    let mut result = String::new();
+    let mut cursor = 0usize;
+    for edit in sorted {
+        let start: usize = edit.range.start().into();
+        let end: usize = edit.range.end().into();
+        result.push_str(&source[cursor..start]);
+        result.push_str(&edit.new_text);
+        cursor = end;
+    }
+    result.push_str(&source[cursor..]);
+    result
+}
+
+/// Snapshot every quick fix attached to diagnostics matching `code_filter`: the fix
+/// label, its `safe_for_fix_all` flag, and the full source after applying that fix in
+/// isolation. Proves the fix payload — which [`format_diags`] deliberately omits.
+pub fn check_fix_snapshot_for(
+    source: &str,
+    code_filter: DiagnosticCode,
+    expected: expect_test::Expect,
+) {
+    use std::fmt::Write as _;
+    let diagnostics = check_hir_diagnostic(source);
+    let mut output = String::new();
+    for diag in diagnostics.iter().filter(|diag| diag.code == code_filter) {
+        let (start_line, start_col, end_line, end_col) = range_to_line_col(source, diag.range);
+        for fix in &diag.fixes {
+            if !output.is_empty() {
+                output.push_str("\n\n");
+            }
+            writeln!(
+                output,
+                "{} @ {}:{}..{}:{} — {} [fix_all={}]",
+                diag.code.as_str(),
+                start_line + 1,
+                start_col + 1,
+                end_line + 1,
+                end_col + 1,
+                fix.label,
+                fix.safe_for_fix_all,
+            )
+            .expect("writing to String should not fail");
+            write!(output, "{}", apply_edits(source, &fix.edits))
+                .expect("writing to String should not fail");
+        }
+    }
+    expected.assert_eq(&output);
+}
+
 struct FormattedDiag<'a> {
     diag: &'a Diagnostic,
     start_line: u32,

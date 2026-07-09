@@ -125,6 +125,27 @@ impl DiagnosticTag {
 pub struct Fix {
     pub label: String,
     pub edits: Vec<TextEdit>,
+    /// Whether this fix may be applied unattended as part of a `source.fixAll`
+    /// batch. Safe means the edit is deterministic, semantics-preserving, and
+    /// reference-safe when applied together with every other occurrence in the
+    /// file. Fixes that offer the user a choice, or that rename an identifier
+    /// whose other references the batch cannot reach, stay opt-in quick fixes.
+    pub safe_for_fix_all: bool,
+}
+
+impl Fix {
+    /// A fix eligible for `source.fixAll`: deterministic, semantics-preserving,
+    /// and reference-safe as an unattended batch edit.
+    pub fn safe(label: impl Into<String>, edits: Vec<TextEdit>) -> Self {
+        Self { label: label.into(), edits, safe_for_fix_all: true }
+    }
+
+    /// A fix that stays an explicit, opt-in quick fix and is excluded from
+    /// `source.fixAll` — it offers a choice or renames a symbol whose remaining
+    /// references a file-local batch cannot keep in sync.
+    pub fn manual(label: impl Into<String>, edits: Vec<TextEdit>) -> Self {
+        Self { label: label.into(), edits, safe_for_fix_all: false }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
