@@ -10,6 +10,7 @@ mod goto_definition;
 pub mod graph;
 mod hover;
 mod references;
+mod rename;
 mod signature_help;
 pub mod streaming;
 pub mod symbol_info;
@@ -41,6 +42,7 @@ pub use ide_diagnostics::{
     DiagnosticsConfig, DiagnosticsContext, Fix, ImpactSeverity, MetadataTag, Severity,
     SoftwareQuality, TextEdit,
 };
+pub use rename::{prepare_rename, rename, RenameError, RenameTarget};
 pub use signature_help::{ParameterInfo, SignatureHelp};
 pub use symbol_info::{
     symbol_info, SymbolContainer, SymbolDefinition, SymbolInfoCard, SymbolInfoRequest,
@@ -83,6 +85,21 @@ impl Analysis {
     pub fn find_references(&self, file_id: FileId, offset: u32) -> Vec<Location> {
         let offset = TextSize::from(offset);
         references::find_references(&self.db, file_id, offset)
+    }
+
+    pub fn prepare_rename(&self, file_id: FileId, offset: u32) -> Option<RenameTarget> {
+        let offset = TextSize::from(offset);
+        rename::prepare_rename(&self.db, file_id, offset)
+    }
+
+    pub fn rename(
+        &self,
+        file_id: FileId,
+        offset: u32,
+        new_name: &str,
+    ) -> Result<Vec<Location>, RenameError> {
+        let offset = TextSize::from(offset);
+        rename::rename(&self.db, file_id, offset, new_name)
     }
 
     pub fn document_highlights(&self, file_id: FileId, offset: u32) -> Vec<DocumentHighlight> {

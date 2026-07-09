@@ -1,18 +1,20 @@
 use anyhow::Result;
 use ide::{
     DocumentHighlightKind as IdeDocumentHighlightKind, FoldingRangeKind as IdeFoldingRangeKind,
-    Location as IdeLocation,
+    Location as IdeLocation, RenameError,
 };
 use line_index::{LineIndex, TextSize};
 use lsp_types::{
     CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem,
-    CompletionItemKind, CompletionParams, CompletionResponse,
+    CompletionItemKind, CompletionParams, CompletionResponse, DocumentChanges,
     DocumentHighlight as LspDocumentHighlight, DocumentHighlightKind as LspDocumentHighlightKind,
     DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
     FoldingRange as LspFoldingRange, FoldingRangeKind as LspFoldingRangeKind, FoldingRangeParams,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
-    MarkupContent, MarkupKind, ReferenceParams, SemanticTokens, SemanticTokensParams,
-    SemanticTokensResult, SignatureHelpParams,
+    MarkupContent, MarkupKind, OneOf, OptionalVersionedTextDocumentIdentifier,
+    PrepareRenameResponse, ReferenceParams, RenameParams, SemanticTokens, SemanticTokensParams,
+    SemanticTokensResult, SignatureHelpParams, TextDocumentEdit, TextDocumentPositionParams,
+    TextEdit, WorkspaceEdit,
 };
 use rustc_hash::FxHashMap;
 use vfs::FileId;
@@ -129,6 +131,118 @@ pub fn handle_find_references(
     } else {
         Ok(Some(lsp_locations))
     }
+}
+
+pub fn handle_prepare_rename(
+    ctx: LatencyRequestContext,
+    params: TextDocumentPositionParams,
+) -> Result<Option<PrepareRenameResponse>> {
+    let _p =
+        tracing::info_span!("handle_prepare_rename", uri = %params.text_document.uri).entered();
+
+    let uri = params.text_document.uri;
+    let position = params.position;
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+
+    let Some(target) = ctx.analysis.prepare_rename(file_id, offset.into()) else {
+        return Ok(None);
+    };
+
+    let range =
+        crate::lsp::range_with_encoding(line_index, text, target.range, ctx.position_encoding)
+            .ok_or_else(|| anyhow::anyhow!("Failed to convert rename range"))?;
+
+    Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+        range,
+        placeholder: target.current_name,
+    }))
+}
+
+pub fn handle_rename(
+    ctx: LatencyRequestContext,
+    params: RenameParams,
+) -> Result<Option<WorkspaceEdit>> {
+    let _p = tracing::info_span!(
+        "handle_rename",
+        uri = %params.text_document_position.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position.text_document.uri;
+    let position = params.text_document_position.position;
+    let new_name = params.new_name;
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+
+    let locations = match ctx.analysis.rename(file_id, offset.into(), &new_name) {
+        Ok(locations) => locations,
+        Err(RenameError::NotRenameable) => {
+            anyhow::bail!("This symbol cannot be renamed")
+        }
+        Err(RenameError::InvalidIdentifier(name)) => {
+            anyhow::bail!("'{name}' is not a valid identifier")
+        }
+    };
+
+    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, text);
+    let mut grouped: FxHashMap<lsp_types::Url, Vec<TextEdit>> = FxHashMap::default();
+    for location in locations {
+        let lsp_location = converter.convert(location)?;
+        grouped
+            .entry(lsp_location.uri)
+            .or_default()
+            .push(TextEdit { range: lsp_location.range, new_text: new_name.clone() });
+    }
+
+    let edit = if ctx.supports_workspace_edit_document_changes {
+        // Versioned edits let the client discard a rename computed against a buffer it
+        // has since changed. An unopened file carries `None` — its on-disk content is
+        // authoritative, so there is no editor version to match.
+        let document_changes = grouped
+            .into_iter()
+            .map(|(uri, edits)| {
+                let version = ctx.mem_docs.get(&uri).map(|doc| doc.version());
+                TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier { uri, version },
+                    edits: edits.into_iter().map(OneOf::Left).collect(),
+                }
+            })
+            .collect();
+        WorkspaceEdit {
+            changes: None,
+            document_changes: Some(DocumentChanges::Edits(document_changes)),
+            change_annotations: None,
+        }
+    } else {
+        WorkspaceEdit {
+            changes: Some(grouped.into_iter().collect()),
+            document_changes: None,
+            change_annotations: None,
+        }
+    };
+
+    Ok(Some(edit))
 }
 
 pub fn handle_document_highlight(
@@ -1442,6 +1556,8 @@ mod tests {
             position_encoding: state.position_encoding,
             supports_insert_text_mode_adjust_indentation: state
                 .supports_insert_text_mode_adjust_indentation,
+            supports_workspace_edit_document_changes: state
+                .supports_workspace_edit_document_changes,
             task_sender: state.task_pool.pool.sender.clone(),
             client_sender: state.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
@@ -1519,6 +1635,128 @@ mod tests {
 
         let result = handle_find_references(ctx, params);
         assert!(result.is_err() || result.unwrap().is_none());
+    }
+
+    fn open_source(state: &mut GlobalState, uri: &lsp_types::Url, source: &str) {
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        let open_file_id = state.vfs_file_for_url(uri).unwrap();
+        state.open_files.insert(open_file_id);
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+    }
+
+    #[test]
+    fn prepare_rename_reports_placeholder_for_local_variable() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///rename.bsl").unwrap();
+        let source =
+            "Процедура Тест()\n    Перем МояПеременная;\n    МояПеременная = 10;\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position { line: 1, character: 10 },
+        };
+
+        let result = handle_prepare_rename(ctx, params).unwrap().unwrap();
+        match result {
+            PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. } => {
+                assert_eq!(placeholder, "МояПеременная");
+            }
+            other => panic!("expected RangeWithPlaceholder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_local_variable_edits_every_occurrence() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///rename.bsl").unwrap();
+        let source = "Процедура Тест()\n    Перем МояПеременная;\n    МояПеременная = 10;\n    Результат = МояПеременная;\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position { line: 1, character: 10 },
+            },
+            new_name: "Итог".to_string(),
+            work_done_progress_params: Default::default(),
+        };
+
+        let edit = handle_rename(ctx, params).unwrap().unwrap();
+        let changes = edit.changes.expect("workspace edit must carry changes");
+        let edits = changes.get(&uri).expect("edits for the renamed file");
+        assert_eq!(edits.len(), 3, "declaration + 2 usages");
+        assert!(edits.iter().all(|e| e.new_text == "Итог"));
+    }
+
+    #[test]
+    fn rename_uses_versioned_document_changes_when_supported() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+        state.supports_workspace_edit_document_changes = true;
+
+        let uri = lsp_types::Url::parse("file:///rename.bsl").unwrap();
+        let source =
+            "Процедура Тест()\n    Перем МояПеременная;\n    МояПеременная = 10;\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position { line: 1, character: 10 },
+            },
+            new_name: "Итог".to_string(),
+            work_done_progress_params: Default::default(),
+        };
+
+        let edit = handle_rename(ctx, params).unwrap().unwrap();
+        assert!(edit.changes.is_none(), "versioned path must not populate changes");
+        match edit.document_changes.expect("document_changes must be present") {
+            DocumentChanges::Edits(edits) => {
+                assert_eq!(edits.len(), 1);
+                assert_eq!(edits[0].text_document.uri, uri);
+                assert_eq!(edits[0].text_document.version, Some(1));
+                assert_eq!(edits[0].edits.len(), 2, "declaration + 1 usage");
+            }
+            other => panic!("expected edits, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_rejects_invalid_identifier() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///rename.bsl").unwrap();
+        let source =
+            "Процедура Тест()\n    Перем МояПеременная;\n    МояПеременная = 10;\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line: 1, character: 10 },
+            },
+            new_name: "Если".to_string(),
+            work_done_progress_params: Default::default(),
+        };
+
+        assert!(handle_rename(ctx, params).is_err());
     }
 
     #[test]

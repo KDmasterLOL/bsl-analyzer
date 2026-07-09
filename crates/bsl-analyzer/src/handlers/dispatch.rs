@@ -127,6 +127,9 @@ impl RequestDispatcher<'_> {
             supports_insert_text_mode_adjust_indentation: self
                 .global_state
                 .supports_insert_text_mode_adjust_indentation,
+            supports_workspace_edit_document_changes: self
+                .global_state
+                .supports_workspace_edit_document_changes,
             task_sender: self.global_state.task_pool.pool.sender.clone(),
             client_sender: self.global_state.sender.clone(),
             mem_docs: self.global_state.mem_docs.freeze(),
@@ -535,6 +538,8 @@ mod tests {
             position_encoding: state.position_encoding,
             supports_insert_text_mode_adjust_indentation: state
                 .supports_insert_text_mode_adjust_indentation,
+            supports_workspace_edit_document_changes: state
+                .supports_workspace_edit_document_changes,
             task_sender: state.task_pool.pool.sender.clone(),
             client_sender: state.sender.clone(),
             mem_docs: state.mem_docs.freeze(),

@@ -180,6 +180,11 @@ pub struct GlobalState {
     /// `InsertTextMode::ADJUST_INDENTATION`, so completion snippet continuation
     /// lines can be indented to the cursor column by the client.
     pub supports_insert_text_mode_adjust_indentation: bool,
+    /// Negotiated at `initialize`: whether the client honors versioned
+    /// `WorkspaceEdit.documentChanges`. When it does, rename edits carry the open
+    /// document's version so the client rejects them if the buffer moved on after
+    /// the snapshot; otherwise the server falls back to unversioned `changes`.
+    pub supports_workspace_edit_document_changes: bool,
     /// True when the pull diagnostic provider is advertised (config opt-in) *and* the
     /// client advertised `textDocument/diagnostic` support — i.e. the client drives
     /// diagnostics by pulling. In that mode push publishing is suppressed so a
@@ -322,6 +327,7 @@ impl GlobalState {
             lsp_locale: None,
             position_encoding: PositionEncoding::default(),
             supports_insert_text_mode_adjust_indentation: false,
+            supports_workspace_edit_document_changes: false,
             pull_diagnostics_active: false,
             supports_workspace_diagnostic_refresh: false,
             diagnostics_generation: HashMap::new(),

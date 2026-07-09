@@ -42,6 +42,8 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     let position_encoding = PositionEncoding::negotiate(&initialize_params.capabilities);
     let supports_insert_text_mode_adjust_indentation =
         client_supports_insert_text_mode_adjust_indentation(&initialize_params.capabilities);
+    let supports_workspace_edit_document_changes =
+        client_supports_workspace_edit_document_changes(&initialize_params.capabilities);
 
     // The pull diagnostic provider is opt-in per configuration, so the scope must be
     // known before capabilities are advertised — before the VFS loader (and its own
@@ -82,6 +84,7 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     state.position_encoding = position_encoding;
     state.supports_insert_text_mode_adjust_indentation =
         supports_insert_text_mode_adjust_indentation;
+    state.supports_workspace_edit_document_changes = supports_workspace_edit_document_changes;
     // Suppress push publishing only when the client will actually pull, so a
     // pull-capable client does not render open-buffer diagnostics twice; a client
     // that cannot pull keeps push even with the feature enabled.
@@ -127,6 +130,18 @@ fn client_supports_insert_text_mode_adjust_indentation(
         .and_then(|c| c.completion_item.as_ref())
         .and_then(|ci| ci.insert_text_mode_support.as_ref())
         .is_some_and(|s| s.value_set.contains(&lsp_types::InsertTextMode::ADJUST_INDENTATION))
+}
+
+/// Whether the client honors versioned `WorkspaceEdit.documentChanges`. When it does,
+/// the rename handler returns `TextDocumentEdit`s carrying each open document's version
+/// so the client can reject edits computed against a since-superseded buffer; otherwise
+/// the server must fall back to the unversioned `changes` map.
+fn client_supports_workspace_edit_document_changes(caps: &lsp_types::ClientCapabilities) -> bool {
+    caps.workspace
+        .as_ref()
+        .and_then(|w| w.workspace_edit.as_ref())
+        .and_then(|we| we.document_changes)
+        .unwrap_or(false)
 }
 
 /// Whether the client advertised pull-diagnostics support (`textDocument/diagnostic`).
@@ -872,8 +887,8 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
         CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
         DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
-        OnTypeFormatting, RangeFormatting, References, Request as _, SemanticTokensFullRequest,
-        SignatureHelpRequest, WorkspaceDiagnosticRequest,
+        OnTypeFormatting, PrepareRenameRequest, RangeFormatting, References, Rename, Request as _,
+        SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceDiagnosticRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -899,6 +914,8 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         })
         .on_latency::<GotoDefinition>(crate::handlers::handle_goto_definition)
         .on_latency::<References>(crate::handlers::handle_find_references)
+        .on_latency::<PrepareRenameRequest>(crate::handlers::handle_prepare_rename)
+        .on_latency::<Rename>(crate::handlers::handle_rename)
         .on_latency::<DocumentHighlightRequest>(crate::handlers::handle_document_highlight)
         .on_latency::<FoldingRangeRequest>(crate::handlers::handle_folding_range)
         .on_latency::<HoverRequest>(crate::handlers::handle_hover)
@@ -1035,6 +1052,11 @@ fn server_capabilities(
             more_trigger_character: Some(vec!["\n".to_string()]),
         }),
 
+        rename_provider: Some(lsp_types::OneOf::Right(lsp_types::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
+        })),
+
         ..Default::default()
     }
 }
@@ -1062,6 +1084,13 @@ mod tests {
 
         assert_eq!(caps.document_highlight_provider, Some(lsp_types::OneOf::Left(true)));
         assert_eq!(caps.folding_range_provider, Some(FoldingRangeProviderCapability::Simple(true)));
+
+        match caps.rename_provider {
+            Some(lsp_types::OneOf::Right(options)) => {
+                assert_eq!(options.prepare_provider, Some(true));
+            }
+            _ => panic!("Expected rename provider with prepare support"),
+        }
     }
 
     #[test]
