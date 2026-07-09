@@ -52,6 +52,20 @@ pub enum BenchCommands {
         #[arg(long = "boot-budget-ms", default_value = "120000")]
         boot_budget_ms: u64,
     },
+    /// Compare a candidate run against a baseline (regression gate).
+    /// Exit codes: 0 pass, 1 regression, 2 incompatible.
+    Compare {
+        /// Directory of per-run report JSONs (or a single file).
+        #[arg(long = "baseline")]
+        baseline: PathBuf,
+
+        #[arg(long = "candidate")]
+        candidate: PathBuf,
+
+        /// Policy JSON; built-in defaults when omitted.
+        #[arg(long = "policy")]
+        policy: Option<PathBuf>,
+    },
 }
 
 pub fn run_bench(command: BenchCommands) -> ! {
@@ -134,6 +148,31 @@ pub fn run_bench(command: BenchCommands) -> ! {
                 Err(e) => {
                     eprintln!("bench run: {e}");
                     std::process::exit(exit_code(&e));
+                }
+            }
+        }
+        BenchCommands::Compare { baseline, candidate, policy } => {
+            use bsl_analyzer::bench::compare;
+            let run = || -> Result<(compare::CompareOutcome, String), String> {
+                let policy = compare::load_policy(policy.as_deref())?;
+                let base = compare::load_reports(&baseline)?;
+                let cand = compare::load_reports(&candidate)?;
+                let (outcome, report) = compare::compare(&base, &cand, &policy);
+                Ok((outcome, compare::render_report(&report)?))
+            };
+            match run() {
+                Ok((outcome, rendered)) => {
+                    println!("{rendered}");
+                    let code = match outcome {
+                        compare::CompareOutcome::Pass => 0,
+                        compare::CompareOutcome::Regression => 1,
+                        compare::CompareOutcome::Incompatible => 2,
+                    };
+                    std::process::exit(code);
+                }
+                Err(e) => {
+                    eprintln!("bench compare: {e}");
+                    std::process::exit(2);
                 }
             }
         }

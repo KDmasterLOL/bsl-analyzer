@@ -7,6 +7,7 @@
 //! never silently degrade into timing a no-op. Process-cold isolation (one
 //! process per point) is orchestrated by `scripts/bench/run-matrix.sh`.
 
+pub mod compare;
 pub mod discover;
 pub mod manifest;
 pub mod report;
