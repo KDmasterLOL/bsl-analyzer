@@ -55,3 +55,4 @@ plans/
 bsl-platform-shcntx/
 bsl-json.json
 .bsl-ls-cache/
+__pycache__/
