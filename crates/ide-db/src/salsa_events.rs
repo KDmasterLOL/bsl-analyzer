@@ -146,6 +146,41 @@ impl SalsaEventStats {
         }
     }
 
+    /// Zero every counter and drop all per-ingredient / per-key entries,
+    /// opening a fresh observation window. Callers must not race this against
+    /// concurrent query execution — events recorded while the clear runs land
+    /// on whichever side of the window the interleaving decides. The intended
+    /// use is a quiescent measurement harness: warm → `reset` → one change →
+    /// queries → report.
+    pub fn reset(&self) {
+        self.per_ingredient.clear();
+        self.per_key.clear();
+        self.check_cancellation.store(0, Ordering::Relaxed);
+        self.set_cancellation.store(0, Ordering::Relaxed);
+        self.discard_accumulated.store(0, Ordering::Relaxed);
+    }
+
+    /// Every key with raw counts, sorted by descending `(execute,
+    /// discard_stale)` — the full-window complement of [`Self::top_keys`],
+    /// for callers that need exact distinct-key counts and complete module
+    /// attribution rather than a hottest-N sample.
+    pub fn all_keys(&self) -> Vec<KeyEventCount> {
+        let mut rows: Vec<KeyEventCount> = self
+            .per_key
+            .iter()
+            .map(|e| {
+                let c = e.value();
+                KeyEventCount {
+                    key: *e.key(),
+                    execute: c.execute.load(Ordering::Relaxed),
+                    discard_stale: c.discard_stale.load(Ordering::Relaxed),
+                }
+            })
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse((r.execute, r.discard_stale)));
+        rows
+    }
+
     /// Global (keyless) counters: `(check_cancellation, set_cancellation, discard_accumulated)`.
     pub fn global_counts(&self) -> GlobalCounts {
         GlobalCounts {
@@ -231,6 +266,14 @@ pub struct KeyEventRow {
     pub name: String,
     pub execute: u64,
     pub discard_stale: u64,
+}
+
+/// The complete per-key churn of one observation window: exact distinct-key
+/// count plus every key's resolved row; see
+/// `RootDatabaseImpl::salsa_key_event_window`.
+pub struct KeyEventWindow {
+    pub distinct_keys: usize,
+    pub rows: Vec<KeyEventRow>,
 }
 
 /// One ingredient's resolved event row; see [`SalsaEventStats::rows`].

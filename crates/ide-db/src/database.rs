@@ -276,6 +276,47 @@ impl RootDatabaseImpl {
         }))
     }
 
+    /// Zero the salsa event counters, opening a fresh observation window.
+    /// Returns `false` when events are disabled (no `BSL_SALSA_EVENTS=1`).
+    /// See [`crate::salsa_events::SalsaEventStats::reset`] for the quiescence
+    /// contract.
+    pub fn salsa_events_reset(&self) -> bool {
+        match self.salsa_events.as_ref() {
+            Some(stats) => {
+                stats.reset();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The *complete* per-key churn of the current observation window — exact
+    /// distinct-key count and every key resolved to a readable name — unlike
+    /// the hottest-N sample of [`Self::salsa_key_event_report`].
+    ///
+    /// Same revision constraint as the top-K report, restated as a windowed
+    /// protocol: open the window with [`Self::salsa_events_reset`], apply at
+    /// most one revision-bumping change, run the queries under observation,
+    /// and call this *before any further revision bump* — every recorded key
+    /// then decodes in the revision that produced it. `None` unless events
+    /// are enabled.
+    pub fn salsa_key_event_window(&self) -> Option<crate::salsa_events::KeyEventWindow> {
+        let stats = self.salsa_events.as_ref()?;
+        let counts = stats.all_keys();
+        let distinct_keys = counts.len();
+        let rows = salsa::attach(self, || {
+            counts
+                .into_iter()
+                .map(|c| crate::salsa_events::KeyEventRow {
+                    name: self.resolve_hot_key_name(c.key),
+                    execute: c.execute,
+                    discard_stale: c.discard_stale,
+                })
+                .collect()
+        });
+        Some(crate::salsa_events::KeyEventWindow { distinct_keys, rows })
+    }
+
     /// Name one hot salsa key: `query(<module path>[#m<local>])` for the curated
     /// per-file / per-method query families, else the attach-rendered
     /// `query(Id(..))` fallback. Must run inside a [`salsa::attach`] scope (for the

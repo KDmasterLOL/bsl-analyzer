@@ -4804,3 +4804,48 @@ fn salsa_key_event_report_decodes_file_keyed_query() {
         parse_key.name
     );
 }
+
+#[test]
+fn salsa_event_window_resets_and_reports_full_key_set() {
+    // Off by default: reset is a no-op and the window is unavailable.
+    let plain = RootDatabaseImpl::new_inner(false);
+    assert!(!plain.salsa_events_reset(), "reset must report disabled counters");
+    assert!(plain.salsa_key_event_window().is_none(), "no window unless enabled");
+
+    let mut db = RootDatabaseImpl::new_with_salsa_events();
+    let file_id = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new("/window.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
+
+    // Warm phase: executions recorded here must NOT leak into the window.
+    let _ = db.parse(file_id);
+    assert!(db.salsa_events_reset(), "reset must succeed with counters enabled");
+    let window = db.salsa_key_event_window().expect("window available when enabled");
+    assert_eq!(window.distinct_keys, 0, "reset must clear all per-key entries");
+    assert!(
+        db.salsa_event_report().expect("per-ingredient report available").is_empty(),
+        "reset must clear per-ingredient counters too"
+    );
+
+    // Window: one revision-bumping change, then the observed re-execution.
+    db.set_file_text(file_id, "Процедура Тест()\n\tФ = 1;\nКонецПроцедуры");
+    let _ = db.parse(file_id);
+
+    let window = db.salsa_key_event_window().expect("window available when enabled");
+    assert!(window.distinct_keys >= 1, "the re-parse must be recorded");
+    assert_eq!(window.distinct_keys, window.rows.len(), "count must cover ALL keys, not top-K");
+    let parse_row = window
+        .rows
+        .iter()
+        .find(|r| r.name.contains("parse"))
+        .expect("the parse key must appear in the window");
+    assert!(parse_row.execute >= 1);
+    assert!(
+        parse_row.name.contains("/window.bsl"),
+        "keys must decode to module paths in the window's revision, got {:?}",
+        parse_row.name
+    );
+}
