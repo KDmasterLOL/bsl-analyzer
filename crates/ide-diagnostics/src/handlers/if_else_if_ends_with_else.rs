@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -18,19 +18,62 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    crate::simple_hir_diagnostic(
+    let mut diagnostic = crate::simple_hir_diagnostic(
         DiagnosticCode::IfElseIfEndsWithElse,
         "Конструкция Если-ИначеЕсли должна заканчиваться блоком Иначе",
         range,
         ctx,
-    )
+    )?;
+
+    // The range points at the closing `КонецЕсли`; insert an empty `Иначе` branch with a
+    // TODO right before it, matching its indentation. It leaves a placeholder for the
+    // author, so it is opt-in rather than part of `source.fixAll`.
+    let text = ctx.file_text();
+    let end_if_start: usize = range.start().into();
+    let indent = line_indent(&text, end_if_start);
+    let insert = format!("Иначе\n{indent}    // TODO: обработать остальные случаи\n{indent}");
+    diagnostic.fixes = vec![Fix::manual(
+        "Добавить блок Иначе",
+        vec![TextEdit { range: TextRange::empty(range.start()), new_text: insert }],
+    )];
+
+    Some(diagnostic)
+}
+
+/// The leading whitespace of the line containing `offset` (its indentation).
+fn line_indent(text: &str, offset: usize) -> &str {
+    let line_start = text[..offset].rfind('\n').map_or(0, |nl| nl + 1);
+    let line_prefix = &text[line_start..offset];
+    let indent_end = line_prefix.find(|c: char| c != ' ' && c != '\t').unwrap_or(line_prefix.len());
+    &line_prefix[..indent_end]
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_fix_snapshot_for};
     use crate::DiagnosticCode;
     use expect_test::expect;
+
+    #[test]
+    fn test_fix_inserts_else_with_indent() {
+        let code = "Процедура Тест(Значение)\n    Если Значение = 1 Тогда\n        Сообщить(\"Один\");\n    ИначеЕсли Значение = 2 Тогда\n        Сообщить(\"Два\");\n    КонецЕсли;\nКонецПроцедуры";
+        check_fix_snapshot_for(
+            code,
+            DiagnosticCode::IfElseIfEndsWithElse,
+            expect![[r#"
+            IfElseIfEndsWithElse @ 6:5..6:14 — Добавить блок Иначе [fix_all=false]
+            Процедура Тест(Значение)
+                Если Значение = 1 Тогда
+                    Сообщить("Один");
+                ИначеЕсли Значение = 2 Тогда
+                    Сообщить("Два");
+                Иначе
+                    // TODO: обработать остальные случаи
+                КонецЕсли;
+            КонецПроцедуры"#]],
+        );
+    }
+
     #[test]
     fn test_if_elsif_without_else() {
         let code = r#"Процедура Тест(Значение)

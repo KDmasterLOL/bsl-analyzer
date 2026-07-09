@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 use line_index::LineIndex;
 
@@ -132,21 +132,43 @@ fn create_diagnostic(
 
     let message = format!("Найдено {} подряд идущих пустых строк (максимум: {})", count, allowed);
 
+    // The range spans every empty line except the first, so deleting it collapses the
+    // run to a single blank line — always at or under the allowed maximum.
+    let range = TextRange::new(start_byte, end_byte);
     Diagnostic {
         code,
         message,
         severity: ctx.severity(code),
-        range: TextRange::new(start_byte, end_byte),
+        range,
         tags: ctx.tags(code),
-        fixes: vec![],
+        fixes: vec![Fix::safe(
+            "Удалить лишние пустые строки",
+            vec![TextEdit { range, new_text: String::new() }],
+        )],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{check_ast_diagnostic, format_diags};
+    use crate::test_utils::{check_ast_diagnostic, check_fix_snapshot_for, format_diags};
+    use crate::DiagnosticCode;
     use expect_test::expect;
+
+    #[test]
+    fn test_fix_collapses_to_single_blank_line() {
+        let code = "Процедура А()\n\n\n\nКонецПроцедуры";
+        check_fix_snapshot_for(
+            code,
+            DiagnosticCode::ConsecutiveEmptyLines,
+            expect![[r#"
+            ConsecutiveEmptyLines @ 2:1..4:1 — Удалить лишние пустые строки [fix_all=true]
+            Процедура А()
+
+            КонецПроцедуры"#]],
+        );
+    }
+
     #[test]
     fn test_empty_file() {
         let code = "";

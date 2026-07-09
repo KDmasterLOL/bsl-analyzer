@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -18,19 +18,39 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    crate::simple_hir_diagnostic(
+    let mut diagnostic = crate::simple_hir_diagnostic(
         DiagnosticCode::UnaryPlusInConcatenation,
         "Унарный плюс в конкатенации строк",
         range,
         ctx,
-    )
+    )?;
+
+    // The flagged `+` is the stray unary operator; removing it turns the erroneous
+    // `"a" + + "b"` into a plain concatenation.
+    diagnostic.fixes =
+        vec![Fix::safe("Убрать унарный плюс", vec![TextEdit { range, new_text: String::new() }])];
+
+    Some(diagnostic)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_fix_snapshot_for};
     use crate::DiagnosticCode;
     use expect_test::expect;
+
+    #[test]
+    fn test_fix_removes_unary_plus() {
+        let code = "Плохо = \"Строка1\" + + \"Строка2\";";
+        check_fix_snapshot_for(
+            code,
+            DiagnosticCode::UnaryPlusInConcatenation,
+            expect![[r#"
+            UnaryPlusInConcatenation @ 1:21..1:22 — Убрать унарный плюс [fix_all=true]
+            Плохо = "Строка1" +  "Строка2";"#]],
+        );
+    }
+
     #[test]
     fn test_basic() {
         let code = r#"Процедура Тест()

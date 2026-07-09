@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 use lexer::{tokenize, Token, TokenKind};
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -63,18 +63,56 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     for group in comment_groups {
         if is_commented_code(&group, &config) {
+            // Deleting commented-out code is destructive and easy to regret, so it is an
+            // opt-in quick fix, never part of an unattended `source.fixAll` sweep. The whole
+            // commented line(s) are removed, but only when they hold nothing but the
+            // comments (no real code shares them — see `deletable_lines_range`).
+            let fixes = deletable_lines_range(&file_text, &group)
+                .map(|delete_range| {
+                    Fix::manual(
+                        "Удалить закомментированный код",
+                        vec![TextEdit { range: delete_range, new_text: String::new() }],
+                    )
+                })
+                .into_iter()
+                .collect();
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::CommentedCode,
                 message: message_ru(),
                 range: group.range,
                 severity: ctx.severity(code),
                 tags: ctx.tags(code),
-                fixes: Vec::new(),
+                fixes,
             });
         }
     }
 
     diagnostics
+}
+
+/// The full lines a comment group occupies — indentation and trailing newline included —
+/// but only when the group is the sole content of those lines. Returns `None` if any real
+/// code shares a line (before, between, or after the comments), so deleting never drops it.
+fn deletable_lines_range(text: &str, group: &CommentGroup) -> Option<TextRange> {
+    let start: usize = group.range.start().into();
+    let end: usize = group.range.end().into();
+    let line_start = text[..start].rfind('\n').map_or(0, |nl| nl + 1);
+    let line_end = text[end..].find('\n').map_or(text.len(), |nl| end + nl + 1);
+
+    // Everything in the region that is not a comment token must be whitespace.
+    let mut cursor = line_start;
+    for token in &group.tokens {
+        let token_start: usize = token.text_range().start().into();
+        if !text[cursor..token_start].trim().is_empty() {
+            return None;
+        }
+        cursor = token.text_range().end().into();
+    }
+    if !text[cursor..line_end].trim().is_empty() {
+        return None;
+    }
+
+    Some(TextRange::new((line_start as u32).into(), (line_end as u32).into()))
 }
 
 fn collect_comment_tokens(root: &SyntaxNode) -> Vec<SyntaxToken> {
@@ -640,9 +678,31 @@ fn is_cyrillic(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{check_ast_diagnostic, format_diags};
+    use crate::test_utils::{check_ast_diagnostic, check_fix_snapshot_for, format_diags};
     use crate::DiagnosticCode;
     use expect_test::expect;
+
+    #[test]
+    fn test_fix_deletes_commented_code_manual() {
+        let code = "Функция Тест()\n    //А = 1;\n    Возврат Б;\nКонецФункции";
+        check_fix_snapshot_for(
+            code,
+            DiagnosticCode::CommentedCode,
+            expect![[r#"
+            CommentedCode @ 2:5..2:13 — Удалить закомментированный код [fix_all=false]
+            Функция Тест()
+                Возврат Б;
+            КонецФункции"#]],
+        );
+    }
+
+    #[test]
+    fn test_fix_not_offered_for_inline_code_comment() {
+        // The comment body looks like code, but real code precedes it on the line, so
+        // deleting the line would drop the assignment — no fix is offered.
+        let code = "Функция Тест()\n    Х = ВызовФункции();    // Возврат Старое;\n    Возврат Х;\nКонецФункции";
+        check_fix_snapshot_for(code, DiagnosticCode::CommentedCode, expect![]);
+    }
 
     #[test]
     fn test_no_diagnostic_for_regular_comments() {
