@@ -889,8 +889,8 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
         DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
         InlayHintRequest, OnTypeFormatting, PrepareRenameRequest, RangeFormatting, References,
-        Rename, Request as _, SemanticTokensFullRequest, SignatureHelpRequest,
-        WorkspaceDiagnosticRequest, WorkspaceSymbolRequest,
+        Rename, Request as _, SelectionRangeRequest, SemanticTokensFullRequest,
+        SignatureHelpRequest, WorkspaceDiagnosticRequest, WorkspaceSymbolRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -923,6 +923,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_latency::<CallHierarchyOutgoingCalls>(crate::handlers::handle_call_hierarchy_outgoing)
         .on_latency::<InlayHintRequest>(crate::handlers::handle_inlay_hint)
         .on_latency::<WorkspaceSymbolRequest>(crate::handlers::handle_workspace_symbol)
+        .on_latency::<SelectionRangeRequest>(crate::handlers::handle_selection_range)
         .on_latency::<DocumentHighlightRequest>(crate::handlers::handle_document_highlight)
         .on_latency::<FoldingRangeRequest>(crate::handlers::handle_folding_range)
         .on_latency::<HoverRequest>(crate::handlers::handle_hover)
@@ -1070,6 +1071,8 @@ fn server_capabilities(
 
         workspace_symbol_provider: Some(lsp_types::OneOf::Left(true)),
 
+        selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(true)),
+
         ..Default::default()
     }
 }
@@ -1113,6 +1116,11 @@ mod tests {
         assert_eq!(caps.inlay_hint_provider, Some(lsp_types::OneOf::Left(true)));
 
         assert_eq!(caps.workspace_symbol_provider, Some(lsp_types::OneOf::Left(true)));
+
+        assert_eq!(
+            caps.selection_range_provider,
+            Some(lsp_types::SelectionRangeProviderCapability::Simple(true))
+        );
     }
 
     #[test]

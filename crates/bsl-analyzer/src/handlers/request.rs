@@ -15,10 +15,11 @@ use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InlayHint as LspInlayHint, InlayHintKind as LspInlayHintKind, InlayHintLabel, InlayHintParams,
     Location, MarkupContent, MarkupKind, OneOf, OptionalVersionedTextDocumentIdentifier,
-    PrepareRenameResponse, Range, ReferenceParams, RenameParams, SemanticTokens,
-    SemanticTokensParams, SemanticTokensResult, SignatureHelpParams, SymbolKind, TextDocumentEdit,
-    TextDocumentPositionParams, TextEdit, WorkspaceEdit, WorkspaceSymbol as LspWorkspaceSymbol,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    PrepareRenameResponse, Range, ReferenceParams, RenameParams, SelectionRange,
+    SelectionRangeParams, SemanticTokens, SemanticTokensParams, SemanticTokensResult,
+    SignatureHelpParams, SymbolKind, TextDocumentEdit, TextDocumentPositionParams, TextEdit,
+    WorkspaceEdit, WorkspaceSymbol as LspWorkspaceSymbol, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use rustc_hash::FxHashMap;
 use vfs::FileId;
@@ -763,6 +764,55 @@ pub fn handle_document_symbol(
         .collect();
 
     Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
+}
+
+pub fn handle_selection_range(
+    ctx: LatencyRequestContext,
+    params: SelectionRangeParams,
+) -> Result<Option<Vec<SelectionRange>>> {
+    let _p =
+        tracing::info_span!("handle_selection_range", uri = %params.text_document.uri).entered();
+
+    let uri = params.text_document.uri;
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    let mut offsets = Vec::with_capacity(params.positions.len());
+    for position in &params.positions {
+        // The result must be one range per position; a stale position (buffer
+        // shrank under the request) can't be answered, so bail cleanly.
+        let Ok(offset) =
+            crate::lsp::offset_with_encoding(line_index, text, *position, ctx.position_encoding)
+        else {
+            return Ok(None);
+        };
+        offsets.push(offset);
+    }
+
+    let chains = ctx.analysis.selection_ranges(file_id, &offsets);
+
+    let mut result = Vec::with_capacity(chains.len());
+    for chain in chains {
+        // Nest outermost → innermost so each `parent` points at the wider span.
+        let mut current: Option<Box<SelectionRange>> = None;
+        for range in chain.iter().rev() {
+            let lsp_range =
+                crate::lsp::range_with_encoding(line_index, text, *range, ctx.position_encoding)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to convert selection range"))?;
+            current = Some(Box::new(SelectionRange { range: lsp_range, parent: current }));
+        }
+        let Some(innermost) = current else {
+            return Ok(None);
+        };
+        result.push(*innermost);
+    }
+    Ok(Some(result))
 }
 
 pub fn handle_workspace_symbol(
@@ -2128,6 +2178,42 @@ mod tests {
             OneOf::Left(loc) => assert_eq!(loc.uri, uri),
             OneOf::Right(_) => panic!("expected a full location with range"),
         }
+    }
+
+    #[test]
+    fn selection_range_nests_from_cursor_outward() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///sel.bsl").unwrap();
+        let source = "Процедура Тест()\n    Итог = Первое + Второе;\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = SelectionRangeParams {
+            text_document: TextDocumentIdentifier { uri },
+            positions: vec![Position { line: 1, character: 11 }], // inside "Первое"
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let ranges = handle_selection_range(ctx, params).unwrap().unwrap();
+        assert_eq!(ranges.len(), 1);
+
+        // Walk the parent chain; each parent must strictly contain its child.
+        let mut node = &ranges[0];
+        let mut depth = 1;
+        while let Some(parent) = &node.parent {
+            let child = &node.range;
+            let wider = &parent.range;
+            let contains = (wider.start.line, wider.start.character)
+                <= (child.start.line, child.start.character)
+                && (child.end.line, child.end.character) <= (wider.end.line, wider.end.character);
+            assert!(contains, "parent {wider:?} must contain child {child:?}");
+            node = parent;
+            depth += 1;
+        }
+        assert!(depth >= 2, "expected a nested chain, got depth {depth}");
     }
 
     #[test]

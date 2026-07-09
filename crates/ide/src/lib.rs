@@ -13,6 +13,7 @@ mod hover;
 mod inlay_hints;
 mod references;
 mod rename;
+mod selection_range;
 mod signature_help;
 pub mod streaming;
 pub mod symbol_info;
@@ -143,6 +144,10 @@ impl Analysis {
     pub fn workspace_symbols(&self, query: &str) -> Vec<WorkspaceSymbol> {
         use ide_db::base_db::SourceRootId;
         workspace_symbols::workspace_symbols(&self.db, SourceRootId(0), query)
+    }
+
+    pub fn selection_ranges(&self, file_id: FileId, offsets: &[TextSize]) -> Vec<Vec<TextRange>> {
+        selection_range::selection_ranges(&self.db, file_id, offsets)
     }
 
     pub fn completions(
