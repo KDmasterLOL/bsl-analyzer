@@ -10,6 +10,7 @@ pub mod formatting;
 mod goto_definition;
 pub mod graph;
 mod hover;
+mod inlay_hints;
 mod references;
 mod rename;
 mod signature_help;
@@ -44,6 +45,7 @@ pub use ide_diagnostics::{
     DiagnosticsConfig, DiagnosticsContext, Fix, ImpactSeverity, MetadataTag, Severity,
     SoftwareQuality, TextEdit,
 };
+pub use inlay_hints::{InlayHint, InlayHintKind};
 pub use rename::{prepare_rename, rename, RenameError, RenameTarget};
 pub use signature_help::{ParameterInfo, SignatureHelp};
 pub use symbol_info::{
@@ -130,6 +132,10 @@ impl Analysis {
 
     pub fn folding_ranges(&self, file_id: FileId) -> Vec<FoldingRange> {
         folding::folding_ranges(&self.db, file_id)
+    }
+
+    pub fn inlay_hints(&self, file_id: FileId, range: TextRange) -> Vec<InlayHint> {
+        inlay_hints::inlay_hints(&self.db, file_id, range)
     }
 
     pub fn completions(

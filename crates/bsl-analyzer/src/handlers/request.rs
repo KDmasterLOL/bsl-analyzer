@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ide::{
     DocumentHighlightKind as IdeDocumentHighlightKind, FoldingRangeKind as IdeFoldingRangeKind,
-    Location as IdeLocation, RenameError,
+    InlayHintKind as IdeInlayHintKind, Location as IdeLocation, RenameError,
 };
 use line_index::{LineIndex, TextSize};
 use lsp_types::{
@@ -12,8 +12,9 @@ use lsp_types::{
     DocumentHighlight as LspDocumentHighlight, DocumentHighlightKind as LspDocumentHighlightKind,
     DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
     FoldingRange as LspFoldingRange, FoldingRangeKind as LspFoldingRangeKind, FoldingRangeParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
-    MarkupContent, MarkupKind, OneOf, OptionalVersionedTextDocumentIdentifier,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    InlayHint as LspInlayHint, InlayHintKind as LspInlayHintKind, InlayHintLabel, InlayHintParams,
+    Location, MarkupContent, MarkupKind, OneOf, OptionalVersionedTextDocumentIdentifier,
     PrepareRenameResponse, Range, ReferenceParams, RenameParams, SemanticTokens,
     SemanticTokensParams, SemanticTokensResult, SignatureHelpParams, SymbolKind, TextDocumentEdit,
     TextDocumentPositionParams, TextEdit, WorkspaceEdit,
@@ -391,6 +392,68 @@ fn convert_call_ranges(
         .into_iter()
         .map(|range| Ok(converter.convert(IdeLocation { file_id, range })?.range))
         .collect()
+}
+
+pub fn handle_inlay_hint(
+    ctx: LatencyRequestContext,
+    params: InlayHintParams,
+) -> Result<Option<Vec<LspInlayHint>>> {
+    let _p = tracing::info_span!("handle_inlay_hint", uri = %params.text_document.uri).entered();
+
+    let uri = params.text_document.uri;
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    // A visible range from a since-shrunk buffer can fall out of bounds; treat it
+    // as "nothing to hint" rather than a request failure, matching signature help.
+    let (Ok(start), Ok(end)) = (
+        crate::lsp::offset_with_encoding(
+            line_index,
+            text,
+            params.range.start,
+            ctx.position_encoding,
+        ),
+        crate::lsp::offset_with_encoding(line_index, text, params.range.end, ctx.position_encoding),
+    ) else {
+        return Ok(None);
+    };
+    let range = ide::TextRange::new(start, end);
+
+    let hints = ctx.analysis.inlay_hints(file_id, range);
+    if hints.is_empty() {
+        return Ok(None);
+    }
+
+    let mut result = Vec::with_capacity(hints.len());
+    for hint in hints {
+        let converted = crate::lsp::range_with_encoding(
+            line_index,
+            text,
+            ide::TextRange::empty(hint.position),
+            ctx.position_encoding,
+        )
+        .ok_or_else(|| anyhow::anyhow!("Failed to convert inlay hint position"))?;
+        result.push(LspInlayHint {
+            position: converted.start,
+            label: InlayHintLabel::String(hint.label),
+            kind: Some(match hint.kind {
+                IdeInlayHintKind::Parameter => LspInlayHintKind::PARAMETER,
+                IdeInlayHintKind::Type => LspInlayHintKind::TYPE,
+            }),
+            text_edits: None,
+            tooltip: None,
+            padding_left: Some(hint.padding_left),
+            padding_right: Some(hint.padding_right),
+            data: None,
+        });
+    }
+    Ok(Some(result))
 }
 
 pub fn handle_document_highlight(
@@ -1987,6 +2050,38 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].from.name, "Первый");
         assert_eq!(calls[0].from_ranges.len(), 1);
+    }
+
+    #[test]
+    fn inlay_hint_labels_call_arguments() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///hints.bsl").unwrap();
+        let source = "Функция Сложить(Первое, Второе)\n    Возврат Первое;\nКонецФункции\n\nПроцедура Тест()\n    Сложить(10, 20);\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = InlayHintParams {
+            work_done_progress_params: Default::default(),
+            text_document: TextDocumentIdentifier { uri },
+            range: lsp_types::Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 7, character: 0 },
+            },
+        };
+
+        let hints = handle_inlay_hint(ctx, params).unwrap().unwrap();
+        assert!(hints.iter().all(|h| h.kind == Some(LspInlayHintKind::PARAMETER)));
+        let labels: Vec<String> = hints
+            .iter()
+            .map(|h| match &h.label {
+                InlayHintLabel::String(s) => s.clone(),
+                _ => panic!("expected string label"),
+            })
+            .collect();
+        assert!(labels.contains(&"Первое:".to_string()), "{labels:?}");
+        assert!(labels.contains(&"Второе:".to_string()), "{labels:?}");
     }
 
     #[test]

@@ -888,8 +888,9 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
         CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
         DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
-        OnTypeFormatting, PrepareRenameRequest, RangeFormatting, References, Rename, Request as _,
-        SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceDiagnosticRequest,
+        InlayHintRequest, OnTypeFormatting, PrepareRenameRequest, RangeFormatting, References,
+        Rename, Request as _, SemanticTokensFullRequest, SignatureHelpRequest,
+        WorkspaceDiagnosticRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -920,6 +921,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_latency::<CallHierarchyPrepare>(crate::handlers::handle_prepare_call_hierarchy)
         .on_latency::<CallHierarchyIncomingCalls>(crate::handlers::handle_call_hierarchy_incoming)
         .on_latency::<CallHierarchyOutgoingCalls>(crate::handlers::handle_call_hierarchy_outgoing)
+        .on_latency::<InlayHintRequest>(crate::handlers::handle_inlay_hint)
         .on_latency::<DocumentHighlightRequest>(crate::handlers::handle_document_highlight)
         .on_latency::<FoldingRangeRequest>(crate::handlers::handle_folding_range)
         .on_latency::<HoverRequest>(crate::handlers::handle_hover)
@@ -1063,6 +1065,8 @@ fn server_capabilities(
 
         call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
 
+        inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
+
         ..Default::default()
     }
 }
@@ -1102,6 +1106,8 @@ mod tests {
             caps.call_hierarchy_provider,
             Some(lsp_types::CallHierarchyServerCapability::Simple(true))
         );
+
+        assert_eq!(caps.inlay_hint_provider, Some(lsp_types::OneOf::Left(true)));
     }
 
     #[test]
