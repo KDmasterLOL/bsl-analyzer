@@ -145,3 +145,10 @@ debug = 0
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Salsa fork (v0.27.2 + fix): an LRU-evicted fixpoint memo re-verified in a later
+# revision must re-execute instead of being mistaken for a poisoned cycle head
+# (bogus Cancelled::PropagatedPanic that poisons the module until the next write).
+[patch.crates-io]
+salsa = { git = "https://github.com/itrous/salsa.git", branch = "fix/evicted-cycle-head-false-panic" }
+salsa-macros = { git = "https://github.com/itrous/salsa.git", branch = "fix/evicted-cycle-head-false-panic" }

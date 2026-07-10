@@ -3585,8 +3585,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 [[package]]
 name = "salsa"
 version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffbaab832e2ea754afda4a738f987dd1e8bd30c9e5d8c981ee6a3934386095e2"
+source = "git+https://github.com/itrous/salsa.git?branch=fix%2Fevicted-cycle-head-false-panic#cdd0af431a1072a196b9158d591cc73df1581fe9"
 dependencies = [
  "boxcar",
  "crossbeam-queue",
@@ -3611,14 +3610,12 @@ dependencies = [
 [[package]]
 name = "salsa-macro-rules"
 version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de6872462ac73d39969a836273c24163e6a26a4e08f5114fcd80e25af30ea9c6"
+source = "git+https://github.com/itrous/salsa.git?branch=fix%2Fevicted-cycle-head-false-panic#cdd0af431a1072a196b9158d591cc73df1581fe9"
 
 [[package]]
 name = "salsa-macros"
 version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76bc78ffaf65b1a9175818592c5130aa10b1bb245a905722fd4db87cea8a8457"
+source = "git+https://github.com/itrous/salsa.git?branch=fix%2Fevicted-cycle-head-false-panic#cdd0af431a1072a196b9158d591cc73df1581fe9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3927,8 +3924,8 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28332bb44a9e7e7f1aa43ce4d97b6d1b27323a1fc160d4cfe0089245e1750845"
 dependencies = [
- "foldhash 0.1.5",
- "hashbrown 0.15.5",
+ "foldhash 0.2.0",
+ "hashbrown 0.17.0",
 ]
 
 [[package]]
