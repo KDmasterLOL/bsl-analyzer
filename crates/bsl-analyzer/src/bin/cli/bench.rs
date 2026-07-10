@@ -20,6 +20,11 @@ pub enum BenchCommands {
 
         #[arg(long = "boot-budget-ms", default_value = "120000")]
         boot_budget_ms: u64,
+
+        /// Feature names whose probe cannot fit the stand (skipping one is a
+        /// measurement verdict — record it in the run report).
+        #[arg(long = "skip-features", value_delimiter = ',')]
+        skip_features: Vec<String>,
     },
     /// Execute exactly one manifest point in this process and report timings.
     Run {
@@ -70,8 +75,12 @@ pub enum BenchCommands {
 
 pub fn run_bench(command: BenchCommands) -> ! {
     match command {
-        BenchCommands::Discover { source_dir, output, boot_budget_ms } => {
-            let args = bsl_analyzer::bench::discover::DiscoverArgs { source_dir, boot_budget_ms };
+        BenchCommands::Discover { source_dir, output, boot_budget_ms, skip_features } => {
+            let args = bsl_analyzer::bench::discover::DiscoverArgs {
+                source_dir,
+                boot_budget_ms,
+                skip_features,
+            };
             match bsl_analyzer::bench::discover::discover(&args) {
                 Ok(manifest) => {
                     let text = match serde_json::to_string_pretty(&manifest) {

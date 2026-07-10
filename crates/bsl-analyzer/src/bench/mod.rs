@@ -434,8 +434,13 @@ mod tests {
         let manifest = discover(&DiscoverArgs {
             source_dir: tmp.path().to_path_buf(),
             boot_budget_ms: 60_000,
+            skip_features: vec!["signature_help".to_string()],
         })
         .unwrap();
+        assert!(
+            manifest.targets.iter().all(|t| t.spec.feature_name() != "signature_help"),
+            "skipped features must not be probed into the manifest"
+        );
         validate(&manifest).unwrap();
         assert!(
             manifest.targets.iter().any(|t| t.spec.feature_name() == "hover"),

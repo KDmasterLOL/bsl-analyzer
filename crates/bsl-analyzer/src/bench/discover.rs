@@ -24,6 +24,11 @@ use crate::bench::runner::{self, BenchEnv, ResolvedTarget, RunError};
 pub struct DiscoverArgs {
     pub source_dir: PathBuf,
     pub boot_budget_ms: u64,
+    /// Feature names (as in the manifest `feature` tag) to skip entirely —
+    /// for features whose mere probe cannot fit the stand (e.g. a cold
+    /// whole-workspace call graph exceeding available RAM). The skip itself
+    /// is a measurement verdict and belongs in the run report.
+    pub skip_features: Vec<String>,
 }
 
 const PROBE_OFFSET_CAP: usize = 400;
@@ -38,19 +43,35 @@ pub fn discover(args: &DiscoverArgs) -> Result<BenchManifest, RunError> {
     let mut targets: Vec<Target> = Vec::new();
     for (class, relative_path) in representative_files(&files) {
         let resolved = runner::resolve_target(&env, &relative_path, None)?;
-        discover_in_file(&mut env, &class, &relative_path, &resolved, &mut targets)?;
+        discover_in_file(
+            &mut env,
+            &class,
+            &relative_path,
+            &resolved,
+            &args.skip_features,
+            &mut targets,
+        )?;
+        // Probing accumulates salsa memos across heavy structures (usage
+        // index, call graph, inference of the largest modules); on a 25k-file
+        // workspace that OOMs the discovery process unless released between
+        // files. Discovery is not a measurement — warm state is expendable.
+        trim_deep(&mut env);
     }
 
     let config_hash = std::fs::read_to_string(args.source_dir.join("bsl-analyzer.toml"))
         .ok()
         .map(|text| crate::bench::manifest::hash_text(&text));
 
-    Ok(BenchManifest {
+    let manifest = BenchManifest {
         schema_version: SCHEMA_VERSION,
         workspace_commit: workspace_commit(&args.source_dir),
         config_hash,
         targets,
-    })
+    };
+    // A manifest that fails its own validation must die here, at discovery
+    // time — not hours later in the first matrix run.
+    crate::bench::manifest::validate(&manifest).map_err(RunError::Manifest)?;
+    Ok(manifest)
 }
 
 fn workspace_commit(source_dir: &Path) -> Option<String> {
@@ -142,6 +163,7 @@ fn discover_in_file(
     class: &str,
     relative_path: &str,
     resolved: &ResolvedTarget,
+    skip_features: &[String],
     targets: &mut Vec<Target>,
 ) -> Result<(), RunError> {
     let offsets = ident_offsets(env, resolved);
@@ -174,9 +196,27 @@ fn discover_in_file(
         |o| FeatureSpec::Rename { offset: o, new_name: "БенчНовоеИмя".to_string() },
     ];
     for ctor in positional {
-        if let Some((spec, count)) = probe_offsets(env, resolved, &offsets, *ctor) {
+        let feature = ctor(0).feature_name();
+        if skip_features.iter().any(|s| s == feature) {
+            tracing::info!(class, feature, "discovery probe skipped by --skip-features");
+            continue;
+        }
+        let _span = tracing::info_span!("discover_probe", class, feature).entered();
+        let probed = probe_offsets(env, resolved, &offsets, *ctor);
+        tracing::info!(
+            class,
+            feature,
+            found = probed.is_some(),
+            rss_mb = crate::smoke::read_rss_bytes().map(|b| b / (1024 * 1024)),
+            "discovery probe done"
+        );
+        if let Some((spec, count)) = probed {
             push(spec, count, targets);
         }
+        // Deep, not light: a single references / call-hierarchy probe leaves
+        // multi-GB structures (usage index, call graph) that LRU caps alone
+        // do not release — cumulative families OOM a 25k-file discovery.
+        trim_deep(env);
     }
 
     let fileless: &[FeatureSpec] = &[
@@ -191,6 +231,10 @@ fn discover_in_file(
         },
     ];
     for spec in fileless {
+        if skip_features.iter().any(|s| s == spec.feature_name()) {
+            tracing::info!(class, feature = spec.feature_name(), "discovery probe skipped");
+            continue;
+        }
         overlay_and_probe(env, resolved, spec.clone()).into_iter().for_each(|count| {
             // Zero-count scans (no actions / no diagnostics) are still a real
             // path, but a NonEmpty/positive bound would be a lie — keep only
@@ -199,6 +243,7 @@ fn discover_in_file(
                 push(spec.clone(), count, targets);
             }
         });
+        trim_light(env);
     }
 
     if let Some(offsets3) = offsets.get(..offsets.len().min(3)) {
@@ -213,8 +258,8 @@ fn discover_in_file(
     }
 
     if class.ends_with("_large") {
-        discover_workspace_symbol(env, resolved, relative_path, &file_hash, targets);
-        discover_edit_and_burst(env, resolved, relative_path, &file_hash, &offsets, targets);
+        discover_workspace_symbol(env, resolved, class, relative_path, &file_hash, targets);
+        discover_edit_and_burst(env, resolved, class, relative_path, &file_hash, &offsets, targets);
     }
 
     Ok(())
@@ -223,6 +268,7 @@ fn discover_in_file(
 fn discover_workspace_symbol(
     env: &mut BenchEnv,
     resolved: &ResolvedTarget,
+    class: &str,
     relative_path: &str,
     file_hash: &str,
     targets: &mut Vec<Target>,
@@ -254,7 +300,7 @@ fn discover_workspace_symbol(
         if let Some(count) = overlay_and_probe(env, resolved, spec.clone()) {
             if count > 0 {
                 targets.push(Target {
-                    id: "workspace_symbol/scan/01".to_string(),
+                    id: format!("workspace_symbol/scan_{class}/01"),
                     relative_path: relative_path.to_string(),
                     file_hash: file_hash.to_string(),
                     spec,
@@ -265,7 +311,7 @@ fn discover_workspace_symbol(
         }
     }
     targets.push(Target {
-        id: "workspace_symbol/empty_control/01".to_string(),
+        id: format!("workspace_symbol/empty_control_{class}/01"),
         relative_path: relative_path.to_string(),
         file_hash: file_hash.to_string(),
         spec: FeatureSpec::WorkspaceSymbol { query: String::new() },
@@ -277,6 +323,7 @@ fn discover_workspace_symbol(
 fn discover_edit_and_burst(
     env: &mut BenchEnv,
     resolved: &ResolvedTarget,
+    class: &str,
     relative_path: &str,
     file_hash: &str,
     offsets: &[u32],
@@ -295,7 +342,7 @@ fn discover_edit_and_burst(
     let end = resolved.text.len() as u32;
     if end > first_ident {
         targets.push(Target {
-            id: "edit/body_append/01".to_string(),
+            id: format!("edit/body_append_{class}/01"),
             relative_path: relative_path.to_string(),
             file_hash: file_hash.to_string(),
             spec: FeatureSpec::Edit {
@@ -312,7 +359,7 @@ fn discover_edit_and_burst(
     }
 
     targets.push(Target {
-        id: "burst/did_open/01".to_string(),
+        id: format!("burst/did_open_{class}/01"),
         relative_path: relative_path.to_string(),
         file_hash: file_hash.to_string(),
         spec: FeatureSpec::Burst {
@@ -327,6 +374,21 @@ fn discover_edit_and_burst(
         expect: Expect::NonEmpty,
         note: Some("post-didOpen sequential core cost".to_string()),
     });
+}
+
+/// Light trim for the cheap single-file families; keeps the working set near
+/// the LRU caps without paying full re-derivation.
+fn trim_light(env: &mut BenchEnv) {
+    env.state.analysis_host.raw_database_mut().enforce_lru();
+}
+
+/// Deep release: LRU trim past the working-set caps, drop the shared
+/// green-node arena on every thread and return freed pages.
+fn trim_deep(env: &mut BenchEnv) {
+    env.state.analysis_host.raw_database_mut().enforce_lru_deep();
+    syntax::clear_shared_node_cache();
+    rayon::broadcast(|_| syntax::clear_shared_node_cache());
+    profile::purge_allocator();
 }
 
 fn probe_offsets(
@@ -352,7 +414,24 @@ fn overlay_and_probe(
     spec: FeatureSpec,
 ) -> Option<usize> {
     runner::ensure_overlay(env, resolved, &spec).ok()?;
-    runner::execute_once(env, resolved, &spec).ok().map(|(_, obs)| obs.count)
+    // A probe may hit a server-side panic (e.g. a salsa cycle head poisoned
+    // for the whole revision on some real-world module). Discovery's job is
+    // to map what IS measurable — record the failure and move on; the panic
+    // itself is a baseline finding, not a reason to lose every other target.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runner::execute_once(env, resolved, &spec).ok().map(|(_, obs)| obs.count)
+    }));
+    match outcome {
+        Ok(count) => count,
+        Err(_) => {
+            tracing::warn!(
+                feature = spec.feature_name(),
+                url = %resolved.url,
+                "probe panicked; feature skipped for this file"
+            );
+            None
+        }
+    }
 }
 
 /// Observed count → generous cardinality bound. The lower bound stays at 1 so
