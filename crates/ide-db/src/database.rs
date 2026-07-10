@@ -1930,6 +1930,11 @@ impl DefDatabase for RootDatabaseImpl {
         hir::source_root_name_usage_query(self, source_root_input)
     }
 
+    fn file_name_offsets(&self, file_id: FileId) -> Arc<hir::FileNameOffsets> {
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        hir::file_name_offsets_query(self, file_id_input)
+    }
+
     fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<hir::ExternalRef>> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         hir::file_external_refs_query(self, file_id_input)

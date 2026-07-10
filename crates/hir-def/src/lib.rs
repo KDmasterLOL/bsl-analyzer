@@ -52,8 +52,8 @@ pub use module_index::{
 };
 pub use name::Name;
 pub use name_usage_index::{
-    file_name_usage_query, normalize_name, source_root_name_usage_query, FileNameUsage,
-    SourceRootNameUsage,
+    file_name_offsets_query, file_name_usage_query, normalize_match_name, normalize_name,
+    source_root_name_usage_query, FileNameOffsets, FileNameUsage, SourceRootNameUsage,
 };
 pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
@@ -113,6 +113,8 @@ pub trait DefDatabase: base_db::RootQueryDb {
         &self,
         source_root_id: SourceRootId,
     ) -> Arc<crate::name_usage_index::SourceRootNameUsage>;
+
+    fn file_name_offsets(&self, file_id: FileId) -> Arc<crate::name_usage_index::FileNameOffsets>;
 
     fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<ExternalRef>>;
 

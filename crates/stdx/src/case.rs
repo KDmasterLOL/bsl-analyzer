@@ -77,6 +77,23 @@ impl CaseExt for str {
     }
 }
 
+/// Folds per char with no contextual mappings, so two strings produce the
+/// same key **iff** [`eq_ignore_case`] holds for them. `fold_lower` is not
+/// that key: its `str::to_lowercase` fallback applies contextual mappings
+/// (Greek final sigma), splitting `eq_ignore_case`-equal strings into
+/// different keys. Use this for match buckets, `fold_lower` for display or
+/// `to_lowercase`-compatible persisted keys.
+pub fn fold_lower_per_char(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match fold_char_fast(c) {
+            Some(folded) => out.push(folded),
+            None => out.extend(c.to_lowercase()),
+        }
+    }
+    out
+}
+
 #[cold]
 fn eq_ignore_case_slow(
     x: char,
@@ -149,6 +166,22 @@ mod tests {
         ] {
             assert_eq!(s.fold_lower(), s.to_lowercase(), "mismatch for {s:?}");
         }
+    }
+
+    #[test]
+    fn per_char_fold_key_agrees_with_eq_ignore_case() {
+        // Same key <=> eq_ignore_case, including where contextual
+        // `to_lowercase` (and therefore `fold_lower`) disagrees.
+        let cases =
+            [("Процедура", "ПРОЦЕДУРА"), ("İ", "i\u{307}"), ("ΟΔΟΣ", "οδοσ"), ("ΟΔΟΣ", "οδος")];
+        for (a, b) in cases {
+            assert_eq!(
+                fold_lower_per_char(a) == fold_lower_per_char(b),
+                eq_ignore_case(a, b),
+                "key/eq mismatch for {a:?} vs {b:?}"
+            );
+        }
+        assert_ne!("ΟΔΟΣ".fold_lower(), fold_lower_per_char("ΟΔΟΣ"), "final sigma is contextual");
     }
 
     #[test]

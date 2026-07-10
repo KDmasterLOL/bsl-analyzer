@@ -28,6 +28,34 @@ impl FileNameUsage {
     }
 }
 
+/// Start offsets of every name token in one file, keyed by the folded name.
+///
+/// References/rename resolve popular names (standard event handlers exist in
+/// hundreds of modules) against every candidate file the aggregated index
+/// returns. Walking each candidate's syntax tree on every request repeats the
+/// same token scan on warm paths; this projection pays the walk once per file
+/// revision and lets consumers jump straight to the matching tokens.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileNameOffsets {
+    by_name: FxHashMap<Name, Box<[u32]>>,
+}
+
+impl FileNameOffsets {
+    /// Token start offsets for `match_name` (a [`normalize_match_name`] key),
+    /// in document order.
+    pub fn offsets(&self, match_name: &Name) -> &[u32] {
+        self.by_name.get(match_name).map(|v| v.as_ref()).unwrap_or(&[])
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceRootNameUsage {
     by_name: FxHashMap<Name, Vec<FileId>>,
@@ -49,6 +77,15 @@ impl SourceRootNameUsage {
 
 pub fn normalize_name(name: &Name) -> Name {
     Name::new(&name.as_str().fold_lower())
+}
+
+/// Match-bucket key: same key iff `Name::eq_ignore_case` holds. `fold_lower`
+/// is NOT that key — its contextual `to_lowercase` fallback (Greek final
+/// sigma) splits `eq_ignore_case`-equal names into different keys, and the
+/// lexer admits any `\p{L}` identifier. Offset buckets must agree with the
+/// token-level comparison or lookups silently miss occurrences.
+pub fn normalize_match_name(name: &Name) -> Name {
+    Name::new(&stdx::case::fold_lower_per_char(name.as_str()))
 }
 
 /// Approximate live heap bytes for Salsa's `memory_usage` report: the `names`
@@ -83,6 +120,54 @@ pub fn file_name_usage_query<'db>(
     }
 
     Arc::new(FileNameUsage { names })
+}
+
+/// Approximate live heap bytes for Salsa's `memory_usage` report: the map
+/// table, each name's non-inlined `SmolStr` payload, and the offset slices.
+fn file_name_offsets_heap(v: &Arc<FileNameOffsets>) -> usize {
+    use crate::heap_estimate::{map_table_bytes, name_bytes};
+
+    let mut bytes = map_table_bytes::<Name, Box<[u32]>>(v.by_name.len());
+    for (name, offsets) in &v.by_name {
+        bytes += name_bytes(name) + std::mem::size_of_val(offsets.as_ref());
+    }
+    bytes
+}
+
+// Kept separate from `file_name_usage_query` on purpose: the aggregated index
+// touches every workspace file cold and only needs name *presence*, while the
+// offsets are needed only for files that references/rename actually visit.
+// Folding them into one query would materialise offset maps for all 25k+
+// files during the cold index build for no reader.
+//
+// The `lru` cap is not a same-request ceiling: salsa evicts at revision
+// boundaries and explicit trims, so one request over N candidate files keeps
+// N maps resident until then. The `heap_size` hook makes that residency
+// visible to `memory_report`.
+#[salsa::tracked(lru = 1024, heap_size = file_name_offsets_heap)]
+pub fn file_name_offsets_query<'db>(
+    db: &'db dyn DefDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<FileNameOffsets> {
+    let file_id = file_id_input.file_id(db);
+    let _span = tracing::debug_span!("file_name_offsets_query", ?file_id).entered();
+
+    let parse = db.parse_ref(file_id);
+    let root = parse.syntax_node();
+
+    let mut by_name: FxHashMap<Name, Vec<u32>> = FxHashMap::default();
+    for token in root.descendants_with_tokens().filter_map(|e| e.into_token()) {
+        if !token.kind().is_name_token() {
+            continue;
+        }
+        by_name
+            .entry(Name::new(&stdx::case::fold_lower_per_char(token.text())))
+            .or_default()
+            .push(u32::from(token.text_range().start()));
+    }
+
+    let by_name = by_name.into_iter().map(|(name, offsets)| (name, offsets.into())).collect();
+    Arc::new(FileNameOffsets { by_name })
 }
 
 #[salsa::tracked(lru = 4)]

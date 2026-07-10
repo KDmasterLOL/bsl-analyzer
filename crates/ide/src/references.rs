@@ -1,4 +1,6 @@
-use hir::{normalize_usage_name, Name, ReferenceScope, SemanticSymbol, Semantics};
+use hir::{
+    normalize_match_name, normalize_usage_name, Name, ReferenceScope, SemanticSymbol, Semantics,
+};
 use ide_db::RootDatabase;
 use syntax::TextSize;
 use vfs::FileId;
@@ -76,7 +78,15 @@ pub(crate) fn find_references_in_file<DB: RootDatabase>(
 ) -> Vec<Location> {
     let _span = tracing::debug_span!("find_references_in_file", ?file_id).entered();
 
-    let target_name = target_symbol.name.clone();
+    // Popular names (standard event handlers) yield hundreds of candidate
+    // files; the memoised per-file offsets replace a full token walk per
+    // request with a lookup, so only the actual occurrences pay resolution.
+    let normalized = normalize_match_name(&target_symbol.name);
+    let occurrences = db.file_name_offsets(file_id);
+    let offsets = occurrences.offsets(&normalized);
+    if offsets.is_empty() {
+        return Vec::new();
+    }
 
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
@@ -84,13 +94,14 @@ pub(crate) fn find_references_in_file<DB: RootDatabase>(
 
     let mut references = Vec::new();
 
-    for token in root.descendants_with_tokens().filter_map(|e| e.into_token()) {
-        if !token.kind().is_name_token() {
+    for &offset in offsets {
+        let Some(token) = root.token_at_offset(TextSize::from(offset)).right_biased() else {
             continue;
-        }
-
-        let token_name = Name::new(token.text());
-        if !token_name.eq_ignore_case(&target_name) {
+        };
+        if !token.kind().is_name_token()
+            || u32::from(token.text_range().start()) != offset
+            || !Name::new(token.text()).eq_ignore_case(&target_symbol.name)
+        {
             continue;
         }
 
@@ -106,7 +117,7 @@ pub(crate) fn find_references_in_file<DB: RootDatabase>(
 
     tracing::debug!(
         count = references.len(),
-        target_name = %target_name.as_str(),
+        target_name = %target_symbol.name.as_str(),
         "Found references"
     );
 
@@ -219,6 +230,48 @@ mod tests {
             "Expected at least 3 references, found {}",
             references.len()
         );
+    }
+
+    #[test]
+    fn find_references_survive_edit_that_shifts_offsets() {
+        let source = "Процедура МояПроцедура()\nКонецПроцедуры\n\nПроцедура Тест()\n    МояПроцедура();\nКонецПроцедуры\n";
+        let (mut db, file_id) = create_db_with_file(source);
+
+        let def_offset = source.find("МояПроцедура").unwrap();
+        let before = find_references(&db, file_id, TextSize::from(def_offset as u32));
+        assert_eq!(before.len(), 2);
+
+        // Prepend a comment so every occurrence moves; memoised per-file
+        // offsets must be recomputed, not replayed at the stale positions.
+        let shifted = format!("// сдвиг\n{source}");
+        db.set_file_text(file_id, &shifted);
+
+        let def_offset = shifted.find("МояПроцедура").unwrap();
+        let after = find_references(&db, file_id, TextSize::from(def_offset as u32));
+        assert_eq!(after.len(), 2);
+        for loc in &after {
+            let start = usize::from(loc.range.start());
+            assert_eq!(&shifted[start..start + "МояПроцедура".len()], "МояПроцедура");
+        }
+    }
+
+    #[test]
+    fn find_references_final_sigma_keeps_token_walk_semantics() {
+        // Final-sigma pair: `eq_ignore_case`-equal tokens whose contextual
+        // `to_lowercase` keys differ. Local-symbol keys normalise via
+        // `fold_lower` (`SemanticSymbolKey::BodyLocal`), so the usage never
+        // matches the declaration's key: exactly one reference, same as the
+        // pre-offsets token walk. The offsets bucket uses the per-char fold
+        // (`normalize_match_name`) so its candidate set equals the old
+        // `eq_ignore_case` prefilter; this pins that neither a missed token
+        // nor a new false match appears for such identifiers.
+        let source = "Процедура Тест(ΟΔΟΣ)\n    Рез = οδοσ + 1;\nКонецПроцедуры\n";
+        let (db, file_id) = create_db_with_file(source);
+
+        let decl_offset = source.find("ΟΔΟΣ").unwrap();
+        let references = find_references(&db, file_id, TextSize::from(decl_offset as u32));
+        assert_eq!(references.len(), 1, "declaration only, got {references:?}");
+        assert_eq!(usize::from(references[0].range.start()), decl_offset);
     }
 
     #[test]

@@ -130,7 +130,8 @@ pub mod dataflow {
 
 pub use hir_def::compute_execution_context;
 pub use hir_def::name_usage_index::{
-    normalize_name as normalize_usage_name, FileNameUsage, SourceRootNameUsage,
+    normalize_match_name, normalize_name as normalize_usage_name, FileNameOffsets, FileNameUsage,
+    SourceRootNameUsage,
 };
 pub use hir_def::region_tree::lower_regions;
 pub use hir_def::resolver::Resolution;
@@ -139,10 +140,11 @@ pub use hir_def::MethodIdInput;
 
 pub use hir_def::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query,
-    file_name_usage_query, item_tree_query, method_body_query, method_body_with_source_map_query,
-    module_bodies_query, module_call_summary_query, module_data_query, module_index_query,
-    region_tree_query, set_module_bodies_lru_sweep_mode, source_root_name_usage_query,
-    symbol_tree_query, workspace_index_query, workspace_symbols_query,
+    file_name_offsets_query, file_name_usage_query, item_tree_query, method_body_query,
+    method_body_with_source_map_query, module_bodies_query, module_call_summary_query,
+    module_data_query, module_index_query, region_tree_query, set_module_bodies_lru_sweep_mode,
+    source_root_name_usage_query, symbol_tree_query, workspace_index_query,
+    workspace_symbols_query,
 };
 
 pub use bsl_config::VisibleConfig;
