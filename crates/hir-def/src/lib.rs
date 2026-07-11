@@ -1,5 +1,6 @@
 pub mod body;
 pub mod call_graph;
+pub mod call_hierarchy_index;
 pub mod catch_class;
 pub mod common_module_ref;
 pub mod conditional_tree;
@@ -40,6 +41,7 @@ pub use body::{
     lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, DeprecatedKind8312,
     ExistingBindingKind, ExternalRef, LowerResult, ManagerType, RedundantAccessKind,
 };
+pub use call_hierarchy_index::{CallHierarchyReverseIndex, MethodCallPair};
 pub use hir::{BinaryOp, Binding, Expr, IfStmt, Literal, Stmt, UnaryOp};
 
 pub use cfg_types::{BindingId, ExprId, IdConversion, StmtId};

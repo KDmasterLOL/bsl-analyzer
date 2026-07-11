@@ -25,8 +25,10 @@ pub use hir_def::{all_sdbl_in_file_query, sdbl_hir_for_file_query, SdblHirEntrie
 pub use hir_def::{
     BindingId, DefWithBodyId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId,
 };
+pub use hir_def::{
+    CallHierarchyReverseIndex, MethodCallPair, MethodId, ModuleData, ModuleId, VariableId,
+};
 pub use hir_def::{ExecutionContext, QualifiedName};
-pub use hir_def::{MethodId, ModuleData, ModuleId, VariableId};
 pub use hir_def::{RedundantAccessKind, SdblExprId};
 
 pub use hir_def::body::{
