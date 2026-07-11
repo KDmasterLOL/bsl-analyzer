@@ -1,5 +1,6 @@
 pub mod batch_fixes;
 mod call_hierarchy;
+mod call_hierarchy_index;
 mod completion;
 pub mod config_finder;
 pub mod diagnostics_catalog;
@@ -22,6 +23,11 @@ mod type_definition;
 mod workspace_symbols;
 
 pub use call_hierarchy::{CallHierarchyCall, CallHierarchyItem};
+pub use call_hierarchy_index::{
+    build_call_hierarchy_index, CallHierarchyBatchEvent, CallHierarchyBatchEventKind,
+    CallHierarchyBatchPhase, CallHierarchyIndexBuildError, CallHierarchyIndexBuildRequest,
+    CallHierarchyIndexBuildResult, CallHierarchyRssSample,
+};
 pub use completion::{CompletionItem, CompletionItemKind};
 pub use diagnostics_catalog::{catalog_entry, diagnostic_catalog, CatalogEntry, SeverityBucket};
 pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
