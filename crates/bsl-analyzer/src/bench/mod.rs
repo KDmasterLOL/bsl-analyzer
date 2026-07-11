@@ -181,6 +181,38 @@ mod tests {
     }
 
     #[test]
+    fn call_hierarchy_index_bench_reports_todo_five_digest() {
+        // Given: the two-method fixture and one module per fresh builder batch.
+        let r = run_one_mode(
+            FeatureSpec::CallHierarchyIndexBuild { batch_size: 1 },
+            Expect::Cardinality { min: 1, max: 1 },
+            RunMode::Memory,
+        )
+        .unwrap();
+
+        // When: the production bounded builder completes in the booted process.
+        let index = r.call_hierarchy_index.expect("mode C must attach index-build metrics");
+        let memory = r.memory.expect("mode C must attach memory metrics");
+
+        // Then: the durable pair digest and process-wide RSS report remain complete.
+        assert_eq!(r.feature, "call_hierarchy_index_build");
+        assert_eq!(r.observed_count, 1);
+        assert_eq!(r.digest, "89cb140b8a987de183dcde487e793ed460226a60b5a20c9a03ebb12e0c12aa5a");
+        assert_eq!(index.digest, r.digest);
+        assert_eq!(index.method_count, 2);
+        assert_eq!(index.unique_pair_count, 1);
+        assert_eq!(index.reverse_target_count, 1);
+        assert_eq!(index.batch_size, 1);
+        assert!(index.estimated_heap_bytes > 0);
+        assert!(index.build_duration_ns > 0);
+        assert!(index.boot_rss_bytes > 0);
+        assert!(index.pre_build_rss_bytes > 0);
+        assert!(index.post_build_rss_bytes > 0);
+        assert!(index.post_trim_rss_bytes > 0);
+        assert_eq!(index.vm_hwm_bytes, memory.vm_hwm_bytes);
+    }
+
+    #[test]
     fn inlay_hints_point_covers_whole_file() {
         let r = run_one(FeatureSpec::InlayHints { range: None }, Expect::NonEmpty).unwrap();
         assert_measured(&r);

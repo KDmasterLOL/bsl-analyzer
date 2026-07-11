@@ -79,6 +79,9 @@ pub enum FeatureSpec {
     CallHierarchyOutgoing {
         offset: u32,
     },
+    CallHierarchyIndexBuild {
+        batch_size: usize,
+    },
     /// `range: None` = the whole file.
     InlayHints {
         range: Option<OffsetRange>,
@@ -199,6 +202,7 @@ impl FeatureSpec {
             FeatureSpec::CallHierarchyPrepare { .. } => "call_hierarchy_prepare",
             FeatureSpec::CallHierarchyIncoming { .. } => "call_hierarchy_incoming",
             FeatureSpec::CallHierarchyOutgoing { .. } => "call_hierarchy_outgoing",
+            FeatureSpec::CallHierarchyIndexBuild { .. } => "call_hierarchy_index_build",
             FeatureSpec::InlayHints { .. } => "inlay_hints",
             FeatureSpec::SelectionRange { .. } => "selection_range",
             FeatureSpec::DocumentSymbol => "document_symbol",
@@ -236,7 +240,8 @@ impl FeatureSpec {
             | FeatureSpec::SemanticTokensFull
             | FeatureSpec::DiagnosticsPush
             | FeatureSpec::DiagnosticsPull
-            | FeatureSpec::WorkspaceSymbol { .. } => None,
+            | FeatureSpec::WorkspaceSymbol { .. }
+            | FeatureSpec::CallHierarchyIndexBuild { .. } => None,
             FeatureSpec::Edit { .. } | FeatureSpec::Burst { .. } => None,
         }
     }
@@ -318,6 +323,11 @@ fn validate_spec(id: &str, spec: &FeatureSpec, errors: &mut Vec<String>) {
         }
         FeatureSpec::SelectionRange { offsets } if offsets.is_empty() => {
             errors.push(format!("{id}: selection_range needs at least one offset"));
+        }
+        FeatureSpec::CallHierarchyIndexBuild { batch_size } if *batch_size == 0 => {
+            errors.push(format!(
+                "{id}: call_hierarchy_index_build batch_size must be greater than zero"
+            ));
         }
         FeatureSpec::InlayHints { range: Some(r) } | FeatureSpec::CodeAction { range: r }
             if r.start > r.end =>
@@ -405,6 +415,7 @@ mod tests {
             FeatureSpec::CallHierarchyPrepare { offset: 1 },
             FeatureSpec::CallHierarchyIncoming { offset: 1 },
             FeatureSpec::CallHierarchyOutgoing { offset: 1 },
+            FeatureSpec::CallHierarchyIndexBuild { batch_size: 1 },
             FeatureSpec::InlayHints { range: Some(OffsetRange { start: 0, end: 5 }) },
             FeatureSpec::InlayHints { range: None },
             FeatureSpec::SelectionRange { offsets: vec![1, 2] },
@@ -482,6 +493,22 @@ mod tests {
             Expect::Cardinality { min: 5, max: 1 },
         )]);
         assert!(validate(&m).unwrap_err().contains("min 5 > max 1"));
+    }
+
+    #[test]
+    fn call_hierarchy_index_batch_size_must_be_positive() {
+        // Given: an index-build target with no modules per batch.
+        let m = manifest(vec![target(
+            "call-hierarchy-index/zero",
+            FeatureSpec::CallHierarchyIndexBuild { batch_size: 0 },
+            Expect::NonEmpty,
+        )]);
+
+        // When: manifest validation runs.
+        let err = validate(&m).unwrap_err();
+
+        // Then: the invalid batching contract is named explicitly.
+        assert!(err.contains("batch_size must be greater than zero"), "{err}");
     }
 
     #[test]

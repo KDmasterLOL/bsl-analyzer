@@ -42,6 +42,8 @@ pub struct PointReport {
     /// Mode C only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_hierarchy_index: Option<CallHierarchyIndexReport>,
 }
 
 /// Salsa churn observed in one measurement window (mode B).
@@ -96,6 +98,22 @@ pub struct MemoryReport {
     pub vm_hwm_bytes: Option<u64>,
     /// Top salsa ingredients by live entry count at `rss_after_bytes` time.
     pub ingredient_counts: Vec<(String, usize)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallHierarchyIndexReport {
+    pub method_count: usize,
+    pub unique_pair_count: usize,
+    pub reverse_target_count: usize,
+    pub estimated_heap_bytes: usize,
+    pub batch_size: usize,
+    pub build_duration_ns: u64,
+    pub boot_rss_bytes: u64,
+    pub pre_build_rss_bytes: u64,
+    pub post_build_rss_bytes: u64,
+    pub post_trim_rss_bytes: u64,
+    pub vm_hwm_bytes: Option<u64>,
+    pub digest: String,
 }
 
 /// Extra timings recorded for `edit` points.
@@ -172,10 +190,45 @@ mod tests {
             edit: None,
             recompute: None,
             memory: None,
+            call_hierarchy_index: Some(CallHierarchyIndexReport {
+                method_count: 2,
+                unique_pair_count: 1,
+                reverse_target_count: 1,
+                estimated_heap_bytes: 512,
+                batch_size: 1,
+                build_duration_ns: 42,
+                boot_rss_bytes: 1_024,
+                pre_build_rss_bytes: 2_048,
+                post_build_rss_bytes: 4_096,
+                post_trim_rss_bytes: 3_072,
+                vm_hwm_bytes: Some(4_096),
+                digest: "cd".to_string(),
+            }),
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: PointReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back.point_id, "hover/01");
         assert!(!json.contains("ctx_build_ns"), "None fields must be omitted: {json}");
+        let index = back.call_hierarchy_index.expect("index-build metrics must round-trip");
+        assert_eq!(index.method_count, 2);
+        assert_eq!(index.unique_pair_count, 1);
+        assert_eq!(index.reverse_target_count, 1);
+        assert_eq!(index.estimated_heap_bytes, 512);
+        assert_eq!(index.batch_size, 1);
+        assert_eq!(index.build_duration_ns, 42);
+        assert_eq!(index.boot_rss_bytes, 1_024);
+        assert_eq!(index.pre_build_rss_bytes, 2_048);
+        assert_eq!(index.post_build_rss_bytes, 4_096);
+        assert_eq!(index.post_trim_rss_bytes, 3_072);
+        assert_eq!(index.vm_hwm_bytes, Some(4_096));
+        assert_eq!(index.digest, "cd");
+
+        let mut without_index = r.clone();
+        without_index.call_hierarchy_index = None;
+        let without_index_json = serde_json::to_string(&without_index).unwrap();
+        assert!(
+            !without_index_json.contains("call_hierarchy_index"),
+            "None fields must be omitted: {without_index_json}"
+        );
     }
 }

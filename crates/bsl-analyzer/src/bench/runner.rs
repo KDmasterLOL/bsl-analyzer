@@ -13,17 +13,21 @@
 //! construction is reported separately as `ctx_build_ns` — production pays it
 //! per request in dispatch, and Tier B measures that end-to-end).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
+use base_db::SourceDatabase as _;
 use line_index::LineIndex;
 use lsp_types::Url;
+use rustc_hash::FxHashMap;
 use syntax::{TextRange, TextSize};
 
 use crate::bench::manifest::{self, EditPatch, FeatureSpec, Target};
 use crate::bench::report::{
-    percentile_ns, EditPhases, FamilyChurn, MemoryReport, PointReport, RecomputeReport,
-    MODULES_CAP, REPORT_SCHEMA_VERSION,
+    percentile_ns, CallHierarchyIndexReport, EditPhases, FamilyChurn, MemoryReport, PointReport,
+    RecomputeReport, MODULES_CAP, REPORT_SCHEMA_VERSION,
 };
 use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
 use crate::global_state::GlobalState;
@@ -96,12 +100,22 @@ pub struct RunArgs {
 pub(crate) struct Observation {
     pub(crate) count: usize,
     pub(crate) digest_input: String,
+    call_hierarchy_index: Option<CallHierarchyIndexObservation>,
+}
+
+struct CallHierarchyIndexObservation {
+    method_count: usize,
+    unique_pair_count: usize,
+    reverse_target_count: usize,
+    estimated_heap_bytes: usize,
+    batch_size: usize,
+    build_duration_ns: u64,
 }
 
 impl Observation {
     fn from_lines(count: usize, mut lines: Vec<String>) -> Self {
         lines.sort();
-        Observation { count, digest_input: lines.join("\n") }
+        Observation { count, digest_input: lines.join("\n"), call_hierarchy_index: None }
     }
 
     pub(crate) fn digest_hex(&self) -> String {
@@ -114,6 +128,7 @@ pub(crate) struct BenchEnv {
     // Keeps the client-message drain thread alive for the whole measurement.
     _drain_handle: std::thread::JoinHandle<()>,
     pub(crate) boot_ms: u64,
+    pub(crate) boot_rss_bytes: Option<u64>,
     pub(crate) workspace_root: PathBuf,
     pub(crate) ctx_build_ns: Option<u64>,
     /// Cached frozen VFS path table for handler contexts: freezing is O(files)
@@ -126,6 +141,17 @@ pub(crate) struct ResolvedTarget {
     pub(crate) file_id: vfs::FileId,
     pub(crate) url: Url,
     pub(crate) text: String,
+}
+
+struct CallHierarchyBuildContext {
+    source_root_id: base_db::SourceRootId,
+    source_root: base_db::SourceRoot,
+    modules: Vec<ide::ModuleId>,
+    paths: FxHashMap<vfs::FileId, String>,
+    file_paths: HashMap<vfs::FileId, PathBuf>,
+    config_paths: Vec<(Option<String>, PathBuf)>,
+    config_cache: Arc<ide::GraphConfigCache>,
+    workspace_root: PathBuf,
 }
 
 pub(crate) fn boot(source_dir: &Path, boot_budget_ms: u64) -> Result<BenchEnv, RunError> {
@@ -145,6 +171,7 @@ pub(crate) fn boot(source_dir: &Path, boot_budget_ms: u64) -> Result<BenchEnv, R
         state: bootstrap.state,
         _drain_handle: bootstrap._drain_handle,
         boot_ms: bootstrap.boot.vfs_done_ms,
+        boot_rss_bytes: bootstrap.boot.rss_bytes_post_boot,
         workspace_root: source_dir,
         ctx_build_ns: None,
         frozen_paths: None,
@@ -396,6 +423,10 @@ fn run_memory_point(
     target: &Target,
     resolved: &ResolvedTarget,
 ) -> Result<PointReport, RunError> {
+    if matches!(target.spec, FeatureSpec::CallHierarchyIndexBuild { .. }) {
+        return run_call_hierarchy_index_memory_point(args, env, target, resolved);
+    }
+
     let rss_before = read_rss_checked()?;
 
     // The sampler is stopped before any error propagates — a leaked sampler
@@ -476,6 +507,67 @@ fn run_memory_point(
         ingredient_counts,
     };
     finish_mode_report(args, env, target, &obs, ns, None, None, Some(memory))
+}
+
+fn run_call_hierarchy_index_memory_point(
+    args: &RunArgs,
+    env: &mut BenchEnv,
+    target: &Target,
+    resolved: &ResolvedTarget,
+) -> Result<PointReport, RunError> {
+    let boot_rss_bytes = env.boot_rss_bytes.ok_or_else(|| {
+        RunError::Other("cannot read boot VmRSS from /proc (non-Linux?)".to_string())
+    })?;
+    let pre_build_rss_bytes = read_rss_checked()?;
+
+    let sampler = RssSampler::start();
+    let result = execute_once(env, resolved, &target.spec);
+    let (phase_peak, sample_count) = sampler.stop();
+    let (ns, observation) = result?;
+    let post_build_rss_bytes = read_rss_checked()?;
+    let ingredient_counts: Vec<(String, usize)> =
+        crate::mem_report::salsa_memory_rows(env.state.analysis_host.raw_database())
+            .into_iter()
+            .take(20)
+            .map(|(name, count, ..)| (name.to_string(), count))
+            .collect();
+
+    let post_trim_rss_bytes = trim_and_settle(env, false, args.trim_settle_ms)?;
+    let rss_after_deep_trim_bytes = trim_and_settle(env, true, args.trim_settle_ms)?;
+    let vm_hwm_bytes = crate::mem_report::proc_kb("VmHWM:").map(|kb| kb * 1024);
+
+    let index = observation.call_hierarchy_index.as_ref().ok_or_else(|| {
+        RunError::Other("call hierarchy index benchmark did not return build metrics".to_string())
+    })?;
+    let call_hierarchy_index = CallHierarchyIndexReport {
+        method_count: index.method_count,
+        unique_pair_count: index.unique_pair_count,
+        reverse_target_count: index.reverse_target_count,
+        estimated_heap_bytes: index.estimated_heap_bytes,
+        batch_size: index.batch_size,
+        build_duration_ns: index.build_duration_ns,
+        boot_rss_bytes,
+        pre_build_rss_bytes,
+        post_build_rss_bytes,
+        post_trim_rss_bytes,
+        vm_hwm_bytes,
+        digest: observation.digest_hex(),
+    };
+    let memory = MemoryReport {
+        rss_before_bytes: pre_build_rss_bytes,
+        phase_peak_bytes: phase_peak,
+        sample_count,
+        peak_is_lower_bound: sample_count < 3,
+        rss_after_bytes: post_build_rss_bytes,
+        rss_after_trim_bytes: post_trim_rss_bytes,
+        rss_after_deep_trim_bytes,
+        vm_hwm_bytes,
+        ingredient_counts,
+    };
+    let mut report =
+        finish_mode_report(args, env, target, &observation, ns, None, None, Some(memory))?;
+    report.call_hierarchy_index = Some(call_hierarchy_index);
+    Ok(report)
 }
 
 fn read_rss_checked() -> Result<u64, RunError> {
@@ -718,6 +810,7 @@ fn build_report(
         edit,
         recompute,
         memory,
+        call_hierarchy_index: None,
     };
     match invariant {
         Ok(()) => Ok(report),
@@ -894,6 +987,24 @@ pub(crate) fn execute_once(
             let lines = r.iter().map(|c| format!("{c:?}")).collect();
             Ok((ns, Observation::from_lines(r.len(), lines)))
         }
+        FeatureSpec::CallHierarchyIndexBuild { batch_size } => {
+            if *batch_size == 0 {
+                return Err(RunError::Manifest(
+                    "call_hierarchy_index_build batch_size must be greater than zero".to_string(),
+                ));
+            }
+            let context = call_hierarchy_build_context(env, resolved)?;
+            let mut open_batch =
+                |batch: &[ide::ModuleId]| open_call_hierarchy_batch(&context, batch);
+            let built = ide::build_call_hierarchy_index(
+                ide::CallHierarchyIndexBuildRequest::new(&context.modules, *batch_size),
+                &mut open_batch,
+            )
+            .map_err(|err| RunError::Other(format!("call hierarchy index build failed: {err}")))?;
+            let build_duration_ns = built.elapsed.as_nanos() as u64;
+            let observation = call_hierarchy_index_observation(&built, &context, *batch_size)?;
+            Ok((build_duration_ns, observation))
+        }
         FeatureSpec::InlayHints { range } => {
             let text_range = match range {
                 Some(r) => TextRange::new(TextSize::from(r.start), TextSize::from(r.end)),
@@ -1035,6 +1146,116 @@ pub(crate) fn execute_once(
             "edit points are executed by run_edit_point, not execute_once".to_string(),
         )),
     }
+}
+
+fn call_hierarchy_build_context(
+    env: &BenchEnv,
+    resolved: &ResolvedTarget,
+) -> Result<CallHierarchyBuildContext, RunError> {
+    let db = env.state.analysis_host.raw_database();
+    let source_root_id = db.file_source_root_input(resolved.file_id).source_root_id(db);
+    let source_root = db.source_root_input(source_root_id).root(db);
+    let modules: Vec<ide::ModuleId> = source_root.iter().map(ide::ModuleId::new).collect();
+    let mut paths = FxHashMap::default();
+    let mut file_paths = HashMap::with_capacity(modules.len());
+
+    for module in &modules {
+        let path = source_root
+            .file_set()
+            .path_for_file(&module.file_id)
+            .ok_or_else(|| {
+                RunError::Other(format!(
+                    "call hierarchy index: source-root file {:?} has no disk path",
+                    module.file_id
+                ))
+            })?
+            .as_path()
+            .to_path_buf();
+        paths.insert(module.file_id, path.to_string_lossy().replace('\\', "/"));
+        file_paths.insert(module.file_id, path);
+    }
+
+    Ok(CallHierarchyBuildContext {
+        source_root_id,
+        source_root,
+        modules,
+        paths,
+        file_paths,
+        config_paths: db.all_config_paths(),
+        config_cache: Arc::new(ide::GraphConfigCache::default()),
+        workspace_root: env.workspace_root.clone(),
+    })
+}
+
+fn open_call_hierarchy_batch(
+    context: &CallHierarchyBuildContext,
+    batch: &[ide::ModuleId],
+) -> ide::RootDatabaseImpl {
+    let batch_files: Vec<(vfs::FileId, PathBuf)> = batch
+        .iter()
+        .map(|module| (module.file_id, context.file_paths[&module.file_id].clone()))
+        .collect();
+    let mut db = ide::RootDatabaseImpl::default();
+    db.set_graph_config_cache(Arc::clone(&context.config_cache));
+    db.set_source_root(context.source_root_id, context.source_root.clone());
+    let _unreadable =
+        ide_host_core::register_files_disk_backed(&mut db, context.source_root_id, &batch_files);
+    db.set_all_config_paths(context.config_paths.clone());
+    ide::warm_batch_config_roots(&db, &batch_files, &context.config_paths);
+    db
+}
+
+fn call_hierarchy_index_observation(
+    built: &ide::CallHierarchyIndexBuildResult,
+    context: &CallHierarchyBuildContext,
+    batch_size: usize,
+) -> Result<Observation, RunError> {
+    if batch_size == 0 {
+        return Err(RunError::Manifest(
+            "call_hierarchy_index_build batch_size must be greater than zero".to_string(),
+        ));
+    }
+
+    let mut graph_index = hir::graph_index::GraphIndex::new();
+    for batch in context.modules.chunks(batch_size) {
+        {
+            let db = open_call_hierarchy_batch(context, batch);
+            for &module in batch {
+                graph_index.add_module(&db, module);
+            }
+        }
+        syntax::clear_shared_node_cache();
+        rayon::broadcast(|_| syntax::clear_shared_node_cache());
+    }
+    let reverse_target_count = graph_index
+        .method_nodes()
+        .filter(|target| !built.index.callers(*target).is_empty())
+        .count();
+    let digest = hir::call_hierarchy_method_digest(
+        &built.index,
+        &graph_index,
+        &context.paths,
+        Some(&context.workspace_root),
+    );
+    let digest_input = digest
+        .rows()
+        .iter()
+        .map(|(target, caller)| format!("{target}\t{caller}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(Observation {
+        count: built.pair_count,
+        digest_input,
+        call_hierarchy_index: Some(CallHierarchyIndexObservation {
+            method_count: built.method_count,
+            unique_pair_count: built.pair_count,
+            reverse_target_count,
+            estimated_heap_bytes: built.estimated_heap_bytes,
+            batch_size,
+            build_duration_ns: built.elapsed.as_nanos() as u64,
+        }),
+    })
 }
 
 fn pull_report_count(result: &lsp_types::DocumentDiagnosticReportResult) -> usize {
