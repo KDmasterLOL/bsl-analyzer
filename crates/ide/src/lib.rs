@@ -44,6 +44,7 @@ pub use graph::{
 };
 pub use hir::graph_index;
 pub use hir::ModuleId;
+pub use hir::{call_hierarchy_method_digest, MethodCallDigest};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
 pub use ide_db::{GraphConfigCache, RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};

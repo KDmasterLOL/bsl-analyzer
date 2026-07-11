@@ -32,7 +32,7 @@ use crate::{
     module_index::{module_key_for_path, ModuleKey},
     name::Name,
     resolver::Resolver,
-    MethodId, ModuleId,
+    CallHierarchyReverseIndex, MethodId, ModuleId,
 };
 
 /// A module's methods as seen from the item tree alone (no body lowering).
@@ -1875,9 +1875,56 @@ pub struct EdgeRow {
 }
 
 /// Encodes graph nodes/edges to durable rows at build time — method names/ranges
-/// from the resident [`GraphIndex`], paths from the file set, no database. Produces
-/// the SAME durable id strings as `ide::graph` (a parity test in `ide-db` guards
-/// this), so ids an agent holds survive the in-memory → SQLite switch.
+/// Canonical target/caller rows used to compare call-hierarchy storage backends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodCallDigest {
+    rows: Vec<(String, String)>,
+}
+
+impl MethodCallDigest {
+    /// Sort and deduplicate durable `(target_method_id, caller_method_id)` rows.
+    pub fn from_rows(rows: impl IntoIterator<Item = (String, String)>) -> Self {
+        let mut rows: Vec<_> = rows.into_iter().collect();
+        rows.sort_unstable();
+        rows.dedup();
+        Self { rows }
+    }
+
+    pub fn rows(&self) -> &[(String, String)] {
+        &self.rows
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// Encode compact-index method pairs with the durable graph id rules used by SQLite.
+pub fn call_hierarchy_method_digest(
+    reverse_index: &CallHierarchyReverseIndex,
+    graph_index: &GraphIndex,
+    paths: &FxHashMap<FileId, String>,
+    workspace_root: Option<&Path>,
+) -> MethodCallDigest {
+    let encoder = GraphRowEncoder::new(graph_index, paths, workspace_root);
+    let mut rows = Vec::new();
+    for target in graph_index.method_nodes() {
+        let target_id = encoder.encode(&GraphNode::Method(target)).0;
+        rows.extend(reverse_index.callers(target).iter().map(|caller| {
+            let caller_id = encoder.encode(&GraphNode::Method(*caller)).0;
+            (target_id.clone(), caller_id)
+        }));
+    }
+    MethodCallDigest::from_rows(rows)
+}
+
+/// Encodes durable graph rows from the resident [`GraphIndex`] and file-set paths,
+/// with no database access. It produces the SAME durable ids as `ide::graph`, so ids
+/// an agent holds survive the in-memory → SQLite switch.
 pub struct GraphRowEncoder<'a> {
     index: &'a GraphIndex,
     paths: &'a FxHashMap<FileId, String>,

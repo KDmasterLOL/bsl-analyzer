@@ -115,6 +115,8 @@ fn build(batch_size: usize) -> (CallHierarchyIndexBuildResult, Vec<ProbeEvent>, 
     (result, recorded_events, probe.cache_clears)
 }
 
+mod parity;
+
 #[derive(Debug, PartialEq, Eq)]
 struct IndexDigest {
     layout_hashes: Vec<(ModuleId, u64)>,

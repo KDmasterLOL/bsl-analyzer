@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use ide::graph_index::{EdgeRow, NodeRow};
-use ide::{GraphBuildSummary, GraphBuildTicker, ModuleId, RootDatabaseImpl};
+use ide::{GraphBuildSummary, GraphBuildTicker, MethodCallDigest, ModuleId, RootDatabaseImpl};
 use rusqlite::{params, Connection, OptionalExtension};
 use rustc_hash::FxHashMap;
 use vfs::FileId;
@@ -70,6 +70,30 @@ pub struct GraphMeta {
     pub files: usize,
     /// RFC 3339 build timestamp.
     pub built_at: String,
+}
+
+/// Read the canonical method-call digest from an existing bounded-build SQLite graph.
+///
+/// `SetAction` registrations are intentionally excluded: the call hierarchy only
+/// represents direct, notification, and idle-handler method calls.
+pub fn read_sqlite_method_call_digest(path: &Path) -> anyhow::Result<MethodCallDigest> {
+    let conn = Connection::open(path)
+        .with_context(|| format!("opening graph database at {}", path.display()))?;
+    let mut statement = conn.prepare(
+        "SELECT edge.to_id, edge.from_id \
+         FROM edges AS edge \
+         JOIN nodes AS target ON target.id = edge.to_id \
+         JOIN nodes AS caller ON caller.id = edge.from_id \
+         WHERE target.kind = 'method' \
+           AND caller.kind = 'method' \
+           AND edge.kind IN ('call', 'notify_ref', 'idle_handler') \
+         ORDER BY edge.to_id, edge.from_id",
+    )?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<(String, String)>>>()
+        .context("reading method-to-method call edges from graph database")?;
+    Ok(MethodCallDigest::from_rows(rows))
 }
 
 /// Streams graph rows into a fresh SQLite file. Created once per build; nodes and
@@ -1617,5 +1641,92 @@ mod tests {
 
         // Then: the durable body-only update exactly matches a full rebuild.
         assert_eq!(dump(&db_incremental), dump(&db_full));
+    }
+
+    #[test]
+    fn call_hierarchy_sqlite_method_digest() {
+        // Given: persisted method calls alongside metadata and SetAction rows.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bsl-graph.db");
+        let mut subscription = method_node("mdo/EventSubscription/ПриЗаписи", "ПриЗаписи");
+        subscription.kind = "mdo";
+        subscription.module = None;
+        subscription.file = None;
+        subscription.is_export = None;
+
+        let mut writer = GraphDbWriter::create(&path).unwrap();
+        writer
+            .write_nodes(&[
+                method_node("method/common/Caller/Прямой", "Прямой"),
+                method_node("method/common/Caller/Оповещение", "Оповещение"),
+                method_node("method/common/Caller/Ожидание", "Ожидание"),
+                method_node("method/common/Target/Цель", "Цель"),
+                subscription,
+            ])
+            .unwrap();
+        writer
+            .write_edges(&[
+                edge("method/common/Caller/Прямой", "method/common/Target/Цель"),
+                EdgeRow {
+                    from_id: "method/common/Caller/Оповещение".to_string(),
+                    to_id: "method/common/Target/Цель".to_string(),
+                    kind: "notify_ref",
+                    provenance: "string_resolved",
+                    crosses: false,
+                },
+                EdgeRow {
+                    from_id: "method/common/Caller/Ожидание".to_string(),
+                    to_id: "method/common/Target/Цель".to_string(),
+                    kind: "idle_handler",
+                    provenance: "string_resolved",
+                    crosses: false,
+                },
+                EdgeRow {
+                    from_id: "mdo/EventSubscription/ПриЗаписи".to_string(),
+                    to_id: "method/common/Target/Цель".to_string(),
+                    kind: "event_subscription",
+                    provenance: "string_resolved",
+                    crosses: false,
+                },
+                EdgeRow {
+                    from_id: "method/common/Caller/Прямой".to_string(),
+                    to_id: "method/common/Target/Цель".to_string(),
+                    kind: "set_action",
+                    provenance: "string_resolved",
+                    crosses: false,
+                },
+            ])
+            .unwrap();
+        writer
+            .finalize(&GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files: 0,
+                built_at: "t".to_string(),
+            })
+            .unwrap();
+
+        // When: the read-only SQLite oracle projects method-to-method calls.
+        let digest = read_sqlite_method_call_digest(&path).unwrap();
+
+        // Then: direct, notify, and idle handlers remain; metadata and SetAction do not.
+        assert_eq!(
+            digest.rows(),
+            &[
+                (
+                    "method/common/Target/Цель".to_string(),
+                    "method/common/Caller/Ожидание".to_string(),
+                ),
+                (
+                    "method/common/Target/Цель".to_string(),
+                    "method/common/Caller/Оповещение".to_string(),
+                ),
+                (
+                    "method/common/Target/Цель".to_string(),
+                    "method/common/Caller/Прямой".to_string(),
+                ),
+            ]
+        );
+        assert_eq!(digest.len(), 3);
     }
 }

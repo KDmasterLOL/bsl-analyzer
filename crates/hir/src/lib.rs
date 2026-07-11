@@ -65,6 +65,7 @@ pub use hir_def::docs::{
     is_dotted_type_reference, MethodDocs, ParameterDoc, TypeDoc, VariableDocs,
 };
 pub use hir_def::graph_index;
+pub use hir_def::graph_index::{call_hierarchy_method_digest, MethodCallDigest};
 pub use hir_def::{
     method_outbound_facts, resolved_module_summary_query, workspace_call_graph_query, ManagerRef,
     MethodOutboundFacts,

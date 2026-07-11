@@ -14,7 +14,7 @@ pub use baseline::{
     resolve_project_baseline_diagnostics, BaselineConfigDiagnostics, BaselineResolutionSummary,
 };
 pub use cache::graph_db_path;
-pub use graph_db::build_graph_database;
+pub use graph_db::{build_graph_database, read_sqlite_method_call_digest};
 pub use graph_query::{GraphDb, GraphDbContextProvider};
 pub use state::SharedState;
 use state::WorkspaceSearchMode;

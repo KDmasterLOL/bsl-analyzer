@@ -3066,6 +3066,313 @@ fn workspace_call_graph_via_index_matches_salsa_fold() {
     }
 }
 
+fn method_call_digest_from_fold(
+    graph: &hir::call_graph::WorkspaceCallGraph,
+    encoder: &hir::graph_index::GraphRowEncoder<'_>,
+) -> hir::MethodCallDigest {
+    use hir::GraphNode;
+
+    hir::MethodCallDigest::from_rows(graph.edges().filter_map(|edge| {
+        let (GraphNode::Method(caller), GraphNode::Method(target)) = (&edge.from, &edge.to) else {
+            return None;
+        };
+        Some((
+            encoder.encode(&GraphNode::Method(*target)).0,
+            encoder.encode(&GraphNode::Method(*caller)).0,
+        ))
+    }))
+}
+
+fn compact_call_hierarchy_index(
+    db: &dyn hir::ConfigsDatabase,
+    modules: &[ModuleId],
+    batch_size: usize,
+) -> (hir::graph_index::GraphIndex, hir::CallHierarchyReverseIndex) {
+    use hir::graph_index::{project_batch_method_call_pairs, GraphIndex};
+    use hir::MethodCallPair;
+
+    let graph_index = GraphIndex::build(db, modules);
+
+    let mut reverse_index = hir::CallHierarchyReverseIndex::new();
+    for batch in modules.chunks(batch_size.max(1)) {
+        let pairs = project_batch_method_call_pairs(db, &graph_index, batch);
+        for &module in batch {
+            let layout_hash = graph_index
+                .module_layout_hash(module)
+                .expect("indexed fixture module has a layout hash");
+            reverse_index.replace_module(
+                module,
+                pairs
+                    .iter()
+                    .filter(|(caller, _)| caller.module == module)
+                    .map(|&(caller, target)| MethodCallPair::new(caller, target)),
+                layout_hash,
+            );
+        }
+    }
+    (graph_index, reverse_index)
+}
+
+#[test]
+fn call_hierarchy_index_fixture_parity() {
+    use hir::call_graph::{EdgeKind, GraphNode};
+    use hir::graph_index::GraphRowEncoder;
+    use hir::ConfigsDatabase;
+    use rustc_hash::FxHashMap;
+
+    // Given: all method-only call forms supported by the compact projection.
+    let files: &[(FileId, &str, &str)] = &[
+        (
+            FileId(0),
+            "/src/CommonModules/Вызыватель/Ext/Module.bsl",
+            "Процедура Главная() Экспорт\n\
+             ЛокальнаяЦель();\n\
+             Общий.Метод();\n\
+             Справочники.Товары.МетодМенеджера();\n\
+             Новый ОписаниеОповещения(\"Оповещение\", ЭтотОбъект);\n\
+             ПодключитьОбработчикОжидания(\"Ожидание\", 1);\n\
+             УстановитьДействие(\"ПриНажатии\", \"Исключен\");\n\
+             КонецПроцедуры\n\
+             Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры\n\
+             Процедура Оповещение() Экспорт КонецПроцедуры\n\
+             Процедура Ожидание() Экспорт КонецПроцедуры\n\
+             Процедура Исключен() Экспорт КонецПроцедуры",
+        ),
+        (
+            FileId(1),
+            "/src/CommonModules/Общий/Ext/Module.bsl",
+            "Процедура Метод() Экспорт КонецПроцедуры",
+        ),
+        (
+            FileId(2),
+            "/src/Catalogs/Товары/Ext/ManagerModule.bsl",
+            "Процедура МетодМенеджера() Экспорт КонецПроцедуры",
+        ),
+    ];
+    let source_root_id = SourceRootId(0);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    let mut paths = FxHashMap::default();
+    let mut texts = FxHashMap::default();
+    for &(file_id, path, text) in files {
+        file_set.insert(file_id, VfsPath::new(path));
+        paths.insert(file_id, path.to_string());
+        texts.insert(file_id, text);
+    }
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(source_root_id, source_root.clone());
+    for (&file_id, &text) in &texts {
+        db.set_file_source_root(file_id, source_root_id);
+        db.set_file_text(file_id, text);
+    }
+    let modules: Vec<_> = files.iter().map(|(file_id, _, _)| ModuleId::new(*file_id)).collect();
+
+    // When: the compact batch projection builds the reverse index.
+    let (graph_index, reverse_index) = compact_call_hierarchy_index(&db, &modules, 1);
+    let compact = hir::call_hierarchy_method_digest(&reverse_index, &graph_index, &paths, None);
+    let encoder = GraphRowEncoder::new(&graph_index, &paths, None);
+    let salsa = db.workspace_call_graph(source_root_id);
+    let folded = method_call_digest_from_fold(&salsa, &encoder);
+
+    // Then: every retained method edge agrees with the Salsa incoming graph.
+    assert_eq!(compact, folded);
+    assert_eq!(compact.len(), 5, "direct, qualified, manager, notify, and idle rows");
+    let caller = ModuleId::new(FileId(0));
+    assert!(salsa.edges().any(|edge| {
+        edge.kind == EdgeKind::DirectLocal
+            && matches!((&edge.from, &edge.to),
+                (GraphNode::Method(from), GraphNode::Method(to)) if from.module == caller && to.module == caller)
+    }));
+    assert!(salsa.edges().any(|edge| {
+        edge.kind == EdgeKind::DirectQualifiedModule
+            && matches!((&edge.from, &edge.to),
+                (GraphNode::Method(from), GraphNode::Method(to))
+                    if from.module == caller && to.module == ModuleId::new(FileId(1)))
+    }));
+    assert!(salsa.edges().any(|edge| {
+        matches!((&edge.from, &edge.to),
+            (GraphNode::Method(from), GraphNode::Method(to))
+                if from.module == caller && to.module == ModuleId::new(FileId(2)))
+    }));
+    assert!(salsa.edges().any(|edge| {
+        edge.kind == EdgeKind::NotifyRef
+            && matches!((&edge.from, &edge.to),
+                (GraphNode::Method(from), GraphNode::Method(to)) if from.module == caller && to.module == caller)
+    }));
+    assert!(salsa.edges().any(|edge| {
+        edge.kind == EdgeKind::IdleHandler
+            && matches!((&edge.from, &edge.to),
+                (GraphNode::Method(from), GraphNode::Method(to)) if from.module == caller && to.module == caller)
+    }));
+    assert!(
+        !compact.rows().iter().any(|(_, caller_id)| caller_id.ends_with("/Исключен")),
+        "SetAction registrations are not call-hierarchy method pairs"
+    );
+}
+
+#[test]
+fn call_hierarchy_index_selects_source_root_by_anchor_file() {
+    use hir::MethodId;
+
+    // Given: overlapping module names in deliberately separate BSL source roots.
+    let root_a = SourceRootId(10);
+    let root_b = SourceRootId(11);
+    let files: &[(FileId, SourceRootId, &str, &str)] = &[
+        (
+            FileId(0),
+            root_a,
+            "/root-a/CommonModules/CallerA/Ext/Module.bsl",
+            "Процедура Вызвать() Экспорт\nShared.Цель();\nКонецПроцедуры",
+        ),
+        (
+            FileId(1),
+            root_a,
+            "/root-a/CommonModules/Shared/Ext/Module.bsl",
+            "Процедура Цель() Экспорт КонецПроцедуры",
+        ),
+        (
+            FileId(2),
+            root_b,
+            "/root-b/CommonModules/CallerB/Ext/Module.bsl",
+            "Процедура Вызвать() Экспорт\nShared.Цель();\nКонецПроцедуры",
+        ),
+        (
+            FileId(3),
+            root_b,
+            "/root-b/CommonModules/Shared/Ext/Module.bsl",
+            "Процедура Цель() Экспорт КонецПроцедуры",
+        ),
+    ];
+    let mut db = RootDatabaseImpl::new();
+    let mut root_a_files = FileSet::new();
+    let mut root_b_files = FileSet::new();
+    for &(file_id, root, path, text) in files {
+        match root {
+            id if id == root_a => root_a_files.insert(file_id, VfsPath::new(path)),
+            id if id == root_b => root_b_files.insert(file_id, VfsPath::new(path)),
+            _ => unreachable!("fixture owns exactly two source roots"),
+        }
+        db.set_file_source_root(file_id, root);
+        db.set_file_text(file_id, text);
+    }
+    db.set_source_root(root_a, SourceRoot::new_local(root_a_files));
+    db.set_source_root(root_b, SourceRoot::new_local(root_b_files));
+    let modules_a = [ModuleId::new(FileId(0)), ModuleId::new(FileId(1))];
+    let modules_b = [ModuleId::new(FileId(2)), ModuleId::new(FileId(3))];
+
+    // When: each root is built independently and selected from its anchor file.
+    let (_, index_a) = compact_call_hierarchy_index(&db, &modules_a, 1);
+    let (_, index_b) = compact_call_hierarchy_index(&db, &modules_b, 1);
+    let indexes = std::collections::BTreeMap::from([(root_a, index_a), (root_b, index_b)]);
+    let index_for = |anchor: FileId| {
+        let root = db.file_source_root_input(anchor).source_root_id(&db);
+        indexes.get(&root).expect("each anchor root has exactly one compact index")
+    };
+
+    // Then: independent roots never share reverse pairs or lifecycle layout state.
+    let caller_a = MethodId { module: ModuleId::new(FileId(0)), local_id: 0 };
+    let target_a = MethodId { module: ModuleId::new(FileId(1)), local_id: 0 };
+    let caller_b = MethodId { module: ModuleId::new(FileId(2)), local_id: 0 };
+    let target_b = MethodId { module: ModuleId::new(FileId(3)), local_id: 0 };
+    let selected_a = index_for(FileId(0));
+    let selected_b = index_for(FileId(2));
+    assert_eq!(selected_a.callers(target_a), &[caller_a]);
+    assert_eq!(selected_b.callers(target_b), &[caller_b]);
+    assert!(selected_a.callers(target_b).is_empty());
+    assert!(selected_b.callers(target_a).is_empty());
+    assert!(selected_a.layout_hash(target_b.module).is_none());
+    assert!(selected_b.layout_hash(target_a.module).is_none());
+}
+
+#[test]
+fn call_hierarchy_index_cfe_parity() {
+    use hir::call_graph::GraphNode;
+    use hir::graph_index::GraphRowEncoder;
+    use hir::ConfigsDatabase;
+    use rustc_hash::FxHashMap;
+    use test_fixture::CfeFixtureBuilder;
+
+    fn common_module_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>{name}</Name><Server>true</Server></Properties>
+    </CommonModule>
+</MetaDataObject>"#
+        )
+    }
+
+    // Given: base and extension modules share one artificial BSL source root.
+    let base_source = "Процедура Цель() Экспорт КонецПроцедуры";
+    let extension_source = "Процедура Вызвать() Экспорт\nБазовыйApi.Цель();\nКонецПроцедуры";
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Extension", "").add_extension_module(
+        "Extension",
+        "ExtensionCaller",
+        extension_source,
+    );
+    let fixture = builder.build();
+    let base_dir = fixture.root().join("CommonModules/БазовыйApi/Ext");
+    std::fs::create_dir_all(&base_dir).expect("create base module directory");
+    let base_path = base_dir.join("Module.bsl");
+    std::fs::write(&base_path, base_source).expect("write base module");
+    std::fs::write(
+        fixture.root().join("CommonModules/БазовыйApi.xml"),
+        common_module_xml("БазовыйApi"),
+    )
+    .expect("write base metadata");
+    let extension = &fixture.extensions()[0];
+    let extension_path = extension.modules()[0].path().to_path_buf();
+    std::fs::write(
+        extension.root().join("CommonModules/ExtensionCaller.xml"),
+        common_module_xml("ExtensionCaller"),
+    )
+    .expect("write extension metadata");
+
+    let source_root_id = SourceRootId(0);
+    let base_file = FileId(0);
+    let extension_file = FileId(1);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(base_file, VfsPath::new(base_path.to_string_lossy().as_ref()));
+    file_set.insert(extension_file, VfsPath::new(extension_path.to_string_lossy().as_ref()));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(source_root_id, source_root.clone());
+    db.set_file_source_root(base_file, source_root_id);
+    db.set_file_source_root(extension_file, source_root_id);
+    db.set_file_text(base_file, base_source);
+    db.set_file_text(extension_file, extension_source);
+    let config_paths = fixture.config_paths();
+    db.set_all_config_paths(config_paths.clone());
+    let modules = [ModuleId::new(base_file), ModuleId::new(extension_file)];
+    let mut paths = FxHashMap::default();
+    paths.insert(base_file, base_path.to_string_lossy().into_owned());
+    paths.insert(extension_file, extension_path.to_string_lossy().into_owned());
+
+    // When: the compact index resolves the extension against the base module.
+    let (graph_index, reverse_index) = compact_call_hierarchy_index(&db, &modules, 1);
+    let compact = hir::call_hierarchy_method_digest(&reverse_index, &graph_index, &paths, None);
+    let encoder = GraphRowEncoder::new(&graph_index, &paths, None);
+    let salsa = db.workspace_call_graph(source_root_id);
+    let folded = method_call_digest_from_fold(&salsa, &encoder);
+
+    // Then: CFE directory membership does not create a second Salsa source root.
+    assert_eq!(
+        db.file_source_root_input(base_file).source_root_id(&db),
+        db.file_source_root_input(extension_file).source_root_id(&db)
+    );
+    assert_eq!(compact, folded);
+    assert_eq!(compact.len(), 1);
+    assert!(salsa.edges().any(|edge| {
+        matches!(
+            (&edge.from, &edge.to),
+            (GraphNode::Method(from), GraphNode::Method(to))
+                if from.module == ModuleId::new(extension_file) && to.module == ModuleId::new(base_file)
+        )
+    }));
+}
+
 /// A `Движения.<Регистр>` movement must resolve to the register's `Mdo` node — and the
 /// Salsa fold and the resident index must agree — given a configuration that supplies the
 /// register's metadata type. Uses the checked-in designer fixture (which defines the

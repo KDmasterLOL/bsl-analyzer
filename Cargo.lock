@@ -1956,6 +1956,7 @@ dependencies = [
  "stdx",
  "syntax",
  "tempfile",
+ "test-fixture",
  "thiserror 1.0.69",
  "tracing",
  "vfs",
