@@ -481,12 +481,18 @@ fn resolved_summary_method_pairs(summary: &ResolvedModuleSummary) -> Vec<(Method
 
     let mut pairs = Vec::new();
     for edge in &summary.edges {
-        let (CallerId::Method(local_id), ResolvedTarget::Method(target)) =
-            (&edge.caller, &edge.target)
-        else {
-            continue;
-        };
-        pairs.push((MethodId { module: summary.module, local_id: *local_id }, *target));
+        match (&edge.caller, &edge.target) {
+            (CallerId::Method(local_id), ResolvedTarget::Method(target)) => {
+                pairs.push((MethodId { module: summary.module, local_id: *local_id }, *target));
+            }
+            (CallerId::Method(_), ResolvedTarget::Mdo { .. } | ResolvedTarget::Unresolved(_))
+            | (
+                CallerId::ModuleCode,
+                ResolvedTarget::Method(_)
+                | ResolvedTarget::Mdo { .. }
+                | ResolvedTarget::Unresolved(_),
+            ) => {}
+        }
     }
     pairs.sort_unstable_by_key(|(caller, target)| {
         (caller.local_id, target.module.file_id, target.local_id)
