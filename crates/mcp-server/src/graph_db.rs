@@ -1507,4 +1507,115 @@ mod tests {
             "a signature change to a subscription handler module must force a full rebuild"
         );
     }
+
+    #[test]
+    fn variable_insertion_preserves_durable_body_only_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let module_path = root.join("CommonModules/Модуль/Ext/Module.bsl");
+        std::fs::create_dir_all(module_path.parent().expect("module path has a parent")).unwrap();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            root.join("CommonModules/Модуль.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000001">
+        <Properties>
+            <Name>Модуль</Name>
+            <Global>false</Global>
+            <ClientManagedApplication>false</ClientManagedApplication>
+            <Server>true</Server>
+            <ExternalConnection>false</ExternalConnection>
+            <ClientOrdinaryApplication>false</ClientOrdinaryApplication>
+            <ServerCall>false</ServerCall>
+            <Privileged>false</Privileged>
+            <ReturnValuesReuse>DontUse</ReturnValuesReuse>
+        </Properties>
+    </CommonModule>
+</MetaDataObject>"#,
+        )
+        .unwrap();
+        std::fs::write(&module_path, "&НаСервере\nПроцедура Выполнить() Экспорт\nКонецПроцедуры")
+            .unwrap();
+
+        let meta =
+            || GraphMeta { revision: 1, fingerprint: 0, files: 0, built_at: "t".to_string() };
+        let db_pre = root.join(".build/pre.db");
+        std::fs::create_dir_all(db_pre.parent().expect("database path has a parent")).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("initial build succeeds");
+
+        let changed = vec![module_path.canonicalize().expect("module file exists")];
+        let path_key = changed[0].to_string_lossy().into_owned();
+        let stored_sig: i64 = Connection::open(&db_pre)
+            .unwrap()
+            .query_row("SELECT sig_hash FROM files WHERE path = ?1", [&path_key], |row| row.get(0))
+            .unwrap();
+
+        // When: a top-level variable shifts method local ids but preserves its signature.
+        std::fs::write(
+            &module_path,
+            "Перем Состояние;\n&НаСервере\nПроцедура Выполнить() Экспорт\nКонецПроцедуры",
+        )
+        .unwrap();
+        let profiles =
+            recompute_module_profiles(root, &changed).expect("profile recomputation succeeds");
+        let profile = profiles.get(&path_key).expect("changed module has a profile");
+        assert_eq!(
+            profile.sig_hash,
+            u64::from_ne_bytes(stored_sig.to_ne_bytes()),
+            "the durable signature gate must retain the body-only path"
+        );
+
+        let db_incremental = root.join(".build/incremental.db");
+        update_graph_database_bodies(root, &db_pre, &db_incremental, &changed, 1, &meta())
+            .expect("body-only incremental update succeeds");
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild succeeds");
+
+        let dump = |path: &Path| {
+            let conn = Connection::open(path).unwrap();
+            let mut output = Vec::new();
+            for (label, query, columns) in [
+                (
+                    "nodes",
+                    "SELECT id, kind, name, qualified, module, file, name_offset, sig_end, src_start, \
+                     src_end, dispatch, is_export, addressable FROM nodes ORDER BY id",
+                    13,
+                ),
+                (
+                    "edges",
+                    "SELECT from_id, to_id, kind, provenance, crosses FROM edges \
+                     ORDER BY from_id, to_id, kind, provenance, crosses",
+                    5,
+                ),
+                ("in_degree", "SELECT id, degree FROM in_degree ORDER BY id", 2),
+                (
+                    "unresolved_calls",
+                    "SELECT target_scope, method_lower, caller_file FROM unresolved_calls \
+                     ORDER BY target_scope, method_lower, caller_file",
+                    3,
+                ),
+                ("files", "SELECT path, fingerprint, sig_hash FROM files ORDER BY path", 3),
+            ] {
+                let mut statement = conn.prepare(query).unwrap();
+                let rows = statement
+                    .query_map([], |row| {
+                        let mut values = Vec::with_capacity(columns);
+                        for column in 0..columns {
+                            values.push(
+                                row.get::<_, rusqlite::types::Value>(column)
+                                    .map(|value| format!("{value:?}"))?,
+                            );
+                        }
+                        Ok(values.join("|"))
+                    })
+                    .unwrap();
+                output.extend(rows.map(|row| format!("{label}:{}", row.unwrap())));
+            }
+            output
+        };
+
+        // Then: the durable body-only update exactly matches a full rebuild.
+        assert_eq!(dump(&db_incremental), dump(&db_full));
+    }
 }

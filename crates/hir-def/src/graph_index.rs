@@ -200,6 +200,34 @@ impl GraphIndex {
         Some(hasher.finish())
     }
 
+    /// A body-free resident layout hash of one module's methods: the ordered
+    /// (`local_id`, original-spelling name, `is_export`, effective dispatch) of every
+    /// method in declaration order. It deliberately includes the top-level position
+    /// encoded in `local_id`, unlike [`Self::module_sig_hash`], so resident identity
+    /// can detect declaration-layout shifts without widening the durable contract.
+    /// Excludes source ranges and bodies. `None` if the module is not indexed.
+    pub fn module_layout_hash(&self, module: ModuleId) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+
+        let methods = self.methods.get(&module)?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for entry in &methods.all {
+            entry.local_id.hash(&mut hasher);
+            entry.name.as_str().hash(&mut hasher);
+            entry.is_export.hash(&mut hasher);
+            match self.node_dispatch.get(&MethodId { module, local_id: entry.local_id }) {
+                Some(d) => {
+                    true.hash(&mut hasher);
+                    d.can_run_on_client.hash(&mut hasher);
+                    d.can_run_on_server.hash(&mut hasher);
+                    d.no_context.hash(&mut hasher);
+                }
+                None => false.hash(&mut hasher),
+            }
+        }
+        Some(hasher.finish())
+    }
+
     /// A module's methods as `(original-spelling name, is_export)` in declaration
     /// order, for the incremental caller-delta eligibility check (comparing the
     /// resolvable name surface across an edit). `None` if the module is not indexed.
@@ -421,6 +449,114 @@ pub fn resolve_module_summary_via_index(
     ));
 
     ResolvedModuleSummary { module, edges }
+}
+
+/// Projects a batch's resolved semantic calls to deterministic method-only pairs.
+///
+/// The index-backed resolver supplies direct, qualified-module, manager-user-method,
+/// notify, and idle-handler targets. This projection intentionally retains only
+/// method callers and method targets, so module code, unresolved calls, metadata,
+/// query, form, subscription, role, subsystem, register, and `SetAction` facts do
+/// not enter the call hierarchy.
+pub fn project_batch_method_call_pairs(
+    db: &dyn ConfigsDatabase,
+    index: &GraphIndex,
+    batch: &[ModuleId],
+) -> Vec<(MethodId, MethodId)> {
+    let mut pairs = Vec::new();
+    let mut seen = FxHashSet::default();
+
+    for &module in batch {
+        let summary = resolve_module_summary_via_index(db, module, index);
+        pairs.extend(
+            resolved_summary_method_pairs(&summary).into_iter().filter(|pair| seen.insert(*pair)),
+        );
+    }
+
+    pairs
+}
+
+fn resolved_summary_method_pairs(summary: &ResolvedModuleSummary) -> Vec<(MethodId, MethodId)> {
+    use crate::call_graph::CallerId;
+
+    let mut pairs = Vec::new();
+    for edge in &summary.edges {
+        let (CallerId::Method(local_id), ResolvedTarget::Method(target)) =
+            (&edge.caller, &edge.target)
+        else {
+            continue;
+        };
+        pairs.push((MethodId { module: summary.module, local_id: *local_id }, *target));
+    }
+    pairs.sort_unstable_by_key(|(caller, target)| {
+        (caller.local_id, target.module.file_id, target.local_id)
+    });
+    pairs.dedup();
+    pairs
+}
+
+#[cfg(test)]
+mod method_only_call_pair_tests {
+    use super::resolved_summary_method_pairs;
+    use bsl_metadata::MdoType;
+    use syntax::{TextRange, TextSize};
+    use vfs::FileId;
+
+    use crate::{
+        call_graph::{
+            CallTarget, CallerId, EdgeKind, EdgeProvenance, ResolvedCallEdge,
+            ResolvedModuleSummary, ResolvedTarget,
+        },
+        name::Name,
+        MethodId, ModuleId,
+    };
+
+    fn edge(caller: CallerId, target: ResolvedTarget) -> ResolvedCallEdge {
+        ResolvedCallEdge {
+            caller,
+            target,
+            kind: EdgeKind::DirectLocal,
+            range: TextRange::empty(TextSize::from(0)),
+            provenance: EdgeProvenance::Resolved,
+        }
+    }
+
+    #[test]
+    fn method_only_call_pairs_drop_non_method_edges_and_deduplicate() {
+        // Given: resolved edges to methods, metadata, an unresolved target, and module code.
+        let module = ModuleId::new(FileId(0));
+        let local = MethodId { module, local_id: 1 };
+        let other = MethodId { module: ModuleId::new(FileId(1)), local_id: 0 };
+        let summary = ResolvedModuleSummary {
+            module,
+            edges: vec![
+                edge(CallerId::Method(0), ResolvedTarget::Method(other)),
+                edge(CallerId::Method(0), ResolvedTarget::Method(local)),
+                edge(CallerId::Method(0), ResolvedTarget::Method(other)),
+                edge(CallerId::ModuleCode, ResolvedTarget::Method(other)),
+                edge(
+                    CallerId::Method(0),
+                    ResolvedTarget::Mdo {
+                        mdo_type: MdoType::Catalog,
+                        object_name: Name::new("Контрагенты"),
+                    },
+                ),
+                edge(CallerId::Method(0), ResolvedTarget::Unresolved(CallTarget::Unresolved)),
+            ],
+        };
+
+        // When: the resolved summary is projected to hierarchy pairs.
+        let pairs = resolved_summary_method_pairs(&summary);
+
+        // Then: only unique method-to-method pairs remain in target order.
+        assert_eq!(
+            pairs,
+            vec![
+                (MethodId { module, local_id: 0 }, local),
+                (MethodId { module, local_id: 0 }, other)
+            ],
+        );
+    }
 }
 
 /// Build the whole-config call graph over `modules` using the resident `index`
@@ -2111,5 +2247,56 @@ mod role_rls_tests {
     fn rls_drops_macro_template_without_false_edge() {
         // A legacy `#`-macro template parses with errors → dropped; no spurious object.
         assert!(objs("#ПоЗначениям(\"Справочник.Организации\")").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod module_layout_hash_tests {
+    use super::*;
+
+    fn hashes(source: &str) -> (u64, u64) {
+        let module = ModuleId::new(FileId(0));
+        let parse = parser::parse(source);
+        let methods =
+            crate::call_graph::extract_graph_methods(&crate::ItemTree::from_parse(&parse));
+        let mut index = GraphIndex::new();
+        index.insert_module_data(module, methods, None);
+
+        (
+            index.module_sig_hash(module).expect("indexed module has a signature hash"),
+            index.module_layout_hash(module).expect("indexed module has a layout hash"),
+        )
+    }
+
+    #[test]
+    fn module_layout_hash_changes_when_a_top_level_variable_shifts_method_local_ids() {
+        // Given: the same method declaration, with a new preceding top-level variable.
+        let before = hashes("Процедура Выполнить() Экспорт\nКонецПроцедуры");
+        let after = hashes("Перем Счетчик;\nПроцедура Выполнить() Экспорт\nКонецПроцедуры");
+
+        // Then: durable signature identity is stable, while resident layout identity moves.
+        assert_eq!(before.0, after.0);
+        assert_ne!(before.1, after.1);
+    }
+
+    #[test]
+    fn module_layout_hash_ignores_method_body_edits() {
+        // Given: the same declaration surface with a body-only edit.
+        let before = hashes("Процедура Выполнить() Экспорт\nСообщить(\"до\");\nКонецПроцедуры");
+        let after = hashes("Процедура Выполнить() Экспорт\nСообщить(\"после\");\nКонецПроцедуры");
+
+        // Then: neither durable signature nor resident layout identity changes.
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn module_layout_hash_changes_with_signature_and_effective_dispatch() {
+        // Given: a declaration whose spelling, export, and effective dispatch all change.
+        let before = hashes("&НаКлиенте\nПроцедура Выполнить() Экспорт\nКонецПроцедуры");
+        let after = hashes("&НаСервере\nПроцедура ВыполнитьНаСервере()\nКонецПроцедуры");
+
+        // Then: both declaration contracts change.
+        assert_ne!(before.0, after.0);
+        assert_ne!(before.1, after.1);
     }
 }

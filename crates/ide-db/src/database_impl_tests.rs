@@ -2676,6 +2676,102 @@ fn test_workspace_call_graph_module_code_and_multiple_callers() {
 }
 
 #[test]
+fn project_batch_method_pairs_include_resolved_callbacks_and_exclude_non_methods() {
+    use hir::graph_index::{project_batch_method_call_pairs, GraphIndex};
+
+    const BASE_CALLER: &str = "Процедура Главная() Экспорт\n\
+         ЛокальнаяЦель();\n\
+         Сервер.Считать();\n\
+         Справочники.Контрагенты.НайтиПоИНН();\n\
+         Оп1 = Новый ОписаниеОповещения(\"ЛокальныйОбработчик\", ЭтотОбъект);\n\
+         Оп2 = Новый ОписаниеОповещения(\"Считать\", Сервер);\n\
+         ПодключитьОбработчикОжидания(\"ОбновитьЭкран\", 1);\n\
+         КонецПроцедуры\n\
+         Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры\n\
+         Процедура ЛокальныйОбработчик() Экспорт КонецПроцедуры\n\
+         Процедура ОбновитьЭкран() Экспорт КонецПроцедуры\n\
+         Процедура ОбработчикДействия() Экспорт КонецПроцедуры";
+    const IGNORED_CALLER: &str = "Процедура Главная() Экспорт\n\
+         ЛокальнаяЦель();\n\
+         Сервер.Считать();\n\
+         Справочники.Контрагенты.НайтиПоИНН();\n\
+         Справочники.Номенклатура.СоздатьЭлемент();\n\
+         Оп1 = Новый ОписаниеОповещения(\"ЛокальныйОбработчик\", ЭтотОбъект);\n\
+         Оп2 = Новый ОписаниеОповещения(\"Считать\", Сервер);\n\
+         ПодключитьОбработчикОжидания(\"ОбновитьЭкран\", 1);\n\
+         Элементы.Кнопка.УстановитьДействие(\"Нажатие\", \"ОбработчикДействия\");\n\
+         Запрос = Новый Запрос(\"ВЫБРАТЬ Ссылка ИЗ Справочник.Номенклатура\");\n\
+         КонецПроцедуры\n\
+         Процедура ЛокальнаяЦель() Экспорт КонецПроцедуры\n\
+         Процедура ЛокальныйОбработчик() Экспорт КонецПроцедуры\n\
+         Процедура ОбновитьЭкран() Экспорт КонецПроцедуры\n\
+         Процедура ОбработчикДействия() Экспорт КонецПроцедуры\n\
+         ЛокальнаяЦель();";
+    let files = [
+        ("/src/CommonModules/Клиент/Ext/Module.bsl", BASE_CALLER),
+        ("/src/CommonModules/Сервер/Ext/Module.bsl", "Функция Считать() Экспорт КонецФункции"),
+        (
+            "/src/Catalogs/Контрагенты/Ext/ManagerModule.bsl",
+            "Функция НайтиПоИНН() Экспорт КонецФункции",
+        ),
+    ];
+    let client = FileId(0);
+    let server = FileId(1);
+    let manager = FileId(2);
+    let modules = [ModuleId::new(client), ModuleId::new(server), ModuleId::new(manager)];
+    let make_db = |caller: &str| {
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        for (index, (path, _)) in files.iter().enumerate() {
+            file_set.insert(FileId(index as u32), VfsPath::new(*path));
+        }
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        for (index, (_, text)) in files.iter().enumerate() {
+            let file_id = FileId(index as u32);
+            db.set_file_source_root(file_id, SourceRootId(0));
+            db.set_file_text(file_id, if file_id == client { caller } else { text });
+        }
+        db
+    };
+
+    // Given: direct, qualified, manager, and callback calls in one caller module.
+    let base = make_db(BASE_CALLER);
+    let index = GraphIndex::build(&base, &modules);
+
+    // When: the index-backed batch projection resolves the caller module.
+    let pairs = project_batch_method_call_pairs(&base, &index, &modules);
+    let main = hir::MethodId { module: ModuleId::new(client), local_id: 0 };
+
+    // Then: every supported target is emitted once as a method pair.
+    assert_eq!(
+        pairs,
+        vec![
+            (main, hir::MethodId { module: ModuleId::new(client), local_id: 1 }),
+            (main, hir::MethodId { module: ModuleId::new(client), local_id: 2 }),
+            (main, hir::MethodId { module: ModuleId::new(client), local_id: 3 }),
+            (main, hir::MethodId { module: ModuleId::new(server), local_id: 0 }),
+            (main, hir::MethodId { module: ModuleId::new(manager), local_id: 0 }),
+        ],
+        "local, qualified, manager, notify, and idle-handler targets are method-only pairs",
+    );
+
+    // Given: the same calls plus module code, an MDO call, a query, and SetAction.
+    let ignored = make_db(IGNORED_CALLER);
+    assert_eq!(
+        ignored.module_call_summary(ModuleId::new(client)).set_action_regs.len(),
+        1,
+        "the fixture must exercise SetAction extraction",
+    );
+
+    // When/Then: ignored graph domains cannot change the method-pair digest.
+    assert_eq!(
+        project_batch_method_call_pairs(&ignored, &index, &modules),
+        pairs,
+        "module code, MDO, query, and SetAction additions must not alter the method-pair digest",
+    );
+}
+
+#[test]
 fn test_workspace_call_graph_client_server_boundary() {
     use hir::call_graph::{GraphNode, ResolvedTarget};
     use hir::ConfigsDatabase;
