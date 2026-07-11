@@ -12,4 +12,4 @@ pub use presenters::{
     render_completion_detail, render_declaration, render_hover_markdown, render_signature_help,
     CompletionDetail, ParameterInfoView, SignatureHelpView,
 };
-pub use use_cases::{resolve_callee_at, ActiveParam};
+pub use use_cases::{resolve_callee_at, ActiveParam, CalleeResolver};

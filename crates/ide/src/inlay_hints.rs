@@ -1,6 +1,6 @@
 use ide_db::RootDatabase;
 use stdx::case::CaseExt;
-use symbol_info::{build_signature, resolve_callee_at};
+use symbol_info::{build_signature, CalleeResolver};
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize};
 use vfs::FileId;
 
@@ -28,36 +28,33 @@ pub enum InlayHintKind {
 /// per-binding inference surface, not yet exposed to this layer).
 pub fn inlay_hints<DB: RootDatabase>(db: &DB, file_id: FileId, range: TextRange) -> Vec<InlayHint> {
     let _span = tracing::info_span!("inlay_hints", ?file_id).entered();
-    let parse = db.parse(file_id);
-    let root = parse.syntax_node();
+    let resolver = CalleeResolver::new(db, file_id);
 
     let mut hints = Vec::new();
-    for node in root.descendants() {
+    for node in resolver.root().descendants() {
         if node.kind() != SyntaxKind::ARG_LIST {
             continue;
         }
         if range.intersect(node.text_range()).is_none() {
             continue;
         }
-        parameter_hints_for_arg_list(db, file_id, &node, range, &mut hints);
+        parameter_hints_for_arg_list(&resolver, db, file_id, &node, range, &mut hints);
     }
     hints
 }
 
 fn parameter_hints_for_arg_list<DB: RootDatabase>(
+    resolver: &CalleeResolver<'_, DB>,
     db: &DB,
     file_id: FileId,
     arg_list: &SyntaxNode,
     range: TextRange,
     hints: &mut Vec<InlayHint>,
 ) {
-    // Anchor callee resolution inside the argument list so it selects this call
-    // (and not an enclosing one); an empty list carries nothing to label.
-    let Some(first_arg) = arg_list.children().next() else {
+    if arg_list.children().next().is_none() {
         return;
-    };
-    let Some((callee, _active)) = resolve_callee_at(db, file_id, first_arg.text_range().start())
-    else {
+    }
+    let Some(callee) = resolver.resolve_arg_list(arg_list) else {
         return;
     };
     let Some(signature) = build_signature(db, file_id, &callee) else {
@@ -204,5 +201,34 @@ mod tests {
             TextSize::from(MODULE.find("Процедура Тест").unwrap() as u32),
         );
         assert!(inlay_hints(&db, file_id, decl_only).is_empty());
+    }
+
+    #[test]
+    fn parameter_hints_distinct_for_nested_repeated_calls() {
+        let source = r#"
+Функция Сложить(Первое, Второе)
+    Возврат Первое + Второе;
+КонецФункции
+
+Процедура Тест()
+    Сложить(Сложить(1, 2), 3);
+КонецПроцедуры
+"#;
+        let (db, file_id) = single_file(source);
+        let mut hints = inlay_hints(&db, file_id, whole_range(source));
+        // Document order proves inner/outer ARG_LIST nodes remain distinct:
+        // outer-arg1 hint on the inner call, then inner's two hints, then
+        // outer-arg2 — four total, not collapsed or duplicated.
+        hints.sort_by_key(|h| h.position);
+        let labels = labels_at(source, &hints);
+        assert_eq!(
+            labels,
+            vec![
+                ("Первое:".to_string(), "Сложить".to_string()),
+                ("Первое:".to_string(), "1".to_string()),
+                ("Второе:".to_string(), "2".to_string()),
+                ("Второе:".to_string(), "3".to_string()),
+            ],
+        );
     }
 }

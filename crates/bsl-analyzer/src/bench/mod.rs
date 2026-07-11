@@ -14,6 +14,9 @@ pub mod report;
 pub mod runner;
 
 #[cfg(test)]
+mod inlay_hints_tests;
+
+#[cfg(test)]
 mod tests {
     use super::discover::{discover, DiscoverArgs};
     use super::manifest::{

@@ -1840,6 +1840,8 @@ mod tests {
     use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
     use crate::global_state::GlobalState;
 
+    mod inlay_hint_tests;
+
     #[test]
     fn workspace_scope_filters_by_extension_root() {
         use project_model::WorkspaceDiagnosticsScope::{All, Extensions, Off};

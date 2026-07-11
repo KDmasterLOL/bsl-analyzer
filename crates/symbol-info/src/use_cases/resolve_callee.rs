@@ -14,35 +14,77 @@ pub struct ActiveParam {
     pub index: usize,
 }
 
+/// Resolves callees for syntax nodes owned by one request-local parsed file.
+///
+/// The bound root prevents structurally identical nodes from another file from
+/// being classified against this file's semantic context.
+pub struct CalleeResolver<'db, DB> {
+    db: &'db DB,
+    file_id: FileId,
+    root: SyntaxNode,
+}
+
+impl<'db, DB: RootDatabase> CalleeResolver<'db, DB> {
+    /// Creates a resolver with one parsed root for the request's file.
+    pub fn new(db: &'db DB, file_id: FileId) -> Self {
+        let root = db.parse(file_id).syntax_node();
+        Self { db, file_id, root }
+    }
+
+    /// Returns the request-local root for traversals whose nodes may be resolved.
+    pub fn root(&self) -> &SyntaxNode {
+        &self.root
+    }
+
+    /// Resolves an argument list only when it originates from this resolver's root.
+    ///
+    /// Rejecting foreign nodes keeps their semantic context from being confused
+    /// with the bound file, even when their syntax is otherwise valid.
+    pub fn resolve_arg_list(&self, arg_list: &SyntaxNode) -> Option<CalleeKind> {
+        if arg_list.kind() != SyntaxKind::ARG_LIST || arg_list.ancestors().last()? != self.root {
+            return None;
+        }
+
+        let parent = arg_list.parent()?;
+        if parent.kind() == SyntaxKind::NEW_EXPR {
+            let type_name = extract_new_expr_type_name(&parent)?;
+            return Some(CalleeKind::PlatformConstructor { type_name: type_name.into() });
+        }
+        if parent.kind() != SyntaxKind::CALL_EXPR {
+            return None;
+        }
+
+        resolve_call_expr(self.db, self.file_id, &parent)
+    }
+}
+
 pub fn resolve_callee_at<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
     offset: TextSize,
 ) -> Option<(CalleeKind, ActiveParam)> {
-    let parse = db.parse(file_id);
-    let root = parse.syntax_node();
-    let token = root.token_at_offset(offset).left_biased()?;
+    let resolver = CalleeResolver::new(db, file_id);
+    let token = resolver.root().token_at_offset(offset).left_biased()?;
 
     let arg_list = find_arg_list(&token)?;
     if is_on_closing_paren(&token, &arg_list) {
         return None;
     }
 
-    if let Some(new_expr) = arg_list.parent().filter(|p| p.kind() == SyntaxKind::NEW_EXPR) {
-        if let Some(type_name) = extract_new_expr_type_name(&new_expr) {
-            let active = ActiveParam { index: count_commas_before(&arg_list, offset) };
-            return Some((CalleeKind::PlatformConstructor { type_name: type_name.into() }, active));
-        }
-        return None;
-    }
-
-    let call_expr = find_call_expr(&arg_list)?;
-
-    let (receiver, callee_name) = extract_callee_info(&call_expr)?;
+    let callee = resolver.resolve_arg_list(&arg_list)?;
     let active = ActiveParam { index: count_commas_before(&arg_list, offset) };
+    Some((callee, active))
+}
 
-    if let Some(kind) = classify_mdo_chain(db, file_id, &call_expr, &callee_name) {
-        return Some((kind, active));
+fn resolve_call_expr<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    call_expr: &SyntaxNode,
+) -> Option<CalleeKind> {
+    let (receiver, callee_name) = extract_callee_info(call_expr)?;
+
+    if let Some(kind) = classify_mdo_chain(db, file_id, call_expr, &callee_name) {
+        return Some(kind);
     }
 
     if let Some((receiver_name, receiver_node)) = receiver {
@@ -55,13 +97,10 @@ pub fn resolve_callee_at<DB: RootDatabase>(
             )
             .is_some()
             {
-                return Some((
-                    CalleeKind::PlatformMethod {
-                        type_name: type_name.into(),
-                        method_name: callee_name.into(),
-                    },
-                    active,
-                ));
+                return Some(CalleeKind::PlatformMethod {
+                    type_name: type_name.into(),
+                    method_name: callee_name.into(),
+                });
             }
         }
 
@@ -78,13 +117,10 @@ pub fn resolve_callee_at<DB: RootDatabase>(
                 )
                 .is_some()
                 {
-                    return Some((
-                        CalleeKind::PlatformMethod {
-                            type_name: type_name.into(),
-                            method_name: callee_name.into(),
-                        },
-                        active,
-                    ));
+                    return Some(CalleeKind::PlatformMethod {
+                        type_name: type_name.into(),
+                        method_name: callee_name.into(),
+                    });
                 }
             }
         }
@@ -95,22 +131,16 @@ pub fn resolve_callee_at<DB: RootDatabase>(
         )
         .is_some()
         {
-            return Some((
-                CalleeKind::PlatformMethod {
-                    type_name: receiver_name.into(),
-                    method_name: callee_name.into(),
-                },
-                active,
-            ));
+            return Some(CalleeKind::PlatformMethod {
+                type_name: receiver_name.into(),
+                method_name: callee_name.into(),
+            });
         }
 
-        return Some((
-            CalleeKind::CommonModuleMethod {
-                module: Name::new(&receiver_name),
-                method: Name::new(&callee_name),
-            },
-            active,
-        ));
+        return Some(CalleeKind::CommonModuleMethod {
+            module: Name::new(&receiver_name),
+            method: Name::new(&callee_name),
+        });
     }
 
     // An unqualified call may target an exported method of a GLOBAL common module, which
@@ -125,20 +155,17 @@ pub fn resolve_callee_at<DB: RootDatabase>(
             .into_iter()
             .find(|(_, method_name, _)| method_name.eq_ignore_case(&name))
         {
-            return Some((
-                CalleeKind::CommonModuleMethod { module: module_name, method: name },
-                active,
-            ));
+            return Some(CalleeKind::CommonModuleMethod { module: module_name, method: name });
         }
     }
 
     if global_function_query(db, TypeNameInput::new(db, callee_name.clone())).is_some() {
-        return Some((CalleeKind::GlobalFunction { name: callee_name.into() }, active));
+        return Some(CalleeKind::GlobalFunction { name: callee_name.into() });
     }
 
     let resolver = Resolver::for_module(module_id);
     if resolver.resolve_module_method(db, &name).is_some() {
-        return Some((CalleeKind::LocalMethod { module_id, method: name }, active));
+        return Some(CalleeKind::LocalMethod { module_id, method: name });
     }
 
     None
@@ -201,10 +228,6 @@ fn is_on_closing_paren(token: &SyntaxToken, arg_list: &SyntaxNode) -> bool {
     false
 }
 
-fn find_call_expr(arg_list: &SyntaxNode) -> Option<SyntaxNode> {
-    arg_list.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR)
-}
-
 fn extract_new_expr_type_name(new_expr: &SyntaxNode) -> Option<String> {
     Some(syntax::ast_utils::new_expr_type_name_token(new_expr)?.text().to_string())
 }
@@ -265,3 +288,7 @@ fn count_commas_before(arg_list: &SyntaxNode, offset: TextSize) -> usize {
     }
     count
 }
+
+#[cfg(test)]
+#[path = "resolve_callee_tests.rs"]
+mod tests;
