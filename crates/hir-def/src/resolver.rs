@@ -296,11 +296,11 @@ impl Resolver {
     /// Both the global flag and the module body are taken from the module *effective* for
     /// this file: candidate names come from [`Self::global_common_module_names`], but each
     /// is confirmed global via [`ConfigsDatabase::resolve_common_module`] (base composed
-    /// with the file's own extension, extension winning) before its body is located through
-    /// [`Self::locate_common_module`] — the same visibility-correct path a qualified
-    /// `Модуль.Метод()` call takes. So a bare call resolves to exactly the target the
-    /// qualified form would, and an extension that turns a base-global module non-global
-    /// (or vice versa) is honoured rather than leaking the base flag.
+    /// with the file's own extension, extension winning) before its bodies are located
+    /// through [`Self::locate_common_module_candidates`] — the same visibility-correct path
+    /// a qualified `Модуль.Метод()` call takes. So a bare call resolves to exactly the
+    /// target the qualified form would, and an extension that turns a base-global module
+    /// non-global (or vice versa) is honoured rather than leaking the base flag.
     ///
     /// Order is deterministic: global modules in configuration-iteration order, methods in
     /// symbol-tree order. Callers that need a single winner for a name keep the FIRST
@@ -321,12 +321,20 @@ impl Resolver {
             if !effective_is_global {
                 continue;
             }
-            let Ok(module_id) = self.locate_common_module(db, &module_name) else {
+            let Ok(candidates) = self.locate_common_module_candidates(db, &module_name) else {
                 continue;
             };
-            let symbol_tree = db.symbol_tree(module_id);
-            for method in symbol_tree.exported_methods() {
-                exports.push((module_name.clone(), method.name.clone(), method.id));
+            // Base first, then the caller's own extension body: a name declared
+            // in both keeps the base declaration, an extension-added export is
+            // appended after it.
+            let mut seen = rustc_hash::FxHashSet::default();
+            for module_id in candidates {
+                let symbol_tree = db.symbol_tree(module_id);
+                for method in symbol_tree.exported_methods() {
+                    if seen.insert(method.name.as_str().fold_lower()) {
+                        exports.push((module_name.clone(), method.name.clone(), method.id));
+                    }
+                }
             }
         }
         exports
@@ -418,32 +426,56 @@ impl Resolver {
         ]))
     }
 
-    /// Locate the common module `module_name` is declared in (config visibility +
-    /// path index), without looking at any method. Shared by
-    /// [`Self::resolve_qualified_method`] and the graph-index build, so both agree
-    /// on which module a qualified call targets; only the method-lookup step
-    /// (symbol tree vs. the resident graph index) differs.
-    pub(crate) fn locate_common_module(
+    /// Every body file the common module `module_name` resolves to for this
+    /// resolver's file (config visibility + body lookup), base first, without
+    /// looking at any method. Shared by [`Self::resolve_qualified_method`] and
+    /// the graph-index build, so both agree on which bodies a qualified call
+    /// targets; only the method-lookup step (symbol tree vs. the resident graph
+    /// index) differs.
+    ///
+    /// A module adopted by the caller's own
+    /// extension has two bodies — the base one and the extension one that adds
+    /// methods on top of it — and a method lookup that sees only one of them
+    /// misreports the other half of the surface. Callers outside any extension
+    /// get exactly the base body, so an extension-added method stays invisible
+    /// to base-configuration code (calling it from there is a genuine error:
+    /// the extension can be detached at any time).
+    ///
+    /// The returned vector is never empty.
+    pub(crate) fn locate_common_module_candidates(
         &self,
         db: &dyn ConfigsDatabase,
         module_name: &Name,
-    ) -> Result<ModuleId, QualifiedMethodError> {
+    ) -> Result<Vec<ModuleId>, QualifiedMethodError> {
         if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
-            tracing::warn!("locate_common_module called without workspace scope; refusing");
+            tracing::warn!(
+                "locate_common_module_candidates called without workspace scope; refusing"
+            );
             return Err(QualifiedMethodError::NotFound);
         }
 
         let module_id = self.module_id().ok_or_else(|| {
-            tracing::warn!("locate_common_module called without module scope");
+            tracing::warn!("locate_common_module_candidates called without module scope");
             QualifiedMethodError::NotFound
         })?;
 
         let file_id = module_id.file_id;
 
-        if db.has_config_root(file_id)
-            && db.resolve_common_module(file_id, module_name.as_str()).is_none()
-        {
-            return Err(QualifiedMethodError::NotVisibleInConfigs);
+        if db.has_config_root(file_id) {
+            if db.resolve_common_module(file_id, module_name.as_str()).is_none() {
+                return Err(QualifiedMethodError::NotVisibleInConfigs);
+            }
+
+            if let Some(files) =
+                db.resolve_common_module_file_candidates(file_id, module_name.as_str())
+            {
+                if !files.is_empty() {
+                    return Ok(files.into_iter().map(crate::ModuleId::new).collect());
+                }
+                // Configs see the module but no body file mapped (metadata-URI
+                // drift): degrade to the path index below instead of reporting
+                // a module the visibility gate just confirmed as missing.
+            }
         }
 
         let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
@@ -453,7 +485,7 @@ impl Resolver {
             .resolve_common_module(module_name)
             .ok_or(QualifiedMethodError::NotFound)?;
 
-        Ok(crate::ModuleId::new(target_file_id))
+        Ok(vec![crate::ModuleId::new(target_file_id)])
     }
 
     pub fn resolve_qualified_method(
@@ -465,15 +497,17 @@ impl Resolver {
         let _span =
             tracing::info_span!("resolve_qualified_method", %module_name, %method_name).entered();
 
-        let target_module_id = self.locate_common_module(db, module_name)?;
-        let symbol_tree = db.symbol_tree(target_module_id);
-        let method_symbol =
-            symbol_tree.find_method(method_name).ok_or(QualifiedMethodError::NotFound)?;
-
-        Ok(QualifiedMethodResolution {
-            method_id: method_symbol.id,
-            is_export: method_symbol.is_export,
-        })
+        let candidates = self.locate_common_module_candidates(db, module_name)?;
+        for target_module_id in candidates {
+            let symbol_tree = db.symbol_tree(target_module_id);
+            if let Some(method_symbol) = symbol_tree.find_method(method_name) {
+                return Ok(QualifiedMethodResolution {
+                    method_id: method_symbol.id,
+                    is_export: method_symbol.is_export,
+                });
+            }
+        }
+        Err(QualifiedMethodError::NotFound)
     }
 
     fn resolve_cross_module(

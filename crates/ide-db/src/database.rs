@@ -2002,6 +2002,18 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         RootDatabaseImpl::resolve_common_module_for_file(self, file_id, name)
     }
 
+    fn resolve_common_module_file_candidates(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Vec<FileId>> {
+        // The helper orders extension-first for merged-surface validation;
+        // qualified resolution wants the base declaration to win, so reverse.
+        let mut files = self.resolve_common_module_files_for_file(file_id, name);
+        files.reverse();
+        Some(files)
+    }
+
     fn resolve_event_subscription(
         &self,
         file_id: FileId,

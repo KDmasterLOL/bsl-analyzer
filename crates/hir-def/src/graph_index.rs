@@ -306,9 +306,14 @@ pub fn resolve_module_summary_via_index(
                 edge.kind,
             ),
             CallTarget::QualifiedModule { module_name, method_name } => {
-                match resolver.locate_common_module(db, module_name) {
-                    Ok(target_module) => match index.find_method(target_module, method_name) {
-                        Some(m) if m.is_export => (
+                match resolver.locate_common_module_candidates(db, module_name) {
+                    // Base body first, then the caller's own extension body —
+                    // the first hit mirrors `resolve_qualified_method`.
+                    Ok(candidates) => match candidates
+                        .iter()
+                        .find_map(|&m| index.find_method(m, method_name).map(|hit| (m, hit)))
+                    {
+                        Some((target_module, m)) if m.is_export => (
                             ResolvedTarget::Method(MethodId {
                                 module: target_module,
                                 local_id: m.local_id,
@@ -428,13 +433,18 @@ pub fn resolve_module_summary_via_index(
     };
     let find_qualified =
         |module_name: &crate::name::Name, method_name: &crate::name::Name| match resolver
-            .locate_common_module(db, module_name)
+            .locate_common_module_candidates(db, module_name)
         {
-            Ok(target_module) => match index.find_method(target_module, method_name) {
-                Some(m) if m.is_export => crate::queries::QualifiedLookup::Resolved(MethodId {
-                    module: target_module,
-                    local_id: m.local_id,
-                }),
+            Ok(candidates) => match candidates
+                .iter()
+                .find_map(|&m| index.find_method(m, method_name).map(|hit| (m, hit)))
+            {
+                Some((target_module, m)) if m.is_export => {
+                    crate::queries::QualifiedLookup::Resolved(MethodId {
+                        module: target_module,
+                        local_id: m.local_id,
+                    })
+                }
                 Some(_) => crate::queries::QualifiedLookup::VisibilityBlocked,
                 None => crate::queries::QualifiedLookup::Absent,
             },
@@ -638,9 +648,13 @@ pub fn extract_unresolved_refs(
     for edge in &summary.call_edges {
         match &edge.target {
             CallTarget::QualifiedModule { module_name, method_name } => {
-                if let Ok(target) = resolver.locate_common_module(db, module_name) {
-                    if unresolved(index.find_method(target, method_name)) {
-                        out.push((target, method_name.as_str().fold_lower()));
+                if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
+                    // No candidate resolves the call: track every body so adding
+                    // the method to either (base or own extension) reprojects.
+                    if candidates.iter().all(|&m| unresolved(index.find_method(m, method_name))) {
+                        for target in candidates {
+                            out.push((target, method_name.as_str().fold_lower()));
+                        }
                     }
                 }
             }
@@ -665,9 +679,12 @@ pub fn extract_unresolved_refs(
     // `module_call_summary` invalidation.
     for reg in &summary.notify_regs {
         if let crate::call_graph::NotifyTarget::Module(module_name) = &reg.target {
-            if let Ok(target) = resolver.locate_common_module(db, module_name) {
-                if unresolved(index.find_method(target, &reg.callback_name)) {
-                    out.push((target, reg.callback_name.as_str().fold_lower()));
+            if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
+                if candidates.iter().all(|&m| unresolved(index.find_method(m, &reg.callback_name)))
+                {
+                    for target in candidates {
+                        out.push((target, reg.callback_name.as_str().fold_lower()));
+                    }
                 }
             }
         }
