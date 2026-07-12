@@ -7,6 +7,7 @@ pub mod conditional_tree;
 pub mod configs;
 pub mod docs;
 pub mod effective_module;
+pub mod execution_env;
 pub mod extension_merge;
 pub mod graph_index;
 pub(crate) mod heap_estimate;
