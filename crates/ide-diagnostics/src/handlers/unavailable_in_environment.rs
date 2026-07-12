@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn preprocessor_branch_suppresses_check() {
+    fn preprocessor_guard_narrows_environments() {
         let fixture = r#"
 //- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
 &НаКлиенте
@@ -100,7 +100,124 @@ mod tests {
 КонецПроцедуры
 "#;
         let diags = env_diags(fixture);
-        assert!(diags.is_empty(), "code inside #Если must not be flagged, got: {diags:?}");
+        assert!(diags.is_empty(), "the guard excludes the web client, got: {diags:?}");
+    }
+
+    #[test]
+    fn preprocessor_branch_still_checks_matching_environments() {
+        // Unlike a blanket skip, narrowing keeps checking the environments
+        // the branch IS compiled for.
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Прочитать()
+    #Если ТонкийКлиент ИЛИ ВебКлиент Тогда
+    Чтение = Новый ЧтениеТекста;
+    Стр = Чтение.ПрочитатьСтроку();
+    #КонецЕсли
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert_eq!(diags.len(), 1, "web client is inside the branch mask, got: {diags:?}");
+        assert!(
+            diags[0].0.contains("Веб-клиент") && !diags[0].0.contains("Тонкий клиент"),
+            "only the web client lacks ЧтениеТекста: {}",
+            diags[0].0
+        );
+    }
+
+    #[test]
+    fn preprocessor_else_gets_complement() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Прочитать()
+    #Если ВебКлиент Тогда
+    Сообщить("веб");
+    #Иначе
+    Чтение = Новый ЧтениеТекста;
+    Стр = Чтение.ПрочитатьСтроку();
+    #КонецЕсли
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "else runs only on thin/thick clients, got: {diags:?}");
+
+        let fixture_positive = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиентеНаСервере
+Процедура Записать()
+    #Если Сервер Тогда
+    Сообщить("сервер");
+    #Иначе
+    ЗаписьЖурналаРегистрации("Событие");
+    #КонецЕсли
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture_positive);
+        assert_eq!(diags.len(), 1, "else covers the clients, got: {diags:?}");
+        assert!(
+            diags[0].0.contains("Тонкий клиент") && diags[0].0.contains("Веб-клиент"),
+            "thin and web clients lack the API: {}",
+            diags[0].0
+        );
+    }
+
+    #[test]
+    fn unrecognized_preprocessor_symbol_skips_chain() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Прочитать()
+    #Если Линукс Тогда
+    Чтение = Новый ЧтениеТекста;
+    Стр = Чтение.ПрочитатьСтроку();
+    #Иначе
+    ЗаписьЖурналаРегистрации("Событие");
+    #КонецЕсли
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(
+            diags.is_empty(),
+            "an undecidable condition must silence the whole chain, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_preprocessor_condition_silences_chain() {
+        // Parser error recovery may keep a valid prefix of the condition;
+        // the availability check must not act on it.
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Прочитать()
+    #Если ВебКлиент = 1 Тогда
+    Чтение = Новый ЧтениеТекста;
+    Стр = Чтение.ПрочитатьСтроку();
+    #КонецЕсли
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "malformed condition must silence the chain, got: {diags:?}");
+    }
+
+    #[test]
+    fn nested_preprocessor_narrows_cumulatively() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Прочитать()
+    #Если Клиент Тогда
+        #Если НЕ ВебКлиент Тогда
+        Чтение = Новый ЧтениеТекста;
+        Стр = Чтение.ПрочитатьСтроку();
+        #КонецЕсли
+    #КонецЕсли
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "nested guards intersect, got: {diags:?}");
     }
 
     #[test]

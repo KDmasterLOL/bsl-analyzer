@@ -6,9 +6,10 @@ The 1C:Enterprise platform API is not uniformly available across execution envir
 
 The call site's environment set is the intersection of the module's environments (module kind, common-module flags: Server, ClientManagedApplication, ServerCall, ExternalConnection) and the method's compilation directive (`&AtClient`, `&AtServer`, `&AtClientAtServer`, …). The message qualifier lists only the environments where the member is missing — mirroring 1C:EDT verdicts like "… is not defined [Web client]".
 
+Preprocessor conditions are understood: inside `#If … #EndIf` only the intersection of the method's environments with the environments the branch compiles for is checked (`#If Not WebClient Then` removes the web client; the `#Else` branch receives the complement). Environments for which the condition stays undecidable (e.g. it involves an OS name and is not resolved by И/ИЛИ absorption) are skipped throughout the branch chain.
+
 Current limitations (deliberately conservative):
 
-- code inside any `#If … #EndIf` preprocessor block is not checked — the preprocessor condition narrows the environment set, and without evaluating it the check would produce false positives;
 - extension modules (interceptors `&Instead`/`&Before`/`&After`, `&ChangeAndValidate`) are not checked;
 - the mobile client, the external connection, and the legacy thick client (ordinary application) are excluded from the checked environment set by default (`checked_environments`);
 - when a platform type name is ambiguous (e.g. `ЭлементыФормы` names both the managed-form items collection and the legacy form controls), availability of its members is not judged.
@@ -36,7 +37,7 @@ Procedure ReadFileAtServer()
 EndProcedure
 ```
 
-or with an explicit preprocessor guard:
+or with an explicit preprocessor guard (the diagnostic understands such conditions and stays silent):
 
 ```bsl
 &AtClient

@@ -389,6 +389,11 @@ pub(crate) fn body_heap(body: &Body) -> usize {
                         .map(|branch| vec_bytes::<StmtIdx>(branch.2.len()))
                         .sum::<usize>()
                     + pre.else_branch.as_ref().map_or(0, |b| vec_bytes::<StmtIdx>(b.len()))
+                    + pre.condition.memory_usage()
+                    + vec_bytes::<crate::preproc_condition::PreprocCondition>(
+                        pre.elsif_conditions.len(),
+                    )
+                    + pre.elsif_conditions.iter().map(|c| c.memory_usage()).sum::<usize>()
             }
             Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::ForEach { body, .. } => {
                 vec_bytes::<StmtIdx>(body.len())

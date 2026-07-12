@@ -20,6 +20,7 @@ pub mod module_structure;
 pub mod name;
 pub mod name_usage_index;
 pub mod path;
+pub mod preproc_condition;
 pub mod queries;
 pub mod region_tree;
 pub mod resolver;

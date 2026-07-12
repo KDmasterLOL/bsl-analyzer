@@ -377,12 +377,6 @@ pub struct InferenceContext<'db> {
     /// out of default verdicts.
     checked_env: hir_def::execution_env::EnvFlags,
 
-    /// Nesting depth of `#Если … #КонецЕсли` preprocessor branches around the
-    /// statement being inferred. Non-zero suppresses availability checks: the
-    /// branch condition narrows the environment set in a way this pass does
-    /// not model yet, so anything inside is assumed intentional.
-    preproc_depth: u32,
-
     /// Lazily-built lookup of unqualified-callable exports of the GLOBAL common modules
     /// visible to this body: lowercased method name → owning `MethodId` (first global
     /// module wins on a name collision). Built once per inference run on first bare-call
@@ -586,7 +580,6 @@ impl<'db> InferenceContext<'db> {
             return_expr_ids: Vec::new(),
             body_env,
             checked_env: opts.checked_environments,
-            preproc_depth: 0,
             global_exports: None,
             structure_shapes: FxHashMap::default(),
         }
@@ -796,9 +789,9 @@ impl<'db> InferenceContext<'db> {
     /// Report a resolved platform member that is missing from some of the
     /// environments this body runs in. Free when nothing is wrong: one u8
     /// mask compare against availability already carried by the lookup
-    /// result. Suppressed inside `#Если` branches (the condition narrows the
-    /// environment set beyond this pass's model) and when either side is
-    /// unknown.
+    /// result. `#Если` branches narrow the body mask per their condition
+    /// (see the `Stmt::PreprocIf` arm); the check is skipped when either
+    /// side is unknown.
     fn check_member_env(
         &mut self,
         expr: ExprId,
@@ -806,7 +799,7 @@ impl<'db> InferenceContext<'db> {
         member_env: hir_def::execution_env::EnvFlags,
         member_kind: EnvMemberKind,
     ) {
-        if self.preproc_depth > 0 || self.body_env.is_empty() || member_env.is_empty() {
+        if self.body_env.is_empty() || member_env.is_empty() {
             return;
         }
         let missing = self.body_env.without(member_env) & self.checked_env;
@@ -1110,15 +1103,31 @@ impl<'db> InferenceContext<'db> {
             }
 
             Stmt::PreprocIf(preproc) => {
-                self.preproc_depth += 1;
+                // Availability checks inside a branch see only the
+                // environments its condition compiles for; nesting works
+                // because each frame restores its own parent mask.
+                let parent = self.body_env;
+                let mut remaining = parent;
+                self.body_env = preproc.condition.narrow_branch(&mut remaining);
                 self.infer_stmts(&preproc.then_branch);
-                for (_, _, branch) in preproc.elsif_branches.iter() {
+                for (idx, (_, _, branch)) in preproc.elsif_branches.iter().enumerate() {
+                    self.body_env = match preproc.elsif_conditions.get(idx) {
+                        Some(cond) => cond.narrow_branch(&mut remaining),
+                        // A branch without a lowered condition (broken
+                        // alignment) poisons the rest of the chain,
+                        // including #Иначе.
+                        None => {
+                            remaining = hir_def::execution_env::EnvFlags::EMPTY;
+                            remaining
+                        }
+                    };
                     self.infer_stmts(branch);
                 }
                 if let Some(else_branch) = &preproc.else_branch {
+                    self.body_env = remaining;
                     self.infer_stmts(else_branch);
                 }
-                self.preproc_depth -= 1;
+                self.body_env = parent;
             }
 
             Stmt::While { condition, body } => {
