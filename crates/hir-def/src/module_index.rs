@@ -367,6 +367,8 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
     }
 
     let path_lower = path.fold_lower();
+    let is_manager_module =
+        parts.last().is_some_and(|file_name| file_name.eq_ignore_ascii_case("ManagerModule.bsl"));
 
     for (i, part) in parts.iter().enumerate().rev() {
         let module_type = module_path_type_from_segment(part);
@@ -383,7 +385,7 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
                     {
                         return Some((mod_type, name, ModuleFileKind::Common));
                     }
-                } else if path_lower.ends_with("managermodule.bsl") {
+                } else if is_manager_module {
                     return Some((mod_type, name, ModuleFileKind::Manager));
                 } else if path_lower.ends_with("objectmodule.bsl") {
                     return Some((mod_type, name, ModuleFileKind::Object));
@@ -436,6 +438,30 @@ mod tests {
                 "ПриходнаяНакладная".to_string(),
                 ModuleFileKind::Object,
             )),
+        );
+    }
+
+    #[test]
+    fn value_manager_module_does_not_replace_constant_manager_module() {
+        let manager = FileId::from_raw(1);
+        let value_manager = FileId::from_raw(2);
+        let index = ModuleIndex::build_from_paths(
+            [
+                (manager, "Constants/ИспользоватьОсобыеУсловияТруда/Ext/ManagerModule.bsl"),
+                (
+                    value_manager,
+                    "Constants/ИспользоватьОсобыеУсловияТруда/Ext/ValueManagerModule.bsl",
+                ),
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(
+            index.resolve_manager(
+                ManagerType::Constants,
+                &Name::new("ИспользоватьОсобыеУсловияТруда")
+            ),
+            Some(manager),
         );
     }
 

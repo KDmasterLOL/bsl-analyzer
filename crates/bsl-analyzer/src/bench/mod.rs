@@ -164,12 +164,21 @@ mod tests {
             run_one(FeatureSpec::CallHierarchyPrepare { offset: decl }, Expect::NonEmpty).unwrap();
         assert_measured(&r);
 
-        let r = run_one(
-            FeatureSpec::CallHierarchyIncoming { offset: decl },
-            Expect::Cardinality { min: 1, max: 10 },
+        // Given: the fixture's incoming edge is projected into a compact reverse index.
+        let r = run_one_mode(
+            FeatureSpec::CallHierarchyIndexBuild { batch_size: 1 },
+            Expect::Cardinality { min: 1, max: 1 },
+            RunMode::Memory,
         )
         .unwrap();
-        assert_measured(&r);
+        // When: the bounded builder reports its compact index.
+        assert!(r.invariant_ok, "invariant must hold: {:?}", r.invariant_error);
+        assert!(r.cold_ns > 0, "build time must be non-zero");
+        // Then: it retains the single incoming caller pair and reverse target.
+        let index = r.call_hierarchy_index.expect("index build must report compact metrics");
+        assert_eq!(r.digest, "89cb140b8a987de183dcde487e793ed460226a60b5a20c9a03ebb12e0c12aa5a");
+        assert_eq!(index.unique_pair_count, 1);
+        assert_eq!(index.reverse_target_count, 1);
 
         let caller = off("Процедура БенчЭкспортная") + "Процедура ".len() as u32;
         let r = run_one(

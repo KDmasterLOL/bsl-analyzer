@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use base_db::{DiagnosticsConfigInput, Locale};
 use crossbeam_channel::{Receiver, Sender};
+use hir::CallHierarchyReverseIndex;
 use ide::Analysis;
 use lsp_server::{Message, ReqQueue, Response};
 use lsp_types::{PublishDiagnosticsParams, Url};
@@ -15,6 +17,7 @@ use vfs::loader::Handle;
 use vfs::{loader, Vfs};
 
 use crate::analysis_host::AnalysisHost;
+use crate::call_hierarchy_index_state::CallHierarchyIndexState;
 use crate::lsp::{PositionEncoding, Progress};
 use crate::mem_docs::MemDocs;
 use crate::task_pool;
@@ -22,6 +25,42 @@ use crate::task_pool;
 /// How long background analysis must stay busy before the "Analyzing" indicator
 /// appears. Fast per-file opens finish within this window and show nothing.
 const ANALYSIS_PROGRESS_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Bound on the one incoming-call request allowed to await a compact-index build.
+#[derive(Debug, Clone, Copy)]
+pub struct CallHierarchyWaitPolicy {
+    pub timeout: std::time::Duration,
+}
+
+impl Default for CallHierarchyWaitPolicy {
+    fn default() -> Self {
+        Self { timeout: std::time::Duration::from_secs(2) }
+    }
+}
+
+/// Defers the call-hierarchy lifecycle allocation until the first ready prepare request.
+#[derive(Debug, Default)]
+pub struct DeferredCallHierarchyIndexState {
+    inner: OnceLock<CallHierarchyIndexState>,
+}
+
+impl DeferredCallHierarchyIndexState {
+    pub(crate) fn active(&self) -> Option<&CallHierarchyIndexState> {
+        self.inner.get()
+    }
+
+    pub(crate) fn ensure(&self) -> CallHierarchyIndexState {
+        self.inner.get_or_init(CallHierarchyIndexState::default).clone()
+    }
+}
+
+impl Deref for DeferredCallHierarchyIndexState {
+    type Target = CallHierarchyIndexState;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.get_or_init(CallHierarchyIndexState::default)
+    }
+}
 
 #[derive(Debug)]
 pub enum Task {
@@ -64,6 +103,28 @@ pub enum Task {
     WorkspaceBatchChunk {
         generation: u64,
         outcome: WorkspaceBatchOutcome,
+    },
+    /// A compact reverse call index build completed on a worker. Publication is
+    /// generation-checked on the event loop, never through Salsa.
+    CallHierarchyIndexBuilt {
+        source_root: base_db::SourceRootId,
+        generation: u64,
+        index: Arc<CallHierarchyReverseIndex>,
+    },
+    /// A compact reverse call index build failed before publication.
+    CallHierarchyIndexFailed {
+        source_root: base_db::SourceRootId,
+        generation: u64,
+        reason: String,
+    },
+    CallHierarchyIndexSuperseded {
+        source_root: base_db::SourceRootId,
+        generation: u64,
+    },
+    /// A successful `callHierarchy/prepare` authorized this generation to build.
+    CallHierarchyIndexBuildRequested {
+        source_root: base_db::SourceRootId,
+        generation: u64,
     },
 }
 
@@ -171,6 +232,11 @@ pub struct GlobalState {
     pub vfs_progress_config_version: u32,
     pub vfs_done: bool,
     pub task_pool: task_pool::Handle<Task>,
+    /// Non-Salsa lifecycle for compact call-hierarchy reverse indexes. Snapshots
+    /// clone this handle for readers; orchestration remains on GlobalState.
+    pub call_hierarchy_index: DeferredCallHierarchyIndexState,
+    pub call_hierarchy_index_rebuilds: FxHashSet<base_db::SourceRootId>,
+    pub call_hierarchy_wait_policy: CallHierarchyWaitPolicy,
     pub(crate) next_request_id: AtomicI32,
     pub(crate) diagnostics_config: DiagnosticsConfigInput,
 
@@ -314,6 +380,9 @@ impl GlobalState {
             vfs_progress_config_version: 0,
             vfs_done: false,
             task_pool: task_pool::TaskPool::new_with_handle(),
+            call_hierarchy_index: DeferredCallHierarchyIndexState::default(),
+            call_hierarchy_index_rebuilds: FxHashSet::default(),
+            call_hierarchy_wait_policy: CallHierarchyWaitPolicy::default(),
             next_request_id: AtomicI32::new(1),
             diagnostics_config: DiagnosticsConfigInput::from_raw(
                 Vec::<String>::new(),
@@ -623,6 +692,7 @@ impl GlobalState {
             position_encoding: self.position_encoding,
             vfs_done: self.vfs_done,
             task_sender: self.task_pool.pool.sender.clone(),
+            call_hierarchy_index: self.call_hierarchy_index.ensure(),
         }
     }
 }
@@ -637,6 +707,7 @@ pub struct GlobalStateSnapshot {
     pub position_encoding: PositionEncoding,
     pub vfs_done: bool,
     pub task_sender: Sender<Task>,
+    pub call_hierarchy_index: CallHierarchyIndexState,
 }
 
 impl GlobalStateSnapshot {
@@ -668,6 +739,22 @@ mod vfs_race_tests {
         let sr = db.source_root_input(SourceRootId(0));
         assert!(!sr.root(db).is_library());
         assert_eq!(sr.root(db).file_set().len(), 0);
+    }
+
+    #[test]
+    fn call_hierarchy_index_lifecycle_is_deferred_until_prepare() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let state = GlobalState::new(sender);
+
+        let source_root = base_db::SourceRootId(0);
+
+        assert!(state.call_hierarchy_index.active().is_none());
+
+        let index = state.call_hierarchy_index.ensure();
+
+        assert_eq!(index.generation(source_root), None);
+        assert_eq!(index.next_generation(source_root), Some(1));
+        assert!(state.call_hierarchy_index.active().is_some());
     }
 
     #[test]
@@ -795,6 +882,72 @@ mod vfs_race_tests {
             !suppressed.affects_open_documents,
             "a suppressed initial-sync batch bumps nothing, so it reports no refresh"
         );
+    }
+
+    #[test]
+    fn call_hierarchy_workspace_changes_journal_bodies_and_supersede_structure() {
+        use crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId;
+
+        // Given: a loaded source root with an active compact-index build.
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
+        state.init_empty_source_root();
+        let module_path = vfs::VfsPath::new("/cf/CommonModules/М/Ext/Module.bsl");
+        state.vfs.write().set_file_contents(
+            module_path.clone(),
+            Some(Arc::from("Процедура А() КонецПроцедуры")),
+        );
+        state.process_changes(false);
+        let module_id = state.vfs.read().file_id(&module_path).expect("module FileId");
+        let root = base_db::SourceRootId(0);
+        assert!(state.call_hierarchy_index.start_build(root, 1, CallHierarchyIndexSnapshotId(1)));
+        let body_cancellation =
+            state.call_hierarchy_index.cancellation(root, 1).expect("active build cancellation");
+
+        // When: a body edit arrives, followed by file, XML, and config structure changes.
+        state
+            .vfs
+            .write()
+            .set_file_contents(module_path, Some(Arc::from("Процедура А()\nКонецПроцедуры")));
+        state.process_changes(false);
+        let body_journal = state.call_hierarchy_index.journal_files(root, 1);
+        assert_eq!(body_journal, Some(vec![module_id]));
+        assert!(!body_cancellation.is_cancelled());
+
+        let added_path = vfs::VfsPath::new("/cf/CommonModules/Новый/Ext/Module.bsl");
+        state
+            .vfs
+            .write()
+            .set_file_contents(added_path.clone(), Some(Arc::from("Процедура Б() КонецПроцедуры")));
+        state.process_changes(false);
+        assert!(body_cancellation.is_cancelled());
+        assert!(state.call_hierarchy_index.finish_superseded(root, 1));
+
+        assert!(state.call_hierarchy_index.start_build(root, 2, CallHierarchyIndexSnapshotId(2)));
+        state.vfs.write().set_file_contents(added_path, None);
+        state.process_changes(false);
+        assert!(state.call_hierarchy_index.finish_superseded(root, 2));
+
+        assert!(state.call_hierarchy_index.start_build(root, 3, CallHierarchyIndexSnapshotId(3)));
+        state.vfs.write().set_file_contents(
+            vfs::VfsPath::new("/cf/Catalogs/Товары.xml"),
+            Some(Arc::from("<MetaDataObject/>")),
+        );
+        state.process_changes(false);
+        assert!(state.call_hierarchy_index.finish_superseded(root, 3));
+
+        assert!(state.call_hierarchy_index.start_build(root, 4, CallHierarchyIndexSnapshotId(4)));
+        state.vfs.write().set_file_contents(
+            vfs::VfsPath::new("/cf/bsl-analyzer.toml"),
+            Some(Arc::from("[source]")),
+        );
+        state.process_changes(false);
+
+        // Then: only the body edit remains non-cancelling; every structural change queues one rebuild.
+        assert!(state.call_hierarchy_index.finish_superseded(root, 4));
+        assert!(state.call_hierarchy_index_rebuilds.contains(&root));
+        assert_eq!(state.call_hierarchy_index_rebuilds.len(), 1);
     }
 
     #[test]

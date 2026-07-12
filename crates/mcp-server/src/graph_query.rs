@@ -1087,7 +1087,34 @@ fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::{edge_kind, method_id_range, provenance, GraphDb};
+    use crate::graph_db::{GraphDbWriter, GraphMeta};
     use rusqlite::{params, Connection};
+
+    #[test]
+    fn rejects_graph_from_prior_projection_schema_version() {
+        // Given: a complete graph created by the current writer.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bsl-graph.db");
+        GraphDbWriter::create(&path)
+            .unwrap()
+            .finalize(&GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files: 0,
+                built_at: "t".to_string(),
+            })
+            .unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute("UPDATE meta SET value = '12' WHERE key = 'schema_version'", [])
+            .unwrap();
+
+        // When: the graph is opened through the serving path.
+        let result = GraphDb::open(&path);
+
+        // Then: a graph from the prior projection schema is rejected for rebuilding.
+        assert!(result.is_err(), "prior projection graphs must be rebuilt");
+    }
 
     #[test]
     fn stored_callback_edge_kinds_round_trip_not_collapsed_to_call() {

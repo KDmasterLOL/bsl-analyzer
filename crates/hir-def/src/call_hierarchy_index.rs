@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::mem::size_of;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{MethodId, ModuleId};
 
@@ -36,8 +36,14 @@ impl CallHierarchyReverseIndex {
     {
         let mut index = Self::new();
         for (module, pairs, layout_hash) in modules {
-            index.replace_module(module, pairs, layout_hash);
+            let pairs = canonical_pairs(pairs);
+            for pair in &pairs {
+                debug_assert_eq!(pair.caller.module, module);
+            }
+            index.module_layout_hashes.insert(module, layout_hash);
+            index.module_pairs.insert(module, pairs);
         }
+        index.rebuild_reverse_callers();
         index
     }
 
@@ -56,10 +62,13 @@ impl CallHierarchyReverseIndex {
         self.remove_module(module);
 
         let pairs = canonical_pairs(new_pairs);
+        let mut added_targets = FxHashSet::default();
         for &pair in &pairs {
             debug_assert_eq!(pair.caller.module, module);
             self.insert_pair(pair);
+            added_targets.insert(pair.target);
         }
+        self.canonicalize_reverse_callers(added_targets);
         self.module_layout_hashes.insert(module, new_layout_hash);
         self.module_pairs.insert(module, pairs);
     }
@@ -88,6 +97,10 @@ impl CallHierarchyReverseIndex {
         self.module_pairs.values().all(Vec::is_empty)
     }
 
+    /// Returns a capacity-based estimate of this index's heap storage, not exact allocated bytes.
+    ///
+    /// It sums map capacities and owned vector capacities, while omitting allocator and hash-table
+    /// overhead and `Arc` header overhead.
     pub fn estimated_heap_bytes(&self) -> usize {
         map_heap_bytes(&self.reverse_callers)
             + self
@@ -105,10 +118,27 @@ impl CallHierarchyReverseIndex {
     }
 
     fn insert_pair(&mut self, pair: MethodCallPair) {
-        let callers = self.reverse_callers.entry(pair.target).or_default();
-        match callers.binary_search_by(|caller| compare_methods(caller, &pair.caller)) {
-            Ok(_) => {}
-            Err(position) => callers.insert(position, pair.caller),
+        self.reverse_callers.entry(pair.target).or_default().push(pair.caller);
+    }
+
+    fn rebuild_reverse_callers(&mut self) {
+        self.reverse_callers.clear();
+        for pairs in self.module_pairs.values() {
+            for &pair in pairs {
+                self.reverse_callers.entry(pair.target).or_default().push(pair.caller);
+            }
+        }
+        for callers in self.reverse_callers.values_mut() {
+            canonicalize_callers(callers);
+        }
+    }
+
+    fn canonicalize_reverse_callers(&mut self, targets: impl IntoIterator<Item = MethodId>) {
+        for target in targets {
+            let Some(callers) = self.reverse_callers.get_mut(&target) else {
+                continue;
+            };
+            canonicalize_callers(callers);
         }
     }
 }
@@ -118,6 +148,11 @@ fn canonical_pairs(pairs: impl IntoIterator<Item = MethodCallPair>) -> Vec<Metho
     pairs.sort_unstable_by(compare_pairs);
     pairs.dedup();
     pairs
+}
+
+fn canonicalize_callers(callers: &mut Vec<MethodId>) {
+    callers.sort_unstable_by(compare_methods);
+    callers.dedup();
 }
 
 fn compare_pairs(left: &MethodCallPair, right: &MethodCallPair) -> Ordering {

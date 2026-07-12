@@ -197,6 +197,7 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
         }
 
         if state.shutdown_requested {
+            state.call_hierarchy_index.shutdown();
             break;
         }
 
@@ -215,6 +216,7 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
         // the batch never contends ahead of the file the user is editing; its own
         // guards make this a no-op unless a run is pending and the pool has capacity.
         crate::handlers::spawn_workspace_batch(state);
+        state.spawn_pending_call_hierarchy_index_builds();
     }
 
     Ok(())
@@ -394,6 +396,7 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     .analysis_host
                     .raw_database_mut()
                     .bump_config_for_paths(files.iter().map(|p| p.as_ref()));
+                state.supersede_call_hierarchy_index(base_db::BSL_SOURCE_ROOT);
                 for uri in state.opened_document_uris() {
                     crate::handlers::notification::schedule_diagnostics(state, &uri);
                 }
@@ -530,6 +533,43 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
         }
         Task::WorkspaceBatchChunk { generation, outcome } => {
             apply_workspace_batch_completion(state, generation, outcome)?;
+        }
+        Task::CallHierarchyIndexBuilt { source_root, generation, index } => {
+            if !state.call_hierarchy_index.is_ready_generation(source_root, generation)
+                && !state.call_hierarchy_index.publish(source_root, generation, index)
+            {
+                tracing::debug!(?source_root, generation, "discarding stale call hierarchy index");
+            }
+        }
+        Task::CallHierarchyIndexFailed { source_root, generation, reason } => {
+            if !state.call_hierarchy_index.fail(source_root, generation, reason) {
+                tracing::debug!(
+                    ?source_root,
+                    generation,
+                    "discarding stale call hierarchy failure"
+                );
+            }
+        }
+        Task::CallHierarchyIndexSuperseded { source_root, generation } => {
+            if state.call_hierarchy_index.finish_superseded(source_root, generation) {
+                state.schedule_call_hierarchy_index_build(source_root);
+            }
+        }
+        Task::CallHierarchyIndexBuildRequested { source_root, generation } => {
+            if state.call_hierarchy_index.is_prepared(source_root, generation) {
+                tracing::debug!(
+                    ?source_root,
+                    generation,
+                    "scheduling prepared call hierarchy index"
+                );
+                state.schedule_call_hierarchy_index_build(source_root);
+            } else {
+                tracing::debug!(
+                    ?source_root,
+                    generation,
+                    "discarding stale call hierarchy prepare"
+                );
+            }
         }
     }
     Ok(())
@@ -909,6 +949,10 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         }
     }
 
+    if state.vfs_done && req.method == CallHierarchyPrepare::METHOD {
+        state.call_hierarchy_index.ensure();
+    }
+
     RequestDispatcher { req: Some(req), global_state: state }
         .on_sync_mut::<Shutdown>(|state, ()| {
             state.shutdown_requested = true;
@@ -920,7 +964,9 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_latency::<PrepareRenameRequest>(crate::handlers::handle_prepare_rename)
         .on_latency::<Rename>(crate::handlers::handle_rename)
         .on_latency::<CallHierarchyPrepare>(crate::handlers::handle_prepare_call_hierarchy)
-        .on_latency::<CallHierarchyIncomingCalls>(crate::handlers::handle_call_hierarchy_incoming)
+        .on_waiting_latency::<CallHierarchyIncomingCalls>(
+            crate::handlers::handle_call_hierarchy_incoming,
+        )
         .on_latency::<CallHierarchyOutgoingCalls>(crate::handlers::handle_call_hierarchy_outgoing)
         .on_latency::<InlayHintRequest>(crate::handlers::handle_inlay_hint)
         .on_latency::<WorkspaceSymbolRequest>(crate::handlers::handle_workspace_symbol)
@@ -1084,6 +1130,7 @@ fn server_capabilities(
 mod tests {
     use super::*;
     use crate::global_state::Task;
+    use std::sync::Arc;
 
     #[test]
     fn test_server_capabilities() {
@@ -1247,6 +1294,83 @@ mod tests {
             receiver.try_recv().is_err(),
             "diagnostics for a closed document must not be published"
         );
+    }
+
+    #[test]
+    fn call_hierarchy_index_state_task_messages_are_generation_checked() {
+        // Given: a GlobalState build for one source root.
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        let source_root = base_db::SourceRootId(3);
+        let first = Arc::new(hir::CallHierarchyReverseIndex::new());
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            1,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(1),
+        ));
+
+        // When: a worker succeeds, then an older worker reports after generation two starts.
+        handle_task(
+            &mut state,
+            Task::CallHierarchyIndexBuilt { source_root, generation: 1, index: Arc::clone(&first) },
+        )
+        .expect("completion task must be handled");
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            2,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(2),
+        ));
+        handle_task(
+            &mut state,
+            Task::CallHierarchyIndexBuilt {
+                source_root,
+                generation: 1,
+                index: Arc::new(hir::CallHierarchyReverseIndex::new()),
+            },
+        )
+        .expect("stale completion task must be handled");
+
+        // Then: the old complete value remains available and the stale task cannot replace it.
+        assert!(Arc::ptr_eq(
+            &state.call_hierarchy_index.current(source_root).expect("previous ready value remains"),
+            &first,
+        ));
+        handle_task(
+            &mut state,
+            Task::CallHierarchyIndexFailed {
+                source_root,
+                generation: 2,
+                reason: "replacement failed".to_owned(),
+            },
+        )
+        .expect("failure task must be handled");
+        assert_eq!(
+            state.call_hierarchy_index.failure_reason(source_root, 2).as_deref(),
+            Some("replacement failed")
+        );
+    }
+
+    #[test]
+    fn prepared_call_hierarchy_signal_schedules_one_source_root() {
+        // Given: a prepared source-root generation after the VFS boot gate opens.
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        state.vfs_done = true;
+        let source_root = base_db::SourceRootId(5);
+        assert!(state.call_hierarchy_index.record_prepare(source_root, 1));
+
+        // When: duplicate prepare signals reach the event loop.
+        for _ in 0..2 {
+            handle_task(
+                &mut state,
+                Task::CallHierarchyIndexBuildRequested { source_root, generation: 1 },
+            )
+            .expect("prepare signal must be handled");
+        }
+
+        // Then: scheduling coalesces to one pending root build.
+        assert_eq!(state.call_hierarchy_index_rebuilds.len(), 1);
+        assert!(state.call_hierarchy_index_rebuilds.contains(&source_root));
     }
 
     /// Decode the URI + diagnostic count of a `textDocument/publishDiagnostics`

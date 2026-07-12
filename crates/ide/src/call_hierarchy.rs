@@ -1,5 +1,5 @@
-use hir::call_graph::{CallerId, GraphNode, ResolvedTarget};
-use hir::{ConfigsDatabase, Definition, Method, MethodId, Semantics};
+use hir::call_graph::{CallerId, ResolvedTarget};
+use hir::{CallHierarchyReverseIndex, ConfigsDatabase, Definition, Method, MethodId, Semantics};
 use ide_db::RootDatabase;
 use rustc_hash::FxHashMap;
 use syntax::{TextRange, TextSize};
@@ -49,43 +49,22 @@ pub fn incoming_calls<DB: RootDatabase + ConfigsDatabase>(
     db: &DB,
     file_id: FileId,
     offset: TextSize,
-) -> Vec<CallHierarchyCall> {
-    let Some(target) = method_at(db, file_id, offset) else {
-        return Vec::new();
-    };
-
-    let source_root = db.file_source_root_input(file_id).source_root_id(db);
-    let graph = db.workspace_call_graph(source_root);
-
-    // The stored graph names callers but keeps no call-site ranges; take the
-    // distinct caller methods here, then recover ranges from each caller's own
-    // resolved summary below.
-    //
-    // Callers that are a module's top-level body (`GraphNode::ModuleCode`) are
-    // intentionally skipped: a `CallHierarchyItem` is a method, and module code
-    // has no name/declaration range to anchor one, nor a method position to
-    // re-resolve on a follow-up request. Such callers are uncommon in BSL
-    // (common modules carry no top-level code).
-    let mut callers: Vec<MethodId> = Vec::new();
-    for edge in graph.callers(&GraphNode::Method(target)) {
-        if let GraphNode::Method(caller) = &edge.from {
-            if !callers.contains(caller) {
-                callers.push(*caller);
+    index: &CallHierarchyReverseIndex,
+) -> Option<Vec<CallHierarchyCall>> {
+    let target = method_at(db, file_id, offset)?;
+    let calls = index
+        .callers(target)
+        .iter()
+        .filter_map(|&caller| {
+            let ranges = call_ranges_to_target(db, caller, target);
+            if ranges.is_empty() {
+                return None;
             }
-        }
-    }
-
-    let mut calls = Vec::new();
-    for caller in callers {
-        let ranges = call_ranges_to_target(db, caller, target);
-        if ranges.is_empty() {
-            continue;
-        }
-        if let Some(item) = item_for_method(db, caller) {
-            calls.push(CallHierarchyCall { item, ranges });
-        }
-    }
-    calls
+            let item = item_for_method(db, caller)?;
+            Some(CallHierarchyCall { item, ranges })
+        })
+        .collect::<Vec<_>>();
+    (!calls.is_empty()).then_some(calls)
 }
 
 /// Methods called by the method under the cursor, each with the ranges of the
@@ -230,10 +209,38 @@ mod tests {
         assert!(calls[0].ranges.iter().all(|r| MODULE[*r].contains("Помощник")));
     }
 
+    fn reverse_index(
+        target: MethodId,
+        callers: impl IntoIterator<Item = MethodId>,
+    ) -> std::sync::Arc<hir::CallHierarchyReverseIndex> {
+        let mut index = hir::CallHierarchyReverseIndex::new();
+        index.replace_module(
+            target.module,
+            callers.into_iter().map(|caller| hir::MethodCallPair::new(caller, target)),
+            0,
+        );
+        std::sync::Arc::new(index)
+    }
+
+    fn method_id(db: &RootDatabaseImpl, file_id: FileId, source: &str, name: &str) -> MethodId {
+        method_at(db, file_id, offset_of(source, name)).expect("method name resolves")
+    }
+
     #[test]
-    fn incoming_lists_callers_with_ranges() {
+    fn incoming_uses_index_callers_with_every_live_call_site() {
+        // Given: two callers, one of which invokes the target twice.
         let (db, file_id) = single_file(MODULE);
-        let calls = incoming_calls(&db, file_id, offset_of(MODULE, "Помощник"));
+        let target = method_id(&db, file_id, MODULE, "Помощник");
+        let index = reverse_index(
+            target,
+            [method_id(&db, file_id, MODULE, "Первый"), method_id(&db, file_id, MODULE, "Второй")],
+        );
+
+        // When: incoming calls resolve through the compact index.
+        let calls = incoming_calls(&db, file_id, offset_of(MODULE, "Помощник"), &index)
+            .expect("indexed callers resolve");
+
+        // Then: both caller items and every current call-site range are returned.
         let mut names: Vec<&str> = calls.iter().map(|c| c.item.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["Второй", "Первый"]);
@@ -242,6 +249,55 @@ mod tests {
         assert_eq!(second.ranges.len(), 2, "Второй calls Помощник twice");
         let first = calls.iter().find(|c| c.item.name == "Первый").unwrap();
         assert_eq!(first.ranges.len(), 1);
+    }
+
+    #[test]
+    fn incoming_reads_ranges_from_the_live_database_after_a_body_edit() {
+        // Given: an index rebuilt for a body edit that adds a third call site.
+        let (mut db, file_id) = single_file(MODULE);
+        let edited = MODULE.replacen(
+            "    Помощник();\nКонецПроцедуры\n",
+            "    Помощник();\n    Помощник();\nКонецПроцедуры\n",
+            1,
+        );
+        db.set_file_text(file_id, &edited);
+        let target = method_id(&db, file_id, &edited, "Помощник");
+        let index = reverse_index(
+            target,
+            [
+                method_id(&db, file_id, &edited, "Первый"),
+                method_id(&db, file_id, &edited, "Второй"),
+            ],
+        );
+
+        // When: the rebuilt caller index is joined to the live database.
+        let calls = incoming_calls(&db, file_id, offset_of(&edited, "Помощник"), &index)
+            .expect("indexed callers resolve");
+
+        // Then: identity comes from the index and ranges reflect the edited body.
+        let first = calls.iter().find(|call| call.item.name == "Первый").unwrap();
+        assert_eq!(first.ranges.len(), 2);
+        let second = calls.iter().find(|call| call.item.name == "Второй").unwrap();
+        assert_eq!(second.ranges.len(), 2);
+    }
+
+    #[test]
+    fn incoming_rejects_an_index_after_a_method_layout_change() {
+        // Given: an index built before a top-level declaration shifts method IDs.
+        let (mut db, file_id) = single_file(MODULE);
+        let target = method_id(&db, file_id, MODULE, "Помощник");
+        let stale_index = reverse_index(
+            target,
+            [method_id(&db, file_id, MODULE, "Первый"), method_id(&db, file_id, MODULE, "Второй")],
+        );
+        let shifted = format!("Перем Сдвиг;\n{MODULE}");
+        db.set_file_text(file_id, &shifted);
+
+        // When: the request resolves the post-layout-change target.
+        let calls = incoming_calls(&db, file_id, offset_of(&shifted, "Помощник"), &stale_index);
+
+        // Then: stale durable IDs do not produce a caller response.
+        assert!(calls.is_none());
     }
 
     #[test]

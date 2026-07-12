@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use super::{CallHierarchyReverseIndex, MethodCallPair};
 use crate::{MethodId, ModuleId};
 
@@ -79,6 +81,33 @@ fn call_hierarchy_reverse_index_orders_callers_deterministically() {
 
     // Then: callers are returned in stable method-id order.
     assert_eq!(index.callers(target), &[method(1, 1), method(1, 2), method(1, 3)]);
+}
+
+#[test]
+fn call_hierarchy_reverse_index_insert_pair_hot_target() {
+    // Given: many modules contribute callers to the same target in reverse order.
+    let target = method(0, 1);
+    let caller_count = 50_000;
+    let modules = (1..=caller_count).rev().map(|file_id| {
+        let caller = method(file_id, 1);
+        (caller.module, vec![pair(caller, target), pair(caller, target)], u64::from(file_id))
+    });
+
+    // When: the reverse index is constructed.
+    let started = Instant::now();
+    let index = CallHierarchyReverseIndex::from_modules(modules);
+    let elapsed = started.elapsed();
+
+    // Then: construction remains bounded and query output is sorted and deduplicated.
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "constructing {caller_count} callers took {elapsed:?}"
+    );
+    assert_eq!(index.callers(target).len(), caller_count as usize);
+    assert_eq!(index.callers(target).first(), Some(&method(1, 1)));
+    assert_eq!(index.callers(target).last(), Some(&method(caller_count, 1)));
+    assert!(index.callers(target).windows(2).all(|callers| callers[0] != callers[1]
+        && super::compare_methods(&callers[0], &callers[1]).is_lt()));
 }
 
 #[test]

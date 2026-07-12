@@ -974,10 +974,15 @@ pub(crate) fn execute_once(
         FeatureSpec::CallHierarchyIncoming { offset } => {
             let a = env.state.analysis_host.analysis();
             let t = Instant::now();
-            let r = a.call_hierarchy_incoming(file_id, *offset);
+            let source_root =
+                a.database().file_source_root_input(file_id).source_root_id(a.database());
+            let r =
+                env.state.call_hierarchy_index.current(source_root).and_then(|index| {
+                    a.call_hierarchy_incoming_from_index(file_id, *offset, index)
+                });
             let ns = t.elapsed().as_nanos() as u64;
-            let lines = r.iter().map(|c| format!("{c:?}")).collect();
-            Ok((ns, Observation::from_lines(r.len(), lines)))
+            let lines = r.iter().flatten().map(|c| format!("{c:?}")).collect();
+            Ok((ns, Observation::from_lines(r.as_ref().map_or(0, Vec::len), lines)))
         }
         FeatureSpec::CallHierarchyOutgoing { offset } => {
             let a = env.state.analysis_host.analysis();
@@ -1290,6 +1295,8 @@ fn build_latency_ctx(env: &mut BenchEnv) -> LatencyRequestContext {
             .supports_insert_text_mode_adjust_indentation,
         supports_workspace_edit_document_changes: state.supports_workspace_edit_document_changes,
         task_sender: state.task_pool.pool.sender.clone(),
+        call_hierarchy_index: state.call_hierarchy_index.ensure(),
+        call_hierarchy_wait_policy: state.call_hierarchy_wait_policy,
         client_sender: state.sender.clone(),
         mem_docs: state.mem_docs.freeze(),
         file_paths,

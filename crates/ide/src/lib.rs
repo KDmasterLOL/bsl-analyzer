@@ -24,9 +24,10 @@ mod workspace_symbols;
 
 pub use call_hierarchy::{CallHierarchyCall, CallHierarchyItem};
 pub use call_hierarchy_index::{
-    build_call_hierarchy_index, CallHierarchyBatchEvent, CallHierarchyBatchEventKind,
-    CallHierarchyBatchPhase, CallHierarchyIndexBuildError, CallHierarchyIndexBuildRequest,
-    CallHierarchyIndexBuildResult, CallHierarchyRssSample,
+    build_call_hierarchy_index, reproject_call_hierarchy_index_modules, CallHierarchyBatchEvent,
+    CallHierarchyBatchEventKind, CallHierarchyBatchPhase, CallHierarchyIndexBuildError,
+    CallHierarchyIndexBuildRequest, CallHierarchyIndexBuildResult,
+    CallHierarchyIndexModuleProjection, CallHierarchyRssSample,
 };
 pub use completion::{CompletionItem, CompletionItemKind};
 pub use diagnostics_catalog::{catalog_entry, diagnostic_catalog, CatalogEntry, SeverityBucket};
@@ -116,9 +117,14 @@ impl Analysis {
         call_hierarchy::prepare_call_hierarchy(&self.db, file_id, offset)
     }
 
-    pub fn call_hierarchy_incoming(&self, file_id: FileId, offset: u32) -> Vec<CallHierarchyCall> {
+    pub fn call_hierarchy_incoming_from_index(
+        &self,
+        file_id: FileId,
+        offset: u32,
+        index: Arc<hir::CallHierarchyReverseIndex>,
+    ) -> Option<Vec<CallHierarchyCall>> {
         let offset = TextSize::from(offset);
-        call_hierarchy::incoming_calls(&self.db, file_id, offset)
+        call_hierarchy::incoming_calls(&self.db, file_id, offset, &index)
     }
 
     pub fn call_hierarchy_outgoing(&self, file_id: FileId, offset: u32) -> Vec<CallHierarchyCall> {

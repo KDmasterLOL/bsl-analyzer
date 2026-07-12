@@ -14,6 +14,12 @@ pub struct RequestDispatcher<'a> {
     pub global_state: &'a mut GlobalState,
 }
 
+#[derive(Clone, Copy)]
+enum LatencyExecutor {
+    TaskPool,
+    DedicatedThread,
+}
+
 impl RequestDispatcher<'_> {
     pub fn on_sync_mut<R>(
         &mut self,
@@ -71,12 +77,41 @@ impl RequestDispatcher<'_> {
         R::Params: DeserializeOwned + fmt::Debug + Send + 'static,
         R::Result: Serialize + Send + 'static,
     {
+        self.on_latency_with::<R>(f, LatencyExecutor::TaskPool)
+    }
+
+    pub fn on_waiting_latency<R>(
+        &mut self,
+        f: fn(LatencyRequestContext, R::Params) -> Result<R::Result>,
+    ) -> &mut Self
+    where
+        R: lsp_types::request::Request,
+        R::Params: DeserializeOwned + fmt::Debug + Send + 'static,
+        R::Result: Serialize + Send + 'static,
+    {
+        self.on_latency_with::<R>(f, LatencyExecutor::DedicatedThread)
+    }
+
+    fn on_latency_with<R>(
+        &mut self,
+        f: fn(LatencyRequestContext, R::Params) -> Result<R::Result>,
+        executor: LatencyExecutor,
+    ) -> &mut Self
+    where
+        R: lsp_types::request::Request,
+        R::Params: DeserializeOwned + fmt::Debug + Send + 'static,
+        R::Result: Serialize + Send + 'static,
+    {
         let (req, params) = match self.parse_request::<R>() {
             Some(it) => it,
             None => return self,
         };
 
-        tracing::debug!("Handling {} on task pool (id: {})", R::METHOD, req.id);
+        let executor_name = match executor {
+            LatencyExecutor::TaskPool => "task pool",
+            LatencyExecutor::DedicatedThread => "dedicated thread",
+        };
+        tracing::debug!("Handling {} on {} (id: {})", R::METHOD, executor_name, req.id);
 
         // While the workspace is still loading, analysis would run over a
         // half-loaded source root (wrong results), and its db clone is exactly
@@ -95,18 +130,17 @@ impl RequestDispatcher<'_> {
             return self;
         }
 
-        // A saturated task pool must not park the event loop in `try_spawn`'s
-        // bounded queue (nor pin another db clone into a queued closure).
-        // Checked before building the context: the event loop is the only job
-        // producer, so capacity observed here cannot be taken by anyone else.
-        if !self.global_state.task_pool.pool.has_capacity() {
-            tracing::warn!(method = R::METHOD, id = ?req.id, "declining request: task pool saturated");
-            self.global_state.respond(Response::new_err(
-                req.id,
-                ErrorCode::ContentModified as i32,
-                "server is busy, please retry".to_string(),
-            ));
-            return self;
+        match executor {
+            LatencyExecutor::TaskPool if !self.global_state.task_pool.pool.has_capacity() => {
+                tracing::warn!(method = R::METHOD, id = ?req.id, "declining request: task pool saturated");
+                self.global_state.respond(Response::new_err(
+                    req.id,
+                    ErrorCode::ContentModified as i32,
+                    "server is busy, please retry".to_string(),
+                ));
+                return self;
+            }
+            LatencyExecutor::TaskPool | LatencyExecutor::DedicatedThread => {}
         }
 
         let db = self.global_state.analysis_host.raw_database().clone();
@@ -131,6 +165,8 @@ impl RequestDispatcher<'_> {
                 .global_state
                 .supports_workspace_edit_document_changes,
             task_sender: self.global_state.task_pool.pool.sender.clone(),
+            call_hierarchy_index: self.global_state.call_hierarchy_index.ensure(),
+            call_hierarchy_wait_policy: self.global_state.call_hierarchy_wait_policy,
             client_sender: self.global_state.sender.clone(),
             mem_docs: self.global_state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&self.global_state.vfs.read()),
@@ -138,22 +174,43 @@ impl RequestDispatcher<'_> {
 
         let id = req.id;
         let job_id = id.clone();
-        let spawned = self.global_state.task_pool.pool.try_spawn(move || {
-            let response = run_latency_handler::<R>(job_id, ctx, params, f);
-            Task::RequestResult { response }
-        });
-        if let Err(err) = spawned {
-            // Unreachable after the capacity check above; kept so a queue
-            // hiccup degrades to a declined request instead of a lost one.
-            tracing::warn!(method = R::METHOD, request_id = ?id, ?err, "task pool rejected request job");
-            self.global_state.request_tokens.remove(&id);
-            self.global_state.respond(Response::new_err(
-                id,
-                ErrorCode::ContentModified as i32,
-                "server is busy, please retry".to_string(),
-            ));
+        match executor {
+            LatencyExecutor::TaskPool => {
+                let spawned = self.global_state.task_pool.pool.try_spawn(move || {
+                    let response = run_latency_handler::<R>(job_id, ctx, params, f);
+                    Task::RequestResult { response }
+                });
+                if let Err(err) = spawned {
+                    self.reject_latency_launch::<R>(id, err);
+                }
+            }
+            LatencyExecutor::DedicatedThread => {
+                let task_sender = self.global_state.task_pool.pool.sender.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("bsl-call-hierarchy-waiter".to_owned())
+                    .spawn(move || {
+                        let response = run_latency_handler::<R>(job_id, ctx, params, f);
+                        let _ = task_sender.send(Task::RequestResult { response });
+                    });
+                if let Err(err) = spawned {
+                    self.reject_latency_launch::<R>(id, err);
+                }
+            }
         }
         self
+    }
+
+    fn reject_latency_launch<R>(&mut self, id: RequestId, error: impl fmt::Debug)
+    where
+        R: lsp_types::request::Request,
+    {
+        tracing::warn!(method = R::METHOD, request_id = ?id, ?error, "could not launch latency request");
+        self.global_state.request_tokens.remove(&id);
+        self.global_state.respond(Response::new_err(
+            id,
+            ErrorCode::ContentModified as i32,
+            "server is busy, please retry".to_string(),
+        ));
     }
 
     pub fn finish(&mut self) {
@@ -541,6 +598,8 @@ mod tests {
             supports_workspace_edit_document_changes: state
                 .supports_workspace_edit_document_changes,
             task_sender: state.task_pool.pool.sender.clone(),
+            call_hierarchy_index: state.call_hierarchy_index.ensure(),
+            call_hierarchy_wait_policy: state.call_hierarchy_wait_policy,
             client_sender: state.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: crate::frozen_context::FrozenFilePaths::freeze(&state.vfs.read()),
