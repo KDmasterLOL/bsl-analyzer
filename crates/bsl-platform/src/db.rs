@@ -83,10 +83,13 @@ impl PlatformDataInner {
             }
         }
 
+        let global_functions: Vec<GlobalFunction> =
+            crate::generated::PLATFORM_GLOBAL_FUNCTIONS.iter().map(GlobalFunction::from).collect();
+
         let mut methods: Vec<PlatformMethod> =
             crate::generated::PLATFORM_METHODS.iter().map(PlatformMethod::from).collect();
 
-        apply_docs_gap_method_overlay(&mut methods);
+        apply_docs_gap_method_overlay(&mut methods, &global_functions);
 
         let mut methods_by_name = FxHashMap::default();
         let mut methods_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
@@ -112,9 +115,6 @@ impl PlatformDataInner {
                 methods_by_name.insert((ru_type_key.clone(), en_method_key), idx);
             }
         }
-
-        let global_functions: Vec<GlobalFunction> =
-            crate::generated::PLATFORM_GLOBAL_FUNCTIONS.iter().map(GlobalFunction::from).collect();
 
         let mut global_functions_by_name = FxHashMap::default();
 
@@ -428,55 +428,61 @@ fn apply_docs_gap_iter_types_overlay(types: &mut [PlatformType]) {
     ty.iter_element_types = merged;
 }
 
-/// The platform ships methods that its help archive never documents with an
-/// own page, so HBK extraction cannot see them. `МенеджерОбработкиСтрокиXML`
-/// only lists `НайтиНедопустимыеСимволыXML` while its description (and the
-/// "see also" link of that very method) reference
-/// `УдалитьНедопустимыеСимволыXML` as well; the runtime accepts the call.
-/// Mirror the signature of the same-named global-context function until the
-/// help archive gains the page.
-fn apply_docs_gap_method_overlay(methods: &mut Vec<PlatformMethod>) {
-    use crate::types::{ContextAvailability, MethodParam};
+/// The platform ships manager methods whose pages are missing from the help
+/// archive, so HBK extraction cannot see them. Each entry pairs the manager's
+/// English type name with the method's Russian name; the synthesized method
+/// takes its whole signature from the same-named global-context function, so
+/// a regenerated corpus keeps the overlay in sync automatically, and the
+/// overlay retires itself once the archive gains the real page.
+const DOCS_GAP_MANAGER_METHODS: &[(&str, &str)] = &[
+    // The `МенеджерОбработкиСтрокиXML` page says the manager both finds and
+    // removes disallowed XML characters, and the "see also" of its only
+    // documented method links `УдалитьНедопустимыеСимволыXML` as a manager
+    // method — but the archive has no page for it; the runtime (and EDT)
+    // accept the call.
+    ("XMLStringProcessingManager", "УдалитьНедопустимыеСимволыXML"),
+];
 
-    let exists = methods.iter().any(|m| {
-        m.type_name == "XMLStringProcessingManager" && m.name == "УдалитьНедопустимыеСимволыXML"
-    });
-    if exists {
-        return;
+fn apply_docs_gap_method_overlay(
+    methods: &mut Vec<PlatformMethod>,
+    global_functions: &[GlobalFunction],
+) {
+    use crate::types::MethodVariant;
+
+    for (type_name, method_name) in DOCS_GAP_MANAGER_METHODS {
+        let exists = methods
+            .iter()
+            .any(|m| m.type_name == *type_name && m.name.fold_lower() == method_name.fold_lower());
+        if exists {
+            continue;
+        }
+
+        let Some(source) =
+            global_functions.iter().find(|f| f.name.fold_lower() == method_name.fold_lower())
+        else {
+            continue;
+        };
+
+        let next_id = methods.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+        methods.push(PlatformMethod {
+            id: next_id,
+            type_name: SmolStr::new(*type_name),
+            name: source.name.clone(),
+            english_name: source.english_name.clone(),
+            return_type: source.return_type.clone(),
+            parameters: source.parameters.clone(),
+            variants: source
+                .variants
+                .iter()
+                .map(|v| MethodVariant {
+                    variant_name: v.variant_name.clone(),
+                    parameters: v.parameters.clone(),
+                })
+                .collect(),
+            min_version: source.min_version.clone(),
+            context: source.context,
+        });
     }
-
-    let next_id = methods.iter().map(|m| m.id).max().unwrap_or(0) + 1;
-    methods.push(PlatformMethod {
-        id: next_id,
-        type_name: "XMLStringProcessingManager".into(),
-        name: "УдалитьНедопустимыеСимволыXML".into(),
-        english_name: "DeleteDisallowedXMLCharacters".into(),
-        return_type: Some("Строка".into()),
-        parameters: vec![
-            MethodParam {
-                name: "СтрокаСимволов".into(),
-                param_type: Some("Строка".into()),
-                is_optional: false,
-                is_variadic: false,
-            },
-            MethodParam {
-                name: "Версия".into(),
-                param_type: Some("Строка".into()),
-                is_optional: true,
-                is_variadic: false,
-            },
-        ],
-        variants: Vec::new(),
-        min_version: Some("8.3.20".into()),
-        context: Some(ContextAvailability {
-            thick_client: true,
-            thin_client: true,
-            web_client: false,
-            server: true,
-            mobile_client: true,
-            external_connection: true,
-        }),
-    });
 }
 
 fn apply_docs_only_variadic_overlay(constructors: &mut [PlatformConstructor]) {
@@ -783,22 +789,14 @@ mod tests {
             .get_method("МенеджерОбработкиСтрокиXML", "УдалитьНедопустимыеСимволыXML")
             .expect("docs-gap overlay must expose the manager method");
 
-        // The overlay hand-copies the signature of the same-named global
-        // function; compare against it so a regenerated corpus cannot drift
-        // away from the synthesized entry unnoticed.
-        let global = data
+        // The signature is derived from the same-named global function at
+        // load time; a mismatch means the overlay picked the wrong source.
+        let source = data
             .get_global_function("УдалитьНедопустимыеСимволыXML")
-            .expect("the mirrored global function must exist");
-        assert_eq!(method.english_name, global.english_name);
-        assert_eq!(method.return_type, global.return_type);
-        assert_eq!(method.min_version, global.min_version);
-        assert_eq!(method.context, global.context);
-        assert_eq!(method.parameters.len(), global.parameters.len());
-        for (m, g) in method.parameters.iter().zip(&global.parameters) {
-            assert_eq!(m.name, g.name);
-            assert_eq!(m.param_type, g.param_type);
-            assert_eq!(m.is_optional, g.is_optional);
-        }
+            .expect("the source global function must exist");
+        assert_eq!(method.english_name, source.english_name);
+        assert_eq!(method.parameters, source.parameters);
+        assert!(!method.parameters.is_empty(), "derived signature must carry parameters");
 
         let via_en = data.get_method("XMLStringProcessingManager", "DeleteDisallowedXMLCharacters");
         assert!(via_en.is_some(), "overlay method must resolve by English names too");
