@@ -482,7 +482,11 @@ fn split_key(s: &str) -> (&str, &str) {
 }
 
 fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
+    // `get` refuses a byte index inside a multi-byte character (e.g. a Cyrillic
+    // comment shorter in chars than the prefix in bytes) — such a head cannot
+    // equal an ASCII prefix anyway.
+    let head = s.get(..prefix.len())?;
+    if head.eq_ignore_ascii_case(prefix) {
         Some(&s[prefix.len()..])
     } else {
         None
@@ -538,6 +542,17 @@ mod tests {
     fn contains_ignore_ascii_case_matches_mixed_case() {
         assert!(contains_ignore_ascii_case("xx BSL-Analyzer:Off", "bsl-analyzer:"));
         assert!(!contains_ignore_ascii_case("no directive here", "bsl-analyzer:"));
+    }
+
+    #[test]
+    fn cyrillic_comment_shorter_than_marker_in_chars_is_not_a_directive() {
+        // The prefix length in bytes lands inside a multi-byte character here;
+        // slicing at it used to panic and silently drop the whole file's
+        // diagnostics.
+        assert!(strip_prefix_ignore_ascii_case("Возвращает строку", NATIVE_MARKER).is_none());
+        let code = "Процедура Тест()\n    // Возвращает строку-представление координат\n    А = А;\nКонецПроцедуры\n";
+        let diags = check_file_diagnostics(code);
+        assert_eq!(self_assign_lines(&diags, code), vec![2]);
     }
 
     #[test]
