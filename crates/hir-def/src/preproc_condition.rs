@@ -213,7 +213,7 @@ impl PreprocCondition {
 const MAX_CONDITION_TOKENS: usize = 64;
 
 /// Slice the condition out of a directive header: `#Если X Тогда` → `X`.
-fn extract_condition_text(header: &str) -> Option<&str> {
+pub(crate) fn extract_condition_text(header: &str) -> Option<&str> {
     let rest = header.trim_start();
     let rest = rest.strip_prefix('#')?.trim_start();
     let keyword_len = ["ИначеЕсли", "ElsIf", "Если", "If"]

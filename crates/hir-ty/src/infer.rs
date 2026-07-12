@@ -272,6 +272,7 @@ pub enum EnvMemberKind {
     Property,
     GlobalFunction,
     GlobalProperty,
+    Type,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -549,13 +550,37 @@ impl<'db> InferenceContext<'db> {
         owner: DefWithBodyId,
         body: &Arc<Body>,
     ) -> Self {
+        Self::new_impl(db, file_id, owner, body, true)
+    }
+
+    fn new_impl(
+        db: &'db dyn HirDatabase,
+        file_id: FileId,
+        owner: DefWithBodyId,
+        body: &Arc<Body>,
+        with_body_env: bool,
+    ) -> Self {
         let opts = db.env_options();
-        let body_env = {
+        let body_env = if !with_body_env {
+            hir_def::execution_env::EnvFlags::EMPTY
+        } else {
             use hir_def::execution_env;
             let metadata = db.module_metadata(hir_def::ModuleId { file_id });
             match owner {
                 DefWithBodyId::Method(local_id) => {
-                    execution_env::method_env(&db.item_tree(file_id), local_id, &metadata, &opts)
+                    let item_tree = db.item_tree(file_id);
+                    let mut env = execution_env::method_env(&item_tree, local_id, &metadata, &opts);
+                    if !env.is_empty() {
+                        if let Some(range) =
+                            execution_env::method_source_range(&item_tree, local_id)
+                        {
+                            let conditionals = db.conditional_tree(file_id);
+                            if !conditionals.is_empty() {
+                                env = env & execution_env::conditional_env(&conditionals, range);
+                            }
+                        }
+                    }
+                    env
                 }
                 DefWithBodyId::ModuleCode => execution_env::module_code_env(&metadata, &opts),
             }
@@ -605,12 +630,11 @@ impl<'db> InferenceContext<'db> {
         owner: DefWithBodyId,
         body: &Arc<Body>,
     ) -> Self {
-        let mut ctx = Self::new(db, base_file_id, owner, body);
-        ctx.local_symbols = Some(local_symbols);
         // The effective module's local_ids do not match the base file's item
-        // tree, so the directive computed in `new()` may belong to another
+        // tree, so a directive computed against it may belong to another
         // method — disable availability checks rather than misattribute them.
-        ctx.body_env = hir_def::execution_env::EnvFlags::EMPTY;
+        let mut ctx = Self::new_impl(db, base_file_id, owner, body, false);
+        ctx.local_symbols = Some(local_symbols);
         ctx
     }
 
@@ -626,11 +650,10 @@ impl<'db> InferenceContext<'db> {
         owner: DefWithBodyId,
         body: &Arc<Body>,
     ) -> Self {
-        let mut ctx = Self::new(db, ext_file_id, owner, body);
-        ctx.weaving_base = Some(base_module);
         // A weaving interceptor's effective directive comes from the base
         // method it intercepts, unknown at this layer — no availability checks.
-        ctx.body_env = hir_def::execution_env::EnvFlags::EMPTY;
+        let mut ctx = Self::new_impl(db, ext_file_id, owner, body, false);
+        ctx.weaving_base = Some(base_module);
         ctx
     }
 
@@ -1328,8 +1351,16 @@ impl<'db> InferenceContext<'db> {
                 }
 
                 if let Some(name) = type_name {
-                    let ctors =
-                        bsl_platform::PlatformDataInner::instance().get_constructors(name.as_str());
+                    let platform = bsl_platform::PlatformDataInner::instance();
+                    if !platform.is_ambiguous_type_name(name.as_str()) {
+                        if let Some(platform_type) = platform.get_type(name.as_str()) {
+                            let env = hir_def::execution_env::EnvFlags::from_platform_context(
+                                platform_type.context.as_ref(),
+                            );
+                            self.check_member_env(expr_id, name, env, EnvMemberKind::Type);
+                        }
+                    }
+                    let ctors = platform.get_constructors(name.as_str());
                     if !ctors.is_empty() {
                         let arg_count = args.len();
                         let sigs: Vec<builtin::BuiltinSignature> = ctors

@@ -59,6 +59,7 @@ impl PlatformDataInner {
             crate::generated::PLATFORM_TYPES.iter().map(PlatformType::from).collect();
 
         apply_docs_gap_iter_types_overlay(&mut types);
+        apply_docs_gap_type_context_overlay(&mut types);
 
         let mut types_by_name = FxHashMap::default();
 
@@ -451,6 +452,24 @@ fn apply_docs_gap_iter_types_overlay(types: &mut [PlatformType]) {
     ty.iter_element_types = merged;
 }
 
+/// Type pages in the help archive occasionally omit environments where the
+/// platform demonstrably supports the type: the standard library constructs
+/// these types there unconditionally (shortcuts are assigned to form items in
+/// `&НаСервере` code, choice parameters and the color chooser are created in
+/// `&НаКлиенте` code that also runs in the web client), and 1C:EDT's own
+/// availability model agrees. Union the missing environments in so the
+/// availability check follows observed platform behavior, not the help text.
+fn apply_docs_gap_type_context_overlay(types: &mut [PlatformType]) {
+    for ty in types {
+        let Some(context) = &mut ty.context else { continue };
+        match ty.english_name.as_str() {
+            "Shortcut" => context.server = true,
+            "ChoiceParameter" | "ColorChooseDialog" => context.web_client = true,
+            _ => {}
+        }
+    }
+}
+
 /// The platform ships manager methods whose pages are missing from the help
 /// archive, so HBK extraction cannot see them. Each entry pairs the manager's
 /// English type name with the method's Russian name; the synthesized method
@@ -799,6 +818,25 @@ mod tests {
         // `ParameterValue` is the XDTO name of several data-composition types and
         // is not itself a class name, so it must not resolve to an arbitrary one.
         assert!(data.get_type("ParameterValue").is_none());
+    }
+
+    #[test]
+    fn docs_gap_overlay_widens_type_contexts() {
+        let data = PlatformDataInner::instance();
+        if data.all_types().is_empty() {
+            return;
+        }
+
+        let shortcut = data.get_type("СочетаниеКлавиш").expect("Shortcut must exist");
+        let ctx = shortcut.context.as_ref().expect("Shortcut must carry availability");
+        assert!(ctx.server, "overlay must add the server context to Shortcut");
+        assert!(ctx.thin_client, "archive contexts must survive the overlay");
+
+        for name in ["ПараметрВыбора", "ДиалогВыбораЦвета"] {
+            let ty = data.get_type(name).expect("type must exist");
+            let ctx = ty.context.as_ref().expect("type must carry availability");
+            assert!(ctx.web_client, "overlay must add the web-client context to {name}");
+        }
     }
 
     #[test]

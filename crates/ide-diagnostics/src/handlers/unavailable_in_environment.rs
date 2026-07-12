@@ -31,6 +31,7 @@ pub fn from_hir(
         EnvMemberKind::Property => ("Свойство", "недоступно"),
         EnvMemberKind::GlobalFunction => ("Глобальная функция", "недоступна"),
         EnvMemberKind::GlobalProperty => ("Глобальное свойство", "недоступно"),
+        EnvMemberKind::Type => ("Тип", "недоступен"),
     };
     let envs: Vec<&str> = missing.iter().map(|flag| flag.name_ru()).collect();
     let message = format!("{} '{}' {} [{}]", kind_ru, name.as_str(), suffix_ru, envs.join(", "));
@@ -74,17 +75,25 @@ mod tests {
 КонецФункции
 "#;
         let diags = env_diags(fixture_client);
-        assert_eq!(diags.len(), 1, "web client lacks ЧтениеТекста methods, got: {diags:?}");
-        assert!(
-            diags[0].0.contains("Веб-клиент"),
-            "qualifier must name the missing environment: {}",
-            diags[0].0
+        assert_eq!(
+            diags.len(),
+            2,
+            "web client lacks both the type and its methods, got: {diags:?}"
         );
         assert!(
-            !diags[0].0.contains("Тонкий клиент"),
-            "thin client has ЧтениеТекста — must not be reported: {}",
-            diags[0].0
+            diags.iter().any(|d| d.0.starts_with("Тип 'ЧтениеТекста' недоступен")),
+            "constructor must be flagged: {diags:?}"
         );
+        assert!(
+            diags.iter().any(|d| d.0.starts_with("Метод 'ПрочитатьСтроку' недоступен")),
+            "method call must be flagged: {diags:?}"
+        );
+        for (message, _) in &diags {
+            assert!(
+                message.contains("Веб-клиент") && !message.contains("Тонкий клиент"),
+                "only the web client lacks ЧтениеТекста: {message}"
+            );
+        }
     }
 
     #[test]
@@ -118,12 +127,13 @@ mod tests {
 КонецПроцедуры
 "#;
         let diags = env_diags(fixture);
-        assert_eq!(diags.len(), 1, "web client is inside the branch mask, got: {diags:?}");
-        assert!(
-            diags[0].0.contains("Веб-клиент") && !diags[0].0.contains("Тонкий клиент"),
-            "only the web client lacks ЧтениеТекста: {}",
-            diags[0].0
-        );
+        assert_eq!(diags.len(), 2, "web client is inside the branch mask, got: {diags:?}");
+        for (message, _) in &diags {
+            assert!(
+                message.contains("Веб-клиент") && !message.contains("Тонкий клиент"),
+                "only the web client lacks ЧтениеТекста: {message}"
+            );
+        }
     }
 
     #[test]
@@ -245,6 +255,81 @@ mod tests {
             "thick client is available — must not be reported: {}",
             diags[0].0
         );
+    }
+
+    #[test]
+    fn module_level_preprocessor_guard_narrows_method_env() {
+        // The guard wraps the whole procedure definition, not statements
+        // inside its body — the method never compiles for the web client.
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+#Если НЕ ВебКлиент Тогда
+&НаКлиенте
+Процедура Прочитать()
+    Чтение = Новый ЧтениеТекста;
+    Стр = Чтение.ПрочитатьСтроку();
+КонецПроцедуры
+#КонецЕсли
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "module-level guard excludes the web client, got: {diags:?}");
+    }
+
+    #[test]
+    fn module_level_guard_still_checks_matching_environments() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+#Если ТонкийКлиент ИЛИ ВебКлиент Тогда
+&НаКлиенте
+Процедура Прочитать()
+    Чтение = Новый ЧтениеТекста;
+КонецПроцедуры
+#КонецЕсли
+"#;
+        let diags = env_diags(fixture);
+        assert_eq!(diags.len(), 1, "web client stays inside the module-level mask, got: {diags:?}");
+        assert!(
+            diags[0].0.contains("Веб-клиент") && !diags[0].0.contains("Тонкий клиент"),
+            "only the web client lacks ЧтениеТекста: {}",
+            diags[0].0
+        );
+    }
+
+    #[test]
+    fn type_constructor_unavailable_in_web_client() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Сгенерировать()
+    Генератор = Новый ГенераторСлучайныхЧисел(42);
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert_eq!(
+            diags.len(),
+            1,
+            "ГенераторСлучайныхЧисел cannot be constructed in the web client, got: {diags:?}"
+        );
+        assert!(
+            diags[0].0.starts_with("Тип 'ГенераторСлучайныхЧисел' недоступен")
+                && diags[0].0.contains("Веб-клиент"),
+            "message must name the type and the missing environment: {}",
+            diags[0].0
+        );
+    }
+
+    #[test]
+    fn universal_type_constructor_not_flagged() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Собрать()
+    Список = Новый Массив;
+    Соответствие = Новый Соответствие;
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "universally available types must stay silent, got: {diags:?}");
     }
 
     #[test]

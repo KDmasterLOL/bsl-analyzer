@@ -378,6 +378,83 @@ pub fn method_env(
     body_env(metadata, annotations, opts)
 }
 
+/// Full source range of a method addressed by its item-tree `local_id`, for
+/// locating the method inside item-level preprocessor regions.
+pub fn method_source_range(
+    item_tree: &crate::item_tree::ItemTree,
+    local_id: u32,
+) -> Option<text_size::TextRange> {
+    use crate::item_tree::ModItem;
+    match item_tree.top_level_items().get(local_id as usize)? {
+        ModItem::Procedure(idx) => Some(item_tree.procedure(*idx).source_range),
+        ModItem::Function(idx) => Some(item_tree.function(*idx).source_range),
+        ModItem::Variable(_) => None,
+    }
+}
+
+/// Environment mask claimed by the `#Если` branches enclosing `range`, relative
+/// to [`EnvFlags::ALL`]. Module-level preprocessor regions wrap whole method
+/// definitions, so a method's body environment is its directive-derived set
+/// intersected with this mask. An item outside any region keeps [`EnvFlags::ALL`];
+/// branches whose condition is undecidable poison the whole chain (see
+/// [`crate::preproc_condition::PreprocCondition::narrow_branch`]).
+pub fn conditional_env(
+    tree: &crate::conditional_tree::ConditionalTree,
+    range: text_size::TextRange,
+) -> EnvFlags {
+    use crate::conditional_tree::ConditionalKind;
+    use crate::preproc_condition::PreprocCondition;
+
+    // The innermost enclosing node is the smallest containing range: an `If`
+    // node's range covers its ElsIf/Else clauses, so depth alone cannot
+    // distinguish the then-branch from a sibling clause.
+    let mut node = None;
+    let mut best_len = None;
+    for (idx, data) in tree.conditionals() {
+        if data.range.contains_range(range) {
+            let len = data.range.len();
+            if best_len.is_none_or(|best| len < best) {
+                best_len = Some(len);
+                node = Some(idx);
+            }
+        }
+    }
+
+    let mut env = EnvFlags::ALL;
+    let mut cur = node;
+    while let Some(idx) = cur {
+        let chain_if = match tree.conditional(idx).kind {
+            ConditionalKind::If => idx,
+            // ElsIf/Else clauses always point at their chain's `If`.
+            ConditionalKind::ElsIf | ConditionalKind::Else => match tree.parent(idx) {
+                Some(parent) => parent,
+                None => return EnvFlags::EMPTY,
+            },
+        };
+
+        let mut remaining = EnvFlags::ALL;
+        let mut claimed = EnvFlags::EMPTY;
+        for branch in tree.all_branches(chain_if) {
+            let data = tree.conditional(branch);
+            let branch_env = match data.kind {
+                ConditionalKind::If | ConditionalKind::ElsIf => data
+                    .condition_text
+                    .as_deref()
+                    .map_or(PreprocCondition::Unknown, PreprocCondition::parse)
+                    .narrow_branch(&mut remaining),
+                ConditionalKind::Else => std::mem::take(&mut remaining),
+            };
+            if branch == idx {
+                claimed = branch_env;
+                break;
+            }
+        }
+        env = env & claimed;
+        cur = tree.parent(chain_if);
+    }
+    env
+}
+
 fn is_compilation_directive(kind: &AnnotationKind) -> bool {
     matches!(
         kind,
@@ -705,6 +782,70 @@ mod tests {
         assert_eq!(method_env(&item_tree, 1, &md, &opts), EnvFlags::SERVER);
         // Out-of-range local_id behaves like "no directive".
         assert_eq!(method_env(&item_tree, 99, &md, &opts), EnvFlags::SERVER);
+    }
+
+    fn conditional_env_for(source: &str, method_idx: u32) -> EnvFlags {
+        let parse = parser::parse(source);
+        let item_tree = crate::item_tree::ItemTree::from_parse(&parse);
+        let tree = crate::conditional_tree::lower_conditionals(&parse.syntax_node());
+        let range = method_source_range(&item_tree, method_idx).expect("method must exist");
+        conditional_env(&tree, range)
+    }
+
+    #[test]
+    fn conditional_env_outside_regions_keeps_all() {
+        let env = conditional_env_for("Процедура П()\nКонецПроцедуры\n", 0);
+        assert_eq!(env, EnvFlags::ALL);
+    }
+
+    #[test]
+    fn conditional_env_narrows_guarded_method() {
+        let env = conditional_env_for(
+            "#Если НЕ ВебКлиент Тогда\nПроцедура П()\nКонецПроцедуры\n#КонецЕсли\n",
+            0,
+        );
+        assert_eq!(env, EnvFlags::ALL.without(EnvFlags::WEB_CLIENT));
+    }
+
+    #[test]
+    fn conditional_env_else_gets_complement() {
+        let source = "#Если ВебКлиент Тогда\nПроцедура Веб()\nКонецПроцедуры\n\
+                      #Иначе\nПроцедура НеВеб()\nКонецПроцедуры\n#КонецЕсли\n";
+        assert_eq!(conditional_env_for(source, 0), EnvFlags::WEB_CLIENT);
+        assert_eq!(conditional_env_for(source, 1), EnvFlags::ALL.without(EnvFlags::WEB_CLIENT));
+    }
+
+    #[test]
+    fn conditional_env_elsif_chain_partitions() {
+        let source = "#Если ВебКлиент Тогда\nПроцедура Веб()\nКонецПроцедуры\n\
+                      #ИначеЕсли ТонкийКлиент Тогда\nПроцедура Тонкий()\nКонецПроцедуры\n\
+                      #Иначе\nПроцедура Прочие()\nКонецПроцедуры\n#КонецЕсли\n";
+        assert_eq!(conditional_env_for(source, 0), EnvFlags::WEB_CLIENT);
+        assert_eq!(conditional_env_for(source, 1), EnvFlags::THIN_CLIENT);
+        assert_eq!(
+            conditional_env_for(source, 2),
+            EnvFlags::ALL.without(EnvFlags::WEB_CLIENT | EnvFlags::THIN_CLIENT)
+        );
+    }
+
+    #[test]
+    fn conditional_env_nested_regions_intersect() {
+        let env = conditional_env_for(
+            "#Если Клиент Тогда\n#Если НЕ ВебКлиент Тогда\n\
+             Процедура П()\nКонецПроцедуры\n#КонецЕсли\n#КонецЕсли\n",
+            0,
+        );
+        assert!(!env.contains(EnvFlags::WEB_CLIENT));
+        assert!(!env.contains(EnvFlags::SERVER));
+        assert!(env.contains(EnvFlags::THIN_CLIENT));
+    }
+
+    #[test]
+    fn conditional_env_undecidable_condition_poisons_chain() {
+        let source = "#Если Линукс Тогда\nПроцедура А()\nКонецПроцедуры\n\
+                      #Иначе\nПроцедура Б()\nКонецПроцедуры\n#КонецЕсли\n";
+        assert_eq!(conditional_env_for(source, 0), EnvFlags::EMPTY);
+        assert_eq!(conditional_env_for(source, 1), EnvFlags::EMPTY);
     }
 
     #[test]
