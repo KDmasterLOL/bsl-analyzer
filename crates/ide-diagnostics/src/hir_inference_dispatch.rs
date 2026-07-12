@@ -12,6 +12,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::DeprecatedPlatformApi,
     DiagnosticCode::RedundantAccessToObject,
     DiagnosticCode::MissedRequiredParameter,
+    DiagnosticCode::UnavailableInEnvironment,
 ];
 
 pub fn collect_inference_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -87,6 +88,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
         InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
         InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
+        InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
     }
 }
 
@@ -158,5 +160,8 @@ fn dispatch_inference_diagnostic(
             range,
             ctx,
         ),
+        InferenceDiagnostic::UnavailableInEnvironment { name, member_kind, missing, .. } => {
+            handlers::unavailable_in_environment::from_hir(name, *member_kind, *missing, range, ctx)
+        }
     }
 }

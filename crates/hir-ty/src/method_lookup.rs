@@ -9,6 +9,7 @@ use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{Projection, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
 use hir_def::body::Body;
+use hir_def::execution_env::EnvFlags;
 use hir_def::hir::Expr;
 use hir_def::ty::MetadataKind;
 use hir_def::{DefWithBodyId, ExprId, Name};
@@ -23,6 +24,10 @@ pub struct MethodInfo {
     pub return_ty: TypeId,
     pub params: Vec<TypeId>,
     pub overloads: Vec<Vec<TypeId>>,
+    /// Execution environments the method is available in; [`EnvFlags::ALL`]
+    /// when the source carries no availability markup (user methods,
+    /// undocumented platform entries).
+    pub env: EnvFlags,
 }
 
 pub fn lookup_method(
@@ -116,7 +121,7 @@ fn narrow_unload_return(
     } else {
         attach_projection_to_value_table_id(db, info.return_ty, projection)
     };
-    MethodInfo { return_ty, params: info.params, overloads: info.overloads }
+    MethodInfo { return_ty, params: info.params, overloads: info.overloads, env: info.env }
 }
 
 fn apply_sdbl_chain_rewrite(
@@ -150,6 +155,7 @@ fn apply_sdbl_chain_rewrite(
         ),
         params: info.params,
         overloads: info.overloads,
+        env: info.env,
     }
 }
 
@@ -376,6 +382,11 @@ fn lookup_scalar_receiver(
     let type_key = platform_type_key_id(db, receiver)?;
     let method = PlatformData::instance().get_method(&type_key, method_name.as_str())?;
     let mut info = to_method_info(db, method);
+    // A homonymous type name resolves to an arbitrary namesake, so its
+    // availability markup may belong to the wrong type — don't judge it.
+    if PlatformData::instance().is_ambiguous_type_name(&type_key) {
+        info.env = EnvFlags::ALL;
+    }
     if let Some(row) = form_data_collection_row_ty(db, receiver) {
         info.return_ty =
             rewrite_form_data_collection_item_return(db, info.return_ty, row, method.name.as_str());
@@ -399,6 +410,7 @@ fn lookup_on_object_manager(
         return_ty: res.return_ty,
         params: res.signature.params.to_vec(),
         overloads: res.overloads,
+        env: res.env,
     })
 }
 
@@ -423,6 +435,7 @@ fn lookup_on_metadata_ref(
             return_ty: res.return_ty,
             params: res.signature.params.to_vec(),
             overloads: res.overloads,
+            env: res.env,
         });
     }
     if let Some(scalar_key) = kind.scalar_platform_key() {
@@ -448,6 +461,7 @@ fn lookup_on_any_metadata_ref(
         return_ty: res.return_ty,
         params: res.signature.params.to_vec(),
         overloads: res.overloads,
+        env: res.env,
     })
 }
 
@@ -489,10 +503,14 @@ fn union_lookup(
     // whenever the arms disagree.
     let mut sigs: Vec<Vec<TypeId>> = Vec::new();
     let mut hit_any = false;
+    // A union receiver is one concrete arm at runtime; the member counts as
+    // available wherever ANY arm provides it, so arm envs are united.
+    let mut env = EnvFlags::EMPTY;
     for m in live {
         if let Some(info) = lookup_method_inner(db, m, method_name, refine_ctx) {
             hit_any = true;
             returns.push(info.return_ty);
+            env = env | info.env;
             if info.overloads.is_empty() {
                 push_unique_sig(&mut sigs, info.params);
             } else {
@@ -511,7 +529,7 @@ fn union_lookup(
         } else {
             (sigs[0].clone(), sigs)
         };
-        MethodInfo { return_ty: db.union(returns), params, overloads }
+        MethodInfo { return_ty: db.union(returns), params, overloads, env }
     })
 }
 
@@ -634,7 +652,12 @@ pub(crate) fn to_method_info(db: &dyn TypeKernelDb, method: &PlatformMethod) -> 
 
     let overloads = lower_overloads_typeid(db, method);
 
-    MethodInfo { return_ty, params, overloads }
+    MethodInfo {
+        return_ty,
+        params,
+        overloads,
+        env: EnvFlags::from_platform_context(method.context.as_ref()),
+    }
 }
 
 pub(crate) fn lower_overloads_typeid(
@@ -705,7 +728,12 @@ pub(crate) fn build_tabular_section_method_info(
         })
         .collect();
 
-    MethodInfo { return_ty, params, overloads }
+    MethodInfo {
+        return_ty,
+        params,
+        overloads,
+        env: EnvFlags::from_platform_context(method.context.as_ref()),
+    }
 }
 
 fn rewrite_row_generic(

@@ -1,5 +1,6 @@
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
+use hir_def::execution_env::EnvFlags;
 use hir_def::ty::FunctionSignature;
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
@@ -24,6 +25,7 @@ pub struct BuiltinSignature {
     defaults: Box<[bool]>,
     ret: ReturnTypeSpec,
     max_args: Option<u32>,
+    env: EnvFlags,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +73,11 @@ impl BuiltinSignature {
 
     pub fn max_args(&self) -> Option<u32> {
         self.max_args
+    }
+
+    /// Execution environments this function is available in.
+    pub fn env(&self) -> EnvFlags {
+        self.env
     }
 
     pub fn param_count(&self) -> usize {
@@ -125,6 +132,10 @@ fn descriptors_from_global_function(func: &bsl_platform::GlobalFunction) -> Vec<
     };
     if is_form_data_conversion_helper(&func.name, &func.english_name) {
         complete_form_data_family_params(&mut sigs);
+    }
+    let env = EnvFlags::from_platform_context(func.context.as_ref());
+    for sig in sigs.iter_mut() {
+        sig.env = env;
     }
     sigs
 }
@@ -215,6 +226,7 @@ pub(crate) fn descriptor_from_params(
         defaults: defaults.into_boxed_slice(),
         ret,
         max_args,
+        env: EnvFlags::ALL,
     }
 }
 
@@ -282,6 +294,7 @@ fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<BuiltinSignature>>) {
             defaults: Box::new([false]),
             ret: ReturnTypeSpec::Unknown,
             max_args: Some(1),
+            env: EnvFlags::ALL,
         },
     );
 
@@ -293,6 +306,7 @@ fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<BuiltinSignature>>) {
             defaults: Box::new([false]),
             ret: ReturnTypeSpec::Unknown,
             max_args: None,
+            env: EnvFlags::ALL,
         },
     );
 }
@@ -580,6 +594,7 @@ mod tests {
             defaults: Box::new([false, false]),
             ret: ReturnTypeSpec::Raw("Число".to_string()),
             max_args: Some(2),
+            env: EnvFlags::ALL,
         };
         sigs.insert("foo".into(), vec![json_like.clone()]);
         sigs.insert("bar".into(), vec![json_like.clone()]);
@@ -589,6 +604,7 @@ mod tests {
             defaults: Box::new([false]),
             ret: ReturnTypeSpec::Raw("Строка".to_string()),
             max_args: Some(1),
+            env: EnvFlags::ALL,
         };
         insert_pair(&mut sigs, ("foo", "bar"), fallback);
 

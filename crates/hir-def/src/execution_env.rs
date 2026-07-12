@@ -108,6 +108,36 @@ impl EnvFlags {
         }
     }
 
+    /// Availability set of a platform API entry, from its syntax-helper
+    /// "Доступность" markup. The platform documents one generic thick-client
+    /// availability, so it spans both the managed and the ordinary variant.
+    /// `None` (no markup) maps to [`Self::ALL`] — never diagnosed.
+    pub fn from_platform_context(context: Option<&bsl_platform::ContextAvailability>) -> EnvFlags {
+        let Some(ctx) = context else {
+            return Self::ALL;
+        };
+        let mut env = Self::EMPTY;
+        if ctx.thin_client {
+            env = env | Self::THIN_CLIENT;
+        }
+        if ctx.web_client {
+            env = env | Self::WEB_CLIENT;
+        }
+        if ctx.thick_client {
+            env = env | Self::THICK_CLIENT_MANAGED | Self::THICK_CLIENT_ORDINARY;
+        }
+        if ctx.server {
+            env = env | Self::SERVER;
+        }
+        if ctx.mobile_client {
+            env = env | Self::MOBILE_CLIENT;
+        }
+        if ctx.external_connection {
+            env = env | Self::EXTERNAL_CONNECTION;
+        }
+        env
+    }
+
     /// English name of a single environment, in EDT qualifier wording
     /// ("… is not defined [Web client]").
     pub fn name_en(self) -> &'static str {
@@ -155,7 +185,7 @@ impl std::fmt::Debug for EnvFlags {
 }
 
 /// Project-level settings that shape environment sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EnvOptions {
     /// Interactive client environments the configuration targets. Client
     /// code (`&НаКлиенте`, client-flagged common modules) is assumed to run
@@ -167,6 +197,12 @@ pub struct EnvOptions {
     /// project's runtime surface. Mirrors the diagnostics-level
     /// `ordinary_app_support` setting.
     pub ordinary_app_support: bool,
+    /// Environments availability diagnostics report on. Server-side modules
+    /// formally compile into the external connection too, but flagging every
+    /// `БиблиотекаКартинок` in a manager module as "[Внешнее соединение]" is
+    /// pedantic noise for configurations that never run there — so external
+    /// connection (like the mobile and legacy thick clients) is opt-in.
+    pub checked_environments: EnvFlags,
 }
 
 impl Default for EnvOptions {
@@ -176,6 +212,10 @@ impl Default for EnvOptions {
                 | EnvFlags::WEB_CLIENT
                 | EnvFlags::THICK_CLIENT_MANAGED,
             ordinary_app_support: false,
+            checked_environments: EnvFlags::THIN_CLIENT
+                | EnvFlags::WEB_CLIENT
+                | EnvFlags::THICK_CLIENT_MANAGED
+                | EnvFlags::SERVER,
         }
     }
 }
@@ -319,6 +359,23 @@ pub fn body_env(
 /// initializers), which never carries a directive.
 pub fn module_code_env(metadata: &ModuleMetadata, opts: &EnvOptions) -> EnvFlags {
     module_base_env(metadata, opts)
+}
+
+/// [`body_env`] for a method addressed by its item-tree `local_id` (the
+/// index of the method among the module's top-level items).
+pub fn method_env(
+    item_tree: &crate::item_tree::ItemTree,
+    local_id: u32,
+    metadata: &ModuleMetadata,
+    opts: &EnvOptions,
+) -> EnvFlags {
+    use crate::item_tree::ModItem;
+    let annotations: &[Annotation] = match item_tree.top_level_items().get(local_id as usize) {
+        Some(ModItem::Procedure(idx)) => &item_tree.procedure(*idx).annotations,
+        Some(ModItem::Function(idx)) => &item_tree.function(*idx).annotations,
+        Some(ModItem::Variable(_)) | None => &[],
+    };
+    body_env(metadata, annotations, opts)
 }
 
 fn is_compilation_directive(kind: &AnnotationKind) -> bool {
@@ -577,7 +634,7 @@ mod tests {
                 | EnvFlags::SERVER
                 | EnvFlags::EXTERNAL_CONNECTION
                 | EnvFlags::THICK_CLIENT_ORDINARY,
-            ordinary_app_support: false,
+            ..EnvOptions::default()
         };
         assert_eq!(opts.client_envs(), EnvFlags::THIN_CLIENT);
 
@@ -592,13 +649,62 @@ mod tests {
                 | EnvFlags::WEB_CLIENT
                 | EnvFlags::THICK_CLIENT_MANAGED
                 | EnvFlags::MOBILE_CLIENT,
-            ordinary_app_support: false,
+            ..EnvOptions::default()
         };
         let md = form_metadata();
         assert_eq!(
             body_env(&md, &[ann(AnnotationKind::AtClient)], &opts),
             CLIENTS | EnvFlags::MOBILE_CLIENT
         );
+    }
+
+    #[test]
+    fn platform_context_conversion() {
+        assert_eq!(EnvFlags::from_platform_context(None), EnvFlags::ALL);
+
+        let ctx = bsl_platform::ContextAvailability {
+            thick_client: true,
+            thin_client: true,
+            web_client: false,
+            server: true,
+            mobile_client: false,
+            external_connection: true,
+        };
+        let env = EnvFlags::from_platform_context(Some(&ctx));
+        assert_eq!(
+            env,
+            EnvFlags::THIN_CLIENT
+                | EnvFlags::THICK_CLIENT_MANAGED
+                | EnvFlags::THICK_CLIENT_ORDINARY
+                | EnvFlags::SERVER
+                | EnvFlags::EXTERNAL_CONNECTION
+        );
+        assert!(!env.contains(EnvFlags::WEB_CLIENT));
+
+        let nowhere = bsl_platform::ContextAvailability {
+            thick_client: false,
+            thin_client: false,
+            web_client: false,
+            server: false,
+            mobile_client: false,
+            external_connection: false,
+        };
+        assert!(EnvFlags::from_platform_context(Some(&nowhere)).is_empty());
+    }
+
+    #[test]
+    fn method_env_reads_item_tree_annotations() {
+        let parse = parser::parse(
+            "&НаКлиенте\nПроцедура Клиентская()\nКонецПроцедуры\n\
+             &НаСервере\nПроцедура Серверная()\nКонецПроцедуры\n",
+        );
+        let item_tree = crate::item_tree::ItemTree::from_parse(&parse);
+        let opts = EnvOptions::default();
+        let md = form_metadata();
+        assert_eq!(method_env(&item_tree, 0, &md, &opts), CLIENTS);
+        assert_eq!(method_env(&item_tree, 1, &md, &opts), EnvFlags::SERVER);
+        // Out-of-range local_id behaves like "no directive".
+        assert_eq!(method_env(&item_tree, 99, &md, &opts), EnvFlags::SERVER);
     }
 
     #[test]

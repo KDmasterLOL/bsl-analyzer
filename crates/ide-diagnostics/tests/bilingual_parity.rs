@@ -277,6 +277,10 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
     (DiagnosticCode::UnresolvedField, "known bug: message embeds field/type names"),
     (DiagnosticCode::ReadOnlyPropertyAssignment, "known bug: message embeds property/type names"),
     (
+        DiagnosticCode::UnavailableInEnvironment,
+        "message embeds the member name and environment qualifiers by design",
+    ),
+    (
         DiagnosticCode::AssignAliasFieldsInQuery,
         "SDBL alias policy; query-language parity needs dedicated metadata/query harness",
     ),
@@ -585,7 +589,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 186, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 187, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]

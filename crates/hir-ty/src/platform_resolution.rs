@@ -8,6 +8,7 @@ use bsl_platform::{
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{MetadataKind, TypeId, TypeKind};
+use hir_def::execution_env::EnvFlags;
 use hir_def::Name;
 use smol_str::SmolStr;
 
@@ -78,11 +79,17 @@ pub struct ResolvedPlatformMethod {
     pub return_ty: TypeId,
     pub params: Vec<TypeId>,
     pub overloads: Vec<Vec<TypeId>>,
+    pub env: EnvFlags,
 }
 
 impl ResolvedPlatformMethod {
     pub fn into_method_info(self) -> MethodInfo {
-        MethodInfo { return_ty: self.return_ty, params: self.params, overloads: self.overloads }
+        MethodInfo {
+            return_ty: self.return_ty,
+            params: self.params,
+            overloads: self.overloads,
+            env: self.env,
+        }
     }
 }
 
@@ -111,9 +118,11 @@ fn resolve_method_inner(
             .collect();
         let mut returns: Vec<TypeId> = Vec::with_capacity(live.len());
         let mut chosen: Option<ResolvedPlatformMethod> = None;
+        let mut env = EnvFlags::EMPTY;
         for member in live {
             if let Some(res) = resolve_method_inner(salsa_db, kernel_db, member, method_name) {
                 returns.push(res.return_ty);
+                env = env | res.env;
                 if chosen.is_none() {
                     chosen = Some(res);
                 }
@@ -121,6 +130,7 @@ fn resolve_method_inner(
         }
         return chosen.map(|mut r| {
             r.return_ty = kernel_db.union(returns);
+            r.env = env;
             r
         });
     }
@@ -143,6 +153,7 @@ fn resolve_method_inner(
                 return_ty: resolution.return_ty,
                 params: resolution.signature.params.to_vec(),
                 overloads: resolution.overloads.clone(),
+                env: resolution.env,
             })
         }
         TypeKind::MetadataRef(facet) => resolve_metadata_ref(
@@ -155,7 +166,12 @@ fn resolve_method_inner(
         _ => {
             let key = platform_type_key_id(kernel_db, receiver)?;
             let method = lookup_scalar(salsa_db, &key, method_name.as_str())?;
-            let info = to_method_info(kernel_db, method);
+            let mut info = to_method_info(kernel_db, method);
+            // Same homonym caveat as `lookup_scalar_receiver`: availability
+            // resolved through an ambiguous name is unreliable.
+            if bsl_platform::PlatformDataInner::instance().is_ambiguous_type_name(&key) {
+                info.env = EnvFlags::ALL;
+            }
             Some(ResolvedPlatformMethod {
                 handle: PlatformMethodHandle {
                     method_id: method.id,
@@ -164,6 +180,7 @@ fn resolve_method_inner(
                 return_ty: info.return_ty,
                 params: info.params,
                 overloads: info.overloads,
+                env: info.env,
             })
         }
     }
@@ -189,6 +206,7 @@ fn resolve_metadata_ref(
             return_ty: info.return_ty,
             params: info.params,
             overloads: info.overloads,
+            env: info.env,
         });
     }
 
@@ -207,6 +225,7 @@ fn resolve_metadata_ref(
                 return_ty: resolution.return_ty,
                 params: resolution.signature.params.to_vec(),
                 overloads: resolution.overloads.clone(),
+                env: resolution.env,
             });
         }
     }
@@ -222,6 +241,7 @@ fn resolve_metadata_ref(
                 return_ty: info.return_ty,
                 params: info.params,
                 overloads: info.overloads,
+                env: info.env,
             });
         }
     }
@@ -466,6 +486,7 @@ mod tests {
         let params = vec![db.string(None, false)];
         let overloads = vec![vec![db.boolean()]];
         let res = ResolvedPlatformMethod {
+            env: EnvFlags::ALL,
             handle: PlatformMethodHandle {
                 method_id: 1,
                 origin: PlatformMethodOrigin::Scalar { type_name: SmolStr::from("X") },

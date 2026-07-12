@@ -152,6 +152,7 @@ pub mod type_mismatch;
 pub mod type_mismatch_by_doc_comment;
 pub mod typo;
 pub mod unary_plus_in_concatenation;
+pub mod unavailable_in_environment;
 pub mod union_all;
 pub mod unknown_field_in_query;
 pub mod unknown_preprocessor_symbol;
@@ -470,6 +471,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::TypeMismatchByDocComment => Some(&type_mismatch_by_doc_comment::METADATA),
         DiagnosticCode::UnresolvedField => Some(&unresolved_field::METADATA),
         DiagnosticCode::ReadOnlyPropertyAssignment => Some(&read_only_property::METADATA),
+        DiagnosticCode::UnavailableInEnvironment => Some(&unavailable_in_environment::METADATA),
 
         DiagnosticCode::UnknownSuppressionCode => Some(&crate::suppression::UNKNOWN_CODE_METADATA),
         DiagnosticCode::SuppressionWithoutCode => Some(&crate::suppression::WITHOUT_CODE_METADATA),

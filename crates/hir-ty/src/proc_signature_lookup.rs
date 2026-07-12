@@ -12,6 +12,7 @@ pub fn resolve_workspace_method(db: &dyn HirDatabase, method_id: MethodId) -> Me
         return_ty: signature.return_ty,
         params: signature.params.clone(),
         overloads: Vec::new(),
+        env: hir_def::execution_env::EnvFlags::ALL,
     }
 }
 

@@ -207,13 +207,35 @@ fn lookup_field_in_union_intersection(
     let first = &per_arm[0];
     let merged_ty = db.union(per_arm.iter().map(|f| f.ty).collect());
     let merged_readonly = per_arm.iter().any(|f| f.is_readonly);
+    // The member is available wherever ANY arm provides it, so platform
+    // availability unites across arms; one non-platform arm (a user
+    // attribute) makes it unrestricted — taking the first arm's origin
+    // verbatim would make the verdict depend on arm order.
+    let merged_origin = if per_arm
+        .iter()
+        .all(|f| matches!(f.origin, crate::field_enum::FieldOrigin::PlatformProperty { .. }))
+    {
+        let mut env = hir_def::execution_env::EnvFlags::EMPTY;
+        for f in &per_arm {
+            if let crate::field_enum::FieldOrigin::PlatformProperty { env: arm_env } = f.origin {
+                env = env | arm_env;
+            }
+        }
+        crate::field_enum::FieldOrigin::PlatformProperty { env }
+    } else {
+        per_arm
+            .iter()
+            .map(|f| f.origin)
+            .find(|o| !matches!(o, crate::field_enum::FieldOrigin::PlatformProperty { .. }))
+            .unwrap_or(first.origin)
+    };
     Some(FieldInfo {
         name: first.name.clone(),
         name_en: first.name_en.clone(),
         ty: merged_ty,
         value_ty: None,
         is_readonly: merged_readonly,
-        origin: first.origin,
+        origin: merged_origin,
     })
 }
 
@@ -265,7 +287,7 @@ fn lookup_field_via_platform_property(
         ty: res.return_ty,
         value_ty: None,
         is_readonly: res.is_readonly,
-        origin: crate::field_enum::FieldOrigin::PlatformProperty,
+        origin: crate::field_enum::FieldOrigin::PlatformProperty { env: res.env },
     })
 }
 

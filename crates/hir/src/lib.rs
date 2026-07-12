@@ -21,6 +21,7 @@ pub use type_facade::{
     Field, HirFieldOrigin, Type,
 };
 
+pub use hir_def::execution_env;
 pub use hir_def::{all_sdbl_in_file_query, sdbl_hir_for_file_query, SdblHirEntries, SdblInFile};
 pub use hir_def::{
     BindingId, DefWithBodyId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId,
@@ -177,9 +178,9 @@ pub use hir_ty::narrow::{narrow_or_base, narrow_query, narrowed_type_at, NarrowS
 pub use hir_ty::proc_signature;
 pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
-    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, FormElementKind,
-    InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult, MetadataKind,
-    ModuleCodeInferenceResult, ParamsShape, UnresolvedMethodKind,
+    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, EnvMemberKind,
+    FormElementKind, InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult,
+    MetadataKind, ModuleCodeInferenceResult, ParamsShape, UnresolvedMethodKind,
 };
 
 pub use bsl_types::builders::Builders;

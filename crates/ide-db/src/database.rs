@@ -150,8 +150,12 @@ impl RootDatabaseImpl {
             .new(&db);
         let _ = GlobalConfigRevisionInput::builder(0).durability(Durability::MEDIUM).new(&db);
         let defaults = project_model::FeaturesConfig::default();
-        let _ =
-            FeaturesInput::builder(defaults.type_narrowing).durability(Durability::MEDIUM).new(&db);
+        let _ = FeaturesInput::builder(
+            defaults.type_narrowing,
+            hir::execution_env::EnvOptions::default(),
+        )
+        .durability(Durability::MEDIUM)
+        .new(&db);
         db
     }
 
@@ -1725,6 +1729,16 @@ impl RootDatabaseImpl {
         input.set_type_narrowing(self).to(enabled);
     }
 
+    pub fn env_options(&self) -> hir::execution_env::EnvOptions {
+        self.features().env_options(self)
+    }
+
+    pub fn set_env_options(&mut self, options: hir::execution_env::EnvOptions) {
+        use salsa::Setter;
+        let input = self.features();
+        input.set_env_options(self).to(options);
+    }
+
     pub(crate) fn get_file_path(&self, file_id: FileId) -> Option<PathBuf> {
         let source_root_input = self.file_source_root_input(file_id);
         let source_root_id = source_root_input.source_root_id(self);
@@ -2241,6 +2255,10 @@ impl hir::HirDatabase for RootDatabaseImpl {
 
     fn type_narrowing_enabled(&self) -> bool {
         RootDatabaseImpl::type_narrowing_enabled(self)
+    }
+
+    fn env_options(&self) -> hir::execution_env::EnvOptions {
+        RootDatabaseImpl::env_options(self)
     }
 
     fn proc_signature(

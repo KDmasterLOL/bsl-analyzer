@@ -41,6 +41,12 @@ pub struct PlatformDataInner {
     manager_properties_by_prefix: FxHashMap<SmolStr, Vec<usize>>,
     property_docs_by_id: FxHashMap<u32, usize>,
     global_properties_by_name: FxHashMap<SmolStr, usize>,
+    /// Type names (folded, RU or EN) shared by more than one platform type —
+    /// e.g. `ЭлементыФормы` is both managed-form `FormItems` and legacy
+    /// `Controls`. A by-name lookup resolves to an arbitrary one of them, so
+    /// per-entry facts that differ between the homonyms (availability,
+    /// deprecation) are unreliable for these names.
+    ambiguous_type_names: rustc_hash::FxHashSet<SmolStr>,
 }
 
 impl PlatformDataInner {
@@ -67,12 +73,21 @@ impl PlatformDataInner {
         }
 
         let mut type_en_folded: Vec<SmolStr> = Vec::with_capacity(types.len());
+        let mut ambiguous_type_names = rustc_hash::FxHashSet::default();
         for (idx, ty) in types.iter().enumerate() {
             let ru_key: SmolStr = ty.name.fold_lower().into();
             let en_key: SmolStr = ty.english_name.fold_lower().into();
             type_en_folded.push(en_key.clone());
-            types_by_name.insert(ru_key, idx);
-            types_by_name.insert(en_key, idx);
+            if let Some(prev) = types_by_name.insert(ru_key.clone(), idx) {
+                if prev != idx {
+                    ambiguous_type_names.insert(ru_key);
+                }
+            }
+            if let Some(prev) = types_by_name.insert(en_key.clone(), idx) {
+                if prev != idx {
+                    ambiguous_type_names.insert(en_key);
+                }
+            }
             // The XDTO name is an additional, non-overriding alias: index it only
             // when unambiguous, and never let it shadow a type's own key.
             if let Some(xdto) = &ty.xdto_name {
@@ -223,7 +238,15 @@ impl PlatformDataInner {
             manager_properties_by_prefix,
             property_docs_by_id,
             global_properties_by_name,
+            ambiguous_type_names,
         }
+    }
+
+    /// Whether `name` (any case, RU or EN) names more than one platform type,
+    /// making per-entry facts resolved through it unreliable.
+    pub fn is_ambiguous_type_name(&self, name: &str) -> bool {
+        let key: SmolStr = name.fold_lower().into();
+        self.ambiguous_type_names.contains(&key)
     }
 
     pub fn get_type(&self, name: &str) -> Option<&PlatformType> {

@@ -25,6 +25,10 @@ pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
 
     fn type_narrowing_enabled(&self) -> bool;
 
+    /// Project-level execution-environment settings for API-availability
+    /// checks (which client environments the configuration targets).
+    fn env_options(&self) -> hir_def::execution_env::EnvOptions;
+
     fn proc_signature(&self, method_input: MethodIdInput<'_>) -> Arc<ProcSignature>;
 
     fn infer_method(&self, method: MethodIdInput<'_>) -> Arc<BodyInferenceResult>;

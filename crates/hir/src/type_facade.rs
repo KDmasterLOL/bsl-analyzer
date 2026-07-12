@@ -59,7 +59,7 @@ impl From<FieldOrigin> for HirFieldOrigin {
             FieldOrigin::RegisterResource => Self::RegisterResource,
             FieldOrigin::RegisterAttribute => Self::RegisterAttribute,
             FieldOrigin::MetadataReference => Self::MetadataReference,
-            FieldOrigin::PlatformProperty => Self::PlatformProperty,
+            FieldOrigin::PlatformProperty { .. } => Self::PlatformProperty,
         }
     }
 }

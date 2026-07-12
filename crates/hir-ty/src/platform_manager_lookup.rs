@@ -15,6 +15,8 @@ pub struct PlatformMethodResolution {
     pub signature: FunctionSignature,
     pub return_ty: TypeId,
     pub overloads: Vec<Vec<TypeId>>,
+    /// Execution environments the method is available in.
+    pub env: hir_def::execution_env::EnvFlags,
 }
 
 pub fn resolve_platform_manager_method(
@@ -73,7 +75,12 @@ pub(crate) fn build_resolution(
         ret: return_ty,
         from_doc_comment: false,
     };
-    PlatformMethodResolution { signature, return_ty, overloads: lower_overloads_typeid(db, method) }
+    PlatformMethodResolution {
+        signature,
+        return_ty,
+        overloads: lower_overloads_typeid(db, method),
+        env: hir_def::execution_env::EnvFlags::from_platform_context(method.context.as_ref()),
+    }
 }
 
 pub fn resolve_platform_any_metadata_ref_method(
@@ -118,6 +125,7 @@ pub fn resolve_platform_any_metadata_ref_method(
         signature,
         return_ty,
         overloads: lower_overloads_typeid(db, &method),
+        env: hir_def::execution_env::EnvFlags::from_platform_context(method.context.as_ref()),
     })
 }
 
@@ -300,6 +308,7 @@ mod tests {
             },
             return_ty: db.number(None, None),
             overloads: vec![vec![db.string(None, false)]],
+            env: hir_def::execution_env::EnvFlags::ALL,
         };
         assert_eq!(res.return_ty, db.number(None, None));
         assert_eq!(res.overloads, vec![vec![db.string(None, false)]]);

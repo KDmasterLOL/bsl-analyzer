@@ -254,6 +254,24 @@ pub enum InferenceDiagnostic {
         module: Name,
         args: Vec<bool>,
     },
+
+    /// A resolved platform member is not available in some of the execution
+    /// environments this body runs in (`missing` — the EDT-style
+    /// "[Web client]" qualifier set).
+    UnavailableInEnvironment {
+        expr: ExprId,
+        name: Name,
+        member_kind: EnvMemberKind,
+        missing: hir_def::execution_env::EnvFlags,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvMemberKind {
+    Method,
+    Property,
+    GlobalFunction,
+    GlobalProperty,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +366,22 @@ pub struct InferenceContext<'db> {
     diagnostics: Vec<InferenceDiagnostic>,
 
     call_arg_bindings: Vec<CallArgBinding>,
+
+    /// Execution environments this body runs in (module base ∩ compilation
+    /// directive). Empty = unknown → availability checks are skipped.
+    body_env: hir_def::execution_env::EnvFlags,
+
+    /// Environments availability diagnostics may report on
+    /// ([`EnvOptions::checked_environments`]) — the missing set is clipped to
+    /// this mask, keeping opt-in environments (external connection, mobile)
+    /// out of default verdicts.
+    checked_env: hir_def::execution_env::EnvFlags,
+
+    /// Nesting depth of `#Если … #КонецЕсли` preprocessor branches around the
+    /// statement being inferred. Non-zero suppresses availability checks: the
+    /// branch condition narrows the environment set in a way this pass does
+    /// not model yet, so anything inside is assumed intentional.
+    preproc_depth: u32,
 
     /// Lazily-built lookup of unqualified-callable exports of the GLOBAL common modules
     /// visible to this body: lowercased method name → owning `MethodId` (first global
@@ -521,6 +555,17 @@ impl<'db> InferenceContext<'db> {
         owner: DefWithBodyId,
         body: &Arc<Body>,
     ) -> Self {
+        let opts = db.env_options();
+        let body_env = {
+            use hir_def::execution_env;
+            let metadata = db.module_metadata(hir_def::ModuleId { file_id });
+            match owner {
+                DefWithBodyId::Method(local_id) => {
+                    execution_env::method_env(&db.item_tree(file_id), local_id, &metadata, &opts)
+                }
+                DefWithBodyId::ModuleCode => execution_env::module_code_env(&metadata, &opts),
+            }
+        };
         Self {
             db,
             context_file_id: file_id,
@@ -539,6 +584,9 @@ impl<'db> InferenceContext<'db> {
             diagnostics: Vec::new(),
             call_arg_bindings: Vec::new(),
             return_expr_ids: Vec::new(),
+            body_env,
+            checked_env: opts.checked_environments,
+            preproc_depth: 0,
             global_exports: None,
             structure_shapes: FxHashMap::default(),
         }
@@ -566,6 +614,10 @@ impl<'db> InferenceContext<'db> {
     ) -> Self {
         let mut ctx = Self::new(db, base_file_id, owner, body);
         ctx.local_symbols = Some(local_symbols);
+        // The effective module's local_ids do not match the base file's item
+        // tree, so the directive computed in `new()` may belong to another
+        // method — disable availability checks rather than misattribute them.
+        ctx.body_env = hir_def::execution_env::EnvFlags::EMPTY;
         ctx
     }
 
@@ -583,6 +635,9 @@ impl<'db> InferenceContext<'db> {
     ) -> Self {
         let mut ctx = Self::new(db, ext_file_id, owner, body);
         ctx.weaving_base = Some(base_module);
+        // A weaving interceptor's effective directive comes from the base
+        // method it intercepts, unknown at this layer — no availability checks.
+        ctx.body_env = hir_def::execution_env::EnvFlags::EMPTY;
         ctx
     }
 
@@ -715,6 +770,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
             InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
             InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
+            InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
         };
         if self.body.is_recovered(key) {
             return;
@@ -735,6 +791,34 @@ impl<'db> InferenceContext<'db> {
             return None;
         };
         Some(Name::new(facet.name.as_str()))
+    }
+
+    /// Report a resolved platform member that is missing from some of the
+    /// environments this body runs in. Free when nothing is wrong: one u8
+    /// mask compare against availability already carried by the lookup
+    /// result. Suppressed inside `#Если` branches (the condition narrows the
+    /// environment set beyond this pass's model) and when either side is
+    /// unknown.
+    fn check_member_env(
+        &mut self,
+        expr: ExprId,
+        name: &Name,
+        member_env: hir_def::execution_env::EnvFlags,
+        member_kind: EnvMemberKind,
+    ) {
+        if self.preproc_depth > 0 || self.body_env.is_empty() || member_env.is_empty() {
+            return;
+        }
+        let missing = self.body_env.without(member_env) & self.checked_env;
+        if missing.is_empty() {
+            return;
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::UnavailableInEnvironment {
+            expr,
+            name: name.clone(),
+            member_kind,
+            missing,
+        });
     }
 
     fn push_deprecated_platform_member_diagnostic(
@@ -978,6 +1062,16 @@ impl<'db> InferenceContext<'db> {
                             self.push_deprecated_platform_member_diagnostic(
                                 target_id, base_ty, field, true,
                             );
+                            if let crate::field_enum::FieldOrigin::PlatformProperty { env } =
+                                info.origin
+                            {
+                                self.check_member_env(
+                                    target_id,
+                                    field,
+                                    env,
+                                    EnvMemberKind::Property,
+                                );
+                            }
                             if info.is_readonly {
                                 self.push_inference_diagnostic(
                                     InferenceDiagnostic::ReadOnlyPropertyAssignment {
@@ -1016,6 +1110,7 @@ impl<'db> InferenceContext<'db> {
             }
 
             Stmt::PreprocIf(preproc) => {
+                self.preproc_depth += 1;
                 self.infer_stmts(&preproc.then_branch);
                 for (_, _, branch) in preproc.elsif_branches.iter() {
                     self.infer_stmts(branch);
@@ -1023,6 +1118,7 @@ impl<'db> InferenceContext<'db> {
                 if let Some(else_branch) = &preproc.else_branch {
                     self.infer_stmts(else_branch);
                 }
+                self.preproc_depth -= 1;
             }
 
             Stmt::While { condition, body } => {
@@ -1152,9 +1248,13 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(ExprId::from_idx(arg));
                 }
 
-                crate::method_lookup::lookup_method(self.db, receiver_ty, method)
-                    .map(|info| info.return_ty)
-                    .unwrap_or_else(|| self.db.unknown())
+                match crate::method_lookup::lookup_method(self.db, receiver_ty, method) {
+                    Some(info) => {
+                        self.check_member_env(expr_id, method, info.env, EnvMemberKind::Method);
+                        info.return_ty
+                    }
+                    None => self.db.unknown(),
+                }
             }
 
             Expr::Index { base, index } => {
@@ -1189,6 +1289,9 @@ impl<'db> InferenceContext<'db> {
                     crate::field_lookup::lookup_field(self.db, &obj_resolver, base_ty, field)
                 {
                     self.push_deprecated_platform_member_diagnostic(expr_id, base_ty, field, true);
+                    if let crate::field_enum::FieldOrigin::PlatformProperty { env } = info.origin {
+                        self.check_member_env(expr_id, field, env, EnvMemberKind::Property);
+                    }
                     info.ty
                 } else if let Some(info) = crate::manager_lookup::lookup_manager_field(
                     self.db,
@@ -1463,10 +1566,11 @@ impl<'db> InferenceContext<'db> {
         }
 
         if !user_shadows && !workspace_owns_common_module {
-            if let Some(id) =
-                crate::platform_global_lookup::resolve_platform_global_property_type(self.db, name)
+            if let Some((id, env)) =
+                crate::platform_global_lookup::resolve_platform_global_property(self.db, name)
             {
                 trace!("resolved {} as platform global → {:?}", name, id);
+                self.check_member_env(expr_id, name, env, EnvMemberKind::GlobalProperty);
                 return id;
             }
         }
@@ -1851,6 +1955,7 @@ impl<'db> InferenceContext<'db> {
                         &method_name,
                         false,
                     );
+                    self.check_member_env(callee, &method_name, info.env, EnvMemberKind::Method);
                     let mut return_ty = info.return_ty;
                     let mut params: Vec<TypeId> = info.params.to_vec();
                     let overloads: Vec<Arc<[TypeId]>> =
@@ -1945,6 +2050,15 @@ impl<'db> InferenceContext<'db> {
                     !sigs.is_empty(),
                     "BuiltinFunctions::get must never return an empty overload set"
                 );
+
+                if let Some(first) = sigs.first() {
+                    self.check_member_env(
+                        callee,
+                        &name,
+                        first.env(),
+                        EnvMemberKind::GlobalFunction,
+                    );
+                }
 
                 let sigs: Vec<FunctionSignature> = sigs.iter().map(|s| s.lower(self.db)).collect();
 
@@ -2214,13 +2328,20 @@ impl<'db> InferenceContext<'db> {
                         .is_some();
 
                     if !module_in_workspace {
-                        if let crate::platform_global_lookup::PlatformGlobalLookup::Resolved(
-                            return_ty,
-                        ) = crate::platform_global_lookup::try_resolve_platform_global_member(
+                        if let crate::platform_global_lookup::PlatformGlobalLookup::Resolved {
+                            ty: return_ty,
+                            env,
+                        } = crate::platform_global_lookup::try_resolve_platform_global_member(
                             self.db,
                             module_name,
                             method_name,
                         ) {
+                            self.check_member_env(
+                                call_expr,
+                                method_name,
+                                env,
+                                EnvMemberKind::Method,
+                            );
                             self.expr_types.insert(call_expr, self.db.unknown());
                             return return_ty;
                         }
@@ -2366,10 +2487,14 @@ impl<'db> InferenceContext<'db> {
             module_name,
             method_name,
         ) {
-            crate::platform_global_lookup::PlatformGlobalLookup::Resolved(return_ty) => {
+            crate::platform_global_lookup::PlatformGlobalLookup::Resolved {
+                ty: return_ty,
+                env,
+            } => {
                 for arg in args {
                     self.infer_expr(*arg);
                 }
+                self.check_member_env(call_expr, method_name, env, EnvMemberKind::Method);
                 self.expr_types.insert(call_expr, self.db.unknown());
                 return Some(return_ty);
             }

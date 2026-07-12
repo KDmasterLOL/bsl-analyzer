@@ -46,7 +46,7 @@ pub use hir_def::ty::{
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::ConfigsDatabase;
 pub use infer::{
-    BodyInferenceResult, CallArgBinding, ImplicitLocalAssignment, ImplicitLocalInfo,
+    BodyInferenceResult, CallArgBinding, EnvMemberKind, ImplicitLocalAssignment, ImplicitLocalInfo,
     InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult,
     ModuleCodeInferenceResult, ParamsShape, UnresolvedMethodKind,
 };
