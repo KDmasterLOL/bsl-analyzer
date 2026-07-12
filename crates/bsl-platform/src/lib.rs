@@ -23,6 +23,7 @@ pub use db::{
     platform_property_query, platform_type_query, prefixed_method_query, type_methods_query,
     type_properties_query, MethodLookupInput, PlatformData, PlatformDataInner,
     PrefixedMethodLookupInput, TypeNameInput, GLOBAL_CONTEXT_OWNER,
+    LEGACY_GLOBAL_FUNCTION_EN_ALIASES,
 };
 pub use types::*;
 

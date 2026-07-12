@@ -49,8 +49,10 @@ impl PlatformDataInner {
     }
 
     fn new() -> Self {
-        let types: Vec<PlatformType> =
+        let mut types: Vec<PlatformType> =
             crate::generated::PLATFORM_TYPES.iter().map(PlatformType::from).collect();
+
+        apply_docs_gap_iter_types_overlay(&mut types);
 
         let mut types_by_name = FxHashMap::default();
 
@@ -81,8 +83,10 @@ impl PlatformDataInner {
             }
         }
 
-        let methods: Vec<PlatformMethod> =
+        let mut methods: Vec<PlatformMethod> =
             crate::generated::PLATFORM_METHODS.iter().map(PlatformMethod::from).collect();
+
+        apply_docs_gap_method_overlay(&mut methods);
 
         let mut methods_by_name = FxHashMap::default();
         let mut methods_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
@@ -120,6 +124,14 @@ impl PlatformDataInner {
 
             global_functions_by_name.insert(ru_key, idx);
             global_functions_by_name.insert(en_key, idx);
+        }
+
+        for (ru, legacy_en) in LEGACY_GLOBAL_FUNCTION_EN_ALIASES {
+            let ru_key: SmolStr = ru.fold_lower().into();
+            if let Some(&idx) = global_functions_by_name.get(&ru_key) {
+                let alias_key: SmolStr = legacy_en.fold_lower().into();
+                global_functions_by_name.entry(alias_key).or_insert(idx);
+            }
         }
 
         let mut method_docs_by_id = FxHashMap::default();
@@ -369,6 +381,102 @@ impl PlatformDataInner {
     pub fn get_keyword_docs(&self, keyword: &str) -> Option<crate::types::KeywordDocs> {
         get_keyword_docs_static(keyword)
     }
+}
+
+/// English synonyms the help archive renamed while the runtime keeps accepting
+/// the old spelling. Each `(russian_name, legacy_english)` pair is indexed as
+/// an extra lookup key of the canonical entry, so legacy English code still
+/// resolves; the canonical (renamed) English name stays the display name.
+pub const LEGACY_GLOBAL_FUNCTION_EN_ALIASES: &[(&str, &str)] = &[
+    // The 8.3.27 help renamed КопироватьФайл's English synonym to CopyFile
+    // (aligning with CopyFileAsync); FileCopy remains callable.
+    ("КопироватьФайл", "FileCopy"),
+];
+
+/// Since the 8.3.27 help archives, the `СписокЭлементовDOM` page lists only
+/// HTML element classes as collection elements, while the same collection is
+/// returned by XML DOM traversal too and its own `Элемент` method is still
+/// documented as returning `ЭлементDOM`. Keep the generic DOM node union
+/// alongside the HTML classes so `Для каждого` over XML DOM lists does not
+/// degrade to HTML-only inference.
+fn apply_docs_gap_iter_types_overlay(types: &mut [PlatformType]) {
+    const DOM_NODE_UNION: &[&str] = &[
+        "ЭлементDOM",
+        "АтрибутDOM",
+        "ДокументDOM",
+        "ОпределениеТипаДокументаDOM",
+        "НотацияDOM",
+        "СущностьDOM",
+        "ФрагментДокументаDOM",
+        "ТекстDOM",
+        "КомментарийDOM",
+        "СекцияCDATADOM",
+        "ИнструкцияОбработкиDOM",
+        "СсылкаНаСущностьDOM",
+        "ПространствоИменXPath",
+    ];
+
+    let Some(ty) = types.iter_mut().find(|t| t.english_name == "DOMElementList") else {
+        return;
+    };
+    let mut merged: Vec<SmolStr> = DOM_NODE_UNION.iter().map(|s| SmolStr::new(*s)).collect();
+    for elem in ty.iter_element_types.drain(..) {
+        if !merged.contains(&elem) {
+            merged.push(elem);
+        }
+    }
+    ty.iter_element_types = merged;
+}
+
+/// The platform ships methods that its help archive never documents with an
+/// own page, so HBK extraction cannot see them. `МенеджерОбработкиСтрокиXML`
+/// only lists `НайтиНедопустимыеСимволыXML` while its description (and the
+/// "see also" link of that very method) reference
+/// `УдалитьНедопустимыеСимволыXML` as well; the runtime accepts the call.
+/// Mirror the signature of the same-named global-context function until the
+/// help archive gains the page.
+fn apply_docs_gap_method_overlay(methods: &mut Vec<PlatformMethod>) {
+    use crate::types::{ContextAvailability, MethodParam};
+
+    let exists = methods.iter().any(|m| {
+        m.type_name == "XMLStringProcessingManager" && m.name == "УдалитьНедопустимыеСимволыXML"
+    });
+    if exists {
+        return;
+    }
+
+    let next_id = methods.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+    methods.push(PlatformMethod {
+        id: next_id,
+        type_name: "XMLStringProcessingManager".into(),
+        name: "УдалитьНедопустимыеСимволыXML".into(),
+        english_name: "DeleteDisallowedXMLCharacters".into(),
+        return_type: Some("Строка".into()),
+        parameters: vec![
+            MethodParam {
+                name: "СтрокаСимволов".into(),
+                param_type: Some("Строка".into()),
+                is_optional: false,
+                is_variadic: false,
+            },
+            MethodParam {
+                name: "Версия".into(),
+                param_type: Some("Строка".into()),
+                is_optional: true,
+                is_variadic: false,
+            },
+        ],
+        variants: Vec::new(),
+        min_version: Some("8.3.20".into()),
+        context: Some(ContextAvailability {
+            thick_client: true,
+            thin_client: true,
+            web_client: false,
+            server: true,
+            mobile_client: true,
+            external_connection: true,
+        }),
+    });
 }
 
 fn apply_docs_only_variadic_overlay(constructors: &mut [PlatformConstructor]) {
@@ -665,6 +773,106 @@ mod tests {
     }
 
     #[test]
+    fn docs_gap_overlay_exposes_xml_string_processing_delete() {
+        let data = PlatformDataInner::instance();
+        if data.all_methods().is_empty() {
+            return;
+        }
+
+        let method = data
+            .get_method("МенеджерОбработкиСтрокиXML", "УдалитьНедопустимыеСимволыXML")
+            .expect("docs-gap overlay must expose the manager method");
+
+        // The overlay hand-copies the signature of the same-named global
+        // function; compare against it so a regenerated corpus cannot drift
+        // away from the synthesized entry unnoticed.
+        let global = data
+            .get_global_function("УдалитьНедопустимыеСимволыXML")
+            .expect("the mirrored global function must exist");
+        assert_eq!(method.english_name, global.english_name);
+        assert_eq!(method.return_type, global.return_type);
+        assert_eq!(method.min_version, global.min_version);
+        assert_eq!(method.context, global.context);
+        assert_eq!(method.parameters.len(), global.parameters.len());
+        for (m, g) in method.parameters.iter().zip(&global.parameters) {
+            assert_eq!(m.name, g.name);
+            assert_eq!(m.param_type, g.param_type);
+            assert_eq!(m.is_optional, g.is_optional);
+        }
+
+        let via_en = data.get_method("XMLStringProcessingManager", "DeleteDisallowedXMLCharacters");
+        assert!(via_en.is_some(), "overlay method must resolve by English names too");
+
+        let via_global =
+            data.resolve_global_member("ОбработкаСтрокиXML", "УдалитьНедопустимыеСимволыXML");
+        assert!(via_global.is_some(), "manager method must resolve through the global property");
+    }
+
+    #[test]
+    fn legacy_english_global_function_aliases_resolve() {
+        let data = PlatformDataInner::instance();
+        if data.all_global_functions().is_empty() {
+            return;
+        }
+
+        for (ru, legacy_en) in LEGACY_GLOBAL_FUNCTION_EN_ALIASES {
+            let canonical = data
+                .get_global_function(ru)
+                .unwrap_or_else(|| panic!("{ru} must exist in the corpus"));
+            let via_alias = data
+                .get_global_function(legacy_en)
+                .unwrap_or_else(|| panic!("legacy alias {legacy_en} must resolve"));
+            assert_eq!(via_alias.id, canonical.id, "{legacy_en} must alias {ru}");
+            assert_ne!(
+                canonical.english_name.fold_lower(),
+                legacy_en.fold_lower(),
+                "{legacy_en} duplicates the canonical English name — drop the stale alias"
+            );
+        }
+    }
+
+    #[test]
+    fn dom_element_list_iterates_dom_nodes_and_html_elements() {
+        let data = PlatformDataInner::instance();
+        if data.all_types().is_empty() {
+            return;
+        }
+
+        let ty = data.get_type("СписокЭлементовDOM").expect("type must exist");
+        for expected in ["ЭлементDOM", "ТекстDOM", "ЭлементHTML"] {
+            assert!(
+                ty.iter_element_types.iter().any(|e| e == expected),
+                "СписокЭлементовDOM must iterate {expected}, got {:?}",
+                ty.iter_element_types
+            );
+        }
+    }
+
+    #[test]
+    fn user_password_policies_global_property_is_typed() {
+        let data = PlatformDataInner::instance();
+        if data.all_types().is_empty() {
+            return;
+        }
+
+        let prop = data
+            .get_global_property("ПолитикиПаролейПользователей")
+            .expect("global property must exist");
+        assert_eq!(
+            prop.property_types.first().map(|t| t.as_str()),
+            Some("МенеджерПолитикПаролейПользователей")
+        );
+
+        for method in ["НайтиПоИмени", "СоздатьПолитику", "ПроверитьСоответствиеПароляПолитике"]
+        {
+            assert!(
+                data.resolve_global_member("ПолитикиПаролейПользователей", method).is_some(),
+                "{method} must resolve through the global property"
+            );
+        }
+    }
+
+    #[test]
     fn test_get_method_bilingual() {
         let data = PlatformDataInner::instance();
 
@@ -824,23 +1032,34 @@ mod tests {
         let mut seen_global_hits = 0usize;
 
         for func in funcs {
-            let expected = expected_global_ru.contains(&func.name.as_str());
-            let last_idx = func.parameters.len().saturating_sub(1);
-            for (idx, param) in func.parameters.iter().enumerate() {
-                if expected && idx == last_idx {
-                    assert!(
-                        param.is_variadic,
-                        "{} must mark its last param ({}) as variadic",
-                        func.name, param.name
-                    );
-                    seen_global_hits += 1;
-                } else {
-                    assert!(
-                        !param.is_variadic,
-                        "{} param {} unexpectedly carries is_variadic=true",
-                        func.name, param.name
-                    );
-                }
+            // Since the 8.3.27 help archives the unbounded tail of these
+            // functions is folded into the parameter name
+            // (`Значение1,...,ЗначениеN`); hir-ty's name idiom consumes that
+            // shape, so no global function carries an is_variadic flag.
+            if expected_global_ru.contains(&func.name.as_str()) {
+                let last = func
+                    .parameters
+                    .last()
+                    .unwrap_or_else(|| panic!("{} must declare parameters", func.name));
+                // The exact folded shape matters: hir-ty's
+                // `name_implies_unbounded_variadic` requires `<word><digits>`
+                // before the ellipsis and the same word with a letter suffix
+                // after it, so a looser substring check could pass names the
+                // idiom rejects.
+                assert_eq!(
+                    last.name.as_str(),
+                    "Значение1,...,ЗначениеN",
+                    "{} last param must carry the unbounded name idiom",
+                    func.name
+                );
+                seen_global_hits += 1;
+            }
+            for param in &func.parameters {
+                assert!(
+                    !param.is_variadic,
+                    "{} param {} unexpectedly carries is_variadic=true",
+                    func.name, param.name
+                );
             }
             for variant in &func.variants {
                 for param in &variant.parameters {

@@ -93,6 +93,12 @@ impl BuiltinFunctions {
             signatures.insert(func.english_name.fold_lower(), sigs);
         }
 
+        for (ru, legacy_en) in bsl_platform::LEGACY_GLOBAL_FUNCTION_EN_ALIASES {
+            if let Some(sigs) = signatures.get(&ru.fold_lower()).cloned() {
+                signatures.entry(legacy_en.fold_lower()).or_insert(sigs);
+            }
+        }
+
         register_fallbacks(&mut signatures);
 
         tracing::debug!("initialized {} built-in function signature keys", signatures.len());
@@ -306,6 +312,21 @@ mod tests {
     use bsl_types::facet::DateComponent;
     use bsl_types::kind::TypeKind;
     use bsl_types::testing::InMemoryDb;
+
+    #[test]
+    fn legacy_english_aliases_reach_builtin_signatures() {
+        let builtins = builtin_functions();
+        for (ru, legacy_en) in bsl_platform::LEGACY_GLOBAL_FUNCTION_EN_ALIASES {
+            let Some(canonical) = builtins.get(ru) else {
+                // Corpus-free build (no platform data) — nothing to alias.
+                continue;
+            };
+            let via_alias = builtins
+                .get(legacy_en)
+                .unwrap_or_else(|| panic!("legacy alias {legacy_en} must have a signature"));
+            assert_eq!(via_alias.len(), canonical.len());
+        }
+    }
 
     #[test]
     fn complete_form_data_family_fills_missing_tree() {
