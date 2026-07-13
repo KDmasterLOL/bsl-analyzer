@@ -106,7 +106,7 @@ impl PlatformDataInner {
             crate::generated::PLATFORM_METHODS.iter().map(PlatformMethod::from).collect();
 
         apply_docs_gap_method_overlay(&mut methods, &global_functions);
-        apply_docs_gap_member_context_overlay(&mut methods, &mut global_functions);
+        apply_docs_gap_member_context_overlay(&mut methods, &mut global_functions, &types);
 
         let mut methods_by_name = FxHashMap::default();
         let mut methods_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
@@ -471,35 +471,55 @@ fn apply_docs_gap_type_context_overlay(types: &mut [PlatformType]) {
     }
 }
 
-/// Member pages in the help archive occasionally omit environments where the
-/// platform demonstrably supports the member: the promise-style async dialog
-/// functions exist precisely so web-client code can drop modality, and the
-/// standard library formats errors through `ОбработкаОшибок` in universal
-/// client code that runs in the web client. 1C:EDT's availability model
-/// agrees on every such call site. Union the missing environment in.
+/// Member pages in the help archive systematically understate the web client.
+/// Promise-style `*Асинх` members exist precisely so web-client code can drop
+/// modal and blocking calls, yet many of their pages omit the web client —
+/// 1C:EDT shipped the same corrupted metadata once (1c-edt-issues#783) and
+/// corrected its own model; the help itself was never fixed and is not
+/// expected to be. The standard library also formats errors through
+/// `ОбработкаОшибок` in universal client code that runs in the web client.
+/// Union the missing environment in.
 fn apply_docs_gap_member_context_overlay(
     methods: &mut [PlatformMethod],
     global_functions: &mut [GlobalFunction],
+    types: &[PlatformType],
 ) {
-    const WEB_CAPABLE_GLOBALS: &[&str] =
-        &["DoMessageBoxAsync", "InputNumberAsync", "OpenValueAsync"];
     const WEB_CAPABLE_ERROR_PROCESSING: &[&str] =
         &["DetailErrorDescription", "ErrorDescriptionForUser"];
 
-    for func in global_functions {
-        if WEB_CAPABLE_GLOBALS.contains(&func.english_name.as_str()) {
-            if let Some(context) = &mut func.context {
+    let is_async = |ru: &SmolStr, en: &SmolStr| ru.ends_with("Асинх") || en.ends_with("Async");
+
+    // Thin-client capability marks a genuinely client-side async API: the
+    // mobile-only entries (`КаталогБиблиотекиМобильногоУстройстваАсинх`) stay
+    // untouched.
+    for func in global_functions.iter_mut() {
+        if let Some(context) = &mut func.context {
+            if is_async(&func.name, &func.english_name) && context.thin_client {
                 context.web_client = true;
             }
         }
     }
-    for method in methods {
+
+    // For type methods, follow the (already overlaid) type: an async method of
+    // a web-capable type runs in the web client; a type absent from the web
+    // client altogether (`HTTPСоединение`) keeps its consistent markup.
+    let web_capable_types: rustc_hash::FxHashSet<&str> = types
+        .iter()
+        .filter(|ty| ty.context.as_ref().is_some_and(|c| c.web_client))
+        .map(|ty| ty.english_name.as_str())
+        .collect();
+    for method in methods.iter_mut() {
+        let Some(context) = &mut method.context else { continue };
+        if is_async(&method.name, &method.english_name)
+            && context.thin_client
+            && web_capable_types.contains(method.type_name.as_str())
+        {
+            context.web_client = true;
+        }
         if method.type_name == "ErrorProcessingManager"
             && WEB_CAPABLE_ERROR_PROCESSING.contains(&method.english_name.as_str())
         {
-            if let Some(context) = &mut method.context {
-                context.web_client = true;
-            }
+            context.web_client = true;
         }
     }
 }
@@ -887,6 +907,34 @@ mod tests {
             assert!(ctx.web_client, "overlay must add the web client to {name}");
             assert!(!ctx.server, "async dialogs stay client-side: {name}");
         }
+        let mobile_only = data
+            .get_global_function("КаталогБиблиотекиМобильногоУстройстваАсинх")
+            .expect("mobile async global must exist");
+        assert!(
+            !mobile_only.context.as_ref().unwrap().web_client,
+            "a mobile-only async API must stay out of the web client"
+        );
+
+        // Async methods follow their type: web-capable types gain the method
+        // in the web client, a web-absent type keeps its consistent markup.
+        for (ty, method) in [
+            ("МенеджерФайловыхПотоков", "ОткрытьАсинх"),
+            ("СписокЗначений", "ВыбратьЭлементАсинх"),
+            ("ЧтениеДанных", "ПрочитатьАсинх"),
+        ] {
+            let m = data.get_method(ty, method).expect("async method must exist");
+            assert!(
+                m.context.as_ref().unwrap().web_client,
+                "overlay must add the web client to {ty}.{method}"
+            );
+        }
+        let http = data
+            .get_method("HTTPСоединение", "ПолучитьАсинх")
+            .expect("HTTP async method must exist");
+        assert!(
+            !http.context.as_ref().unwrap().web_client,
+            "HTTPСоединение is not web-capable — its async methods must not become so"
+        );
 
         let method = data
             .get_method("МенеджерОбработкиОшибок", "ПодробноеПредставлениеОшибки")
