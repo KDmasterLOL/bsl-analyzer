@@ -201,12 +201,14 @@ impl CfgBuilder {
         self.current_block = Some(dead_block);
     }
 
-    fn walk_label_statement_hir(&mut self, _stmt_id: StmtIdx, body: &Body) {
+    fn walk_label_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::LabelVertex;
 
-        if let Stmt::Label(name) = body.stmt_idx(_stmt_id) {
-            let label_vertex =
-                self.cfg.add_vertex(CfgVertex::Label(LabelVertex::new(name.clone())));
+        if let Stmt::Label(name) = body.stmt_idx(stmt_id) {
+            let label_vertex = self.cfg.add_vertex_with_origin(
+                CfgVertex::Label(LabelVertex::new(name.clone())),
+                StmtId::from_idx(stmt_id),
+            );
 
             if let Some(current) = self.current_block {
                 let _ = self.cfg.add_edge(current, label_vertex, CfgEdgeType::Direct);
@@ -246,9 +248,10 @@ impl CfgBuilder {
         use crate::vertex::ConditionalVertex;
 
         if let Stmt::If(if_stmt) = body.stmt_idx(stmt_id) {
-            let cond_vertex = self.cfg.add_vertex(CfgVertex::Conditional(ConditionalVertex::new(
-                ExprId::from_idx(if_stmt.condition),
-            )));
+            let cond_vertex = self.cfg.add_vertex_with_origin(
+                CfgVertex::Conditional(ConditionalVertex::new(ExprId::from_idx(if_stmt.condition))),
+                StmtId::from_idx(stmt_id),
+            );
 
             if let Some(current) = self.current_block {
                 let _ = self.cfg.add_edge(current, cond_vertex, CfgEdgeType::Direct);
@@ -276,9 +279,12 @@ impl CfgBuilder {
             let mut current_cond = cond_vertex;
 
             for (elsif_condition, elsif_body) in if_stmt.elsif_branches.iter() {
-                let elsif_cond = self.cfg.add_vertex(CfgVertex::Conditional(
-                    ConditionalVertex::new(ExprId::from_idx(*elsif_condition)),
-                ));
+                let elsif_cond = self.cfg.add_vertex_with_origin(
+                    CfgVertex::Conditional(ConditionalVertex::new(ExprId::from_idx(
+                        *elsif_condition,
+                    ))),
+                    StmtId::from_idx(stmt_id),
+                );
 
                 let _ = self.cfg.add_edge(current_cond, elsif_cond, CfgEdgeType::FalseBranch);
 
@@ -413,9 +419,10 @@ impl CfgBuilder {
         use crate::vertex::WhileLoopVertex;
 
         if let Stmt::While { condition, body: loop_body } = body.stmt_idx(stmt_id) {
-            let loop_vertex = self.cfg.add_vertex(CfgVertex::WhileLoop(WhileLoopVertex::new(
-                ExprId::from_idx(*condition),
-            )));
+            let loop_vertex = self.cfg.add_vertex_with_origin(
+                CfgVertex::WhileLoop(WhileLoopVertex::new(ExprId::from_idx(*condition))),
+                StmtId::from_idx(stmt_id),
+            );
 
             if let Some(current) = self.current_block {
                 if self.block_has_live_incoming(current) {
@@ -460,12 +467,15 @@ impl CfgBuilder {
         use crate::vertex::ForLoopVertex;
 
         if let Stmt::For { var, from, to, body: loop_body } = body.stmt_idx(stmt_id) {
-            let loop_vertex = self.cfg.add_vertex(CfgVertex::ForLoop(ForLoopVertex::with_stmt_id(
-                BindingId::from_idx(*var),
-                ExprId::from_idx(*from),
-                ExprId::from_idx(*to),
+            let loop_vertex = self.cfg.add_vertex_with_origin(
+                CfgVertex::ForLoop(ForLoopVertex::with_stmt_id(
+                    BindingId::from_idx(*var),
+                    ExprId::from_idx(*from),
+                    ExprId::from_idx(*to),
+                    StmtId::from_idx(stmt_id),
+                )),
                 StmtId::from_idx(stmt_id),
-            )));
+            );
 
             if let Some(current) = self.current_block {
                 if self.block_has_live_incoming(current) {
@@ -510,12 +520,14 @@ impl CfgBuilder {
         use crate::vertex::ForEachLoopVertex;
 
         if let Stmt::ForEach { var, collection, body: loop_body } = body.stmt_idx(stmt_id) {
-            let loop_vertex =
-                self.cfg.add_vertex(CfgVertex::ForEachLoop(ForEachLoopVertex::with_stmt_id(
+            let loop_vertex = self.cfg.add_vertex_with_origin(
+                CfgVertex::ForEachLoop(ForEachLoopVertex::with_stmt_id(
                     BindingId::from_idx(*var),
                     ExprId::from_idx(*collection),
                     StmtId::from_idx(stmt_id),
-                )));
+                )),
+                StmtId::from_idx(stmt_id),
+            );
 
             if let Some(current) = self.current_block {
                 if self.block_has_live_incoming(current) {
@@ -560,7 +572,10 @@ impl CfgBuilder {
         use crate::vertex::TryExceptVertex;
 
         if let Stmt::Try { body: try_body, except } = body.stmt_idx(stmt_id) {
-            let try_vertex = self.cfg.add_vertex(CfgVertex::TryExcept(TryExceptVertex::new()));
+            let try_vertex = self.cfg.add_vertex_with_origin(
+                CfgVertex::TryExcept(TryExceptVertex::new()),
+                StmtId::from_idx(stmt_id),
+            );
 
             if let Some(current) = self.current_block {
                 let _ = self.cfg.add_edge(current, try_vertex, CfgEdgeType::Direct);
@@ -733,6 +748,87 @@ mod tests {
         predicate: impl Fn(&CfgVertex) -> bool,
     ) -> bool {
         cfg.vertex(idx).is_some_and(predicate)
+    }
+
+    fn source_stmt_id_of_kind(
+        cfg: &ControlFlowGraph,
+        predicate: impl Fn(&CfgVertex) -> bool,
+    ) -> Option<StmtId> {
+        cfg.vertices()
+            .find(|(_, vertex)| predicate(vertex))
+            .and_then(|(idx, _)| cfg.source_stmt_id(idx))
+    }
+
+    #[test]
+    fn conditional_vertex_exposes_originating_statement_id() {
+        use hir_def::{Body, Expr, IfStmt, Literal, Stmt};
+
+        let mut body = Body::default();
+        let condition = body.exprs_mut().alloc(Expr::Literal(Literal::Bool(true)));
+        let if_stmt = body.stmts_mut().alloc(Stmt::If(Box::new(IfStmt {
+            condition,
+            then_branch: Box::default(),
+            elsif_branches: Box::default(),
+            else_branch: None,
+        })));
+        body.set_body_stmts(vec![if_stmt].into());
+
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+
+        assert_eq!(
+            source_stmt_id_of_kind(&cfg, |vertex| matches!(vertex, CfgVertex::Conditional(_))),
+            Some(StmtId::from_idx(if_stmt))
+        );
+    }
+
+    #[test]
+    fn while_loop_vertex_exposes_originating_statement_id() {
+        use hir_def::{Body, Expr, Literal, Stmt};
+
+        let mut body = Body::default();
+        let condition = body.exprs_mut().alloc(Expr::Literal(Literal::Bool(true)));
+        let while_stmt = body.stmts_mut().alloc(Stmt::While { condition, body: Box::default() });
+        body.set_body_stmts(vec![while_stmt].into());
+
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+
+        assert_eq!(
+            source_stmt_id_of_kind(&cfg, |vertex| matches!(vertex, CfgVertex::WhileLoop(_))),
+            Some(StmtId::from_idx(while_stmt))
+        );
+    }
+
+    #[test]
+    fn try_except_vertex_exposes_originating_statement_id() {
+        use hir_def::{Body, Stmt};
+
+        let mut body = Body::default();
+        let try_stmt =
+            body.stmts_mut().alloc(Stmt::Try { body: Box::default(), except: Box::default() });
+        body.set_body_stmts(vec![try_stmt].into());
+
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+
+        assert_eq!(
+            source_stmt_id_of_kind(&cfg, |vertex| matches!(vertex, CfgVertex::TryExcept(_))),
+            Some(StmtId::from_idx(try_stmt))
+        );
+    }
+
+    #[test]
+    fn label_vertex_exposes_originating_statement_id() {
+        use hir_def::{Body, Name, Stmt};
+
+        let mut body = Body::default();
+        let label_stmt = body.stmts_mut().alloc(Stmt::Label(Name::new("Метка")));
+        body.set_body_stmts(vec![label_stmt].into());
+
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+
+        assert_eq!(
+            source_stmt_id_of_kind(&cfg, |vertex| matches!(vertex, CfgVertex::Label(_))),
+            Some(StmtId::from_idx(label_stmt))
+        );
     }
 
     #[test]
