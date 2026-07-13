@@ -264,6 +264,17 @@ pub enum InferenceDiagnostic {
         member_kind: EnvMemberKind,
         missing: hir_def::execution_env::EnvFlags,
     },
+
+    /// User code (a common module or a same-module method) is called from an
+    /// execution environment it is not compiled for: a server-only common
+    /// module without `ВызовСервера` called from client code, or a
+    /// `&НаКлиенте` form method called from server-side code.
+    ModuleAccessibility {
+        expr: ExprId,
+        name: Name,
+        callee_kind: EnvCalleeKind,
+        missing: hir_def::execution_env::EnvFlags,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +284,12 @@ pub enum EnvMemberKind {
     GlobalFunction,
     GlobalProperty,
     Type,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvCalleeKind {
+    CommonModule,
+    LocalMethod,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,6 +560,30 @@ pub fn infer_owner(
     }
 }
 
+/// Execution environments a method's body is compiled for: the module's base
+/// set intersected with the compilation directive and with the item-level
+/// preprocessor regions enclosing the method.
+fn method_body_env(
+    db: &dyn HirDatabase,
+    file_id: FileId,
+    local_id: u32,
+    opts: &hir_def::execution_env::EnvOptions,
+) -> hir_def::execution_env::EnvFlags {
+    use hir_def::execution_env;
+    let metadata = db.module_metadata(hir_def::ModuleId { file_id });
+    let item_tree = db.item_tree(file_id);
+    let mut env = execution_env::method_env(&item_tree, local_id, &metadata, opts);
+    if !env.is_empty() {
+        if let Some(range) = execution_env::method_source_range(&item_tree, local_id) {
+            let conditionals = db.conditional_tree(file_id);
+            if !conditionals.is_empty() {
+                env = env & execution_env::conditional_env(&conditionals, range);
+            }
+        }
+    }
+    env
+}
+
 impl<'db> InferenceContext<'db> {
     pub fn new(
         db: &'db dyn HirDatabase,
@@ -564,25 +605,12 @@ impl<'db> InferenceContext<'db> {
         let body_env = if !with_body_env {
             hir_def::execution_env::EnvFlags::EMPTY
         } else {
-            use hir_def::execution_env;
-            let metadata = db.module_metadata(hir_def::ModuleId { file_id });
             match owner {
-                DefWithBodyId::Method(local_id) => {
-                    let item_tree = db.item_tree(file_id);
-                    let mut env = execution_env::method_env(&item_tree, local_id, &metadata, &opts);
-                    if !env.is_empty() {
-                        if let Some(range) =
-                            execution_env::method_source_range(&item_tree, local_id)
-                        {
-                            let conditionals = db.conditional_tree(file_id);
-                            if !conditionals.is_empty() {
-                                env = env & execution_env::conditional_env(&conditionals, range);
-                            }
-                        }
-                    }
-                    env
+                DefWithBodyId::Method(local_id) => method_body_env(db, file_id, local_id, &opts),
+                DefWithBodyId::ModuleCode => {
+                    let metadata = db.module_metadata(hir_def::ModuleId { file_id });
+                    hir_def::execution_env::module_code_env(&metadata, &opts)
                 }
-                DefWithBodyId::ModuleCode => execution_env::module_code_env(&metadata, &opts),
             }
         };
         Self {
@@ -742,6 +770,8 @@ impl<'db> InferenceContext<'db> {
     ) -> Option<TypeId> {
         let method_id = self.global_export_map().get(&name.as_str().fold_lower()).copied()?;
 
+        self.check_common_module_callee_env(callee, None, method_id.module);
+
         for arg in args {
             self.infer_expr(*arg);
         }
@@ -787,6 +817,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
             InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
             InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
+            InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
         };
         if self.body.is_recovered(key) {
             return;
@@ -833,6 +864,85 @@ impl<'db> InferenceContext<'db> {
             expr,
             name: name.clone(),
             member_kind,
+            missing,
+        });
+    }
+
+    /// Accessibility of a cross-module call to `callee_module` (a common
+    /// module): every environment this body runs in must either be one the
+    /// callee is compiled for, or — for `ВызовСервера` modules — a client
+    /// environment making a remote server call.
+    /// `module_name` is the name as written at the call site; `None` (a bare
+    /// call to a global module's export) falls back to the module's metadata
+    /// name.
+    fn check_common_module_callee_env(
+        &mut self,
+        expr: ExprId,
+        module_name: Option<&Name>,
+        callee_module: hir_def::ModuleId,
+    ) {
+        use hir_def::execution_env::{self, EnvFlags};
+        if self.body_env.is_empty() || callee_module.file_id == self.context_file_id {
+            return;
+        }
+        let metadata = self.db.module_metadata(callee_module);
+        let Some(physical) = metadata.common_module.as_ref() else { return };
+        let name = match module_name {
+            Some(name) => name.clone(),
+            None => Name::new(bsl_metadata::MdObject::name(physical.as_ref())),
+        };
+        // The caller's own extension may adopt the module and replace its
+        // flags wholesale (enable `ВызовСервера` or client contexts), so the
+        // flags visible TO THE CALLER — not the resolved body's physical XML —
+        // are authoritative. Fall back to the physical flags when the provider
+        // has no configuration scoping.
+        let common_module = self
+            .db
+            .resolve_common_module(self.context_file_id, name.as_str())
+            .unwrap_or_else(|| Arc::clone(physical));
+        let opts = self.db.env_options();
+        let callee_env = execution_env::common_module_env(&common_module, &opts);
+        if callee_env.is_empty() {
+            return;
+        }
+        let mut missing = self.body_env.without(callee_env) & self.checked_env;
+        if common_module.is_server_call() {
+            missing = missing.without(EnvFlags::ALL_CLIENTS);
+        }
+        if missing.is_empty() {
+            return;
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::ModuleAccessibility {
+            expr,
+            name,
+            callee_kind: EnvCalleeKind::CommonModule,
+            missing,
+        });
+    }
+
+    /// Accessibility of a same-module call across compilation directives.
+    /// A client-side caller invoking a server method is the form's regular
+    /// remote server call, so only the server side is ever a violation: code
+    /// compiled for the server cannot reach a method that exists only on the
+    /// client.
+    fn check_local_callee_env(&mut self, expr: ExprId, name: &Name, callee_local_id: u32) {
+        use hir_def::execution_env::EnvFlags;
+        if self.body_env.is_empty() {
+            return;
+        }
+        let opts = self.db.env_options();
+        let callee_env = method_body_env(self.db, self.context_file_id, callee_local_id, &opts);
+        if callee_env.is_empty() {
+            return;
+        }
+        let missing = self.body_env.without(callee_env) & self.checked_env & EnvFlags::SERVER_SIDE;
+        if missing.is_empty() {
+            return;
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::ModuleAccessibility {
+            expr,
+            name: name.clone(),
+            callee_kind: EnvCalleeKind::LocalMethod,
             missing,
         });
     }
@@ -1753,11 +1863,13 @@ impl<'db> InferenceContext<'db> {
                 // self-qualified-access and missed-parameter diagnostics that the name dispatch
                 // emits — the handlers filter further (TwoLevel only fires when the called module
                 // is the current one). A variable is in `assigned_var_names`, so it is excluded.
+                let mut static_receiver = false;
                 if let Expr::Path(recv) = self.body.expr(base_id) {
                     let recv = recv.clone();
                     if !self.assigned_var_names.contains(&recv.as_str().fold_lower())
                         && !self.body_declares_binding(&recv)
                     {
+                        static_receiver = true;
                         let arg_presence: Vec<bool> = args
                             .iter()
                             .map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing))
@@ -1778,7 +1890,8 @@ impl<'db> InferenceContext<'db> {
                         );
                     }
                 }
-                let return_ty = self.infer_qualified_call(&module, &method_name, args, callee);
+                let return_ty =
+                    self.infer_qualified_call(&module, &method_name, args, callee, static_receiver);
                 self.expr_types.insert(callee, self.db.unknown());
                 return return_ty;
             }
@@ -2263,6 +2376,14 @@ impl<'db> InferenceContext<'db> {
                             base_tree.as_ref().and_then(|base_tree| base_tree.find_method(name))
                         });
                         if let Some(method) = resolved_method {
+                            // Weaving-base fallbacks resolve into another file whose
+                            // item tree does not match `context_file_id` — the local
+                            // directive check only makes sense for true siblings.
+                            if method.id.module.file_id == self.context_file_id {
+                                let method_name = method.name.clone();
+                                let local_id = method.id.local_id;
+                                self.check_local_callee_env(callee, &method_name, local_id);
+                            }
                             // In effective (`&ИзменениеИКонтроль`) inference, prefer the
                             // CHANGED body's return over the base-keyed query, so inserted
                             // code that consumes a changed sibling's result types correctly.
@@ -2291,12 +2412,19 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
+    /// `static_receiver` — the call names the module directly
+    /// (`Модуль.Метод()`), as opposed to a variable holding a module value
+    /// (`М = ОбщегоНазначения.ОбщийМодуль(...); М.Метод()`). Flow-insensitive
+    /// typing keeps only the LAST module assigned to such a variable, so
+    /// accessibility verdicts against it would misfire on the common
+    /// per-`#Если`-branch module selection idiom.
     fn infer_qualified_call(
         &mut self,
         module_name: &Name,
         method_name: &Name,
         args: &[ExprId],
         call_expr: ExprId,
+        static_receiver: bool,
     ) -> TypeId {
         for arg in args {
             self.infer_expr(*arg);
@@ -2318,6 +2446,14 @@ impl<'db> InferenceContext<'db> {
                         method_name: method_name.clone(),
                         kind: UnresolvedMethodKind::MethodNotExport,
                     });
+                }
+
+                if static_receiver && resolution.is_export {
+                    self.check_common_module_callee_env(
+                        call_expr,
+                        Some(module_name),
+                        resolution.method_id.module,
+                    );
                 }
 
                 let total = resolution.signature.params.len();
@@ -2484,7 +2620,13 @@ impl<'db> InferenceContext<'db> {
                 },
             );
 
-            return Some(self.infer_qualified_call(module_name, method_name, args, call_expr));
+            return Some(self.infer_qualified_call(
+                module_name,
+                method_name,
+                args,
+                call_expr,
+                true,
+            ));
         }
 
         // A manager module that calls one of its own methods through the object's

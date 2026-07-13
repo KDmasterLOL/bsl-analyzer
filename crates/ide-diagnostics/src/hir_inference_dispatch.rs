@@ -13,6 +13,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::RedundantAccessToObject,
     DiagnosticCode::MissedRequiredParameter,
     DiagnosticCode::UnavailableInEnvironment,
+    DiagnosticCode::ModuleAccessibility,
 ];
 
 pub fn collect_inference_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -89,6 +90,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
         InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
         InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
+        InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
     }
 }
 
@@ -162,6 +164,9 @@ fn dispatch_inference_diagnostic(
         ),
         InferenceDiagnostic::UnavailableInEnvironment { name, member_kind, missing, .. } => {
             handlers::unavailable_in_environment::from_hir(name, *member_kind, *missing, range, ctx)
+        }
+        InferenceDiagnostic::ModuleAccessibility { name, callee_kind, missing, .. } => {
+            handlers::module_accessibility::from_hir(name, *callee_kind, *missing, range, ctx)
         }
     }
 }

@@ -172,6 +172,7 @@ pub enum DiagnosticCode {
     UnresolvedField,
     ReadOnlyPropertyAssignment,
     UnavailableInEnvironment,
+    ModuleAccessibility,
 
     AssignAliasFieldsInQuery,
     FieldsFromJoinsWithoutIsNull,

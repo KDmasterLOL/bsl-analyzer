@@ -97,6 +97,7 @@ pub mod missing_space;
 pub mod missing_temp_storage_deletion;
 pub mod missing_temporary_file_deletion;
 pub mod missing_variables_description;
+pub mod module_accessibility;
 pub mod multiline_string_in_query;
 pub mod multilingual_string_has_all_declared_languages;
 pub mod multilingual_string_using_with_template;
@@ -472,6 +473,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UnresolvedField => Some(&unresolved_field::METADATA),
         DiagnosticCode::ReadOnlyPropertyAssignment => Some(&read_only_property::METADATA),
         DiagnosticCode::UnavailableInEnvironment => Some(&unavailable_in_environment::METADATA),
+        DiagnosticCode::ModuleAccessibility => Some(&module_accessibility::METADATA),
 
         DiagnosticCode::UnknownSuppressionCode => Some(&crate::suppression::UNKNOWN_CODE_METADATA),
         DiagnosticCode::SuppressionWithoutCode => Some(&crate::suppression::WITHOUT_CODE_METADATA),

@@ -849,6 +849,78 @@ pub fn check_with_config_xml(
     crate::diagnostics(&ctx)
 }
 
+/// Diagnostics of a form module calling common modules whose metadata flags
+/// matter: each `(name, body, xml)` triple materializes with its OWN
+/// CommonModule XML (client/server/`ВызовСервера` flags), which the in-memory
+/// fixture VFS cannot provide — `module_metadata` reads them through the
+/// configuration loaded from disk.
+pub fn check_form_with_common_modules(
+    form_source: &str,
+    modules: &[(&str, &str, &str)],
+) -> Vec<Diagnostic> {
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::metadata::intern_configuration_path;
+    use ide_db::RootDatabaseImpl;
+    use vfs::{FileId, FileSet, VfsPath};
+
+    struct TempRootGuard(std::path::PathBuf);
+    impl Drop for TempRootGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let root = next_config_xml_fixture_root();
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create fixture root");
+    let _guard = TempRootGuard(root.clone());
+    std::fs::write(root.join("Configuration.xml"), minimal_configuration_xml())
+        .expect("write Configuration.xml");
+    for (name, body, xml) in modules {
+        let ext_dir = root.join(format!("CommonModules/{name}/Ext"));
+        std::fs::create_dir_all(&ext_dir).expect("create CommonModule Ext directory");
+        std::fs::write(ext_dir.join("Module.bsl"), body).expect("write CommonModule body");
+        std::fs::write(root.join(format!("CommonModules/{name}.xml")), xml)
+            .expect("write CommonModule XML");
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())]);
+
+    let mut file_set = FileSet::default();
+    let caller_file_id = FileId(0);
+    let caller_path = root.join("Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl");
+    file_set.insert(caller_file_id, VfsPath::new(caller_path.to_string_lossy().into_owned()));
+    let mut module_file_ids = Vec::with_capacity(modules.len());
+    for (idx, (name, _, _)) in modules.iter().enumerate() {
+        let fid = FileId((idx + 1) as u32);
+        let path = root.join(format!("CommonModules/{name}/Ext/Module.bsl"));
+        file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
+        module_file_ids.push(fid);
+    }
+
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller_file_id, SourceRootId(0));
+    db.set_file_text(caller_file_id, form_source);
+    for (fid, (_, body, _)) in module_file_ids.iter().zip(modules.iter()) {
+        db.set_file_source_root(*fid, SourceRootId(0));
+        db.set_file_text(*fid, body);
+    }
+
+    let config_path = root.to_string_lossy();
+    let config_path_input = intern_configuration_path(
+        &db,
+        config_path.as_ref(),
+        db.config_root_revision_for_path(std::path::Path::new(config_path.as_ref())),
+    );
+    let provider = ide_db::SalsaProvider::new(&db, Some(config_path_input));
+    let config = crate::DiagnosticsConfig::all_enabled();
+    let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);
+
+    crate::diagnostics(&ctx)
+}
+
 pub fn check_snapshot_with_config_xml(
     source: &str,
     config_xml: &str,

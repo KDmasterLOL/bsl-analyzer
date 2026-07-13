@@ -51,6 +51,11 @@ impl EnvFlags {
             | Self::THICK_CLIENT_MANAGED.0
             | Self::MOBILE_CLIENT.0,
     );
+    /// Every interactive client environment, including the legacy thick
+    /// client — the set a `ВызовСервера` common module may be invoked from
+    /// without being compiled into it.
+    pub const ALL_CLIENTS: EnvFlags =
+        EnvFlags(Self::MANAGED_CLIENTS.0 | Self::THICK_CLIENT_ORDINARY.0);
 
     pub const fn is_empty(self) -> bool {
         self.0 == 0
@@ -281,7 +286,8 @@ pub fn module_base_env(metadata: &ModuleMetadata, opts: &EnvOptions) -> EnvFlags
 /// verdict, this keeps the individual client kinds and honours
 /// `ClientOrdinaryApplication` (gated on `ordinary_app_support`), because
 /// availability — not naming or dispatch — is decided here.
-fn common_module_env(cm: &bsl_metadata::CommonModule, opts: &EnvOptions) -> EnvFlags {
+/// Environments a common module compiles into, from its metadata flags alone.
+pub fn common_module_env(cm: &bsl_metadata::CommonModule, opts: &EnvOptions) -> EnvFlags {
     let mut env = EnvFlags::EMPTY;
     if cm.is_server() || cm.is_server_call() {
         env = env | EnvFlags::SERVER;

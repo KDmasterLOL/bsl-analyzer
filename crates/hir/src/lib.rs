@@ -178,7 +178,7 @@ pub use hir_ty::narrow::{narrow_or_base, narrow_query, narrowed_type_at, NarrowS
 pub use hir_ty::proc_signature;
 pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
-    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, EnvMemberKind,
+    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, EnvCalleeKind, EnvMemberKind,
     FormElementKind, InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult,
     MetadataKind, ModuleCodeInferenceResult, ParamsShape, UnresolvedMethodKind,
 };
