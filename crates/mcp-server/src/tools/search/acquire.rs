@@ -1,4 +1,4 @@
-use super::AcquireFailure;
+use super::types::AcquireFailure;
 use bsl_search::SearchEngine;
 use rmcp::ErrorData as McpError;
 use std::sync::{Arc, Mutex, MutexGuard};

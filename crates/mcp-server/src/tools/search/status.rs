@@ -1,6 +1,6 @@
-use super::{
-    acquire_engine_within, engine_lock_poisoned_error, format_baseline_ref, AcquireFailure,
-};
+use super::acquire::{acquire_engine_within, engine_lock_poisoned_error};
+use super::render::format_baseline_ref;
+use super::types::AcquireFailure;
 use crate::baseline::{
     BaselineStatusProbe, ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState,
 };
@@ -721,11 +721,21 @@ fn shorten_fingerprint(fingerprint: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{baseline_warming_not_ready, search_status};
+    use super::super::test_support::unreachable_workspace_service;
+    use super::{
+        baseline_warming_not_ready, search_status, search_status_with_cap, with_index_progress,
+    };
+    use crate::baseline::{
+        ConfiguredBaselineStatus, ExternalBaselineState, ExternalBaselineStatus,
+    };
     use crate::state::{OverlayWarmupState, SemanticRuntimeStatus, WorkspaceSearchMode};
-    use bsl_search::{IndexProgress, SearchEngine};
+    use bsl_search::{Document, IndexProgress, SearchEngine};
     use rmcp::model::ErrorCode;
-    use std::sync::{Arc, Mutex};
+    use std::fs;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::time::{Duration, Instant};
+    use tempfile::tempdir;
 
     #[test]
     fn baseline_warming_not_ready_preserves_structured_envelope() {
@@ -767,5 +777,329 @@ mod tests {
 
         assert_eq!(result.code, ErrorCode::INTERNAL_ERROR);
         assert!(result.message.contains("semantic runtime lock error"));
+    }
+
+    #[test]
+    fn index_progress_suffix_appended_only_when_active() {
+        let progress = IndexProgress::new();
+        assert_eq!(with_index_progress("building".to_owned(), &progress), "building");
+        progress.active.store(true, Ordering::Relaxed);
+        progress.total_chunks.store(100, Ordering::Relaxed);
+        progress.done_chunks.store(77, Ordering::Relaxed);
+        progress.total_batches.store(10, Ordering::Relaxed);
+        progress.done_batches.store(7, Ordering::Relaxed);
+        assert_eq!(
+            with_index_progress("building".to_owned(), &progress),
+            "building (indexing 77% — 7/10 batches)",
+        );
+    }
+
+    #[test]
+    fn search_status_shows_workspace_overlay_section() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        fs::write(&file, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let result = search_status(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
+            Some(ConfiguredBaselineStatus {
+                backend: "sqlite",
+                selection: "local workspace index".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            None,
+            false,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        assert!(text.contains("Code lexical source: local sqlite + local overlay"));
+        assert!(text.contains("Resolved workspace view: ready"));
+        assert!(text.contains("Baseline: snapshot local-workspace-baseline"));
+        assert!(text.contains("Workspace overlay: enabled"));
+        assert!(text.contains("Files:    1"));
+        assert!(text.contains("Chunks:   1"));
+    }
+
+    #[test]
+    fn search_status_shows_external_baseline_probe_errors() {
+        let source = unreachable_workspace_service();
+        source.seed_status_cache_for_test(
+            ExternalBaselineStatus {
+                backend: "postgres",
+                schema: "erp".to_owned(),
+                selection: "branch main".to_owned(),
+                resolved: None,
+                state: ExternalBaselineState::Error("connection refused".to_owned()),
+            },
+            Duration::from_secs(1),
+        );
+
+        let result = search_status(
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            Some(source),
+            false,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        assert!(text.contains("Configured baseline:"));
+        assert!(text.contains("Select:   branch main"));
+        assert!(text.contains("External baseline: configured"));
+        assert!(text.contains("Backend:  postgres"));
+        assert!(text.contains("Status:   error"));
+        assert!(text.contains("Error:    connection refused"));
+        assert!(
+            text.contains("Probed:   1s ago"),
+            "cached render must state the probe age: {text}"
+        );
+    }
+
+    #[test]
+    fn search_status_reports_pending_probe_without_blocking() {
+        let source = unreachable_workspace_service();
+        let started = Instant::now();
+        let result = search_status(
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            Some(source),
+            false,
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        assert!(text.contains("probing the shared baseline in the background — retry shortly"));
+        assert!(text.contains("first background status probe still running"));
+        assert!(!text.contains("(published index)"));
+    }
+
+    #[test]
+    fn search_status_reports_warming_while_baseline_connect_is_pending() {
+        let result = search_status(
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        assert!(text.contains("Configured baseline:"), "{text}");
+        assert!(text.contains("Backend:  postgres"), "{text}");
+        assert!(text.contains("connecting to the shared baseline"), "{text}");
+    }
+
+    #[test]
+    fn search_status_shows_reference_docs_source() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine
+            .index_documents(
+                "platform",
+                "platform://docs",
+                b"v1",
+                &[Document {
+                    title: "Массив / Array".to_owned(),
+                    body: "Тип: Массив / Array".to_owned(),
+                    kind: "type".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+        let result = search_status(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
+            Some(ConfiguredBaselineStatus {
+                backend: "sqlite",
+                selection: "local reference index".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            None,
+            false,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        assert!(text.contains("Docs lexical source: local sqlite"));
+        assert!(text.contains("Docs semantic source: not configured (set EMBEDDING_URL)"));
+    }
+
+    #[test]
+    fn search_status_reports_overlay_sync_for_postgres_mode() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        let progress = Arc::new(IndexProgress::default());
+        progress.active.store(true, Ordering::Relaxed);
+        progress.total_chunks.store(200, Ordering::Relaxed);
+        progress.done_chunks.store(50, Ordering::Relaxed);
+        progress.total_batches.store(20, Ordering::Relaxed);
+        progress.done_batches.store(5, Ordering::Relaxed);
+        let result = search_status(
+            &Arc::new(Mutex::new(Some(engine))),
+            &progress,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::OverlaySyncing)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch develop".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            None,
+            false,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        assert!(text.contains("Search index: ready"));
+        assert!(text.contains("overlay syncing") && text.contains("queues behind the sync"));
+        assert!(text.contains("Semantic: syncing local overlay embeddings against remote baseline"));
+        assert!(text.contains("Indexing in progress: 25%"));
+    }
+
+    #[test]
+    fn search_status_summary_block_is_self_explanatory() {
+        let postgres_baseline = || {
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch develop".to_owned(),
+                issue: None,
+                support: None,
+            })
+        };
+        let run = |warmup: OverlayWarmupState| {
+            search_status(
+                &Arc::new(Mutex::new(None)),
+                &Arc::new(IndexProgress::default()),
+                &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
+                WorkspaceSearchMode::PostgresRemoteOverlay,
+                warmup,
+                postgres_baseline(),
+                None,
+                false,
+            )
+            .unwrap()
+            .content[0]
+                .raw
+                .as_text()
+                .expect("text content")
+                .text
+                .clone()
+        };
+        let no_diffs = run(OverlayWarmupState::NoLocalDiffs);
+        assert!(no_diffs.starts_with("Summary:"));
+        assert!(no_diffs.contains("served from the branch develop baseline (published index)."));
+        assert!(no_diffs.contains("working tree matches the baseline"));
+        let failed = run(OverlayWarmupState::Failed("embedder timeout: global".to_owned()));
+        assert!(failed.contains("warmup failed: embedder timeout: global"));
+        let synced = run(OverlayWarmupState::Synced { overlay_files: 2, embedded: 5 });
+        assert!(synced.contains("2 locally-changed file(s) indexed (5 chunks)"));
+    }
+
+    #[test]
+    fn search_status_emits_progress_signal_while_building() {
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let progress = Arc::new(IndexProgress::default());
+        let result = search_status(
+            &engine,
+            &progress,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
+            WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("text").text.as_str();
+        assert!(text.contains("building"));
+        assert!(text.contains("Indexing pending: initializing"));
+        assert!(!text.contains("Indexing in progress"));
+    }
+
+    #[test]
+    fn search_status_returns_promptly_with_busy_note_when_engine_lock_is_held() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("bsl-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+        let gate = Arc::new(Barrier::new(2));
+        let holder = {
+            let engine = Arc::clone(&engine);
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                let held = engine.lock().unwrap();
+                gate.wait();
+                std::thread::sleep(Duration::from_millis(300));
+                drop(held);
+            })
+        };
+        gate.wait();
+        let started = Instant::now();
+        let status = search_status_with_cap(
+            &engine,
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::OverlaySyncing)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            OverlayWarmupState::Pending,
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            None,
+            false,
+            Duration::from_millis(40),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        holder.join().unwrap();
+        assert!(elapsed < Duration::from_secs(2));
+        let text = status.content[0].raw.as_text().expect("text content").text.as_str();
+        assert!(text.contains("Configured baseline:"));
+        assert!(text.contains("Local index: busy (overlay syncing)"));
+        assert!(text.contains("Lexical search: temporarily unavailable"));
+        assert!(!text.contains("Lexical search: reflects the current working tree"));
     }
 }
