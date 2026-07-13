@@ -31,3 +31,150 @@ impl Drop for EnvVarGuard {
         }
     }
 }
+
+pub(super) use fixtures::{
+    mock_embedding_env, mock_semantic_config, spawn_mock_embedding_server, write_common_module,
+    write_common_module_tree,
+};
+
+#[cfg(test)]
+mod fixtures {
+    use super::EnvVarGuard;
+    use std::fs;
+    /// First byte offset of `needle` in `haystack`, or `None`.
+    pub(super) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// A minimal in-process HTTP embedding endpoint: answers `POST /v1/embeddings` with one
+    /// fixed vector per input, so the real `Embedder` produces deterministic vectors without
+    /// a live service. Returns the base URL; the detached server thread stops on process exit.
+    pub(in crate::state) fn spawn_mock_embedding_server(vector: Vec<f32>) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                let mut header_end: Option<usize> = None;
+                let mut content_len = 0usize;
+                loop {
+                    let n = match stream.read(&mut tmp) {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    buf.extend_from_slice(&tmp[..n]);
+                    if header_end.is_none() {
+                        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                            header_end = Some(pos + 4);
+                            let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                            for line in headers.lines() {
+                                if let Some(v) = line.strip_prefix("content-length:") {
+                                    content_len = v.trim().parse().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                    if header_end.is_some_and(|he| buf.len() >= he + content_len) {
+                        break;
+                    }
+                }
+                let body = header_end.map(|he| &buf[he..]).unwrap_or(&[]);
+                let n_inputs = serde_json::from_slice::<serde_json::Value>(body)
+                    .ok()
+                    .and_then(|v| v.get("input").and_then(|i| i.as_array().map(|a| a.len())))
+                    .unwrap_or(1);
+                let data: Vec<serde_json::Value> = (0..n_inputs)
+                    .map(|i| serde_json::json!({ "index": i, "embedding": vector }))
+                    .collect();
+                let resp_body = serde_json::json!({ "data": data }).to_string();
+                let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                resp_body.len(),
+                resp_body,
+            );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A semantic `SearchConfig` pointed at `base_url`, dim 3.
+    pub(in crate::state) fn mock_semantic_config(base_url: &str) -> bsl_search::SearchConfig {
+        bsl_search::SearchConfig {
+            embedder: bsl_search::EmbedderConfig {
+                base_url: base_url.to_owned(),
+                model: "test-model".to_owned(),
+                dim: Some(3),
+                api_key: None,
+                provider: None,
+            },
+            execution: bsl_search::EmbeddingExecutionPolicy::default(),
+        }
+    }
+
+    /// Point `Self::embedding_config()` (env-driven) at the mock server for the duration of a
+    /// test. Returns the guards (kept alive by the caller) plus the shared env lock guard.
+    pub(in crate::state) fn mock_embedding_env(base_url: &str) -> Vec<EnvVarGuard> {
+        vec![
+            EnvVarGuard::set("EMBEDDING_URL", base_url),
+            EnvVarGuard::set("EMBEDDING_MODEL", "test-model"),
+            EnvVarGuard::set("EMBEDDING_DIM", "3"),
+        ]
+    }
+
+    /// A minimal CommonModule descriptor + body under `root`, so the module is declared and
+    /// its method resolves to a durable graph id (`method/common/<name>/<method>`).
+    pub(in crate::state) fn write_common_module(root: &std::path::Path, name: &str, body: &str) {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+	<CommonModule uuid="00000000-0000-0000-0000-0000000000{id:02}">
+		<Properties>
+			<Name>{name}</Name>
+			<Global>false</Global>
+			<ClientManagedApplication>false</ClientManagedApplication>
+			<Server>true</Server>
+			<ExternalConnection>false</ExternalConnection>
+			<ClientOrdinaryApplication>false</ClientOrdinaryApplication>
+			<ServerCall>false</ServerCall>
+			<Privileged>false</Privileged>
+			<ReturnValuesReuse>DontUse</ReturnValuesReuse>
+		</Properties>
+	</CommonModule>
+</MetaDataObject>"#,
+            id = name.len(),
+        );
+        let xml_path = root.join(format!("CommonModules/{name}.xml"));
+        fs::create_dir_all(xml_path.parent().unwrap()).unwrap();
+        fs::write(&xml_path, xml).unwrap();
+        let module_path = root.join(format!("CommonModules/{name}/Ext/Module.bsl"));
+        fs::create_dir_all(module_path.parent().unwrap()).unwrap();
+        fs::write(&module_path, body).unwrap();
+    }
+
+    /// Write a common module (descriptor XML + `Ext/Module.bsl`) under `base`.
+    pub(in crate::state) fn write_common_module_tree(
+        base: &std::path::Path,
+        name: &str,
+        body: &str,
+    ) {
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\">\n\
+         \t<CommonModule uuid=\"00000000-0000-0000-0000-000000000001\">\n\
+         \t\t<Properties><Name>{name}</Name><Server>true</Server></Properties>\n\
+         \t</CommonModule>\n\
+         </MetaDataObject>\n"
+        );
+        fs::create_dir_all(base.join("CommonModules").join(name).join("Ext")).unwrap();
+        fs::write(base.join("CommonModules").join(format!("{name}.xml")), xml).unwrap();
+        fs::write(base.join("CommonModules").join(name).join("Ext").join("Module.bsl"), body)
+            .unwrap();
+    }
+}
