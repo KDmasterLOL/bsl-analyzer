@@ -38,10 +38,11 @@ use ide::{Analysis, RootDatabaseImpl};
 use vfs::{FileId, Vfs, VfsPath};
 
 use crate::change_hub::{ChangeEntry, Health, SinkCursor, WorkspaceChangeHub};
-use crate::graph::{
-    build_source_root, classify_changes, db_for_files_lazy, enumerate_bsl_files, scan_file_stats,
-    FileStat, WorkspaceDiff,
+use crate::graph::input::{
+    build_source_root, db_for_files_lazy, enumerate_bsl_files, project_config_paths,
+    GRAPH_SOURCE_ROOT,
 };
+use crate::graph::scan::{classify_changes, scan_file_stats, FileStat, WorkspaceDiff};
 
 /// Minimum time between on-disk drift scans, mirroring the graph's throttle. A scan
 /// stats every `.bsl`/`.xml` under the config roots, so this bounds its cost
@@ -1250,11 +1251,10 @@ impl DiagnosticsState {
         // resolves (`root.join("CommonModules/X/Ext/Module.bsl")`) matches the
         // canonical `.bsl` path `enumerate_bsl_files` produced — otherwise the reverse
         // lookup would miss and silently drop the back-link on a symlinked workspace.
-        let config_paths: Vec<(Option<String>, PathBuf)> =
-            crate::graph::project_config_paths(&project)
-                .into_iter()
-                .map(|(label, path)| (label, path.canonicalize().unwrap_or(path)))
-                .collect();
+        let config_paths: Vec<(Option<String>, PathBuf)> = project_config_paths(&project)
+            .into_iter()
+            .map(|(label, path)| (label, path.canonicalize().unwrap_or(path)))
+            .collect();
         let config = ide::DiagnosticsConfig::from_project_json(
             &project.config.diagnostics,
             project.config.output.resolve_locale().unwrap_or_default(),
@@ -1639,7 +1639,7 @@ fn apply_resident_changes(
     let mut file_set_modified = false;
     let mut file_set = {
         let db = &resident.db;
-        db.source_root_input(crate::graph::GRAPH_SOURCE_ROOT).root(db).file_set().clone()
+        db.source_root_input(GRAPH_SOURCE_ROOT).root(db).file_set().clone()
     };
     for path in added_bsl {
         // Vanished again before we got here (create+delete coalesced apart): the
@@ -1656,7 +1656,7 @@ fn apply_resident_changes(
                 return (true, moved);
             }
         }
-        resident.db.set_file_source_root(file_id, crate::graph::GRAPH_SOURCE_ROOT);
+        resident.db.set_file_source_root(file_id, GRAPH_SOURCE_ROOT);
         match base_db::read_disk_text(Path::new(path)) {
             Ok(text) => {
                 set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text))
@@ -1685,9 +1685,7 @@ fn apply_resident_changes(
         moved = true;
     }
     if file_set_modified {
-        resident
-            .db
-            .set_source_root(crate::graph::GRAPH_SOURCE_ROOT, SourceRoot::new_local(file_set));
+        resident.db.set_source_root(GRAPH_SOURCE_ROOT, SourceRoot::new_local(file_set));
     }
 
     // (2) Refresh the per-MDO substrate. Beside the drifted `.xml`, a created or

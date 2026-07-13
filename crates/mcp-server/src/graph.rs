@@ -11,27 +11,42 @@
 //! freshness token is a monotonic *generation*, recorded in the built file's `meta`
 //! so a served response's revision always describes the exact build it serves.
 
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::change_hub::{ChangeEntry, ChangeKind, SinkCursor, WorkspaceChangeHub};
 
-use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use bsl_search::SearchEngine;
-use ide::RootDatabaseImpl;
-use vfs::FileId;
-use walkdir::WalkDir;
 
 use crate::cache::graph_db_path;
 use crate::graph_query::GraphDb;
 
-/// The whole workspace is loaded into a single source root.
-pub(crate) const GRAPH_SOURCE_ROOT: SourceRootId = SourceRootId(0);
+pub(crate) mod input;
+pub(crate) mod scan;
+#[cfg(test)]
+mod test_support;
+
+#[allow(
+    unused_imports,
+    reason = "the stable graph facade preserves crate::graph helper paths while leaf consumers import directly"
+)]
+pub(crate) use input::{
+    build_source_root, config_metadata_paths, db_for_files, db_for_files_lazy, enumerate_bsl_files,
+    project_config_paths, GRAPH_SOURCE_ROOT,
+};
+#[allow(
+    unused_imports,
+    reason = "the stable graph facade preserves crate::graph scan paths while leaf consumers import directly"
+)]
+pub(crate) use scan::{
+    classify_changes, file_fingerprint, scan_file_stats, FileStat, WorkspaceDiff,
+};
+use scan::{
+    entry_touches_scan_universe, fold_fingerprint_entries, stat_pair, workspace_fingerprint,
+    FpMapState, ScanCache, WALK_VERIFY_INTERVAL,
+};
 
 /// Minimum time between on-disk drift scans. A scan stats every `.bsl`/`.xml`
 /// file under the config roots, so throttling bounds its cost regardless of how
@@ -130,11 +145,6 @@ struct Inner {
     published: Option<Published>,
 }
 
-/// How often the query-path freshness fold must come from a real walk instead of the
-/// event-maintained map. Bounds how long a change the hub cannot observe (see
-/// [`GraphState::fp_map`]) can keep freshness wrong.
-const WALK_VERIFY_INTERVAL: Duration = Duration::from_secs(60);
-
 /// Cap on idle pooled snapshot handles. Concurrent graph queries beyond it just open
 /// their own handle, exactly as before pooling.
 const SNAPSHOT_POOL_CAP: usize = 4;
@@ -145,24 +155,6 @@ struct PooledSnapshotEntry {
     fingerprint: u64,
     force_stale: bool,
     db: GraphDb,
-}
-
-/// See [`GraphState::fp_map`].
-#[derive(Default)]
-struct FpMapState {
-    /// `canonical path → (mtime nanos, len)` for every graph-relevant file, in the
-    /// exact spelling the walk produces (hub entries carry the same canonical key).
-    map: Option<std::collections::BTreeMap<String, (u128, u64)>>,
-    /// When the map was last anchored to a real walk.
-    walked_at: Option<Instant>,
-}
-
-/// Throttled cache of the last on-disk fingerprint scan. Guarded by its own mutex
-/// held *across* the walk, so concurrent callers serialize onto one scan per
-/// window rather than all walking the tree (no thundering herd).
-struct ScanCache {
-    at: Instant,
-    disk_fp: u64,
 }
 
 /// A served graph handle plus the freshness token it was built at. Capturing the
@@ -1350,266 +1342,6 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The configuration source directory plus every extension directory — the file
-/// universe both the loader and the drift scan must agree on.
-fn scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
-    let project = project_model::Project::new(workspace_root);
-    let mut roots = vec![project.source_path().to_path_buf()];
-    roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
-    roots
-}
-
-/// One graph-relevant file's stat-only identity: canonical `/`-normalised path,
-/// mtime in nanos, and length. Produced once per scan and shared by the
-/// whole-workspace fingerprint (which folds them) and the per-file `files` table
-/// (which persists them for granular drift classification).
-#[derive(Clone)]
-pub(crate) struct FileStat {
-    pub(crate) path: String,
-    mtime: u128,
-    len: u64,
-}
-
-impl FileStat {
-    /// The per-file fingerprint stored in (and compared against) the `files` table.
-    /// Must stay deterministic across runs so a reload's recomputed value matches the
-    /// stored one for an unchanged file.
-    pub(crate) fn fingerprint(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        (self.mtime, self.len).hash(&mut hasher);
-        hasher.finish()
-    }
-}
-
-/// The drift fingerprint of a single file on disk, matching the per-file value
-/// [`scan_file_stats`] produces, or `None` if it is absent or not a regular file.
-/// Lets the event-driven drift path re-stat only the changed paths instead of
-/// walking the whole workspace — events are hints, this stat is the truth.
-pub(crate) fn file_fingerprint(path: &Path) -> Option<u64> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    Some(FileStat { path: String::new(), mtime, len: meta.len() }.fingerprint())
-}
-
-/// Whether a drained change is relevant to the graph's fingerprint scan (`.bsl`/`.xml`
-/// under a scan root). A removed file's `canonical` may fall back to the raw spelling, so
-/// both are checked; a `SubtreeRemoved` names a vanished directory whose descendants'
-/// extensions are unknown, so it is treated conservatively as relevant.
-fn entry_touches_scan_universe(entry: &ChangeEntry) -> bool {
-    if entry.kind == ChangeKind::SubtreeRemoved {
-        return true;
-    }
-    let is_scan_ext = |path: &Path| {
-        matches!(path.extension().and_then(|e| e.to_str()), Some("bsl") | Some("xml"))
-    };
-    is_scan_ext(&entry.canonical) || is_scan_ext(&entry.raw)
-}
-
-/// Stat every graph-relevant file (`.bsl` sources + `.xml` metadata descriptors)
-/// under the scan roots, once. Covers both extensions because graph resolution
-/// depends on configuration visibility registered from the metadata, not only on
-/// module text. Uses `(canonical path, mtime, len)` — stat only, no file reads —
-/// and mirrors the loader's scan roots and symlink/canonicalization policy so it
-/// compares the same file universe (otherwise it would report phantom drift).
-pub(crate) fn scan_file_stats(workspace_root: &Path) -> Vec<FileStat> {
-    scan_stats_over_roots(&scan_roots(workspace_root))
-}
-
-/// The parallel scan over an explicit set of roots (each a directory, or occasionally a
-/// single file for a misconfigured extension path). Split out so it can be exercised
-/// directly against the sequential reference in tests.
-fn scan_stats_over_roots(roots: &[PathBuf]) -> Vec<FileStat> {
-    use rayon::prelude::*;
-
-    // Work units: each top-level entry under each scan-root directory. Directories are
-    // walked in parallel; a file reachable through two roots (e.g. a symlinked subtree) is
-    // de-duplicated when the per-unit results are merged, so the output set is independent
-    // of how the work was partitioned.
-    let mut units: Vec<PathBuf> = Vec::new();
-    for root in roots {
-        match std::fs::read_dir(root) {
-            Ok(entries) => units.extend(entries.flatten().map(|e| e.path())),
-            // Not a directory (a misconfigured extension path pointing at a file) or
-            // unreadable: a file root is itself one work unit — matching the old
-            // `WalkDir::new(file)` which yielded it; anything else contributes nothing.
-            Err(_) => {
-                if root.is_file() {
-                    units.push(root.clone());
-                }
-            }
-        }
-    }
-
-    let per_unit: Vec<Vec<FileStat>> = units.par_iter().map(|unit| walk_unit_stats(unit)).collect();
-
-    // Merge and de-duplicate by canonical path. The kept `FileStat` is identical whichever
-    // occurrence wins: `(mtime, len)` come from the same on-disk target.
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut stats: Vec<FileStat> = Vec::new();
-    for stat in per_unit.into_iter().flatten() {
-        if seen.insert(stat.path.clone()) {
-            stats.push(stat);
-        }
-    }
-    stats
-}
-
-/// Walk one top-level unit (a directory subtree, or a single top-level file) and collect
-/// the `(canonical path, mtime, len)` of every `.bsl`/`.xml` under it. A per-directory
-/// cache canonicalises each containing directory once instead of every file, which
-/// dominates the walk's syscall cost on a large configuration.
-fn walk_unit_stats(unit: &Path) -> Vec<FileStat> {
-    let mut out: Vec<FileStat> = Vec::new();
-    let mut dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
-    for entry in WalkDir::new(unit).follow_links(true) {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        match entry.path().extension().and_then(|e| e.to_str()) {
-            Some("bsl") | Some("xml") => {}
-            _ => continue,
-        }
-        let canonical = canonical_file_path(entry.path(), entry.path_is_symlink(), &mut dir_cache);
-        let (mtime, len) = entry
-            .metadata()
-            .ok()
-            .map(|m| {
-                let mtime = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
-                (mtime, m.len())
-            })
-            .unwrap_or((0, 0));
-        out.push(FileStat { path: canonical.to_string_lossy().into_owned(), mtime, len });
-    }
-    out
-}
-
-/// The canonical path of a walked file, matching `entry.path().canonicalize()` but reusing
-/// a per-directory canonicalisation. A file that is ITSELF a symlink is canonicalised
-/// directly (its target lies elsewhere); a plain file inherits its directory's canonical
-/// prefix joined with its own name — identical to canonicalising the whole path, since only
-/// the directory components could contain symlinks.
-fn canonical_file_path(
-    path: &Path,
-    is_symlink: bool,
-    dir_cache: &mut HashMap<PathBuf, PathBuf>,
-) -> PathBuf {
-    if is_symlink {
-        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => {
-            let canonical_parent = dir_cache
-                .entry(parent.to_path_buf())
-                .or_insert_with(|| parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf()));
-            canonical_parent.join(name)
-        }
-        _ => path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
-    }
-}
-
-/// A cheap, order-independent fingerprint of the graph-relevant files on disk.
-/// Folds every file's `(path, mtime, len)` into one `u64`; B4 cache reuse compares
-/// it for an exact whole-workspace match.
-fn workspace_fingerprint(workspace_root: &Path) -> u64 {
-    let mut entries: Vec<(String, u128, u64)> =
-        scan_file_stats(workspace_root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
-    entries.sort();
-    fold_fingerprint_entries(&entries)
-}
-
-/// The one fold both fingerprint producers share, so the event-maintained map and the
-/// walk agree bit-for-bit: `entries` must be sorted `(path, mtime, len)` tuples (paths
-/// are unique, so path order alone determines it).
-fn fold_fingerprint_entries(entries: &[(String, u128, u64)]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    entries.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// The raw `(mtime nanos, len)` pair for the fingerprint map, matching what
-/// [`scan_file_stats`] records for a present regular file.
-fn stat_pair(path: &Path) -> Option<(u128, u64)> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    Some((mtime, meta.len()))
-}
-
-/// Granular drift between a built graph's stored per-file fingerprints and the
-/// current on-disk state. The body-only fast path acts on this; today it is computed
-/// for observability while the full rebuild still runs.
-pub(crate) struct WorkspaceDiff {
-    pub(crate) added: Vec<String>,
-    pub(crate) removed: Vec<String>,
-    pub(crate) modified: Vec<String>,
-}
-
-impl WorkspaceDiff {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.removed.is_empty() && self.modified.is_empty()
-    }
-
-    /// Whether any changed file is `.xml` metadata. Metadata drift can change
-    /// configuration visibility for *any* module, so it forces a full rebuild — no
-    /// fast path is sound for it.
-    pub(crate) fn touches_metadata(&self) -> bool {
-        self.added.iter().chain(&self.removed).chain(&self.modified).any(|p| p.ends_with(".xml"))
-    }
-}
-
-/// Classify per-file drift between the stored fingerprint map (read from a built
-/// graph's `files` table) and the current on-disk stats. A path present only on disk
-/// is `added`, present only in the store is `removed`, present in both with a
-/// different fingerprint is `modified`.
-pub(crate) fn classify_changes(
-    stored: &std::collections::HashMap<String, u64>,
-    current: &[FileStat],
-) -> WorkspaceDiff {
-    let mut added = Vec::new();
-    let mut modified = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::with_capacity(current.len());
-
-    for stat in current {
-        seen.insert(stat.path.as_str());
-        match stored.get(&stat.path) {
-            None => added.push(stat.path.clone()),
-            Some(&fp) if fp != stat.fingerprint() => modified.push(stat.path.clone()),
-            Some(_) => {}
-        }
-    }
-    let mut removed: Vec<String> =
-        stored.keys().filter(|p| !seen.contains(p.as_str())).cloned().collect();
-
-    added.sort();
-    modified.sort();
-    removed.sort();
-    WorkspaceDiff { added, removed, modified }
-}
-
 /// Whether the SqliteLocal startup graph decision already populated the search index.
 pub(crate) enum FusedStartup {
     /// Fused cold-build ran: graph + search chunks were written from one parse pass;
@@ -1820,207 +1552,21 @@ pub(crate) fn read_stored_sig_hashes(
     map
 }
 
-/// The configuration source + extension metadata paths the resolver needs for
-/// visibility checks, registered on every database (full or per-batch) just like
-/// the LSP workspace loader does.
-pub(crate) fn config_metadata_paths(workspace_root: &Path) -> Vec<(Option<String>, PathBuf)> {
-    project_config_paths(&project_model::Project::new(workspace_root))
-}
-
-/// The config/metadata paths for an already-loaded project: the configuration source
-/// root plus every extension root. Split out so a caller that also needs the project's
-/// diagnostics settings loads [`project_model::Project`] only once.
-pub(crate) fn project_config_paths(
-    project: &project_model::Project,
-) -> Vec<(Option<String>, PathBuf)> {
-    let mut config_paths: Vec<(Option<String>, PathBuf)> =
-        vec![(None, project.source_path().to_path_buf())];
-    for (name, ext_path) in project.extension_paths() {
-        config_paths.push((Some(name.clone()), ext_path.clone()));
-    }
-    config_paths
-}
-
-/// Enumerate every `.bsl` file under the config + extension roots, assigning a
-/// stable [`FileId`] in walk order. No file text is read — this is the cheap
-/// file-id↔path map that lets the graph build load one batch of texts at a time
-/// while keeping ids consistent across batches.
-pub(crate) fn enumerate_bsl_files(workspace_root: &Path) -> Vec<(FileId, PathBuf)> {
-    let mut entries: Vec<(FileId, PathBuf)> = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut next_id = 0u32;
-    for root in scan_roots(workspace_root) {
-        for entry in WalkDir::new(&root).follow_links(true) {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!("graph scan: walk error: {e}");
-                    continue;
-                }
-            };
-            if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|e| e.to_str()) != Some("bsl")
-            {
-                continue;
-            }
-            let path = entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            entries.push((FileId(next_id), path));
-            next_id += 1;
-        }
-    }
-    entries
-}
-
-pub(crate) use ide_host_core::build_source_root;
-
-/// Build a batch database that shares the whole-workspace `source_root` (so any
-/// target is addressable by path through the module index) but loads text only for
-/// `batch_files` — the only modules this database lowers.
-///
-/// `file_source_root` is set ONLY for `batch_files`: the per-file source-root input
-/// is read solely for the file being lowered (resolver / infer / `get_file_path`),
-/// and the build never lowers a non-batch file. Cross-batch call targets resolve
-/// through the path-keyed module index built from the shared source root, which
-/// never consults `file_source_root`. Setting it for all files would re-pay a
-/// whole-config-sized loop on every batch database for no resolution benefit.
-pub(crate) fn db_for_files(
-    source_root: &SourceRoot,
-    batch_files: &[(FileId, PathBuf)],
-    config_paths: &[(Option<String>, PathBuf)],
-    config_cache: Option<&Arc<ide::GraphConfigCache>>,
-) -> RootDatabaseImpl {
-    let mut db = RootDatabaseImpl::default();
-    if let Some(cache) = config_cache {
-        db.set_graph_config_cache(Arc::clone(cache));
-    }
-    db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
-    for (file_id, path) in batch_files {
-        db.set_file_source_root(*file_id, GRAPH_SOURCE_ROOT);
-        match std::fs::read_to_string(path) {
-            Ok(text) => db.set_file_text(*file_id, &text),
-            Err(e) => {
-                tracing::warn!(path = %path.display(), "graph scan: read failed: {e}");
-                db.set_file_text(*file_id, "");
-            }
-        }
-    }
-    db.set_all_config_paths(config_paths.to_vec());
-    ide::warm_batch_config_roots(&db, batch_files, config_paths);
-    db
-}
-
-/// Like [`db_for_files`] but disk-backed: registers each file's content revision
-/// instead of pinning its text as a salsa input, then drops the text. The resident
-/// diagnostics database holds the WHOLE workspace, so the eager `set_file_text` path
-/// would pin every file's `Arc<str>` in the overlay map (outside the salsa LRU) and
-/// OOM on a large config. Here `file_text_query` re-reads each file from disk on
-/// demand under its `lru` cap (`base_db::queries::file_text_query`), verifying the
-/// bytes against the recorded revision — the same disk-backed contract the LSP server
-/// and the CLI `analyze` path use, so only the working set's text stays resident.
-///
-/// `file_source_root` is set for every file (not just a batch): `file_text_query`
-/// derives the on-disk path through it, so a lazily-read file must have it. An
-/// unreadable file falls back to an empty overlay so a later query yields `""`
-/// instead of panicking on the disk re-read.
-pub(crate) fn db_for_files_lazy(
-    source_root: &SourceRoot,
-    all_files: &[(FileId, PathBuf)],
-    config_paths: &[(Option<String>, PathBuf)],
-    config_cache: Option<&Arc<ide::GraphConfigCache>>,
-) -> RootDatabaseImpl {
-    let mut db = RootDatabaseImpl::default();
-    if let Some(cache) = config_cache {
-        db.set_graph_config_cache(Arc::clone(cache));
-    }
-    db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
-    ide_host_core::register_files_disk_backed(&mut db, GRAPH_SOURCE_ROOT, all_files);
-    db.set_all_config_paths(config_paths.to_vec());
-    db
-}
-
-/// Walk the configuration source and extension directories, load every `.bsl`
-/// file into a fresh database, and register the config metadata paths. Test-only:
-/// the production graph is built straight into SQLite per batch, never as one
-/// whole-config in-memory database.
-#[cfg(test)]
-fn load_workspace_db(workspace_root: &Path) -> anyhow::Result<(RootDatabaseImpl, usize)> {
-    let files = enumerate_bsl_files(workspace_root);
-    let config_paths = config_metadata_paths(workspace_root);
-    let source_root = build_source_root(&files);
-    let db = db_for_files(&source_root, &files, &config_paths, None);
-    Ok((db, files.len()))
-}
-
 #[cfg(test)]
 mod tests {
+    use super::input::{load_workspace_db, scan_roots};
+    use super::scan::scan_stats_over_roots;
+    use super::test_support::{
+        meta_string, sample_workspace, seed_cache, wait_ready, write, write_common_module,
+    };
     use super::*;
     use crate::graph_db::{build_graph_database, update_graph_database_bodies};
     use ide::Analysis;
     use rusqlite::Connection;
+    use std::collections::HashSet;
     use std::fs;
-
-    fn write(root: &Path, rel: &str, text: &str) {
-        let path = root.join(rel);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, text).unwrap();
-    }
-
-    /// Minimal common-module metadata descriptor so the module is declared in the
-    /// configuration (the resolver refuses qualified calls to undeclared modules)
-    /// and its client/server execution context is known.
-    fn write_common_module(root: &Path, name: &str, server: bool, body: &str) {
-        let client = !server;
-        let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
-	<CommonModule uuid="00000000-0000-0000-0000-0000000000{id:02}">
-		<Properties>
-			<Name>{name}</Name>
-			<Global>false</Global>
-			<ClientManagedApplication>{client}</ClientManagedApplication>
-			<Server>{server}</Server>
-			<ExternalConnection>false</ExternalConnection>
-			<ClientOrdinaryApplication>{client}</ClientOrdinaryApplication>
-			<ServerCall>false</ServerCall>
-			<Privileged>false</Privileged>
-			<ReturnValuesReuse>DontUse</ReturnValuesReuse>
-		</Properties>
-	</CommonModule>
-</MetaDataObject>"#,
-            id = name.len(),
-        );
-        write(root, &format!("CommonModules/{name}.xml"), &xml);
-        write(root, &format!("CommonModules/{name}/Ext/Module.bsl"), body);
-    }
-
-    fn sample_workspace(root: &Path) {
-        write_common_module(
-            root,
-            "Клиент",
-            false,
-            "&НаКлиенте\nПроцедура Главная() Экспорт\nСервер.Считать();\nКонецПроцедуры",
-        );
-        write_common_module(
-            root,
-            "Сервер",
-            true,
-            "&НаСервере\nФункция Считать() Экспорт КонецФункции",
-        );
-    }
-
-    fn wait_ready(graph: &GraphState) {
-        for _ in 0..200 {
-            match graph.status() {
-                GraphStatus::Ready { .. } => return,
-                GraphStatus::Failed(msg) => panic!("graph load failed: {msg}"),
-                _ => std::thread::sleep(Duration::from_millis(10)),
-            }
-        }
-        panic!("graph did not become ready");
-    }
+    use std::time::UNIX_EPOCH;
+    use walkdir::WalkDir;
 
     /// End-to-end through `GraphState`: a first use builds the SQLite graph off
     /// the workspace and serves overview/node/neighbors from the opened handle.
@@ -2171,33 +1717,6 @@ mod tests {
 
         lock_recover(&graph.inner).published.as_mut().unwrap().reload = ReloadState::Running;
         assert!(graph.drift_pending(), "a running reload is a pending drift");
-    }
-
-    /// Seed a graph database at the workspace's cache path as a prior process run
-    /// would, with a distinctive `revision`/`built_at` so a test can tell a reused
-    /// cache from a fresh rebuild.
-    fn seed_cache(root: &Path, fingerprint: u64) {
-        let out = graph_db_path(root);
-        fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            root,
-            &out,
-            GRAPH_BUILD_BATCH,
-            &crate::graph_db::GraphMeta {
-                revision: 7,
-                fingerprint,
-                files: 0,
-                built_at: "cached-build-sentinel".to_string(),
-            },
-        )
-        .expect("seed cache builds");
-    }
-
-    fn meta_string(path: &Path, key: &str) -> String {
-        Connection::open(path)
-            .unwrap()
-            .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
-            .unwrap()
     }
 
     /// A cached build that still matches the workspace is republished as-is — no
