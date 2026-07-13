@@ -13,6 +13,10 @@ The callee module's flags come from the configuration visible to the caller: an 
 
 Limitations (deliberately conservative): extension interceptors (`&Instead`/`&Before`/`&After`, `&ChangeAndValidate`) are not checked; calls through a variable holding a module value (`M = Common.CommonModule("Name"); M.Method()`) are not checked — control flow selects the module dynamically; the mobile client, the external connection, and the legacy thick client (ordinary application) are excluded from the checked environment set by default; the ordinary-application client contributes to module environments only when ordinary application support is enabled.
 
+## Configuration
+
+The checked environment set is the `checked_environments` list in the `[features]` section of `bsl-analyzer.toml`, shared with `UnavailableInEnvironment`; see that diagnostic's documentation for details and an example.
+
 ## Examples
 
 Incorrect:

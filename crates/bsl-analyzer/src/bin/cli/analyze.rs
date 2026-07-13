@@ -210,6 +210,7 @@ fn analyze_salsa(
 
     tracing::info!("Creating database");
     let mut db = RootDatabaseImpl::default();
+    bsl_analyzer::features_state::apply_features_to_db(&mut db, &project.config.features);
 
     // Register the base + extension configuration roots so per-file resolution — and the
     // `&ИзменениеИКонтроль` effective merge (`effective_target` → `pair_base_module_path`) —

@@ -14,9 +14,53 @@ fn resolve_features(project: Option<&Project>) -> FeaturesConfig {
     project.map(|p| p.config.features.clone()).unwrap_or_default()
 }
 
-fn apply_features_to_db(db: &mut RootDatabaseImpl, features: &FeaturesConfig) {
+pub fn apply_features_to_db(db: &mut RootDatabaseImpl, features: &FeaturesConfig) {
     tracing::info!(type_narrowing = features.type_narrowing, "updated feature flags");
     db.set_type_narrowing_enabled(features.type_narrowing);
+    db.set_env_options(env_options_from_features(features));
+}
+
+/// The availability diagnostics report only environments the project actually
+/// targets: `[features] checked_environments` lists them by preprocessor-style
+/// names; an unrecognized name is skipped with a warning rather than silently
+/// changing the set.
+fn env_options_from_features(features: &FeaturesConfig) -> hir::execution_env::EnvOptions {
+    use hir::execution_env::{EnvFlags, EnvOptions};
+    let mut options = EnvOptions::default();
+    if let Some(names) = &features.checked_environments {
+        let mut checked = EnvFlags::EMPTY;
+        for name in names {
+            match EnvFlags::from_config_name(name) {
+                Some(flag) => checked = checked | flag,
+                None => tracing::warn!(
+                    name,
+                    "unrecognized environment in `checked_environments`; expected a \
+                     preprocessor-style name such as ВебКлиент/WebClient"
+                ),
+            }
+        }
+        // A non-empty list where nothing parsed is a typo, not an opt-out —
+        // silently disabling both availability diagnostics would hide the
+        // mistake. An explicit `[]` remains the documented opt-out.
+        if checked.is_empty() && !names.is_empty() {
+            tracing::warn!(
+                "`checked_environments` names no recognized environment; keeping the default set"
+            );
+        } else {
+            options.checked_environments = checked;
+            // An opted-in environment must also enter the execution model,
+            // or the checked mask would never intersect a body's set: the
+            // mobile client is not in the default client environments, and
+            // the legacy thick client is gated by ordinary-app support.
+            if checked.contains(EnvFlags::MOBILE_CLIENT) {
+                options.client_environments = options.client_environments | EnvFlags::MOBILE_CLIENT;
+            }
+            if checked.contains(EnvFlags::THICK_CLIENT_ORDINARY) {
+                options.ordinary_app_support = true;
+            }
+        }
+    }
+    options
 }
 
 #[cfg(test)]
@@ -79,5 +123,80 @@ type_narrowing = false
         assert!(default_project_config.features.type_narrowing);
         apply_features_to_db(&mut db, &default_project_config.features);
         assert!(db.type_narrowing_enabled());
+    }
+
+    #[test]
+    fn checked_environments_thread_from_toml_to_env_options() {
+        use hir::execution_env::EnvFlags;
+
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("bsl-analyzer.toml"),
+            r#"
+[features]
+checked_environments = ["ТонкийКлиент", "Server", "НеизвестнаяСреда"]
+"#,
+        )
+        .unwrap();
+
+        let project = Project::new(dir.path());
+        let mut db = RootDatabaseImpl::new();
+        apply_features_to_db(&mut db, &resolve_features(Some(&project)));
+        // The unknown name is skipped with a warning; the rest form the mask.
+        assert_eq!(db.env_options().checked_environments, EnvFlags::THIN_CLIENT | EnvFlags::SERVER);
+
+        apply_features_to_db(&mut db, &FeaturesConfig::default());
+        assert_eq!(
+            db.env_options().checked_environments,
+            hir::execution_env::EnvOptions::default().checked_environments,
+            "omitting the setting must restore the default checked set"
+        );
+    }
+
+    #[test]
+    fn opted_in_environments_enter_the_execution_model() {
+        use hir::execution_env::EnvFlags;
+
+        let mut db = RootDatabaseImpl::new();
+        let features = FeaturesConfig {
+            checked_environments: Some(vec![
+                "МобильныйКлиент".to_string(),
+                "ТолстыйКлиентОбычноеПриложение".to_string(),
+            ]),
+            ..FeaturesConfig::default()
+        };
+        apply_features_to_db(&mut db, &features);
+        let options = db.env_options();
+        assert!(
+            options.client_environments.contains(EnvFlags::MOBILE_CLIENT),
+            "checking the mobile client requires it in the client environments"
+        );
+        assert!(
+            options.ordinary_app_support,
+            "checking the ordinary thick client requires ordinary-app support"
+        );
+    }
+
+    #[test]
+    fn unrecognized_only_list_keeps_the_default_checked_set() {
+        let mut db = RootDatabaseImpl::new();
+        let features = FeaturesConfig {
+            checked_environments: Some(vec!["Sever".to_string()]),
+            ..FeaturesConfig::default()
+        };
+        apply_features_to_db(&mut db, &features);
+        assert_eq!(
+            db.env_options().checked_environments,
+            hir::execution_env::EnvOptions::default().checked_environments,
+            "a typo-only list must not silently disable the availability diagnostics"
+        );
+
+        let explicit_off =
+            FeaturesConfig { checked_environments: Some(vec![]), ..FeaturesConfig::default() };
+        apply_features_to_db(&mut db, &explicit_off);
+        assert!(
+            db.env_options().checked_environments.is_empty(),
+            "an explicit empty list is the documented opt-out"
+        );
     }
 }

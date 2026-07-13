@@ -14,6 +14,17 @@ Current limitations (deliberately conservative):
 - the mobile client, the external connection, and the legacy thick client (ordinary application) are excluded from the checked environment set by default (`checked_environments`);
 - when a platform type name is ambiguous (e.g. `ЭлементыФормы` names both the managed-form items collection and the legacy form controls), availability of its members is not judged.
 
+## Configuration
+
+The checked environment set comes from `bsl-analyzer.toml`, named like preprocessor symbols (case-insensitive, Russian and English names are equivalent). A configuration that never runs in the web client drops it from the list:
+
+```toml
+[features]
+checked_environments = ["ThinClient", "ThickClientManagedApplication", "Server"]
+```
+
+The default set is the thin client, the web client, the managed thick client, and the server. Listing `MobileClient` or `ThickClientOrdinaryApplication` also opts those environments into the execution model (the mobile client joins the client environments; the ordinary application enables ordinary-app support). A list of only unrecognized names keeps the default set (with a logged warning); an explicit empty list `[]` turns both checks off. The setting is shared by `UnavailableInEnvironment` and `ModuleAccessibility`.
+
 ## Examples
 
 Incorrect:

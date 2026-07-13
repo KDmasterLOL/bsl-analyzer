@@ -157,6 +157,34 @@ impl EnvFlags {
             _ => "?",
         }
     }
+
+    /// Parse an environment name from configuration, spelled like the
+    /// preprocessor symbols developers already know (`ВебКлиент` /
+    /// `WebClient`), case-insensitively. `None` — unrecognized.
+    pub fn from_config_name(name: &str) -> Option<EnvFlags> {
+        let eq = |ru: &str, en: &str| {
+            stdx::case::eq_ignore_case(name, ru) || stdx::case::eq_ignore_case(name, en)
+        };
+        if eq("ТонкийКлиент", "ThinClient") {
+            Some(Self::THIN_CLIENT)
+        } else if eq("ВебКлиент", "WebClient") {
+            Some(Self::WEB_CLIENT)
+        } else if eq("ТолстыйКлиентУправляемоеПриложение", "ThickClientManagedApplication")
+        {
+            Some(Self::THICK_CLIENT_MANAGED)
+        } else if eq("ТолстыйКлиентОбычноеПриложение", "ThickClientOrdinaryApplication")
+        {
+            Some(Self::THICK_CLIENT_ORDINARY)
+        } else if eq("Сервер", "Server") {
+            Some(Self::SERVER)
+        } else if eq("МобильныйКлиент", "MobileClient") {
+            Some(Self::MOBILE_CLIENT)
+        } else if eq("ВнешнееСоединение", "ExternalConnection") {
+            Some(Self::EXTERNAL_CONNECTION)
+        } else {
+            None
+        }
+    }
 }
 
 impl std::ops::BitOr for EnvFlags {
@@ -852,6 +880,18 @@ mod tests {
                       #Иначе\nПроцедура Б()\nКонецПроцедуры\n#КонецЕсли\n";
         assert_eq!(conditional_env_for(source, 0), EnvFlags::EMPTY);
         assert_eq!(conditional_env_for(source, 1), EnvFlags::EMPTY);
+    }
+
+    #[test]
+    fn config_names_parse_bilingually_and_case_insensitively() {
+        assert_eq!(EnvFlags::from_config_name("ВебКлиент"), Some(EnvFlags::WEB_CLIENT));
+        assert_eq!(EnvFlags::from_config_name("webclient"), Some(EnvFlags::WEB_CLIENT));
+        assert_eq!(EnvFlags::from_config_name("СЕРВЕР"), Some(EnvFlags::SERVER));
+        assert_eq!(
+            EnvFlags::from_config_name("ТолстыйКлиентУправляемоеПриложение"),
+            Some(EnvFlags::THICK_CLIENT_MANAGED)
+        );
+        assert_eq!(EnvFlags::from_config_name("Линукс"), None);
     }
 
     #[test]
