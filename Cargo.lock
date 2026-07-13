@@ -1581,6 +1581,7 @@ dependencies = [
  "hir-ty",
  "ide-db",
  "parser",
+ "rustc-hash 2.1.2",
  "stdx",
  "syntax",
  "tracing",

@@ -14,7 +14,7 @@ pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYP
 pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
 pub use name_classify::{classify_token, NameClass};
 pub use semantic_symbol::{
-    SemanticSymbol, SemanticSymbolKey, SemanticSymbolKind, SymbolDeclaration,
+    FileSymbolCtx, SemanticSymbol, SemanticSymbolKey, SemanticSymbolKind, SymbolDeclaration,
 };
 pub use type_facade::{
     form_element_type, kernel_type_label, module_implicit_field_names, module_implicit_fields,
@@ -401,104 +401,7 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             .find(|method| method.name().eq_ignore_case(&search_name))
     }
 
-    pub fn resolve_name_to_definition(
-        &self,
-        file_id: FileId,
-        token: &syntax::SyntaxToken,
-    ) -> Option<crate::definition::Definition> {
-        use crate::definition::Definition;
-
-        let _span = tracing::info_span!("resolve_name_to_definition").entered();
-
-        if token.kind() != syntax::SyntaxKind::IDENT && field_name_receiver(token).is_none() {
-            return None;
-        }
-
-        let token_text = token.text();
-        let name = Name::new(token_text);
-
-        if let Some(def) = self.try_resolve_qualified_name_for_token(file_id, token) {
-            tracing::debug!(?def, "resolved as qualified name");
-            return Some(def);
-        }
-
-        if field_name_receiver(token).is_some() {
-            tracing::debug!("skipping free-name resolution: token is field-name in FIELD_EXPR");
-            return None;
-        }
-
-        let module_id = ModuleId::new(file_id);
-        let resolver = hir_def::resolver::Resolver::for_module(module_id);
-
-        // A global common module export extends the global context and so shadows a
-        // same-named platform global. Resolved before builtins to keep Local → Module →
-        // Global-CM → Platform consistent with name inference and signature help; the helper
-        // gates on nearer scopes (local/parameter, same-module method/variable) missing.
-        if let Some(def) = self.global_export_definition(file_id, token) {
-            tracing::debug!(?def, "resolved as global common module export");
-            return Some(def);
-        }
-
-        if let Some(def) = self.try_resolve_builtin(token_text) {
-            tracing::debug!(?def, "resolved as builtin");
-            return Some(def);
-        }
-
-        if let Some(def) = self.resolve_local_to_definition(file_id, token) {
-            tracing::debug!(?def, "resolved as local symbol");
-            return Some(def);
-        }
-
-        if bsl_metadata::MdoType::is_plural_form(token_text) {
-            if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(token_text) {
-                tracing::debug!(?mdo_type, "resolved as MDO collection");
-                return Some(Definition::MdoCollectionType(mdo_type));
-            }
-        }
-
-        if let Some(method_id) = resolver.resolve_module_method(self.db, &name) {
-            tracing::debug!(?method_id, "resolved as module method");
-            return Some(Definition::Method(method_id));
-        }
-
-        if let Some(var_id) = resolver.resolve_module_variable(self.db, &name) {
-            tracing::debug!(?var_id, "resolved as module variable");
-            return Some(Definition::Variable(var_id));
-        }
-
-        tracing::debug!("unresolved identifier: {}", token_text);
-        None
-    }
-
-    /// Resolve a bare identifier to an exported method of a GLOBAL common module — callable
-    /// unqualified because a global common module extends the global context. Returns `None`
-    /// when a nearer scope owns the name (a local/parameter, or a same-module method or
-    /// variable), so the global context only fills the gap below module scope. Shared by the
-    /// free-name and definition resolvers so goto/hover/refs and inference agree on precedence.
-    pub(crate) fn global_export_definition(
-        &self,
-        file_id: FileId,
-        token: &syntax::SyntaxToken,
-    ) -> Option<crate::definition::Definition> {
-        let name = Name::new(token.text());
-        let module_id = ModuleId::new(file_id);
-        let resolver = hir_def::resolver::Resolver::for_module(module_id);
-
-        let shadowed = self.resolve_local_to_definition(file_id, token).is_some()
-            || resolver.resolve_module_method(self.db, &name).is_some()
-            || resolver.resolve_module_variable(self.db, &name).is_some();
-        if shadowed {
-            return None;
-        }
-
-        hir_def::resolver::Resolver::with_workspace_scope(module_id)
-            .global_common_module_exports(self.db)
-            .into_iter()
-            .find(|(_, method_name, _)| method_name.eq_ignore_case(&name))
-            .map(|(_, _, method_id)| crate::definition::Definition::Method(method_id))
-    }
-
-    fn try_resolve_qualified_name_for_token(
+    pub(crate) fn try_resolve_qualified_name_for_token(
         &self,
         file_id: FileId,
         token: &syntax::SyntaxToken,
@@ -541,68 +444,7 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         None
     }
 
-    fn resolve_local_to_definition(
-        &self,
-        file_id: FileId,
-        token: &syntax::SyntaxToken,
-    ) -> Option<crate::definition::Definition> {
-        use crate::definition::Definition;
-        use hir_def::scope::{ExprScopes, ScopeDef};
-
-        let _span = tracing::debug_span!("resolve_local_to_definition").entered();
-
-        let name = Name::new(token.text());
-        let module_id = ModuleId::new(file_id);
-
-        let mut node = token.parent()?;
-        loop {
-            let (scopes, method_range) =
-                if let Some(proc_def) = syntax::ast::ProcedureDef::cast(node.clone()) {
-                    (ExprScopes::from_procedure(&proc_def), proc_def.syntax().text_range())
-                } else if let Some(func_def) = syntax::ast::FunctionDef::cast(node.clone()) {
-                    (ExprScopes::from_function(&func_def), func_def.syntax().text_range())
-                } else {
-                    node = node.parent()?;
-                    continue;
-                };
-
-            let root_scope = scopes.root_scope();
-            let scope_def = scopes.resolve_name(root_scope, &name)?;
-
-            let tree = self.db.item_tree(file_id);
-            for (idx, item) in tree.top_level_items().iter().enumerate() {
-                let (params, source_range) = match item {
-                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                        let p = tree.procedure(*proc_idx);
-                        (&p.params, p.source_range)
-                    }
-                    hir_def::item_tree::ModItem::Function(func_idx) => {
-                        let f = tree.function(*func_idx);
-                        (&f.params, f.source_range)
-                    }
-                    _ => continue,
-                };
-                if source_range != method_range {
-                    continue;
-                }
-                let method_id = MethodId { module: module_id, local_id: idx as u32 };
-                return Some(match scope_def {
-                    ScopeDef::Parameter => {
-                        let param_index =
-                            params.iter().position(|p| p.name.eq_ignore_case(&name)).unwrap_or(0)
-                                as u32;
-                        Definition::Parameter { method_id, param_name: name.clone(), param_index }
-                    }
-                    ScopeDef::LocalVariable => {
-                        Definition::Local { method_id, var_name: name.clone() }
-                    }
-                });
-            }
-            return None;
-        }
-    }
-
-    fn try_resolve_builtin(&self, name: &str) -> Option<crate::definition::Definition> {
+    pub(crate) fn try_resolve_builtin(&self, name: &str) -> Option<crate::definition::Definition> {
         if bsl_platform::PlatformDataInner::instance().get_global_function(name).is_some() {
             return Some(Definition::BuiltinFunction(Name::new(name)));
         }
@@ -813,22 +655,15 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         file_id: FileId,
         token: &syntax::SyntaxToken,
     ) -> Option<crate::definition::Definition> {
-        use crate::definition::Definition;
+        crate::FileSymbolCtx::new(self.db, file_id).resolve_method_call_to_definition(token)
+    }
 
-        if !token.kind().is_name_token() {
-            return None;
-        }
-
-        let receiver_node = field_name_receiver(token)?;
-        let receiver_id = self.type_of_expr(file_id, &receiver_node);
-        if matches!(self.db.lookup_type(receiver_id), TypeKind::Unknown) {
-            return None;
-        }
-
-        let method_name = Name::new(token.text());
-        let resolution = hir_ty::resolve_method(self.db, receiver_id, &method_name)?;
-
-        Some(Definition::BuiltinMethodHandle { handle: resolution.handle, method_name })
+    pub fn resolve_name_to_definition(
+        &self,
+        file_id: FileId,
+        token: &syntax::SyntaxToken,
+    ) -> Option<crate::definition::Definition> {
+        crate::FileSymbolCtx::new(self.db, file_id).resolve_name_to_definition(token)
     }
 }
 
