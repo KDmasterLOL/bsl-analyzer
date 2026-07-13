@@ -5,9 +5,6 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Manifest {
     pub version: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub timestamp: String,
     pub files: HashMap<String, FileInfo>,
 }
 
