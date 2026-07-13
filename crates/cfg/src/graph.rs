@@ -1,12 +1,15 @@
 use crate::edge::CfgEdgeType;
 use crate::vertex::CfgVertex;
+use cfg_types::StmtId;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::{DfsPostOrder, EdgeRef, Reversed};
 use petgraph::Direction;
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {
     graph: DiGraph<CfgVertex, CfgEdgeType>,
+    statement_origins: FxHashMap<NodeIndex, StmtId>,
     entry_point: Option<NodeIndex>,
     exit_point: NodeIndex,
 }
@@ -35,11 +38,21 @@ impl ControlFlowGraph {
 
         let exit_point = graph.add_node(CfgVertex::Exit);
 
-        Self { graph, entry_point: None, exit_point }
+        Self { graph, statement_origins: FxHashMap::default(), entry_point: None, exit_point }
     }
 
     pub fn add_vertex(&mut self, vertex: CfgVertex) -> NodeIndex {
         self.graph.add_node(vertex)
+    }
+
+    pub fn add_vertex_with_origin(&mut self, vertex: CfgVertex, stmt_id: StmtId) -> NodeIndex {
+        let index = self.add_vertex(vertex);
+        self.statement_origins.insert(index, stmt_id);
+        index
+    }
+
+    pub fn source_stmt_id(&self, index: NodeIndex) -> Option<StmtId> {
+        self.statement_origins.get(&index).copied()
     }
 
     pub fn add_edge(
@@ -88,7 +101,8 @@ impl ControlFlowGraph {
     /// Approximate live heap bytes of this graph for Salsa's `memory_usage`
     /// report. Counts petgraph's node/edge backbone (a `Vec<Node>` and a
     /// `Vec<Edge>`, each element a weight plus four `u32` index links) at element
-    /// granularity, plus the only vertex-owned heap: a basic block's `Vec<StmtId>`.
+    /// granularity, plus statement-origin metadata and the only vertex-owned heap: a basic
+    /// block's `Vec<StmtId>`.
     /// The `Exit`/branch/loop vertices own no extra heap; `LabelVertex`'s `Name`
     /// is a small inlined `SmolStr` and is ignored. Spare capacity is not counted,
     /// so the figure tracks live content within a small factor.
@@ -99,6 +113,7 @@ impl ControlFlowGraph {
         // `Edge<E, u32>` = weight + `[EdgeIndex; 2]` + `[NodeIndex; 2]` (16 bytes).
         let mut bytes = self.graph.node_count() * (size_of::<CfgVertex>() + 8);
         bytes += self.graph.edge_count() * (size_of::<CfgEdgeType>() + 16);
+        bytes += self.statement_origins.len() * size_of::<(NodeIndex, StmtId)>();
 
         for vertex in self.graph.node_weights() {
             if let CfgVertex::BasicBlock(block) = vertex {
@@ -144,6 +159,18 @@ impl ControlFlowGraph {
     }
 
     pub fn remove_vertex(&mut self, vertex: NodeIndex) -> Option<CfgVertex> {
+        if !self.vertex_exists(vertex) {
+            return None;
+        }
+
+        let last_vertex = NodeIndex::new(self.graph.node_count() - 1);
+        self.statement_origins.remove(&vertex);
+        if vertex != last_vertex {
+            if let Some(stmt_id) = self.statement_origins.remove(&last_vertex) {
+                self.statement_origins.insert(vertex, stmt_id);
+            }
+        }
+
         self.graph.remove_node(vertex)
     }
 
@@ -215,6 +242,8 @@ impl Default for ControlFlowGraph {
 mod tests {
     use super::*;
     use crate::vertex::BasicBlockVertex;
+    use cfg_types::StmtId;
+    use la_arena::RawIdx;
 
     #[test]
     fn test_graph_creation() {
@@ -232,6 +261,36 @@ mod tests {
 
         assert_eq!(cfg.vertex_count(), 2);
         assert!(cfg.vertex(idx).is_some());
+    }
+
+    #[test]
+    fn source_stmt_id_returns_only_the_explicit_vertex_origin() {
+        let mut cfg = ControlFlowGraph::new();
+        let stmt_id = StmtId::from_raw(RawIdx::from(7));
+        let with_origin =
+            cfg.add_vertex_with_origin(CfgVertex::BasicBlock(BasicBlockVertex::new()), stmt_id);
+        let without_origin = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+
+        assert_eq!(cfg.source_stmt_id(with_origin), Some(stmt_id));
+        assert_eq!(cfg.source_stmt_id(without_origin), None);
+    }
+
+    #[test]
+    fn removing_a_vertex_keeps_the_moved_vertex_origin() {
+        let mut cfg = ControlFlowGraph::new();
+        let removed_stmt_id = StmtId::from_raw(RawIdx::from(7));
+        let moved_stmt_id = StmtId::from_raw(RawIdx::from(8));
+        let removed = cfg.add_vertex_with_origin(
+            CfgVertex::BasicBlock(BasicBlockVertex::new()),
+            removed_stmt_id,
+        );
+        let moved = cfg
+            .add_vertex_with_origin(CfgVertex::BasicBlock(BasicBlockVertex::new()), moved_stmt_id);
+
+        let _ = cfg.remove_vertex(removed);
+
+        assert_eq!(cfg.source_stmt_id(removed), Some(moved_stmt_id));
+        assert_eq!(cfg.source_stmt_id(moved), None);
     }
 
     #[test]
