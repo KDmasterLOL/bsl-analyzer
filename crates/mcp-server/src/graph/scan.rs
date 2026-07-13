@@ -2,35 +2,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use walkdir::WalkDir;
 
 use super::input::scan_roots;
-use crate::change_hub::{ChangeEntry, ChangeKind};
-
-/// How often the query-path freshness fold must come from a real walk instead of the
-/// event-maintained map. Bounds how long a change the hub cannot observe can keep
-/// freshness wrong.
-pub(super) const WALK_VERIFY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// See `GraphState::fp_map`.
-#[derive(Default)]
-pub(super) struct FpMapState {
-    /// `canonical path → (mtime nanos, len)` for every graph-relevant file, in the
-    /// exact spelling the walk produces (hub entries carry the same canonical key).
-    pub(super) map: Option<std::collections::BTreeMap<String, (u128, u64)>>,
-    /// When the map was last anchored to a real walk.
-    pub(super) walked_at: Option<Instant>,
-}
-
-/// Throttled cache of the last on-disk fingerprint scan. Guarded by its own mutex
-/// held *across* the walk, so concurrent callers serialize onto one scan per
-/// window rather than all walking the tree (no thundering herd).
-pub(super) struct ScanCache {
-    pub(super) at: Instant,
-    pub(super) disk_fp: u64,
-}
 
 /// One graph-relevant file's stat-only identity: canonical `/`-normalised path,
 /// mtime in nanos, and length. Produced once per scan and shared by the
@@ -70,20 +46,6 @@ pub(crate) fn file_fingerprint(path: &Path) -> Option<u64> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     Some(FileStat { path: String::new(), mtime, len: meta.len() }.fingerprint())
-}
-
-/// Whether a drained change is relevant to the graph's fingerprint scan (`.bsl`/`.xml`
-/// under a scan root). A removed file's `canonical` may fall back to the raw spelling, so
-/// both are checked; a `SubtreeRemoved` names a vanished directory whose descendants'
-/// extensions are unknown, so it is treated conservatively as relevant.
-pub(super) fn entry_touches_scan_universe(entry: &ChangeEntry) -> bool {
-    if entry.kind == ChangeKind::SubtreeRemoved {
-        return true;
-    }
-    let is_scan_ext = |path: &Path| {
-        matches!(path.extension().and_then(|e| e.to_str()), Some("bsl") | Some("xml"))
-    };
-    is_scan_ext(&entry.canonical) || is_scan_ext(&entry.raw)
 }
 
 /// Stat every graph-relevant file (`.bsl` sources + `.xml` metadata descriptors)
@@ -204,32 +166,7 @@ pub(super) fn workspace_fingerprint(workspace_root: &Path) -> u64 {
     let mut entries: Vec<(String, u128, u64)> =
         scan_file_stats(workspace_root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
     entries.sort();
-    fold_fingerprint_entries(&entries)
-}
-
-/// The one fold both fingerprint producers share, so the event-maintained map and the
-/// walk agree bit-for-bit: `entries` must be sorted `(path, mtime, len)` tuples (paths
-/// are unique, so path order alone determines it).
-pub(super) fn fold_fingerprint_entries(entries: &[(String, u128, u64)]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    entries.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// The raw `(mtime nanos, len)` pair for the fingerprint map, matching what
-/// [`scan_file_stats`] records for a present regular file.
-pub(super) fn stat_pair(path: &Path) -> Option<(u128, u64)> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    Some((mtime, meta.len()))
+    super::snapshot::fold_fingerprint_entries(&entries)
 }
 
 /// Granular drift between a built graph's stored per-file fingerprints and the

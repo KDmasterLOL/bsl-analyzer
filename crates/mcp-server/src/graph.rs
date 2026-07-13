@@ -14,9 +14,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::change_hub::{ChangeEntry, ChangeKind, SinkCursor, WorkspaceChangeHub};
+use crate::change_hub::{SinkCursor, WorkspaceChangeHub};
 
 use bsl_search::SearchEngine;
 
@@ -25,8 +25,10 @@ use crate::graph_query::GraphDb;
 
 pub(crate) mod input;
 pub(crate) mod scan;
+mod snapshot;
 #[cfg(test)]
 mod test_support;
+mod types;
 
 #[allow(
     unused_imports,
@@ -36,6 +38,7 @@ pub(crate) use input::{
     build_source_root, config_metadata_paths, db_for_files, db_for_files_lazy, enumerate_bsl_files,
     project_config_paths, GRAPH_SOURCE_ROOT,
 };
+use scan::workspace_fingerprint;
 #[allow(
     unused_imports,
     reason = "the stable graph facade preserves crate::graph scan paths while leaf consumers import directly"
@@ -43,9 +46,16 @@ pub(crate) use input::{
 pub(crate) use scan::{
     classify_changes, file_fingerprint, scan_file_stats, FileStat, WorkspaceDiff,
 };
-use scan::{
-    entry_touches_scan_universe, fold_fingerprint_entries, stat_pair, workspace_fingerprint,
-    FpMapState, ScanCache, WALK_VERIFY_INTERVAL,
+#[cfg(test)]
+use snapshot::fold_fingerprint_entries;
+use snapshot::{FpMapState, PooledSnapshotEntry, ScanCache};
+#[allow(
+    unused_imports,
+    reason = "the stable graph facade preserves crate::graph snapshot paths while implementation stays private"
+)]
+pub(crate) use snapshot::{GraphSnapshot, PooledGraphDb};
+pub(crate) use types::{
+    Freshness, FusedStartup, GraphPublishSignal, GraphStatus, GraphStatusReport, NudgeOutcome,
 };
 
 /// Minimum time between on-disk drift scans. A scan stats every `.bsl`/`.xml`
@@ -57,46 +67,6 @@ const DRIFT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// 500 keeps peak RSS comfortably bounded on a 25k-module config (measured ~2.9 GB)
 /// while the resident method index resolves cross-batch calls.
 const GRAPH_BUILD_BATCH: usize = 500;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum GraphStatus {
-    /// Not a workspace profile — the graph is unavailable.
-    Disabled,
-    /// A workspace is configured but the graph has not been loaded yet; the
-    /// first `graph` tool call triggers the load.
-    Idle,
-    /// Background load in progress.
-    Loading,
-    /// Ready to serve, with the indexed `.bsl` file count.
-    Ready { files: usize },
-    /// Load failed.
-    Failed(String),
-}
-
-/// What the graph hands its publish hook after a build publishes.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct GraphPublishSignal {
-    /// A fresher reload is already catching up: a fast-path hint the consumer may use to
-    /// skip this round and let that reload's publish do the re-render. Not correctness-bearing.
-    pub(crate) drift_pending: bool,
-    /// The mark-seq captured when THIS build started (see [`GraphState::mark_seq`]). Bounds
-    /// which context-dirty marks the consumer may clear: only drifts this build already
-    /// reflects, never one stamped after it began. This bound is what makes the consumption
-    /// correct.
-    pub(crate) build_start_seq: i64,
-}
-
-/// What a [`GraphState::nudge_rebuild`] scheduled. Surfaced so the single-flight
-/// behavior is assertable in a test without racing the background build thread.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum NudgeOutcome {
-    /// The initial background load was started (`Idle → Loading`).
-    LoadStarted,
-    /// The single reload slot was claimed and a rebuild thread spawned.
-    ReloadClaimed,
-    /// Nothing scheduled: disabled, a build/reload already in flight, or no drift.
-    NoOp,
-}
 
 /// State of an in-flight or last-attempted background reload, surfaced to agents
 /// so a failed reload is visible rather than leaving them at `stale=true` forever.
@@ -143,85 +113,6 @@ struct Published {
 struct Inner {
     status: GraphStatus,
     published: Option<Published>,
-}
-
-/// Cap on idle pooled snapshot handles. Concurrent graph queries beyond it just open
-/// their own handle, exactly as before pooling.
-const SNAPSHOT_POOL_CAP: usize = 4;
-
-/// A pooled idle read handle plus the freshness token it was opened under.
-struct PooledSnapshotEntry {
-    generation: u64,
-    fingerprint: u64,
-    force_stale: bool,
-    db: GraphDb,
-}
-
-/// A served graph handle plus the freshness token it was built at. Capturing the
-/// generation/fingerprint at snapshot time (not at response time) keeps the
-/// envelope's `revision`/`stale` consistent with the data actually returned, even
-/// if a reload publishes a newer generation while the query runs. The handle is an
-/// own read-only connection opened against the on-disk SQLite graph.
-pub(crate) struct GraphSnapshot {
-    pub graph: PooledGraphDb,
-    generation: u64,
-    fingerprint: u64,
-    force_stale: bool,
-}
-
-/// A read handle checked out of (and returned to) [`GraphState::snapshot_pool`].
-/// Dereferences to the underlying [`GraphDb`]; on drop the handle goes back to the
-/// pool (up to [`SNAPSHOT_POOL_CAP`]) so the next query skips the multi-GB open.
-pub(crate) struct PooledGraphDb {
-    /// Present from construction until `Drop` takes it back to the pool.
-    entry: Option<PooledSnapshotEntry>,
-    pool: Arc<Mutex<Vec<PooledSnapshotEntry>>>,
-}
-
-impl std::ops::Deref for PooledGraphDb {
-    type Target = GraphDb;
-    fn deref(&self) -> &GraphDb {
-        &self.entry.as_ref().expect("pooled handle is present until drop").db
-    }
-}
-
-impl Drop for PooledGraphDb {
-    fn drop(&mut self) {
-        if let Some(entry) = self.entry.take() {
-            let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-            if pool.len() < SNAPSHOT_POOL_CAP {
-                pool.push(entry);
-            }
-        }
-    }
-}
-
-/// Freshness verdict for one `graph` response.
-pub(crate) struct Freshness {
-    /// The generation of the snapshot that served this response.
-    pub revision: u64,
-    /// The workspace drifted on disk since this snapshot was built.
-    pub stale: bool,
-    /// Reload state: `"none"`, `"running"`, or `"failed"`.
-    pub reload: &'static str,
-}
-
-/// The graph's lifecycle snapshot for the `status` action — the parallel of the
-/// `diagnostics` status, so an agent can start the lazy build and poll its progress
-/// instead of polling a data action and reading a flat `loading` envelope.
-pub(crate) struct GraphStatusReport {
-    /// `disabled` | `loading` | `ready` | `failed`.
-    pub state: &'static str,
-    /// Indexed `.bsl` file count (when `ready`).
-    pub files: Option<usize>,
-    /// Served snapshot generation (when `ready`).
-    pub revision: Option<u64>,
-    /// Whether the workspace drifted on disk since the build (when `ready`).
-    pub stale: Option<bool>,
-    /// Background reload state `none`/`running`/`failed` (when `ready`).
-    pub reload: Option<&'static str>,
-    /// Failure message (when `failed`).
-    pub error: Option<String>,
 }
 
 /// Handle to the workspace call graph. Cheap to clone (shared `Arc`s).
@@ -757,231 +648,6 @@ impl GraphState {
         Ok(())
     }
 
-    /// Snapshot the graph for a blocking query, if built. The returned
-    /// [`GraphSnapshot`] owns a read-only SQLite handle and its freshness token,
-    /// and can be moved onto a blocking task without holding the lock during the
-    /// query.
-    pub(crate) fn snapshot(&self) -> Option<GraphSnapshot> {
-        // Gate on a published build, but take the served revision/fingerprint from
-        // the FILE's own meta (below), not from the lock — so even if a reload
-        // renames a newer file in between this check and the open, the snapshot's
-        // freshness token describes exactly the build it serves, never a torn mix.
-        let published_generation = lock_recover(&self.inner).published.as_ref()?.generation;
-        // Reuse an idle handle opened under the still-current generation; a handle a
-        // publish superseded is discarded here (checkout-time lazy invalidation), so
-        // a stale snapshot can serve its own checkout to completion but never a new
-        // request.
-        {
-            let mut pool = lock_recover(&self.snapshot_pool);
-            while let Some(entry) = pool.pop() {
-                if entry.generation == published_generation {
-                    let (generation, fingerprint, force_stale) =
-                        (entry.generation, entry.fingerprint, entry.force_stale);
-                    return Some(GraphSnapshot {
-                        graph: PooledGraphDb {
-                            entry: Some(entry),
-                            pool: Arc::clone(&self.snapshot_pool),
-                        },
-                        generation,
-                        fingerprint,
-                        force_stale,
-                    });
-                }
-            }
-        }
-        // A complete file is always present once `Ready` (the loader renames it into
-        // place atomically and publishes only after); a failed open (incomplete or
-        // missing) degrades to the caller's "still loading" path.
-        let path = graph_db_path(self.workspace_root.as_deref()?);
-        let graph = GraphDb::open(&path).ok()?;
-        let (generation, fingerprint, force_stale) = graph.freshness_token().ok()?;
-        Some(GraphSnapshot {
-            graph: PooledGraphDb {
-                entry: Some(PooledSnapshotEntry {
-                    generation,
-                    fingerprint,
-                    force_stale,
-                    db: graph,
-                }),
-                pool: Arc::clone(&self.snapshot_pool),
-            },
-            generation,
-            fingerprint,
-            force_stale,
-        })
-    }
-
-    /// Report the freshness of `snapshot` relative to disk, and on drift kick an
-    /// async reload (at most one in flight). `stale`/`revision` are relative to the
-    /// snapshot that served the response; the reload decision is relative to the
-    /// latest published snapshot. Walks the filesystem, so call from a blocking
-    /// context.
-    pub(crate) fn freshness(&self, snapshot: &GraphSnapshot) -> Freshness {
-        let disk_fp = self.current_disk_fp();
-        // A snapshot from a straddled load is unconditionally stale until a clean
-        // reload replaces it — equality alone could be fooled by an ABA rollback to
-        // the pre-load fingerprint.
-        let stale =
-            snapshot.force_stale || disk_fp.map(|fp| fp != snapshot.fingerprint).unwrap_or(false);
-
-        let mut inner = lock_recover(&self.inner);
-        let Some(published) = inner.published.as_mut() else {
-            return Freshness { revision: snapshot.generation, stale, reload: "none" };
-        };
-        let mut reload = published.reload.label();
-        // Claim the single reload slot under the lock — comparing the fresh disk
-        // fingerprint against the *current* published one means a reload that
-        // landed during our walk is not re-triggered.
-        let claim_reload = disk_fp.map(|fp| fp != published.fingerprint).unwrap_or(false)
-            && published.reload != ReloadState::Running;
-        if claim_reload {
-            published.reload = ReloadState::Running;
-            reload = "running";
-        }
-        drop(inner);
-
-        if claim_reload {
-            let state = self.clone();
-            let spawned = std::thread::Builder::new()
-                .name("bsl-graph-reload".to_owned())
-                .spawn(move || state.run_load(true));
-            if let Err(e) = spawned {
-                let mut inner = lock_recover(&self.inner);
-                if let Some(p) = inner.published.as_mut() {
-                    p.reload = ReloadState::Failed(format!("could not spawn reload: {e}"));
-                }
-                reload = "failed";
-            }
-        }
-
-        Freshness { revision: snapshot.generation, stale, reload }
-    }
-
-    /// The current on-disk fingerprint, throttled to one scan per drift interval.
-    /// The scan mutex is held across the walk, so concurrent callers within the
-    /// window block briefly then reuse the cached value instead of re-walking.
-    /// `None` when no workspace is configured.
-    fn current_disk_fp(&self) -> Option<u64> {
-        let root = self.workspace_root.as_deref()?;
-        // Drain the hub first: a delivered change patches the fingerprint map and
-        // invalidates the throttled cache, so the drift is seen now, not after the
-        // throttle expires.
-        self.invalidate_scan_on_hub_drift();
-        let mut cache = lock_recover(&self.scan);
-        if let Some(c) = cache.as_ref() {
-            if c.at.elapsed() < self.drift_interval {
-                return Some(c.disk_fp);
-            }
-        }
-        // Between walk anchors, fold the event-maintained map (in-memory, <1ms on 100k
-        // entries) instead of stat-walking the tree. The map's fold is bit-identical to
-        // the walk's by construction (same sorted-entries fold). Trusted ONLY while a
-        // healthy hub feeds it — with no hub (or a degraded watcher) nothing patches
-        // the map, so every check must walk, exactly as before.
-        let hub_healthy = matches!(
-            &self.change_hub,
-            Some(hub) if matches!(hub.health(), crate::change_hub::Health::Healthy)
-        );
-        if !hub_healthy {
-            // Events may be missing while the hub is absent or degraded; un-anchor the
-            // map so a hub that recovers later starts from a fresh walk, never from a
-            // map with a hole it cannot detect.
-            let mut fp_state = lock_recover(&self.fp_map);
-            fp_state.map = None;
-            fp_state.walked_at = None;
-        }
-        if hub_healthy {
-            let fp_state = lock_recover(&self.fp_map);
-            if let (Some(map), Some(walked_at)) = (fp_state.map.as_ref(), fp_state.walked_at) {
-                if walked_at.elapsed() < WALK_VERIFY_INTERVAL {
-                    let entries: Vec<(String, u128, u64)> =
-                        map.iter().map(|(p, (m, l))| (p.clone(), *m, *l)).collect();
-                    let fp = fold_fingerprint_entries(&entries);
-                    *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp });
-                    return Some(fp);
-                }
-            }
-        }
-        self.scan_count.fetch_add(1, Ordering::SeqCst);
-        let mut entries: Vec<(String, u128, u64)> =
-            scan_file_stats(root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
-        entries.sort();
-        let fp = fold_fingerprint_entries(&entries);
-        {
-            let mut fp_state = lock_recover(&self.fp_map);
-            fp_state.map = Some(entries.into_iter().map(|(p, m, l)| (p, (m, l))).collect());
-            fp_state.walked_at = Some(Instant::now());
-        }
-        *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp });
-        Some(fp)
-    }
-
-    /// Drop the throttled fingerprint cache if the hub delivered any change (or asked for a
-    /// reconcile) since the last check, so the next fingerprint scan reflects it immediately.
-    /// The graph never applies drift in place — this only bypasses the throttle; the
-    /// fingerprint scan remains the source of truth. Subscribes the cursor lazily.
-    fn invalidate_scan_on_hub_drift(&self) {
-        let Some(hub) = &self.change_hub else {
-            return;
-        };
-        let cursor = {
-            let mut slot = lock_recover(&self.hub_cursor);
-            match *slot {
-                Some(cursor) => cursor,
-                None => {
-                    let cursor = hub.subscribe();
-                    *slot = Some(cursor);
-                    cursor
-                }
-            }
-        };
-        let batch = hub.drain(cursor);
-        *lock_recover(&self.hub_cursor) = Some(batch.cursor);
-        // A lossy hub (overflow) may have dropped events the map will never see: drop
-        // the map too, so the next check re-anchors with a real walk.
-        if batch.rescan_required {
-            *lock_recover(&self.scan) = None;
-            let mut fp_state = lock_recover(&self.fp_map);
-            fp_state.map = None;
-            fp_state.walked_at = None;
-            return;
-        }
-        // Act only on changes touching the graph's scan universe. The hub accepts every
-        // path (filtering is the consumer's job), so an editor/tooling temp file under a
-        // scan root would otherwise reset the cache on every check and re-trigger the
-        // full fingerprint scan — the very cost this sink exists to avoid.
-        let relevant: Vec<&ChangeEntry> =
-            batch.entries.iter().filter(|e| entry_touches_scan_universe(e)).collect();
-        if relevant.is_empty() {
-            return;
-        }
-        *lock_recover(&self.scan) = None;
-        let mut fp_state = lock_recover(&self.fp_map);
-        // A vanished subtree hides descendants the drain could not enumerate; the map
-        // cannot express that, so drop it and let the next check walk.
-        if relevant.iter().any(|e| e.kind == ChangeKind::SubtreeRemoved) {
-            fp_state.map = None;
-            fp_state.walked_at = None;
-            return;
-        }
-        let Some(map) = fp_state.map.as_mut() else {
-            return;
-        };
-        // Events are hints, stats are truth: re-stat each delivered path and patch the
-        // map to what is on disk now (a gone file leaves it).
-        for entry in relevant {
-            let key = entry.canonical.to_string_lossy().into_owned();
-            match stat_pair(&entry.canonical) {
-                Some(pair) => {
-                    map.insert(key, pair);
-                }
-                None => {
-                    map.remove(&key);
-                }
-            }
-        }
-    }
-
     /// Build (or rebuild) the database off-thread and publish it coherently.
     /// `is_reload` distinguishes the initial load (sets `Ready`, generation 1)
     /// from a drift-triggered reload (bumps the generation, keeps the old snapshot
@@ -1342,16 +1008,6 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Whether the SqliteLocal startup graph decision already populated the search index.
-pub(crate) enum FusedStartup {
-    /// Fused cold-build ran: graph + search chunks were written from one parse pass;
-    /// the caller must fill embeddings via [`SearchEngine::embed_pending_chunks_standalone`].
-    Fused,
-    /// Graph served from cache or built the normal lazy way; the caller indexes the
-    /// search engine via the standalone path.
-    Standalone,
-}
-
 /// Build the graph into the canonical path with the full publication bracket:
 /// fingerprint the workspace before and after (so a build that straddled a disk write
 /// is marked `force_stale`), stamp that marker plus the file count into the file's own
@@ -1641,6 +1297,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn set_mark_seq_source_is_first_writer_wins() {
+        let graph = GraphState::disabled();
+        let first = Arc::new(AtomicI64::new(7));
+        let second = Arc::new(AtomicI64::new(11));
+
+        graph.set_mark_seq_source(Arc::clone(&first));
+        graph.set_mark_seq_source(Arc::clone(&second));
+
+        assert_eq!(graph.current_mark_seq(), 7, "the first mark sequence source is retained");
+        first.store(13, Ordering::SeqCst);
+        assert_eq!(graph.current_mark_seq(), 13, "reads continue using the first source");
+    }
+
     /// A drift delivered while a build is in flight (`nudge_rebuild` during `Loading`, or while
     /// a reload runs) is recorded, not dropped: the build's publish re-checks and — seeing disk
     /// moved past what the build captured — claims a follow-up reload whose own publish fires
@@ -1828,42 +1498,6 @@ mod tests {
         let via_map: Vec<(String, u128, u64)> =
             map.iter().map(|(p, (m, l))| (p.clone(), *m, *l)).collect();
         assert_eq!(fold_fingerprint_entries(&via_map), walk, "map fold == walk fold");
-    }
-
-    /// A dropped snapshot's read handle returns to the pool and is reused by the next
-    /// query on the same generation; an entry a publish superseded is discarded at
-    /// checkout instead of serving a new request.
-    #[test]
-    fn snapshot_pool_reuses_and_discards_superseded_handles() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        sample_workspace(root);
-        seed_cache(root, workspace_fingerprint(root));
-
-        let graph = GraphState::for_workspace(root.to_path_buf());
-        graph.ensure_loading();
-        wait_ready(&graph);
-
-        let pool_len = || lock_recover(&graph.snapshot_pool).len();
-        assert_eq!(pool_len(), 0, "no idle handles before the first query");
-        let s1 = graph.snapshot().expect("snapshots");
-        drop(s1);
-        assert_eq!(pool_len(), 1, "the dropped handle parks in the pool");
-        let s2 = graph.snapshot().expect("snapshots");
-        assert_eq!(pool_len(), 0, "the parked handle is checked out, not re-opened");
-        drop(s2);
-        assert_eq!(pool_len(), 1);
-
-        // Re-tag the parked entry with a generation that no longer matches the
-        // published one: the next checkout must discard it and open the current file.
-        {
-            let mut pool = lock_recover(&graph.snapshot_pool);
-            let entry = pool.pop().expect("one parked entry");
-            pool.push(PooledSnapshotEntry { generation: entry.generation + 100, ..entry });
-        }
-        let s3 = graph.snapshot().expect("snapshots");
-        assert_eq!(s3.generation, 7, "a superseded handle never serves a new request");
-        assert_eq!(pool_len(), 0, "the superseded entry was discarded at checkout");
     }
 
     /// A cached build flagged `force_stale` (it straddled a disk write and was never
@@ -4309,52 +3943,6 @@ mod tests {
         assert_eq!(overview.edges, 0, "the caller's edge to the removed method vanished");
     }
 
-    #[test]
-    fn drift_marks_stale_and_async_reload_bumps_generation() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        sample_workspace(root);
-
-        let mut graph = GraphState::for_workspace(root.to_path_buf());
-        // Disable throttling so each check actually scans.
-        graph.drift_interval = Duration::ZERO;
-        graph.ensure_loading();
-        wait_ready(&graph);
-
-        let snap1 = graph.snapshot().expect("ready graph snapshots");
-        let fresh = graph.freshness(&snap1);
-        assert_eq!(fresh.revision, 1);
-        assert!(!fresh.stale);
-        assert_eq!(fresh.reload, "none");
-
-        // Edit a module on disk: a freshness check against the old snapshot must
-        // read as stale and kick a reload that publishes a bumped generation.
-        write(
-            root,
-            "CommonModules/Сервер/Ext/Module.bsl",
-            "&НаСервере\nФункция Считать() Экспорт Возврат 42; КонецФункции",
-        );
-        let drifted = graph.freshness(&snap1);
-        assert!(drifted.stale, "an on-disk edit must read as stale");
-        assert_eq!(drifted.revision, 1, "the stale response still serves the old generation");
-        assert!(matches!(drifted.reload, "running" | "failed"));
-
-        // The async reload publishes generation 2; a fresh snapshot is then clean.
-        let mut settled = None;
-        for _ in 0..200 {
-            let snap = graph.snapshot().expect("snapshot");
-            if snap.generation == 2 {
-                settled = Some(graph.freshness(&snap));
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let settled = settled.expect("reload did not publish a new generation");
-        assert!(!settled.stale);
-        assert_eq!(settled.revision, 2);
-        assert_eq!(settled.reload, "none");
-    }
-
     /// The straightforward sequential scan the parallel per-directory version replaces:
     /// canonicalise every file individually, dedup, in walk order. Kept as the parity
     /// oracle so the optimisation cannot silently change the file universe. Takes explicit
@@ -4455,109 +4043,6 @@ mod tests {
         assert!(
             got.iter().any(|(p, _)| *p == file_root_canonical),
             "a file scan-root must be stat'd, not dropped",
-        );
-    }
-
-    /// A `.bsl` edit delivered by the hub is seen by the very next graph freshness check,
-    /// even with a long drift throttle — the hub drain invalidates the fingerprint cache so
-    /// the throttle is bypassed. Without the hub the edit would stay invisible until the
-    /// throttle expired.
-    #[test]
-    fn graph_freshness_invalidates_on_hub_delivery() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
-        sample_workspace(root);
-
-        let hub = WorkspaceChangeHub::start(vec![root.to_path_buf()]);
-        assert!(hub.wait_until_watching(Duration::from_secs(5)));
-
-        let mut graph = GraphState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
-        // A long throttle: without the hub the edit below would stay invisible this whole time.
-        graph.drift_interval = Duration::from_secs(120);
-        graph.ensure_loading();
-        wait_ready(&graph);
-
-        let snap = graph.snapshot().expect("ready");
-        // Prime the fingerprint cache and subscribe the graph cursor at "now".
-        assert!(!graph.freshness(&snap).stale, "a freshly built graph is not stale");
-
-        // Confirm the hub delivered the edit (so the graph cursor holds it too).
-        let mut observer = hub.subscribe();
-        std::thread::sleep(Duration::from_millis(10));
-        write(
-            root,
-            "CommonModules/Сервер/Ext/Module.bsl",
-            "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции",
-        );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut delivered = false;
-        while Instant::now() < deadline {
-            let batch = hub.drain(observer);
-            observer = batch.cursor;
-            if batch.entries.iter().any(|e| e.raw.to_string_lossy().contains("Module.bsl")) {
-                delivered = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(delivered, "the hub delivered the edit");
-
-        // The next freshness check sees the drift immediately despite the 120s throttle.
-        assert!(
-            graph.freshness(&snap).stale,
-            "a hub-delivered edit is seen without waiting out the drift throttle",
-        );
-    }
-
-    /// An irrelevant file (an editor/tooling temp file) delivered under a scan root must NOT
-    /// invalidate the throttled fingerprint cache — otherwise every freshness check would
-    /// re-run the full scan, reviving the cost the sink exists to avoid.
-    #[test]
-    fn graph_freshness_ignores_non_scan_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
-        sample_workspace(root);
-
-        let hub = WorkspaceChangeHub::start(vec![root.to_path_buf()]);
-        assert!(hub.wait_until_watching(Duration::from_secs(5)));
-
-        let mut graph = GraphState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
-        graph.drift_interval = Duration::from_secs(120);
-        graph.ensure_loading();
-        wait_ready(&graph);
-
-        let snap = graph.snapshot().expect("ready");
-        // Prime the cache + subscribe the cursor; one scan so far.
-        assert!(!graph.freshness(&snap).stale, "a freshly built graph is not stale");
-        let scans_after_prime = graph.scan_count();
-
-        // Deliver only a `.tmp` file — nothing in the graph's `.bsl`/`.xml` universe.
-        let mut observer = hub.subscribe();
-        std::thread::sleep(Duration::from_millis(10));
-        write(root, "CommonModules/Сервер/Ext/Module.bsl.tmp", "editor swap file");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut delivered = false;
-        while Instant::now() < deadline {
-            let batch = hub.drain(observer);
-            observer = batch.cursor;
-            if batch.entries.iter().any(|e| e.raw.to_string_lossy().contains(".tmp")) {
-                delivered = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(delivered, "the hub delivered the .tmp file");
-
-        // The `.tmp` is not scan-relevant, so the cache is NOT invalidated: the 120s throttle
-        // still holds and no fingerprint walk runs. (A temp file never changes the fingerprint
-        // either, so `stale` alone could not catch a spurious re-scan — hence the scan count.)
-        assert!(!graph.freshness(&snap).stale, "a temp file does not make the graph stale");
-        assert_eq!(
-            graph.scan_count(),
-            scans_after_prime,
-            "an irrelevant temp file must not invalidate the cache and re-trigger a scan",
         );
     }
 
