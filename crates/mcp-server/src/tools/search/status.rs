@@ -1,0 +1,771 @@
+use super::{
+    acquire_engine_within, engine_lock_poisoned_error, format_baseline_ref, AcquireFailure,
+};
+use crate::baseline::{
+    BaselineStatusProbe, ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState,
+};
+use crate::state::{OverlayWarmupState, SemanticRuntimeStatus, WorkspaceSearchMode};
+use crate::tools::response::structured;
+use bsl_search::{IndexProgress, SearchEngine};
+use rmcp::model::{CallToolResult, Content};
+use rmcp::ErrorData as McpError;
+use serde_json::json;
+use std::collections::HashSet;
+use std::fmt::Write;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+
+/// Append live indexing progress to a "still building" message so the failed `search_code`
+/// response carries the same signal as `search(status)`, instead of a flat "try again" that
+/// hides whether the build is progressing or stuck.
+pub(super) fn with_index_progress(message: String, progress: &IndexProgress) -> String {
+    if progress.is_active() {
+        let done_b = progress.done_batches.load(Ordering::Relaxed);
+        let total_b = progress.total_batches.load(Ordering::Relaxed);
+        format!("{message} (indexing {}% — {done_b}/{total_b} batches)", progress.percent())
+    } else {
+        message
+    }
+}
+
+/// Poll-back hint (ms) for a not-ready `search_code` response. Index build and overlay
+/// warmup advance on a multi-second cadence, so a sub-second retry just spins.
+const SEARCH_NOT_READY_RETRY_MS: u64 = 1500;
+
+/// A structured "index not ready yet" envelope for `search_code`, mirroring the `graph`
+/// tool's loading envelope so a programmatic poller reads JSON — a machine `status`, a
+/// retry hint, and a live `progress.active` flag — instead of parsing prose. The human
+/// `detail` (the upstream pending reason, verbatim) is preserved for people.
+///
+/// `progress.active` is always present so a poller can tell "a build is running" (going)
+/// from "no build counting yet" (idle/pre-index); the numeric counters are attached ONLY
+/// while `active`, because [`IndexProgress`] is never `reset()` — an inactive object can
+/// still hold stale totals from a finished or failed attempt, and reporting those as
+/// current progress would mislead. The pretty-JSON text mirror keeps the response readable.
+pub(super) fn search_not_ready(detail: &str, progress: &IndexProgress) -> CallToolResult {
+    let mut prog = json!({ "active": progress.is_active() });
+    if progress.is_active() {
+        prog["pct"] = json!(progress.percent());
+        prog["batches"] = json!({
+            "done": progress.done_batches.load(Ordering::Relaxed),
+            "total": progress.total_batches.load(Ordering::Relaxed),
+        });
+        prog["chunks"] = json!({
+            "done": progress.done_chunks.load(Ordering::Relaxed),
+            "total": progress.total_chunks.load(Ordering::Relaxed),
+        });
+    }
+    structured(json!({
+        "status": "not_ready",
+        "detail": detail,
+        "retry_after_ms": SEARCH_NOT_READY_RETRY_MS,
+        "progress": prog,
+    }))
+}
+
+/// The `not_ready` retry envelope for a query that arrived while the deferred baseline
+/// connect is still running. Distinct from the `baseline_unavailable` config errors: the
+/// agent should simply retry in a few seconds, not go fix configuration or restart.
+pub(crate) fn baseline_warming_not_ready(progress: &IndexProgress) -> CallToolResult {
+    search_not_ready("connecting to the shared PostgreSQL baseline (startup warmup)", progress)
+}
+
+#[allow(clippy::too_many_arguments, reason = "distinct status inputs, mirrored by _with_cap")]
+pub fn search_status(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+    progress: &Arc<IndexProgress>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    workspace_search_mode: WorkspaceSearchMode,
+    overlay_warmup: OverlayWarmupState,
+    configured_baseline: Option<ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
+    baseline_pending: bool,
+) -> Result<CallToolResult, McpError> {
+    // Status is a polling primitive: agents call it in a loop to decide when search is usable,
+    // so it answers within the cap and degrades to the "busy" note instead of waiting out a
+    // long engine hold (overlay warmup, a slow embed). The trade-off is real: while something
+    // holds the engine for longer than the cap, status reports no counts / overlay stats —
+    // that is preferred over a poll that blocks for tens of seconds.
+    search_status_with_cap(
+        engine,
+        progress,
+        semantic_runtime,
+        workspace_search_mode,
+        overlay_warmup,
+        configured_baseline,
+        external_baseline,
+        baseline_pending,
+        std::time::Duration::from_secs(2),
+    )
+}
+
+/// The status body, parameterized over the engine-acquire cap so tests can drive the timeout
+/// (busy) branch without a multi-second sleep. Production goes through [`search_status`].
+// Each argument is a distinct status input (engine, progress, runtime status, mode, warmup
+// outcome, baselines) plus the test-only acquire cap; bundling them into a context struct would
+// only rename the same fields, so the one-over-limit arity is accepted here.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn search_status_with_cap(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+    progress: &Arc<IndexProgress>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    workspace_search_mode: WorkspaceSearchMode,
+    overlay_warmup: OverlayWarmupState,
+    configured_baseline: Option<ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
+    baseline_pending: bool,
+    engine_acquire_cap: std::time::Duration,
+) -> Result<CallToolResult, McpError> {
+    let mut out = String::new();
+
+    let semantic_runtime = semantic_runtime
+        .lock()
+        .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
+        .clone();
+    // One non-blocking probe feeds every baseline-derived line below (summary wording, source
+    // labels, the External baseline section). Status makes NO network round-trips of its own:
+    // the probe serves the last completed background probe and re-kicks one when stale.
+    let baseline_probe = external_baseline.as_ref().map(|service| service.probe_status_cached());
+    // Cap the wait so status never hangs to the MCP client timeout while the overlay warmup or a
+    // peer search holds the engine. On a genuine stall we still report the baseline + runtime
+    // sections (which need no engine lock) and note the local index as busy.
+    let guard = match acquire_engine_within(
+        engine,
+        engine_acquire_cap,
+        std::time::Duration::from_millis(25),
+    ) {
+        Ok(g) => Some(g),
+        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
+        Err(AcquireFailure::TimedOut) => None,
+    };
+    // Measure how long the engine lock is held across the status build so a future stall is
+    // diagnosable from `BSL_LOG=debug` alone (the release binary cannot be stack-traced).
+    let guard_held_start = std::time::Instant::now();
+    let engine_busy = guard.is_none();
+    // Drive the summary's lexical-availability claim off the real engine state: "ready" only when
+    // the engine is published and not held, so status never tells the agent the local index is
+    // live while it is still building or a long operation holds the lock.
+    let engine_state = if engine_busy {
+        SummaryEngineState::Busy
+    } else if guard.as_ref().is_some_and(|g| g.as_ref().is_some()) {
+        SummaryEngineState::Ready
+    } else {
+        SummaryEngineState::Building
+    };
+
+    // Prepend a plain-language summary an agent can act on directly: the detailed field list
+    // below is precise but hard to interpret, and a bare `Ready` + empty overlay is ambiguous
+    // between "no local diffs" and "warmup failed". Synthesized from the runtime status, the
+    // workspace mode, the overlay warmup outcome, the engine readiness, and whether a published
+    // baseline is present.
+    write_summary_block(
+        &mut out,
+        &semantic_runtime,
+        &workspace_search_mode,
+        &overlay_warmup,
+        configured_baseline.as_ref(),
+        external_baseline.as_ref(),
+        baseline_probe.as_ref(),
+        engine_state,
+    );
+
+    // Pending is only reachable on the postgres path (a Connect plan exists for no other
+    // backend), so the placeholder backend below is accurate by construction.
+    if baseline_pending && configured_baseline.is_none() {
+        let _ = writeln!(out, "Configured baseline:");
+        let _ = writeln!(out, "  Backend:  postgres");
+        let _ = writeln!(
+            out,
+            "  Status:   connecting to the shared baseline (startup warmup) — retry shortly"
+        );
+        let _ = writeln!(out);
+    }
+
+    if let Some(configured_baseline) = configured_baseline.as_ref() {
+        let _ = writeln!(out, "Configured baseline:");
+        let _ = writeln!(out, "  Backend:  {}", configured_baseline.backend);
+        let _ = writeln!(out, "  Select:   {}", configured_baseline.selection);
+        let _ = writeln!(
+            out,
+            "  Status:   {}",
+            configured_baseline.issue.as_deref().unwrap_or("ready")
+        );
+        if let Some(support) = configured_baseline.support.as_ref() {
+            let _ = writeln!(out, "  Support:  {}", support.state.as_str());
+            let _ = writeln!(out, "  Reason:   {}", support.reason);
+            let _ = writeln!(
+                out,
+                "  Policy:   stale after {}d, expire after {}d",
+                support.stale_after_days, support.expire_after_days
+            );
+            if matches!(support.state, project_model::SearchBaselineSupportState::Expired) {
+                let _ = writeln!(out, "  Action:   update the branch from develop and restart MCP");
+            }
+        }
+        let _ = writeln!(out);
+    }
+
+    if let Some(engine) = guard.as_ref().and_then(|g| g.as_ref()) {
+        let counts_start = std::time::Instant::now();
+        let files = engine.file_count().unwrap_or(0);
+        let chunks = engine.chunk_count().unwrap_or(0);
+        let vectors = engine.vector_count();
+        let semantic = engine.has_semantic();
+        tracing::debug!(
+            elapsed_ms = counts_start.elapsed().as_millis() as u64,
+            "search.status: engine counts (file/chunk/vector/semantic)"
+        );
+
+        let embed_code_start = std::time::Instant::now();
+        let code_vectors = engine.embedding_count_by_collection("code").unwrap_or(0);
+        tracing::debug!(
+            elapsed_ms = embed_code_start.elapsed().as_millis() as u64,
+            "search.status: embedding_count_by_collection code"
+        );
+        let embed_platform_start = std::time::Instant::now();
+        let platform_vectors = engine.embedding_count_by_collection("platform").unwrap_or(0);
+        tracing::debug!(
+            elapsed_ms = embed_platform_start.elapsed().as_millis() as u64,
+            "search.status: embedding_count_by_collection platform"
+        );
+
+        let search_state = match &semantic_runtime {
+            SemanticRuntimeStatus::Failed(_) => "ready (semantic runtime failed)",
+            // Honest about the window the watcher/overlay sync briefly holds the engine lock:
+            // a concurrent search_code now queues behind that hold (it blocks on the engine
+            // mutex rather than failing) and returns real results once the sync frees the lock,
+            // so the agent should expect a brief wait, not a "warming up" error.
+            SemanticRuntimeStatus::OverlaySyncing => {
+                "ready — overlay syncing (a concurrent search_code briefly queues behind the sync, then returns results)"
+            }
+            SemanticRuntimeStatus::Indexing => {
+                "ready (lexical) — semantic index building in background"
+            }
+            _ => "ready",
+        };
+        let _ = writeln!(out, "Search index: {search_state}");
+        let _ = writeln!(out, "  Files:    {files}");
+        let _ = writeln!(out, "  Chunks:   {chunks}");
+        let _ = writeln!(
+            out,
+            "  Vectors:  {vectors} (code: {code_vectors}, platform: {platform_vectors})"
+        );
+        let semantic_status = match &semantic_runtime {
+            SemanticRuntimeStatus::Disabled => {
+                if semantic {
+                    "available".to_owned()
+                } else {
+                    "not configured (set EMBEDDING_URL)".to_owned()
+                }
+            }
+            SemanticRuntimeStatus::OverlaySyncing => match workspace_search_mode {
+                WorkspaceSearchMode::PostgresRemoteOverlay => {
+                    "syncing local overlay embeddings against remote baseline".to_owned()
+                }
+                WorkspaceSearchMode::SqliteLocal => "syncing local semantic index".to_owned(),
+            },
+            SemanticRuntimeStatus::Indexing => with_index_progress(
+                "building local semantic index in background".to_owned(),
+                progress,
+            ),
+            SemanticRuntimeStatus::Ready => match workspace_search_mode {
+                WorkspaceSearchMode::PostgresRemoteOverlay => {
+                    if semantic {
+                        "available (remote baseline semantic + local overlay only)".to_owned()
+                    } else {
+                        "not configured (set EMBEDDING_URL)".to_owned()
+                    }
+                }
+                WorkspaceSearchMode::SqliteLocal => {
+                    if semantic {
+                        "available (local sqlite + local overlay)".to_owned()
+                    } else {
+                        "not configured (set EMBEDDING_URL)".to_owned()
+                    }
+                }
+            },
+            SemanticRuntimeStatus::Failed(_) => "failed (inspect status)".to_owned(),
+        };
+        let _ = writeln!(out, "  Semantic: {semantic_status}");
+        let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
+        let _ = writeln!(out, "  Collections: code, platform");
+        let overlay_stats_start = std::time::Instant::now();
+        let workspace_overlay = engine
+            .workspace_overlay_stats()
+            .map_err(|e| McpError::internal_error(format!("overlay status error: {e}"), None))?;
+        tracing::debug!(
+            elapsed_ms = overlay_stats_start.elapsed().as_millis() as u64,
+            "search.status: workspace_overlay_stats"
+        );
+        if let Some(source) = external_baseline.as_ref() {
+            match source.corpus() {
+                bsl_search::CorpusId::WorkspaceCode => {
+                    // The display label only needs to know whether a baseline snapshot resolved
+                    // on the last probe — worth neither a PG round-trip nor a document load here.
+                    let code_lexical_source = match baseline_probe.as_ref() {
+                        Some(BaselineStatusProbe::Cached(cached))
+                            if matches!(
+                                cached.status.state,
+                                ExternalBaselineState::Ready { .. }
+                            ) =>
+                        {
+                            "external baseline + local overlay"
+                        }
+                        Some(BaselineStatusProbe::Pending) => {
+                            "external baseline (status probe pending) + local overlay"
+                        }
+                        _ => "local sqlite + local overlay",
+                    };
+                    let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
+                    let code_semantic_source = match (
+                        &semantic_runtime,
+                        workspace_search_mode.clone(),
+                    ) {
+                        (SemanticRuntimeStatus::Disabled, _) => {
+                            "not configured (set EMBEDDING_URL)".to_owned()
+                        }
+                        (SemanticRuntimeStatus::Indexing, _) => {
+                            "local sqlite semantic index building in background".to_owned()
+                        }
+                        (
+                            SemanticRuntimeStatus::OverlaySyncing,
+                            WorkspaceSearchMode::PostgresRemoteOverlay,
+                        ) => "remote baseline semantic + local overlay sync in progress".to_owned(),
+                        (
+                            SemanticRuntimeStatus::OverlaySyncing,
+                            WorkspaceSearchMode::SqliteLocal,
+                        ) => "local sqlite + local overlay sync in progress".to_owned(),
+                        (
+                            SemanticRuntimeStatus::Ready,
+                            WorkspaceSearchMode::PostgresRemoteOverlay,
+                        ) => {
+                            if baseline_probe_unreachable(baseline_probe.as_ref()) {
+                                "shared baseline not currently reachable (see the External baseline section); local overlay only".to_owned()
+                            } else if matches!(
+                                baseline_probe.as_ref(),
+                                Some(BaselineStatusProbe::Pending)
+                            ) {
+                                "remote baseline semantic (status probe pending) + local overlay only".to_owned()
+                            } else {
+                                "remote baseline semantic + local overlay only".to_owned()
+                            }
+                        }
+                        (SemanticRuntimeStatus::Ready, WorkspaceSearchMode::SqliteLocal) => {
+                            if semantic {
+                                "local sqlite + local overlay".to_owned()
+                            } else {
+                                "not configured (set EMBEDDING_URL)".to_owned()
+                            }
+                        }
+                        (SemanticRuntimeStatus::Failed(_), _) => "failed".to_owned(),
+                    };
+                    let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
+                }
+                bsl_search::CorpusId::Reference => {
+                    // Same probe-derived label as the workspace arm: no PG round-trip and no
+                    // reference-corpus document load just to word a display line.
+                    let docs_lexical_source = match baseline_probe.as_ref() {
+                        Some(BaselineStatusProbe::Cached(cached))
+                            if matches!(
+                                cached.status.state,
+                                ExternalBaselineState::Ready { .. }
+                            ) =>
+                        {
+                            "external baseline"
+                        }
+                        Some(BaselineStatusProbe::Pending) => {
+                            "external baseline (status probe pending)"
+                        }
+                        _ => "local sqlite",
+                    };
+                    let _ = writeln!(out, "  Docs lexical source: {docs_lexical_source}");
+                    let docs_semantic_source = if semantic {
+                        "local semantic cache of external baseline"
+                    } else {
+                        "not configured (set EMBEDDING_URL)"
+                    };
+                    let _ = writeln!(out, "  Docs semantic source: {docs_semantic_source}");
+                }
+                bsl_search::CorpusId::Custom(_) => {}
+            }
+        } else if workspace_overlay.is_some() {
+            let _ = writeln!(out, "  Code lexical source: local sqlite + local overlay");
+            let code_semantic_source = if semantic {
+                "local sqlite + local overlay"
+            } else {
+                "not configured (set EMBEDDING_URL)"
+            };
+            let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
+        } else {
+            let _ = writeln!(out, "  Docs lexical source: local sqlite");
+            let docs_semantic_source =
+                if semantic { "local sqlite" } else { "not configured (set EMBEDDING_URL)" };
+            let _ = writeln!(out, "  Docs semantic source: {docs_semantic_source}");
+        }
+
+        if let Some(overlay) = workspace_overlay {
+            let resolve_local_start = std::time::Instant::now();
+            let local_view = engine.resolve_workspace_code_view().map_err(|e| {
+                McpError::internal_error(format!("resolved workspace view error: {e}"), None)
+            })?;
+            tracing::debug!(
+                elapsed_ms = resolve_local_start.elapsed().as_millis() as u64,
+                "search.status: resolve_workspace_code_view (local store)"
+            );
+            if let Some(view) = local_view {
+                let files: HashSet<&str> =
+                    view.documents().iter().map(|document| document.path.as_str()).collect();
+                let _ = writeln!(out);
+                let _ = writeln!(out, "Resolved workspace view: ready");
+                let _ = writeln!(out, "  Baseline: {}", format_baseline_ref(view.baseline()));
+                let _ = writeln!(out, "  Files:    {}", files.len());
+                let _ = writeln!(out, "  Chunks:   {}", view.documents().len());
+            }
+
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Workspace overlay: enabled");
+            let _ = writeln!(out, "  Files:    {}", overlay.overlay_files);
+            let _ = writeln!(out, "  Deleted:  {}", overlay.deleted_files);
+            let _ = writeln!(out, "  Hidden:   {}", overlay.hidden_paths);
+            let _ = writeln!(out, "  Chunks:   {}", overlay.lexical_chunks);
+            let _ = writeln!(out, "  Semantic: {}", overlay.semantic_chunks);
+            let _ = writeln!(out, "  Cached embeddings: {}", overlay.cached_embeddings);
+            let _ = writeln!(
+                out,
+                "  Watcher mode: {}",
+                if overlay.watcher_mode { "enabled" } else { "polling" }
+            );
+            let _ = writeln!(out, "  Pending dirty paths: {}", overlay.pending_dirty_paths);
+        }
+    } else if engine_busy {
+        let _ = writeln!(out, "Local index: busy (overlay syncing)");
+    } else {
+        let _ = writeln!(out, "Search index: building (background initialization in progress)");
+    }
+
+    // Everything below is engine-free; release the lock now so a concurrent search never
+    // queues behind status rendering. `index_building` is captured while the guard is held.
+    let index_building = guard.as_ref().is_some_and(|g| g.is_none());
+    if !engine_busy {
+        tracing::debug!(
+            elapsed_ms = guard_held_start.elapsed().as_millis() as u64,
+            "search.status: total time holding engine guard"
+        );
+    }
+    drop(guard);
+
+    if let Some(external_baseline) = external_baseline {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "External baseline: configured");
+        match baseline_probe.as_ref() {
+            None | Some(BaselineStatusProbe::Pending) => {
+                let _ = writeln!(out, "  Backend:  postgres");
+                let _ = writeln!(out, "  Schema:   {}", external_baseline.schema_for_status());
+                let _ = writeln!(out, "  Select:   {}", external_baseline.selection());
+                let _ = writeln!(
+                    out,
+                    "  Status:   probing the shared baseline in the background — retry shortly"
+                );
+            }
+            Some(BaselineStatusProbe::Cached(cached)) => {
+                let status = &cached.status;
+                let _ = writeln!(out, "  Backend:  {}", status.backend);
+                let _ = writeln!(out, "  Schema:   {}", status.schema);
+                let _ = writeln!(out, "  Select:   {}", status.selection);
+                if let Some(resolved) = status.resolved.as_deref() {
+                    let _ = writeln!(out, "  Resolved: {}", resolved);
+                }
+                let _ = writeln!(
+                    out,
+                    "  Probed:   {}s ago (served from cache; re-probed in background when stale)",
+                    cached.age().as_secs()
+                );
+                match &status.state {
+                    ExternalBaselineState::Ready { snapshot_id, fingerprint, documents, files } => {
+                        let _ = writeln!(out, "  Status:   ready");
+                        let _ = writeln!(out, "  Snapshot: {}", snapshot_id);
+                        let _ = writeln!(out, "  Files:    {}", files);
+                        let _ = writeln!(out, "  Chunks:   {}", documents);
+                        if let Some(fingerprint) = fingerprint.as_deref() {
+                            let _ = writeln!(
+                                out,
+                                "  Fingerprint: {}",
+                                shorten_fingerprint(fingerprint)
+                            );
+                        }
+                        match external_baseline.corpus() {
+                            bsl_search::CorpusId::WorkspaceCode => {
+                                // "Ready" already implies the snapshot resolved during the
+                                // probe; searches re-resolve fresh on their own path, so the
+                                // line reports probe-time truth without another round-trip.
+                                let _ = writeln!(out, "  Resolved view: ready (as of last probe)");
+                            }
+                            bsl_search::CorpusId::Reference => {
+                                if let Some(local_fingerprint) =
+                                    external_baseline.local_reference_fingerprint()
+                                {
+                                    let freshness = match fingerprint.as_deref() {
+                                        Some(shared) if shared == local_fingerprint => "up to date",
+                                        Some(_) => "stale",
+                                        None => "unknown",
+                                    };
+                                    let _ = writeln!(out, "  Freshness: {}", freshness);
+                                    let _ = writeln!(
+                                        out,
+                                        "  Local fingerprint: {}",
+                                        shorten_fingerprint(&local_fingerprint)
+                                    );
+                                }
+                                let _ = writeln!(out, "  Resolved view: ready (as of last probe)");
+                            }
+                            bsl_search::CorpusId::Custom(_) => {}
+                        }
+                    }
+                    ExternalBaselineState::Missing => {
+                        let _ = writeln!(out, "  Status:   not found");
+                    }
+                    ExternalBaselineState::Error(error) => {
+                        let _ = writeln!(out, "  Status:   error");
+                        let _ = writeln!(out, "  Error:    {}", error);
+                    }
+                }
+            }
+        }
+    }
+
+    // Always surface a progress signal while the index is building (engine not yet ready)
+    // or an overlay re-index is active — never a bare "building" line with nothing to poll.
+    // Live counters are shown ONLY while `active` (a build is genuinely counting); an
+    // inactive build object can hold stale totals from a finished/failed attempt (it is
+    // never reset()), so we report a phase line instead of misleading numbers.
+    // Genuinely building = we held the lock but the engine was not yet published. A busy timeout
+    // (no guard) is reported separately above as "Local index: busy", not as initializing.
+    if progress.is_active() {
+        let total = progress.total_chunks.load(Ordering::Relaxed);
+        let done = progress.done_chunks.load(Ordering::Relaxed);
+        let total_b = progress.total_batches.load(Ordering::Relaxed);
+        let done_b = progress.done_batches.load(Ordering::Relaxed);
+        let pct = progress.percent();
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "Indexing in progress: {pct}%");
+        let _ = writeln!(out, "  Batches:  {done_b}/{total_b}");
+        let _ = writeln!(out, "  Chunks:   {done}/{total}");
+    } else if index_building {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "Indexing pending: initializing (no live counters yet)");
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "Note: code snippets are secret-redacted (credential-like values shown as ***); \
+         treat snippet text as sanitized, not byte-exact."
+    );
+
+    Ok(CallToolResult::success(vec![Content::text(out)]))
+}
+
+/// Write the plain-language Summary block an LLM agent reads first. It states, in three to four
+/// short lines: what the working tree of lexical search reflects, where semantic ([S]) results
+/// come from, and the overlay warmup outcome (so "no local diffs" is never confused with a failed
+/// warmup). All ASCII so the output stays portable across terminals.
+/// Engine readiness for the summary's lexical-availability line, derived from the (capped) engine
+/// acquire: `Ready` only when the engine is published and the lock was obtained, so status never
+/// claims the local index is live while it is still building or a long operation holds the lock.
+enum SummaryEngineState {
+    Ready,
+    Busy,
+    Building,
+}
+
+/// The summary's claim about baseline-served semantic search must not outrun the probe:
+/// before the first background probe lands the availability is unconfirmed, and a probe
+/// that ended in Missing/Error means the shared baseline is not currently reachable.
+fn baseline_semantic_summary(
+    baseline_selection: &str,
+    baseline_probe: Option<&BaselineStatusProbe>,
+) -> String {
+    match baseline_probe {
+        Some(BaselineStatusProbe::Pending) => format!(
+            "{baseline_selection} baseline configured; first background status probe still running — retry shortly."
+        ),
+        Some(BaselineStatusProbe::Cached(cached))
+            if !matches!(cached.status.state, ExternalBaselineState::Ready { .. }) =>
+        {
+            "shared baseline is not currently reachable (see the External baseline section)."
+                .to_owned()
+        }
+        _ => format!("served from the {baseline_selection} baseline (published index)."),
+    }
+}
+
+/// True when the last completed probe says the shared baseline is Missing or errored —
+/// the one case where summary lines must stop claiming baseline-backed availability.
+/// A pending probe is merely unconfirmed, not unreachable.
+fn baseline_probe_unreachable(baseline_probe: Option<&BaselineStatusProbe>) -> bool {
+    matches!(
+        baseline_probe,
+        Some(BaselineStatusProbe::Cached(cached))
+            if !matches!(cached.status.state, ExternalBaselineState::Ready { .. })
+    )
+}
+
+#[allow(clippy::too_many_arguments, reason = "distinct status inputs, mirrors search_status")]
+fn write_summary_block(
+    out: &mut String,
+    semantic_runtime: &SemanticRuntimeStatus,
+    workspace_search_mode: &WorkspaceSearchMode,
+    overlay_warmup: &OverlayWarmupState,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<&Arc<ExternalBaselineService>>,
+    baseline_probe: Option<&BaselineStatusProbe>,
+    engine_state: SummaryEngineState,
+) {
+    // Reference profile = an external docs baseline (no local workspace code overlay). Its wording
+    // differs: it indexes reference docs, not a working tree, and has no local overlay to (re)build.
+    let is_reference = external_baseline
+        .is_some_and(|source| matches!(source.corpus(), bsl_search::CorpusId::Reference));
+    let has_baseline = external_baseline.is_some();
+    let is_overlay_mode =
+        matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay);
+
+    let _ = writeln!(out, "Summary:");
+
+    let lexical_line = match engine_state {
+        SummaryEngineState::Busy => {
+            "temporarily unavailable - a background operation holds the index; retry shortly."
+        }
+        SummaryEngineState::Building => "index still building; not ready yet.",
+        SummaryEngineState::Ready if is_reference => {
+            "reference docs index (platform documentation)."
+        }
+        SummaryEngineState::Ready => {
+            "reflects the current working tree (baseline committed code + live local edits via the file watcher)."
+        }
+    };
+    let _ = writeln!(out, "  Lexical search: {lexical_line}");
+
+    let baseline_selection =
+        configured_baseline.map(|b| b.selection.as_str()).unwrap_or("configured");
+    let semantic_line = match (semantic_runtime, workspace_search_mode) {
+        (SemanticRuntimeStatus::Disabled, _) => "not configured (set EMBEDDING_URL).".to_owned(),
+        (SemanticRuntimeStatus::Failed(_), _) => {
+            if baseline_probe_unreachable(baseline_probe) {
+                "semantic runtime reported a failure and the shared baseline is not currently reachable (see below).".to_owned()
+            } else {
+                "baseline available; semantic runtime reported a failure (see below).".to_owned()
+            }
+        }
+        (SemanticRuntimeStatus::OverlaySyncing, _) => {
+            if baseline_probe_unreachable(baseline_probe) {
+                "local overlay still syncing; the shared baseline is not currently reachable (see the External baseline section).".to_owned()
+            } else {
+                "baseline available; local overlay still syncing.".to_owned()
+            }
+        }
+        (SemanticRuntimeStatus::Indexing, _) => {
+            "local semantic index building in background.".to_owned()
+        }
+        (SemanticRuntimeStatus::Ready, WorkspaceSearchMode::PostgresRemoteOverlay) => {
+            baseline_semantic_summary(baseline_selection, baseline_probe)
+        }
+        (SemanticRuntimeStatus::Ready, WorkspaceSearchMode::SqliteLocal) => {
+            if has_baseline {
+                baseline_semantic_summary(baseline_selection, baseline_probe)
+            } else {
+                "local semantic index.".to_owned()
+            }
+        }
+    };
+    let _ = writeln!(out, "  Semantic ([S]) search: {semantic_line}");
+
+    // The local overlay (and its startup-rebuild note) only exist in PostgresRemoteOverlay mode.
+    // For SqliteLocal / reference profiles there is no remote baseline to overlay, so `Pending`
+    // there is the permanent initial value, not an in-progress sync - omit the line entirely.
+    if is_overlay_mode {
+        // `OverlaySyncing` lives in the runtime status, not the warmup outcome; surface it here so
+        // the line is never stale-`Pending` while the runtime says the sync is in flight.
+        let overlay_line = if matches!(semantic_runtime, SemanticRuntimeStatus::OverlaySyncing) {
+            "building (indexing local diffs against the baseline)...".to_owned()
+        } else {
+            match overlay_warmup {
+                OverlayWarmupState::Pending => {
+                    "building (indexing local diffs against the baseline)...".to_owned()
+                }
+                OverlayWarmupState::NoLocalDiffs => {
+                    "none needed - working tree matches the baseline, so [S] comes entirely from the baseline.".to_owned()
+                }
+                OverlayWarmupState::Synced { overlay_files, embedded } => format!(
+                    "{overlay_files} locally-changed file(s) indexed ({embedded} chunks); their [S] reflects local edits."
+                ),
+                OverlayWarmupState::Failed(reason) => format!(
+                    "not built (warmup failed: {reason}); [S] still served by the baseline. Restart MCP to retry overlay embedding."
+                ),
+                OverlayWarmupState::Skipped(reason) => format!("disabled ({reason})."),
+            }
+        };
+        let _ = writeln!(out, "  Local overlay semantic: {overlay_line}");
+        let _ = writeln!(
+            out,
+            "  Note: local-only edits are searchable lexically immediately; their semantic index is (re)built at MCP startup."
+        );
+    }
+
+    let _ = writeln!(out);
+}
+
+fn shorten_fingerprint(fingerprint: &str) -> &str {
+    fingerprint.get(..12).unwrap_or(fingerprint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{baseline_warming_not_ready, search_status};
+    use crate::state::{OverlayWarmupState, SemanticRuntimeStatus, WorkspaceSearchMode};
+    use bsl_search::{IndexProgress, SearchEngine};
+    use rmcp::model::ErrorCode;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn baseline_warming_not_ready_preserves_structured_envelope() {
+        let progress = IndexProgress::new();
+        let result = baseline_warming_not_ready(&progress);
+        let body = result.structured_content.as_ref().expect("structured not-ready envelope");
+        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        let mirror: serde_json::Value = serde_json::from_str(text).expect("valid JSON text mirror");
+
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["detail"], "connecting to the shared PostgreSQL baseline (startup warmup)");
+        assert_eq!(body["retry_after_ms"], 1500);
+        assert_eq!(&mirror, body);
+    }
+
+    #[test]
+    fn status_reports_semantic_runtime_lock_poison() {
+        let runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Ready));
+        let poisoner = {
+            let runtime = Arc::clone(&runtime);
+            std::thread::spawn(move || {
+                let _guard = runtime.lock().unwrap();
+                panic!("poison the semantic runtime lock");
+            })
+        };
+        assert!(poisoner.join().is_err());
+
+        let result = search_status(
+            &Arc::new(Mutex::<Option<SearchEngine>>::new(None)),
+            &Arc::new(IndexProgress::default()),
+            &runtime,
+            WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(result.code, ErrorCode::INTERNAL_ERROR);
+        assert!(result.message.contains("semantic runtime lock error"));
+    }
+}
