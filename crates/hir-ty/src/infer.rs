@@ -407,6 +407,16 @@ pub struct InferenceContext<'db> {
     /// enrich a structure local's type with its keys on each read. Empty for bodies with no such
     /// construction → byte-identical default typing. See [`crate::structure_keys`].
     structure_shapes: FxHashMap<String, crate::structure_keys::StructureShape>,
+
+    /// Physical-flag accessibility verdict per callee common module, so a body
+    /// calling the same module many times reads its metadata once instead of
+    /// recording a salsa dependency per call. `None` — not a common module
+    /// (skip); `Some((env, server_call))` — feed the environment compare.
+    callee_module_env: FxHashMap<FileId, Option<(hir_def::execution_env::EnvFlags, bool)>>,
+
+    /// [`method_body_env`] per same-module callee, for the local cross-directive
+    /// accessibility check.
+    local_callee_env: FxHashMap<u32, hir_def::execution_env::EnvFlags>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -573,7 +583,9 @@ fn method_body_env(
     let metadata = db.module_metadata(hir_def::ModuleId { file_id });
     let item_tree = db.item_tree(file_id);
     let mut env = execution_env::method_env(&item_tree, local_id, &metadata, opts);
-    if !env.is_empty() {
+    // The conditional tree costs a syntax walk per file; only files with an
+    // item-level `#Если` can narrow a method's environments through it.
+    if !env.is_empty() && item_tree.has_module_preproc() {
         if let Some(range) = execution_env::method_source_range(&item_tree, local_id) {
             let conditionals = db.conditional_tree(file_id);
             if !conditionals.is_empty() {
@@ -635,6 +647,8 @@ impl<'db> InferenceContext<'db> {
             checked_env: opts.checked_environments,
             global_exports: None,
             structure_shapes: FxHashMap::default(),
+            callee_module_env: FxHashMap::default(),
+            local_callee_env: FxHashMap::default(),
         }
     }
 
@@ -885,6 +899,44 @@ impl<'db> InferenceContext<'db> {
         if self.body_env.is_empty() || callee_module.file_id == self.context_file_id {
             return;
         }
+        // Physical flags per callee module are cached per body: a body calling
+        // the same module many times must not record a salsa dependency per
+        // call.
+        let cached = match self.callee_module_env.get(&callee_module.file_id) {
+            Some(v) => *v,
+            None => {
+                let opts = self.db.env_options();
+                let metadata = self.db.module_metadata(callee_module);
+                let v = metadata
+                    .common_module
+                    .as_ref()
+                    .map(|cm| (execution_env::common_module_env(cm, &opts), cm.is_server_call()));
+                self.callee_module_env.insert(callee_module.file_id, v);
+                v
+            }
+        };
+        let Some((physical_env, physical_server_call)) = cached else { return };
+
+        let missing_with = |env: EnvFlags, server_call: bool| {
+            if env.is_empty() {
+                return EnvFlags::EMPTY;
+            }
+            let mut missing = self.body_env.without(env) & self.checked_env;
+            if server_call {
+                missing = missing.without(EnvFlags::ALL_CLIENTS);
+            }
+            missing
+        };
+
+        // Fast path on the resolved body's physical flags. An extension that
+        // NARROWS an adopted module's flags slips through here as a missed
+        // diagnostic — accepted: adoption in practice widens access
+        // (`ВызовСервера`, client contexts), and the trade keeps the
+        // configuration-scoped lookup off the hot path entirely.
+        if missing_with(physical_env, physical_server_call).is_empty() {
+            return;
+        }
+
         let metadata = self.db.module_metadata(callee_module);
         let Some(physical) = metadata.common_module.as_ref() else { return };
         let name = match module_name {
@@ -892,23 +944,15 @@ impl<'db> InferenceContext<'db> {
             None => Name::new(bsl_metadata::MdObject::name(physical.as_ref())),
         };
         // The caller's own extension may adopt the module and replace its
-        // flags wholesale (enable `ВызовСервера` or client contexts), so the
-        // flags visible TO THE CALLER — not the resolved body's physical XML —
-        // are authoritative. Fall back to the physical flags when the provider
-        // has no configuration scoping.
-        let common_module = self
-            .db
-            .resolve_common_module(self.context_file_id, name.as_str())
-            .unwrap_or_else(|| Arc::clone(physical));
+        // flags wholesale (enable `ВызовСервера` or client contexts), so
+        // before reporting, re-judge against the flags visible TO THE CALLER.
+        // The physical flags stand when the provider has no configuration
+        // scoping.
         let opts = self.db.env_options();
-        let callee_env = execution_env::common_module_env(&common_module, &opts);
-        if callee_env.is_empty() {
-            return;
-        }
-        let mut missing = self.body_env.without(callee_env) & self.checked_env;
-        if common_module.is_server_call() {
-            missing = missing.without(EnvFlags::ALL_CLIENTS);
-        }
+        let caller_scoped = self.db.resolve_common_module(self.context_file_id, name.as_str());
+        let cm = caller_scoped.as_deref().unwrap_or(physical);
+        let missing =
+            missing_with(execution_env::common_module_env(cm, &opts), cm.is_server_call());
         if missing.is_empty() {
             return;
         }
@@ -930,8 +974,15 @@ impl<'db> InferenceContext<'db> {
         if self.body_env.is_empty() {
             return;
         }
-        let opts = self.db.env_options();
-        let callee_env = method_body_env(self.db, self.context_file_id, callee_local_id, &opts);
+        let callee_env = match self.local_callee_env.get(&callee_local_id) {
+            Some(&env) => env,
+            None => {
+                let opts = self.db.env_options();
+                let env = method_body_env(self.db, self.context_file_id, callee_local_id, &opts);
+                self.local_callee_env.insert(callee_local_id, env);
+                env
+            }
+        };
         if callee_env.is_empty() {
             return;
         }

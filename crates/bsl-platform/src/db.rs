@@ -99,13 +99,14 @@ impl PlatformDataInner {
             }
         }
 
-        let global_functions: Vec<GlobalFunction> =
+        let mut global_functions: Vec<GlobalFunction> =
             crate::generated::PLATFORM_GLOBAL_FUNCTIONS.iter().map(GlobalFunction::from).collect();
 
         let mut methods: Vec<PlatformMethod> =
             crate::generated::PLATFORM_METHODS.iter().map(PlatformMethod::from).collect();
 
         apply_docs_gap_method_overlay(&mut methods, &global_functions);
+        apply_docs_gap_member_context_overlay(&mut methods, &mut global_functions);
 
         let mut methods_by_name = FxHashMap::default();
         let mut methods_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
@@ -466,6 +467,39 @@ fn apply_docs_gap_type_context_overlay(types: &mut [PlatformType]) {
             "Shortcut" => context.server = true,
             "ChoiceParameter" | "ColorChooseDialog" => context.web_client = true,
             _ => {}
+        }
+    }
+}
+
+/// Member pages in the help archive occasionally omit environments where the
+/// platform demonstrably supports the member: the promise-style async dialog
+/// functions exist precisely so web-client code can drop modality, and the
+/// standard library formats errors through `ОбработкаОшибок` in universal
+/// client code that runs in the web client. 1C:EDT's availability model
+/// agrees on every such call site. Union the missing environment in.
+fn apply_docs_gap_member_context_overlay(
+    methods: &mut [PlatformMethod],
+    global_functions: &mut [GlobalFunction],
+) {
+    const WEB_CAPABLE_GLOBALS: &[&str] =
+        &["DoMessageBoxAsync", "InputNumberAsync", "OpenValueAsync"];
+    const WEB_CAPABLE_ERROR_PROCESSING: &[&str] =
+        &["DetailErrorDescription", "ErrorDescriptionForUser"];
+
+    for func in global_functions {
+        if WEB_CAPABLE_GLOBALS.contains(&func.english_name.as_str()) {
+            if let Some(context) = &mut func.context {
+                context.web_client = true;
+            }
+        }
+    }
+    for method in methods {
+        if method.type_name == "ErrorProcessingManager"
+            && WEB_CAPABLE_ERROR_PROCESSING.contains(&method.english_name.as_str())
+        {
+            if let Some(context) = &mut method.context {
+                context.web_client = true;
+            }
         }
     }
 }
@@ -837,6 +871,28 @@ mod tests {
             let ctx = ty.context.as_ref().expect("type must carry availability");
             assert!(ctx.web_client, "overlay must add the web-client context to {name}");
         }
+    }
+
+    #[test]
+    fn docs_gap_overlay_widens_member_contexts() {
+        let data = PlatformDataInner::instance();
+        if data.all_methods().is_empty() {
+            return;
+        }
+
+        for name in ["ПредупреждениеАсинх", "ВвестиЧислоАсинх", "ОткрытьЗначениеАсинх"]
+        {
+            let func = data.get_global_function(name).expect("async global must exist");
+            let ctx = func.context.as_ref().expect("async global must carry availability");
+            assert!(ctx.web_client, "overlay must add the web client to {name}");
+            assert!(!ctx.server, "async dialogs stay client-side: {name}");
+        }
+
+        let method = data
+            .get_method("МенеджерОбработкиОшибок", "ПодробноеПредставлениеОшибки")
+            .expect("error-processing method must exist");
+        let ctx = method.context.as_ref().expect("method must carry availability");
+        assert!(ctx.web_client, "overlay must add the web client to ПодробноеПредставлениеОшибки");
     }
 
     #[test]

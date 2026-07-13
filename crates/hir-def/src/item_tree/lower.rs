@@ -62,6 +62,9 @@ impl Ctx {
                         self.lower_variable(&var);
                     }
                 }
+                SyntaxKind::PRE_IF_DIR if !is_inside_method(&node) => {
+                    self.tree.has_module_preproc = true;
+                }
                 _ => {}
             }
         }

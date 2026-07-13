@@ -22,6 +22,11 @@ pub struct ItemTree {
     pub(crate) functions: Arena<Function>,
 
     pub(crate) variables: Arena<Variable>,
+
+    /// The file has a `#Если` region outside any method — only then can an
+    /// item-level preprocessor condition narrow a method's environments, so
+    /// consumers may skip the conditional tree entirely when this is false.
+    pub(crate) has_module_preproc: bool,
 }
 
 impl Default for ItemTree {
@@ -31,6 +36,7 @@ impl Default for ItemTree {
             procedures: Arena::new(),
             functions: Arena::new(),
             variables: Arena::new(),
+            has_module_preproc: false,
         }
     }
 }
@@ -51,6 +57,10 @@ impl ItemTree {
 
     pub fn top_level_items(&self) -> &[ModItem] {
         &self.top_level
+    }
+
+    pub fn has_module_preproc(&self) -> bool {
+        self.has_module_preproc
     }
 
     pub fn procedure(&self, idx: Idx<Procedure>) -> &Procedure {
