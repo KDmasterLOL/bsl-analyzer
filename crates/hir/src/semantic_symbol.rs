@@ -8,6 +8,7 @@ use hir_def::scope::{ExprScopes, ScopeDef};
 use hir_def::{
     BindingId, DefDatabase, DefWithBodyId, ExprId, MethodId, ModuleBodies, ModuleId, VariableId,
 };
+use hir_ty::narrow::{NarrowExprIndex, NarrowState};
 use hir_ty::{db::HirDatabase, ImplicitLocalInfo};
 use rustc_hash::FxHashMap;
 use stdx::case::{fold_lower_per_char, CaseExt};
@@ -120,7 +121,14 @@ pub struct FileSymbolCtx<'db, DB: HirDatabase + base_db::RootQueryDb> {
     module_methods: RefCell<FxHashMap<String, Option<MethodId>>>,
     module_vars: RefCell<FxHashMap<String, Option<VariableId>>>,
     global_exports: OnceCell<FxHashMap<String, MethodId>>,
+    /// Narrowing dataflow per owner. `narrow_or_base` re-runs the whole
+    /// dataflow solve on every call (`db.narrow` is not a tracked query), so
+    /// resolving it per path token is quadratic in the body size; the paired
+    /// index replaces `containing_vertex`'s per-lookup CFG scan.
+    narrow_cache: RefCell<FxHashMap<DefWithBodyId, NarrowEntry>>,
 }
+
+type NarrowEntry = Option<(Arc<dataflow::DataflowResult<NarrowState>>, Arc<NarrowExprIndex>)>;
 
 impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
     pub fn new(db: &'db DB, file_id: FileId) -> Self {
@@ -153,6 +161,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
             module_methods: RefCell::new(FxHashMap::default()),
             module_vars: RefCell::new(FxHashMap::default()),
             global_exports: OnceCell::new(),
+            narrow_cache: RefCell::new(FxHashMap::default()),
         }
     }
 
@@ -541,17 +550,43 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
                 let routed = crate::infer_owner(self.db(), self.file_id, owner);
                 let base_id =
                     routed.type_id_of_expr(expr_id).unwrap_or_else(|| self.db().unknown());
-                return crate::narrow_or_base(
-                    self.db(),
-                    self.file_id,
-                    owner,
-                    body,
-                    expr_id,
-                    base_id,
-                );
+                return self.narrow_or_base_cached(owner, body, expr_id, base_id);
             }
         }
         self.db().unknown()
+    }
+
+    /// `narrow_or_base` through the per-owner cache: one dataflow solve and
+    /// one expression index per body, however many tokens resolve against it.
+    fn narrow_or_base_cached(
+        &self,
+        owner: DefWithBodyId,
+        body: &hir_def::Body,
+        expr_id: ExprId,
+        base: TypeId,
+    ) -> TypeId {
+        if !self.db().type_narrowing_enabled() {
+            return base;
+        }
+        if !matches!(body.expr(expr_id), hir_def::hir::Expr::Path(_)) {
+            return base;
+        }
+        let Some((result, index)) = self.narrow_for(owner, body) else {
+            return base;
+        };
+        crate::narrow_or_base_indexed(self.db(), body, &result, &index, expr_id, base)
+    }
+
+    fn narrow_for(&self, owner: DefWithBodyId, body: &hir_def::Body) -> NarrowEntry {
+        if let Some(hit) = self.narrow_cache.borrow().get(&owner) {
+            return hit.clone();
+        }
+        let entry = self.db().narrow(self.file_id, owner).map(|result| {
+            let index = Arc::new(NarrowExprIndex::build(body, result.cfg()));
+            (result, index)
+        });
+        self.narrow_cache.borrow_mut().insert(owner, entry.clone());
+        entry
     }
 
     fn body_for_token(

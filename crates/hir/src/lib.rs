@@ -174,7 +174,10 @@ pub use hir_ty::infer::{
 };
 pub use hir_ty::method_graph::{infer_method_query, method_return_type_query};
 pub use hir_ty::method_resolution::{resolve_qualified_call, MethodResolution};
-pub use hir_ty::narrow::{narrow_or_base, narrow_query, narrowed_type_at, NarrowState};
+pub use hir_ty::narrow::{
+    narrow_or_base, narrow_or_base_indexed, narrow_query, narrowed_type_at, NarrowExprIndex,
+    NarrowState,
+};
 pub use hir_ty::proc_signature;
 pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
