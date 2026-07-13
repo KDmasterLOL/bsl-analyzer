@@ -59,9 +59,6 @@ pub fn collect_sdbl_via_dispatch(
 
 #[derive(Debug, Clone)]
 pub struct SdblPositionMapper<'a> {
-    #[allow(dead_code)]
-    bsl_literal_range: TextRange,
-
     bsl_source: &'a str,
 
     bsl_literal_line: u32,
@@ -83,14 +80,7 @@ impl<'a> SdblPositionMapper<'a> {
 
         let line_starts = build_line_index(bsl_source);
 
-        Self {
-            bsl_literal_range,
-            bsl_source,
-            bsl_literal_line,
-            bsl_literal_col,
-            line_starts,
-            quote_corrections,
-        }
+        Self { bsl_source, bsl_literal_line, bsl_literal_col, line_starts, quote_corrections }
     }
 
     pub fn new_from_range_with_line_index(
@@ -107,14 +97,7 @@ impl<'a> SdblPositionMapper<'a> {
 
         let line_starts = line_starts.to_vec();
 
-        Self {
-            bsl_literal_range,
-            bsl_source,
-            bsl_literal_line,
-            bsl_literal_col,
-            line_starts,
-            quote_corrections,
-        }
+        Self { bsl_source, bsl_literal_line, bsl_literal_col, line_starts, quote_corrections }
     }
 
     pub fn from_query_info(
