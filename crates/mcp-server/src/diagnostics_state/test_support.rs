@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use crate::change_hub::{SinkCursor, WorkspaceChangeHub};
 
-use super::{lock_recover, DiagnosticsState, DiagnosticsStatus, ResidentOutcome};
+use super::lifecycle::{lock_recover, DiagnosticsState};
+use super::types::{DiagnosticsStatus, ResidentOutcome};
 
 pub(super) fn write(root: &Path, rel: &str, text: &str) {
     let path = root.join(rel);

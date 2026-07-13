@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use super::lifecycle::{lock_recover, DiagnosticsState};
 use super::types::DiagnosticsStatus;
-use super::{lock_recover, DiagnosticsState};
 
 /// The outcome of one [`DiagnosticsState::try_snapshot_once`] pass.
 enum SnapshotAttempt {
