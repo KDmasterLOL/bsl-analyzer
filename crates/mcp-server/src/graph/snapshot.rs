@@ -9,8 +9,8 @@ use crate::change_hub::{ChangeEntry, ChangeKind};
 use crate::graph_query::GraphDb;
 
 use super::scan::scan_file_stats;
+use super::state::{lock_recover, GraphState, ReloadState};
 use super::types::Freshness;
-use super::{lock_recover, GraphState, ReloadState};
 
 /// How often the query-path freshness fold must come from a real walk instead of the
 /// event-maintained map. Bounds how long a change the hub cannot observe can keep
@@ -297,8 +297,8 @@ fn stat_pair(path: &Path) -> Option<(u128, u64)> {
 #[cfg(test)]
 mod tests {
     use super::super::scan::workspace_fingerprint;
+    use super::super::state::{lock_recover, GraphState};
     use super::super::test_support::{sample_workspace, seed_cache, wait_ready, write};
-    use super::super::{lock_recover, GraphState};
     use super::*;
     use crate::change_hub::WorkspaceChangeHub;
     use std::time::Duration;

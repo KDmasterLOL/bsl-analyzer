@@ -5,7 +5,8 @@ use std::time::Duration;
 use crate::cache::graph_db_path;
 use crate::graph_db::build_graph_database;
 
-use super::{GraphState, GraphStatus, GRAPH_BUILD_BATCH};
+use super::build::GRAPH_BUILD_BATCH;
+use super::{GraphState, GraphStatus};
 
 pub(super) fn write(root: &Path, rel: &str, text: &str) {
     let path = root.join(rel);
