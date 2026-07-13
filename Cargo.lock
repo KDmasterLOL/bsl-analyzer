@@ -361,7 +361,6 @@ dependencies = [
  "once_cell",
  "rustc-hash 2.1.2",
  "salsa",
- "serde",
  "serde_json",
  "smol_str",
  "stdx",
@@ -400,10 +399,7 @@ dependencies = [
  "bsl-metadata",
  "elsa",
  "expect-test",
- "intern",
  "rustc-hash 2.1.2",
- "smol_str",
- "tracing",
 ]
 
 [[package]]
@@ -2724,7 +2720,6 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2784,13 +2779,10 @@ dependencies = [
  "expect-test",
  "lexer",
  "parser-error",
- "rayon",
  "smallvec",
  "stdx",
  "syntax",
  "tracing",
- "tracing-subscriber",
- "walkdir",
 ]
 
 [[package]]
@@ -3050,7 +3042,6 @@ dependencies = [
 name = "project-model"
 version = "0.2.59"
 dependencies = [
- "anyhow",
  "base-db",
  "bsl-metadata",
  "chrono",
@@ -4069,9 +4060,7 @@ dependencies = [
  "parser",
  "parser-error",
  "rowan",
- "smol_str",
  "stdx",
- "text-size",
 ]
 
 [[package]]
@@ -4750,7 +4739,6 @@ name = "vfs-notify"
 version = "0.1.28"
 dependencies = [
  "crossbeam-channel",
- "ignore",
  "notify",
  "paths",
  "rustc-hash 2.1.2",

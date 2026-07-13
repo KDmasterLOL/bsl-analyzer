@@ -9,10 +9,7 @@ description = "Type kernel for bsl-analyzer — single source of truth for BSL/S
 [dependencies]
 bsl-config.workspace = true
 bsl-metadata.workspace = true
-intern.workspace = true
-smol_str.workspace = true
 rustc-hash.workspace = true
-tracing.workspace = true
 elsa.workspace = true
 
 [dev-dependencies]
