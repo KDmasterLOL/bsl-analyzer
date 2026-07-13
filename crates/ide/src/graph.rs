@@ -499,6 +499,50 @@ pub type GraphRowSink<'s> =
 /// database needs only its own texts.
 pub type BatchDbOpener<'s> = dyn FnMut(&[ModuleId]) -> RootDatabaseImpl + 's;
 
+/// Release checkpoints of a single batch database. The caller receives the work
+/// summary at each checkpoint so lifecycle observers can record telemetry, but
+/// the helper always performs the drop and cache cleanup regardless of what the
+/// observer does.
+pub enum BatchDbRelease<'a, S> {
+    DatabaseDropped(&'a S),
+    NodeCachesCleared(&'a S),
+}
+
+/// Release the green-node caches accumulated on the driver thread and every pool
+/// worker. The parser dedups subtrees through a thread-local `NodeCache` that
+/// holds strong green-node references and never evicts; across a whole-workspace
+/// build (tens of thousands of unrelated files, re-parsed once per pass) it would
+/// otherwise grow without bound and pin every parsed tree's green storage long
+/// after its `Parse`/Salsa memo and per-batch database are dropped. Clearing it
+/// between batches bounds that residency to a single batch's worth of trees.
+pub(crate) fn clear_node_caches(pool: &rayon::ThreadPool) {
+    syntax::clear_shared_node_cache();
+    pool.broadcast(|_| syntax::clear_shared_node_cache());
+}
+
+/// Open one batch database, run `run` against it, explicitly drop it, then clear
+/// parser node caches. `observe` is called after the drop and after the cache
+/// clear so callers can emit lifecycle events at exactly those boundaries.
+///
+/// This helper exists because the same open/drop/clear sequence is repeated in
+/// every batched graph build: the call-hierarchy compact index, the workspace
+/// graph rows, and incremental reprojection.
+pub fn run_batch_db<S>(
+    batch: &[ModuleId],
+    open_batch: &mut BatchDbOpener<'_>,
+    pool: &rayon::ThreadPool,
+    run: impl FnOnce(&RootDatabaseImpl) -> S,
+    mut observe: impl FnMut(BatchDbRelease<'_, S>),
+) -> S {
+    let db = open_batch(batch);
+    let summary = run(&db);
+    drop(db);
+    observe(BatchDbRelease::DatabaseDropped(&summary));
+    clear_node_caches(pool);
+    observe(BatchDbRelease::NodeCachesCleared(&summary));
+    summary
+}
+
 /// A code chunk projected as a byproduct of the graph pass, for the fused search
 /// index. Mirrors the rows the standalone indexer derives from
 /// [`code_chunk::Chunker`], plus the outbound graph context attached to method
@@ -794,18 +838,6 @@ pub fn build_workspace_graph_rows(
     // that parallelises internally (e.g. metadata loading) to this build's threads.
     let pool = rayon::ThreadPoolBuilder::new().build()?;
 
-    // Release the green-node caches accumulated on the driver thread and every pool
-    // worker. The parser dedups subtrees through a thread-local `NodeCache` that holds
-    // strong green-node references and never evicts; across a whole-workspace build
-    // (tens of thousands of unrelated files, re-parsed once per pass) it would otherwise
-    // grow without bound and pin every parsed tree's green storage long after its
-    // `Parse`/Salsa memo and per-batch database are dropped. Clearing it between batches
-    // bounds that residency to a single batch's worth of trees.
-    let clear_node_caches = || {
-        syntax::clear_shared_node_cache();
-        pool.broadcast(|_| syntax::clear_shared_node_cache());
-    };
-
     // Build the index batch-by-batch: it must cover every resolution target, but
     // only one batch's item trees are resident while it is assembled.
     let mut index = GraphIndex::new();
@@ -813,7 +845,7 @@ pub fn build_workspace_graph_rows(
         note("index", i, batch);
         let db = open_batch(batch);
         index.add_batch(&pool, &db, batch);
-        clear_node_caches();
+        clear_node_caches(&pool);
     }
 
     // Capture each module's body-free signature hash from the resident index, for
@@ -907,7 +939,7 @@ pub fn build_workspace_graph_rows(
                 unresolved_calls.push((scope, method_lower, file));
             }
         }
-        clear_node_caches();
+        clear_node_caches(&pool);
     }
     for (i, batch) in modules.chunks(batch_size).enumerate() {
         note("query_edges", i, batch);
@@ -926,7 +958,7 @@ pub fn build_workspace_graph_rows(
         if let Some(fused) = fused.as_deref_mut() {
             emit_fused_chunks(&db, batch, paths, &index, &mut method_edge_facts, fused)?;
         }
-        clear_node_caches();
+        clear_node_caches(&pool);
     }
     summary.unresolved_calls = unresolved_calls;
 
@@ -943,7 +975,7 @@ pub fn build_workspace_graph_rows(
         let db = open_batch(batch);
         let edges = project_batch_form_edges(&pool, &db, batch, paths, &mut state);
         emit(&edges, &mut summary, &mut seen_aux, sink)?;
-        clear_node_caches();
+        clear_node_caches(&pool);
     }
 
     // Phase D — `contains` edges from the metadata catalog: `mdo → attribute`,
@@ -1097,14 +1129,6 @@ pub fn reproject_changed_modules(
         }
     };
 
-    // See `build_workspace_graph_rows`: the parser's thread-local green-node cache never
-    // evicts, so without clearing it between batches every parsed tree's green storage
-    // stays pinned for the whole index build.
-    let clear_node_caches = || {
-        syntax::clear_shared_node_cache();
-        pool.broadcast(|_| syntax::clear_shared_node_cache());
-    };
-
     // Full index over every module: a changed module's qualified/manager call into an
     // unchanged module must still resolve, so the index cannot be limited to `changed`.
     // The same batch runners as the full build → the same stall class; hence the
@@ -1114,7 +1138,7 @@ pub fn reproject_changed_modules(
         note("reproject_index", i, batch);
         let db = open_batch(batch);
         index.add_batch(&pool, &db, batch);
-        clear_node_caches();
+        clear_node_caches(&pool);
     }
 
     let encoder = GraphRowEncoder::new(&index, paths, workspace_root);

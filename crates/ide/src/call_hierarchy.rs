@@ -1,5 +1,7 @@
-use hir::call_graph::{CallerId, ResolvedTarget};
-use hir::{CallHierarchyReverseIndex, ConfigsDatabase, Definition, Method, MethodId, Semantics};
+use hir::{
+    CallHierarchyReverseIndex, ConfigsDatabase, Definition, Method, MethodCallPair, MethodId,
+    Semantics,
+};
 use ide_db::RootDatabase;
 use rustc_hash::FxHashMap;
 use syntax::{TextRange, TextSize};
@@ -82,16 +84,17 @@ pub fn outgoing_calls<DB: RootDatabase + ConfigsDatabase>(
     let mut by_callee: FxHashMap<MethodId, Vec<TextRange>> = FxHashMap::default();
     let mut order: Vec<MethodId> = Vec::new();
     for edge in &summary.edges {
-        if edge.caller != CallerId::Method(source.local_id) {
+        let Some(pair) = MethodCallPair::from_resolved_edge(source.module, edge) else {
+            continue;
+        };
+        if pair.caller != source {
             continue;
         }
-        if let ResolvedTarget::Method(callee) = &edge.target {
-            let ranges = by_callee.entry(*callee).or_insert_with(|| {
-                order.push(*callee);
-                Vec::new()
-            });
-            ranges.push(edge.range);
-        }
+        let ranges = by_callee.entry(pair.target).or_insert_with(|| {
+            order.push(pair.target);
+            Vec::new()
+        });
+        ranges.push(edge.range);
     }
 
     order
@@ -113,7 +116,7 @@ fn method_at<DB: RootDatabase>(db: &DB, file_id: FileId, offset: TextSize) -> Op
 }
 
 /// Call-site ranges inside `caller` that target `target` — the caller's resolved
-/// summary carries the range each `ResolvedTarget::Method` edge was lowered from.
+/// summary carries the range each method-to-method edge was lowered from.
 fn call_ranges_to_target<DB: ConfigsDatabase>(
     db: &DB,
     caller: MethodId,
@@ -123,9 +126,14 @@ fn call_ranges_to_target<DB: ConfigsDatabase>(
     summary
         .edges
         .iter()
-        .filter(|edge| edge.caller == CallerId::Method(caller.local_id))
-        .filter(|edge| matches!(&edge.target, ResolvedTarget::Method(m) if *m == target))
-        .map(|edge| edge.range)
+        .filter_map(|edge| {
+            let pair = MethodCallPair::from_resolved_edge(caller.module, edge)?;
+            if pair.caller == caller && pair.target == target {
+                Some(edge.range)
+            } else {
+                None
+            }
+        })
         .collect()
 }
 

@@ -1,7 +1,12 @@
 use std::time::{Duration, Instant};
 
+use syntax::{TextRange, TextSize};
+
 use super::{CallHierarchyReverseIndex, MethodCallPair};
-use crate::{MethodId, ModuleId};
+use crate::{
+    call_graph::{CallerId, EdgeKind, EdgeProvenance, ResolvedCallEdge, ResolvedTarget},
+    MethodId, ModuleId,
+};
 
 fn method(file_id: u32, local_id: u32) -> MethodId {
     MethodId { module: ModuleId::new(vfs::FileId(file_id)), local_id }
@@ -128,4 +133,115 @@ fn call_hierarchy_reverse_index_size_estimate_grows_with_capacity() {
     // Then: capacity-backed estimates are nonzero and never decrease.
     assert!(small_size > empty_size);
     assert!(grown_size >= small_size);
+}
+
+#[test]
+fn method_call_pair_from_resolved_edge_includes_call_and_callback_kinds() {
+    // Given: a method caller and a method target.
+    let module = ModuleId::new(vfs::FileId(1));
+    let caller_local = 0;
+    let target = method(2, 0);
+
+    for kind in [
+        EdgeKind::DirectLocal,
+        EdgeKind::DirectQualifiedModule,
+        EdgeKind::NotifyRef,
+        EdgeKind::IdleHandler,
+    ] {
+        let edge = ResolvedCallEdge {
+            caller: CallerId::Method(caller_local),
+            target: ResolvedTarget::Method(target),
+            kind,
+            range: TextRange::empty(TextSize::from(0)),
+            provenance: EdgeProvenance::Resolved,
+        };
+
+        // Then: the edge projects to a method pair.
+        let pair = MethodCallPair::from_resolved_edge(module, &edge).expect("included edge kind");
+        assert_eq!(pair.caller, MethodId { module, local_id: caller_local });
+        assert_eq!(pair.target, target);
+    }
+}
+
+#[test]
+fn method_call_pair_from_resolved_edge_excludes_non_method_endpoints() {
+    // Given: edges with non-method endpoints.
+    let module = ModuleId::new(vfs::FileId(1));
+    let target = method(2, 0);
+
+    // Module-code caller cannot start a hierarchy edge.
+    let module_code_edge = ResolvedCallEdge {
+        caller: CallerId::ModuleCode,
+        target: ResolvedTarget::Method(target),
+        kind: EdgeKind::DirectLocal,
+        range: TextRange::empty(TextSize::from(0)),
+        provenance: EdgeProvenance::Resolved,
+    };
+    assert!(MethodCallPair::from_resolved_edge(module, &module_code_edge).is_none());
+
+    // Metadata and unresolved targets are not hierarchy methods.
+    let mdo_target = ResolvedTarget::Mdo {
+        mdo_type: bsl_metadata::MdoType::Catalog,
+        object_name: crate::name::Name::new("Контрагенты"),
+    };
+    let mdo_edge = ResolvedCallEdge {
+        caller: CallerId::Method(0),
+        target: mdo_target,
+        kind: EdgeKind::DirectLocal,
+        range: TextRange::empty(TextSize::from(0)),
+        provenance: EdgeProvenance::Resolved,
+    };
+    assert!(MethodCallPair::from_resolved_edge(module, &mdo_edge).is_none());
+
+    let unresolved_edge = ResolvedCallEdge {
+        caller: CallerId::Method(0),
+        target: ResolvedTarget::Unresolved(crate::call_graph::CallTarget::Unresolved),
+        kind: EdgeKind::DirectLocal,
+        range: TextRange::empty(TextSize::from(0)),
+        provenance: EdgeProvenance::Resolved,
+    };
+    assert!(MethodCallPair::from_resolved_edge(module, &unresolved_edge).is_none());
+}
+
+#[test]
+fn method_call_pair_from_resolved_edge_excludes_non_hierarchy_edge_kinds() {
+    // Given: an edge whose endpoint shapes are method-only but whose kind is not
+    // part of the call hierarchy (artificial, but proves the exhaustive match).
+    let module = ModuleId::new(vfs::FileId(1));
+    let edge = ResolvedCallEdge {
+        caller: CallerId::Method(0),
+        target: ResolvedTarget::Method(method(2, 0)),
+        kind: EdgeKind::SubsystemMembership,
+        range: TextRange::empty(TextSize::from(0)),
+        provenance: EdgeProvenance::Resolved,
+    };
+
+    // Then: the edge is excluded despite method endpoints.
+    assert!(MethodCallPair::from_resolved_edge(module, &edge).is_none());
+}
+
+#[test]
+fn method_call_pair_group_by_caller_module_preserves_order() {
+    // Given: pairs from two caller modules in a specific order.
+    let first_module = ModuleId::new(vfs::FileId(1));
+    let second_module = ModuleId::new(vfs::FileId(2));
+    let pairs = [
+        pair(method(1, 0), method(3, 0)),
+        pair(method(2, 0), method(3, 1)),
+        pair(method(1, 1), method(3, 2)),
+        pair(method(2, 1), method(3, 3)),
+    ];
+
+    // When: pairs are grouped by caller module.
+    let groups = MethodCallPair::group_by_caller_module(&pairs);
+
+    // Then: each module's vector preserves insertion order.
+    assert_eq!(
+        groups.get(&first_module),
+        Some(&vec![pair(method(1, 0), method(3, 0)), pair(method(1, 1), method(3, 2))])
+    );
+    assert_eq!(
+        groups.get(&second_module),
+        Some(&vec![pair(method(2, 0), method(3, 1)), pair(method(2, 1), method(3, 3))])
+    );
 }

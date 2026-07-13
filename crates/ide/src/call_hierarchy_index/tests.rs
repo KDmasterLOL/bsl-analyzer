@@ -8,6 +8,7 @@ use super::{
     CallHierarchyBatchEventKind, CallHierarchyBatchPhase, CallHierarchyIndexBuildRequest,
     CallHierarchyIndexBuildResult,
 };
+use crate::graph::{run_batch_db, BatchDbRelease};
 use crate::RootDatabaseImpl;
 use hir::{MethodId, ModuleId};
 
@@ -222,4 +223,74 @@ fn bounded_call_hierarchy_index_builder_does_not_enter_query_or_sdbl_phases() {
             CallHierarchyBatchPhase::Index | CallHierarchyBatchPhase::MethodPairs => {}
         }
     }
+}
+
+#[test]
+fn run_batch_db_emits_database_dropped_before_node_caches_cleared() {
+    // Given: a single empty batch and a fresh pool.
+    let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+    let mut opened = 0;
+    let mut open_batch = |_batch: &[ModuleId]| {
+        opened += 1;
+        RootDatabaseImpl::default()
+    };
+    let mut releases = Vec::new();
+
+    // When: the batch runner completes successfully.
+    let summary = run_batch_db(
+        &[],
+        &mut open_batch,
+        &pool,
+        |_db| 42,
+        |release| {
+            let marker = match release {
+                BatchDbRelease::DatabaseDropped(s) => {
+                    assert_eq!(*s, 42);
+                    "dropped"
+                }
+                BatchDbRelease::NodeCachesCleared(s) => {
+                    assert_eq!(*s, 42);
+                    "cleared"
+                }
+            };
+            releases.push(marker);
+        },
+    );
+
+    // Then: the database is opened once, the summary is returned, and release
+    // events arrive in the order the helper promises.
+    assert_eq!(summary, 42);
+    assert_eq!(opened, 1);
+    assert_eq!(releases, vec!["dropped", "cleared"]);
+}
+
+#[test]
+fn run_batch_db_cleans_up_even_when_run_returns_an_error() {
+    // Given: a batch whose work fails.
+    let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+    let mut opened = 0;
+    let mut open_batch = |_batch: &[ModuleId]| {
+        opened += 1;
+        RootDatabaseImpl::default()
+    };
+    let mut dropped = false;
+    let mut cleared = false;
+
+    // When: the runner is invoked with a failing work closure.
+    let result: Result<i32, &'static str> = run_batch_db(
+        &[],
+        &mut open_batch,
+        &pool,
+        |_db| Err("simulated batch failure"),
+        |release| match release {
+            BatchDbRelease::DatabaseDropped(_) => dropped = true,
+            BatchDbRelease::NodeCachesCleared(_) => cleared = true,
+        },
+    );
+
+    // Then: the error is returned, but both cleanup steps still ran.
+    assert_eq!(result, Err("simulated batch failure"));
+    assert_eq!(opened, 1);
+    assert!(dropped, "database must be dropped before the error propagates");
+    assert!(cleared, "node caches must be cleared before the error propagates");
 }

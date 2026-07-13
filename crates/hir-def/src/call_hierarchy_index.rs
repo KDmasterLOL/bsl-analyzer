@@ -3,8 +3,11 @@ use std::mem::size_of;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{MethodId, ModuleId};
+use crate::{call_graph::ResolvedCallEdge, MethodId, ModuleId};
 
+/// One directed edge of the call hierarchy: a caller method and the method it
+/// calls. This is the in-memory unit for both the compact reverse index and the
+/// LSP call-hierarchy responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MethodCallPair {
     pub caller: MethodId,
@@ -14,6 +17,56 @@ pub struct MethodCallPair {
 impl MethodCallPair {
     pub const fn new(caller: MethodId, target: MethodId) -> Self {
         Self { caller, target }
+    }
+
+    /// Projects a resolved semantic edge to a call-hierarchy pair when the edge
+    /// kind and endpoint shapes belong to the method-only hierarchy.
+    ///
+    /// Included edge kinds are direct calls (local and qualified-module) and
+    /// platform-dispatched callbacks (`NotifyRef`, `IdleHandler`). All other
+    /// kinds — metadata touches, queries, form/catalog edges, unresolved refs,
+    /// and module-code callers — are excluded.
+    pub fn from_resolved_edge(module: ModuleId, edge: &ResolvedCallEdge) -> Option<Self> {
+        use crate::call_graph::{CallerId, EdgeKind, ResolvedTarget};
+
+        let caller = match edge.caller {
+            CallerId::Method(local_id) => MethodId { module, local_id },
+            CallerId::ModuleCode => return None,
+        };
+        let target = match edge.target {
+            ResolvedTarget::Method(target) => target,
+            ResolvedTarget::Mdo { .. } | ResolvedTarget::Unresolved(_) => return None,
+        };
+        match edge.kind {
+            EdgeKind::DirectLocal
+            | EdgeKind::DirectQualifiedModule
+            | EdgeKind::NotifyRef
+            | EdgeKind::IdleHandler => Some(Self::new(caller, target)),
+            EdgeKind::ManagerCreates
+            | EdgeKind::ManagerAccess
+            | EdgeKind::QueryRef
+            | EdgeKind::Contains
+            | EdgeKind::DataBinding
+            | EdgeKind::EventSubscriptionRef
+            | EdgeKind::RegisterMovement
+            | EdgeKind::SubsystemMembership
+            | EdgeKind::RoleReference
+            | EdgeKind::RegisterRecords
+            | EdgeKind::RegisterRecordSet => None,
+        }
+    }
+
+    /// Groups a flat pair list by the caller's module, preserving pair order
+    /// within each module. Callers must retrieve groups in their own module/batch
+    /// order; the returned map itself is unordered.
+    pub fn group_by_caller_module(
+        pairs: &[MethodCallPair],
+    ) -> FxHashMap<ModuleId, Vec<MethodCallPair>> {
+        let mut groups: FxHashMap<ModuleId, Vec<MethodCallPair>> = FxHashMap::default();
+        for &pair in pairs {
+            groups.entry(pair.caller.module).or_default().push(pair);
+        }
+        groups
     }
 }
 

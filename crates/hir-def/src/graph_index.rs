@@ -28,6 +28,7 @@ use crate::{
         EdgeKind, EdgeProvenance, GraphMethodEntry, GraphNode, MethodDispatch, ResolvedCallEdge,
         ResolvedModuleSummary, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
     },
+    call_hierarchy_index::MethodCallPair,
     configs::ConfigsDatabase,
     module_index::{module_key_for_path, ModuleKey},
     name::Name,
@@ -472,7 +473,7 @@ pub fn project_batch_method_call_pairs(
     db: &dyn ConfigsDatabase,
     index: &GraphIndex,
     batch: &[ModuleId],
-) -> Vec<(MethodId, MethodId)> {
+) -> Vec<MethodCallPair> {
     let mut pairs = Vec::new();
     let mut seen = FxHashSet::default();
 
@@ -486,26 +487,15 @@ pub fn project_batch_method_call_pairs(
     pairs
 }
 
-fn resolved_summary_method_pairs(summary: &ResolvedModuleSummary) -> Vec<(MethodId, MethodId)> {
-    use crate::call_graph::CallerId;
-
+fn resolved_summary_method_pairs(summary: &ResolvedModuleSummary) -> Vec<MethodCallPair> {
     let mut pairs = Vec::new();
     for edge in &summary.edges {
-        match (&edge.caller, &edge.target) {
-            (CallerId::Method(local_id), ResolvedTarget::Method(target)) => {
-                pairs.push((MethodId { module: summary.module, local_id: *local_id }, *target));
-            }
-            (CallerId::Method(_), ResolvedTarget::Mdo { .. } | ResolvedTarget::Unresolved(_))
-            | (
-                CallerId::ModuleCode,
-                ResolvedTarget::Method(_)
-                | ResolvedTarget::Mdo { .. }
-                | ResolvedTarget::Unresolved(_),
-            ) => {}
+        if let Some(pair) = MethodCallPair::from_resolved_edge(summary.module, edge) {
+            pairs.push(pair);
         }
     }
-    pairs.sort_unstable_by_key(|(caller, target)| {
-        (caller.local_id, target.module.file_id, target.local_id)
+    pairs.sort_unstable_by_key(|pair| {
+        (pair.caller.local_id, pair.target.module.file_id, pair.target.local_id)
     });
     pairs.dedup();
     pairs
@@ -523,6 +513,7 @@ mod method_only_call_pair_tests {
             CallTarget, CallerId, EdgeKind, EdgeProvenance, ResolvedCallEdge,
             ResolvedModuleSummary, ResolvedTarget,
         },
+        call_hierarchy_index::MethodCallPair,
         name::Name,
         MethodId, ModuleId,
     };
@@ -568,8 +559,8 @@ mod method_only_call_pair_tests {
         assert_eq!(
             pairs,
             vec![
-                (MethodId { module, local_id: 0 }, local),
-                (MethodId { module, local_id: 0 }, other)
+                MethodCallPair::new(MethodId { module, local_id: 0 }, local),
+                MethodCallPair::new(MethodId { module, local_id: 0 }, other)
             ],
         );
     }

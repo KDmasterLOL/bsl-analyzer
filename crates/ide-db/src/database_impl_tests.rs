@@ -2746,11 +2746,26 @@ fn project_batch_method_pairs_include_resolved_callbacks_and_exclude_non_methods
     assert_eq!(
         pairs,
         vec![
-            (main, hir::MethodId { module: ModuleId::new(client), local_id: 1 }),
-            (main, hir::MethodId { module: ModuleId::new(client), local_id: 2 }),
-            (main, hir::MethodId { module: ModuleId::new(client), local_id: 3 }),
-            (main, hir::MethodId { module: ModuleId::new(server), local_id: 0 }),
-            (main, hir::MethodId { module: ModuleId::new(manager), local_id: 0 }),
+            hir::MethodCallPair::new(
+                main,
+                hir::MethodId { module: ModuleId::new(client), local_id: 1 }
+            ),
+            hir::MethodCallPair::new(
+                main,
+                hir::MethodId { module: ModuleId::new(client), local_id: 2 }
+            ),
+            hir::MethodCallPair::new(
+                main,
+                hir::MethodId { module: ModuleId::new(client), local_id: 3 }
+            ),
+            hir::MethodCallPair::new(
+                main,
+                hir::MethodId { module: ModuleId::new(server), local_id: 0 }
+            ),
+            hir::MethodCallPair::new(
+                main,
+                hir::MethodId { module: ModuleId::new(manager), local_id: 0 }
+            ),
         ],
         "local, qualified, manager, notify, and idle-handler targets are method-only pairs",
     );
@@ -3089,7 +3104,6 @@ fn compact_call_hierarchy_index(
     batch_size: usize,
 ) -> (hir::graph_index::GraphIndex, hir::CallHierarchyReverseIndex) {
     use hir::graph_index::{project_batch_method_call_pairs, GraphIndex};
-    use hir::MethodCallPair;
 
     let graph_index = GraphIndex::build(db, modules);
 
@@ -3102,10 +3116,7 @@ fn compact_call_hierarchy_index(
                 .expect("indexed fixture module has a layout hash");
             reverse_index.replace_module(
                 module,
-                pairs
-                    .iter()
-                    .filter(|(caller, _)| caller.module == module)
-                    .map(|&(caller, target)| MethodCallPair::new(caller, target)),
+                pairs.iter().filter(|pair| pair.caller.module == module).copied(),
                 layout_hash,
             );
         }
