@@ -313,7 +313,11 @@ impl ModuleBodies {
                     });
                     if !is_inside_method {
                         collect_module_vars(&node, &mut result.module_vars);
-                        top_level_idx += 1;
+                        top_level_idx += node
+                            .children_with_tokens()
+                            .filter_map(|element| element.into_token())
+                            .filter(|token| token.kind() == SyntaxKind::IDENT)
+                            .count() as u32;
                     }
                 }
                 SyntaxKind::PROCEDURE_DEF => {
@@ -605,6 +609,14 @@ mod module_bodies_order_tests {
         let from_lower_results: Vec<u32> = bodies.iter_lower_results().map(|(id, _)| id).collect();
         assert_eq!(from_iter, from_method_bodies);
         assert_eq!(from_iter, from_lower_results);
+    }
+
+    #[test]
+    fn method_after_multi_name_var_decl_uses_item_tree_local_id() {
+        let bodies = lower("Перем A, B; Процедура P() КонецПроцедуры");
+
+        assert!(bodies.body(2).is_some());
+        assert!(bodies.body(1).is_none());
     }
 }
 
