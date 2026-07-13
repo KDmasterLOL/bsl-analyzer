@@ -3,8 +3,8 @@ use hir::{
     MethodCallPair, ModuleId,
 };
 
-use super::{clear_node_caches, CallHierarchyIndexBuildError};
-use crate::graph::BatchDbOpener;
+use super::CallHierarchyIndexBuildError;
+use crate::graph::{run_batch_db, BatchDbOpener};
 
 #[derive(Debug)]
 pub struct CallHierarchyIndexModuleProjection {
@@ -23,23 +23,26 @@ pub fn reproject_call_hierarchy_index_modules(
     let pool = rayon::ThreadPoolBuilder::new().build()?;
     let mut projections = Vec::with_capacity(changed_modules.len());
     for batch in changed_modules.chunks(batch_size) {
-        let db = open_batch(batch);
-        let pairs = project_batch_method_call_pairs(&db, graph_index, batch);
-        let mut refreshed_layouts = GraphIndex::new();
-        refreshed_layouts.add_batch(&pool, &db, batch);
+        let (pairs, refreshed_layouts) = run_batch_db(
+            batch,
+            open_batch,
+            &pool,
+            |db| {
+                let pairs = project_batch_method_call_pairs(db, graph_index, batch);
+                let mut refreshed_layouts = GraphIndex::new();
+                refreshed_layouts.add_batch(&pool, db, batch);
+                (pairs, refreshed_layouts)
+            },
+            |_release| {},
+        );
+        let by_module = MethodCallPair::group_by_caller_module(&pairs);
         for &module in batch {
             let layout_hash = refreshed_layouts
                 .module_layout_hash(module)
                 .ok_or(CallHierarchyIndexBuildError::MissingLayoutHash(module))?;
-            let pairs = pairs
-                .iter()
-                .filter(|(caller, _)| caller.module == module)
-                .map(|&(caller, target)| MethodCallPair::new(caller, target))
-                .collect();
+            let pairs = by_module.get(&module).cloned().unwrap_or_default();
             projections.push(CallHierarchyIndexModuleProjection { module, layout_hash, pairs });
         }
-        drop(db);
-        clear_node_caches(&pool);
     }
 
     Ok(projections)
@@ -54,6 +57,7 @@ mod tests {
 
     use super::*;
     use crate::RootDatabaseImpl;
+    use hir::MethodId;
 
     const ROOT: SourceRootId = SourceRootId(0);
 
@@ -93,6 +97,57 @@ mod tests {
         assert_eq!(projections[0].module, changed_module);
         assert!(projections[0].pairs.is_empty());
         assert_eq!(*batches.borrow(), vec![vec![changed_module]]);
+    }
+
+    #[test]
+    fn call_hierarchy_index_catch_up_groups_pairs_per_module_and_preserves_order() {
+        // Given: two modules, each with one internal call, both edited.
+        let first_module = ModuleId::new(FileId(0));
+        let second_module = ModuleId::new(FileId(1));
+        let modules = [first_module, second_module];
+        let text =
+            "Процедура Первый()\nВторой();\nКонецПроцедуры\n\nПроцедура Второй()\nКонецПроцедуры";
+        let mut target_index = GraphIndex::new();
+        let base = batch_database(&modules, text, text);
+        for &module in &modules {
+            target_index.add_module(&base, module);
+        }
+        let batches = RefCell::new(Vec::new());
+        let mut open_batch = |batch: &[ModuleId]| {
+            batches.borrow_mut().push(batch.to_vec());
+            batch_database(batch, text, text)
+        };
+
+        // When: catch-up reprojects both modules in one batch, in reverse order.
+        let changed_modules = [second_module, first_module];
+        let projections = reproject_call_hierarchy_index_modules(
+            &target_index,
+            changed_modules.len(),
+            &changed_modules,
+            &mut open_batch,
+        )
+        .expect("catch-up projection");
+
+        // Then: both modules are opened together, projections follow changed_modules
+        // order, and each module receives only its own caller-target pair.
+        assert_eq!(*batches.borrow(), vec![vec![second_module, first_module]]);
+        assert_eq!(projections.len(), 2);
+        assert_eq!(projections[0].module, second_module);
+        assert_eq!(projections[1].module, first_module);
+        assert_eq!(
+            projections[0].pairs,
+            vec![MethodCallPair::new(
+                MethodId { module: second_module, local_id: 0 },
+                MethodId { module: second_module, local_id: 1 }
+            )]
+        );
+        assert_eq!(
+            projections[1].pairs,
+            vec![MethodCallPair::new(
+                MethodId { module: first_module, local_id: 0 },
+                MethodId { module: first_module, local_id: 1 }
+            )]
+        );
     }
 
     fn batch_database(

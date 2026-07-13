@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use hir::{graph_index::GraphIndex, CallHierarchyReverseIndex, ModuleId};
 
-use crate::graph::BatchDbOpener;
+use crate::graph::{clear_node_caches, BatchDbOpener};
 
 mod pairs;
 mod reproject;
@@ -167,6 +167,18 @@ impl<'a> BatchLifecycle<'a> {
     }
 }
 
+fn rss_sample(phase: CallHierarchyBatchPhase, batch_index: usize) -> CallHierarchyRssSample {
+    CallHierarchyRssSample { phase, batch_index, bytes: current_rss_bytes() }
+}
+
+fn current_rss_bytes() -> Option<usize> {
+    std::fs::read_to_string("/proc/self/status").ok()?.lines().find_map(|line| {
+        let kibibytes =
+            line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse::<usize>().ok()?;
+        kibibytes.checked_mul(1024)
+    })
+}
+
 /// Builds a compact reverse call index while keeping Salsa and parser residency to one batch.
 pub fn build_call_hierarchy_index(
     request: CallHierarchyIndexBuildRequest<'_>,
@@ -244,23 +256,6 @@ fn build_call_hierarchy_index_with_observer(
         rss_samples,
         elapsed: started.elapsed(),
         estimated_heap_bytes,
-    })
-}
-
-pub(super) fn clear_node_caches(pool: &rayon::ThreadPool) {
-    syntax::clear_shared_node_cache();
-    pool.broadcast(|_| syntax::clear_shared_node_cache());
-}
-
-fn rss_sample(phase: CallHierarchyBatchPhase, batch_index: usize) -> CallHierarchyRssSample {
-    CallHierarchyRssSample { phase, batch_index, bytes: current_rss_bytes() }
-}
-
-fn current_rss_bytes() -> Option<usize> {
-    std::fs::read_to_string("/proc/self/status").ok()?.lines().find_map(|line| {
-        let kibibytes =
-            line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse::<usize>().ok()?;
-        kibibytes.checked_mul(1024)
     })
 }
 

@@ -1,7 +1,7 @@
 use hir::graph_index::GraphIndex;
 
 use super::{BatchLifecycle, CallHierarchyBatchPhase, CallHierarchyIndexBuildRequest};
-use crate::graph::BatchDbOpener;
+use crate::graph::{run_batch_db, BatchDbOpener, BatchDbRelease};
 
 pub(super) fn build_graph_index(
     request: CallHierarchyIndexBuildRequest<'_>,
@@ -29,23 +29,46 @@ pub(super) fn build_graph_index(
             "call hierarchy compact index batch started"
         );
         lifecycle.started(CallHierarchyBatchPhase::Index, batch_index, batch.len());
-        let db = open_batch(batch);
-        graph_index.add_batch(pool, &db, batch);
-        drop(db);
-        tracing::debug!(
-            phase = "pass1",
-            batch_index,
-            batch_size = batch.len(),
-            "call hierarchy compact index batch database dropped"
-        );
-        lifecycle.database_dropped(CallHierarchyBatchPhase::Index, batch_index, batch.len(), 0);
-        lifecycle.node_caches_cleared(pool, CallHierarchyBatchPhase::Index, batch_index);
-        lifecycle.completed(CallHierarchyBatchPhase::Index, batch_index, batch.len(), 0);
-        tracing::debug!(
-            phase = "pass1",
-            batch_index,
-            batch_size = batch.len(),
-            "call hierarchy compact index batch completed"
+        run_batch_db(
+            batch,
+            open_batch,
+            pool,
+            |db| graph_index.add_batch(pool, db, batch),
+            |release| match release {
+                BatchDbRelease::DatabaseDropped(_) => {
+                    tracing::debug!(
+                        phase = "pass1",
+                        batch_index,
+                        batch_size = batch.len(),
+                        "call hierarchy compact index batch database dropped"
+                    );
+                    lifecycle.database_dropped(
+                        CallHierarchyBatchPhase::Index,
+                        batch_index,
+                        batch.len(),
+                        0,
+                    );
+                }
+                BatchDbRelease::NodeCachesCleared(_) => {
+                    lifecycle.node_caches_cleared(
+                        pool,
+                        CallHierarchyBatchPhase::Index,
+                        batch_index,
+                    );
+                    lifecycle.completed(
+                        CallHierarchyBatchPhase::Index,
+                        batch_index,
+                        batch.len(),
+                        0,
+                    );
+                    tracing::debug!(
+                        phase = "pass1",
+                        batch_index,
+                        batch_size = batch.len(),
+                        "call hierarchy compact index batch completed"
+                    );
+                }
+            },
         );
     }
 
