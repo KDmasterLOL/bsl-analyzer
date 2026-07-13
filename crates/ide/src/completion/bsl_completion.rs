@@ -10,6 +10,7 @@ use ide_db::{RootDatabase, TextRange};
 use rustc_hash::FxHashMap;
 use syntax::{ast::AstNode, SyntaxKind};
 
+use super::env_filter::EnvFilter;
 use super::fuzzy::{MatchResult, MatchTier, PrefixMatcher};
 use super::{templates, CompletionItem, CompletionItemKind, CompletionPosition};
 use crate::completion::platform_completion::{render_mdo_field, render_platform_property};
@@ -146,6 +147,7 @@ fn complete_top_level<DB: RootDatabase>(
 
     let mut matcher = PrefixMatcher::new(prefix);
     let freq = build_frequency(db, file_id);
+    let env_filter = EnvFilter::at(db, file_id, offset);
     let in_method = cursor_in_method(db, file_id, offset);
     // Expected type(s) at the cursor (call argument, assignment RHS, or return) —
     // used to float type-matching candidates up (RDT1C's biggest rating factor).
@@ -159,17 +161,25 @@ fn complete_top_level<DB: RootDatabase>(
 
     let locals = complete_local_symbols(db, file_id, offset, &matcher);
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "00_", locals);
-    let user = complete_user_defined_symbols(db, file_id, &matcher, want_fn_types);
+    let user = complete_user_defined_symbols(db, file_id, &matcher, want_fn_types, &env_filter);
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "10_", user);
     let self_attrs = untyped(complete_module_self_attributes(db, file_id, &matcher, locale));
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "15_", self_attrs);
-    let plurals = untyped(complete_mdo_plurals(&matcher));
+    let plurals = untyped(complete_mdo_plurals(&matcher, &env_filter));
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "20_", plurals);
-    let exports = untyped(complete_global_module_exports(db, file_id, &matcher));
+    let (export_items, blocked_exports) =
+        complete_global_module_exports(db, file_id, &matcher, &env_filter);
+    let exports = untyped(export_items);
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "24_", exports);
-    let globals = untyped(complete_hbk_globals(db, file_id, &matcher, locale));
+    // A filtered-out global export still shadows the same-named platform
+    // symbol at call time (Global-CM → Platform precedence), so the label
+    // must not resurface from the platform band.
+    for label in blocked_exports {
+        seen.insert(label.fold_lower());
+    }
+    let globals = untyped(complete_hbk_globals(db, file_id, &matcher, locale, &env_filter));
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "25_", globals);
-    let modules = untyped(complete_user_common_modules(db, file_id, &matcher));
+    let modules = untyped(complete_user_common_modules(db, file_id, &matcher, &env_filter));
     push_band(&mut out, &mut seen, &mut matcher, db, &freq, &expected, "30_", modules);
 
     for scored in templates::complete_templates(&mut matcher, in_method) {
@@ -464,7 +474,7 @@ fn is_expression_start_position(token: &syntax::SyntaxToken) -> bool {
     }
 }
 
-fn complete_mdo_plurals(matcher: &PrefixMatcher) -> Vec<CompletionItem> {
+fn complete_mdo_plurals(matcher: &PrefixMatcher, env: &EnvFilter) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_mdo_plurals").entered();
 
     let mut completions = Vec::new();
@@ -476,6 +486,9 @@ fn complete_mdo_plurals(matcher: &PrefixMatcher) -> Vec<CompletionItem> {
             continue;
         };
         if !matcher.admits_contiguous_bilingual(&prop.name, &prop.english_name) {
+            continue;
+        }
+        if !env.admits_context(prop.context.as_ref()) {
             continue;
         }
         completions.push(render_mdo_plural_with_hbk(mdo_type, prop));
@@ -542,6 +555,7 @@ fn complete_user_common_modules<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
     matcher: &PrefixMatcher,
+    env: &EnvFilter,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_user_common_modules").entered();
 
@@ -549,6 +563,9 @@ fn complete_user_common_modules<DB: RootDatabase>(
 
     for name in module_index_for(db, file_id).common_module_display_names() {
         if !matcher.admits(name) {
+            continue;
+        }
+        if !env.admits_common_module(db, file_id, name) {
             continue;
         }
         completions.push(CompletionItem {
@@ -581,15 +598,21 @@ fn complete_global_module_exports<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
     matcher: &PrefixMatcher,
-) -> Vec<CompletionItem> {
+    env: &EnvFilter,
+) -> (Vec<CompletionItem>, Vec<String>) {
     let _span = tracing::debug_span!("complete_global_module_exports").entered();
 
     let module_id = hir::ModuleId::new(file_id);
     let resolver = hir::Resolver::with_workspace_scope(module_id);
 
     let mut items = Vec::new();
+    let mut blocked = Vec::new();
     for (module_name, method_name, method_id) in resolver.global_common_module_exports(db) {
         if !matcher.admits(method_name.as_str()) {
+            continue;
+        }
+        if !env.admits_common_module(db, file_id, module_name.as_str()) {
+            blocked.push(method_name.as_str().to_string());
             continue;
         }
         let symbol_tree = db.symbol_tree(method_id.module);
@@ -603,7 +626,7 @@ fn complete_global_module_exports<DB: RootDatabase>(
             method,
         ));
     }
-    items
+    (items, blocked)
 }
 
 fn complete_hbk_globals<DB: RootDatabase>(
@@ -611,6 +634,7 @@ fn complete_hbk_globals<DB: RootDatabase>(
     file_id: vfs::FileId,
     matcher: &PrefixMatcher,
     locale: Locale,
+    env: &EnvFilter,
 ) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_hbk_globals").entered();
 
@@ -635,6 +659,9 @@ fn complete_hbk_globals<DB: RootDatabase>(
         if !matcher.admits_contiguous_bilingual(&prop.name, &prop.english_name) {
             continue;
         }
+        if !env.admits_context(prop.context.as_ref()) {
+            continue;
+        }
         if !seen.insert(ru_lower) {
             continue;
         }
@@ -642,7 +669,7 @@ fn complete_hbk_globals<DB: RootDatabase>(
         items.push(render_platform_property(prop, locale));
     }
 
-    items.extend(complete_global_functions(matcher));
+    items.extend(complete_global_functions(matcher, env));
     items
 }
 
@@ -651,6 +678,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
     file_id: vfs::FileId,
     matcher: &PrefixMatcher,
     want_fn_types: bool,
+    env: &EnvFilter,
 ) -> Vec<Candidate> {
     let _span = tracing::debug_span!("complete_user_defined_symbols").entered();
 
@@ -659,11 +687,22 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
     let sema = hir::Semantics::new(db);
     let module = sema.module_from_file(file_id);
 
+    let opts = db.env_options();
+    let metadata = db.module_metadata(hir::ModuleId::new(file_id));
+    let symbol_tree = db.symbol_tree(hir::ModuleId::new(file_id));
+    let local_admits = |env: &EnvFilter, name: &hir::Name| {
+        let Some(method) = symbol_tree.find_method(name) else { return true };
+        env.admits_local_method(hir::execution_env::body_env(&metadata, &method.annotations, &opts))
+    };
+
     for procedure in module.procedures() {
         let name = procedure.name();
         let name_str = name.as_str();
 
         if !matcher.admits(name_str) {
+            continue;
+        }
+        if !local_admits(env, &name) {
             continue;
         }
 
@@ -694,6 +733,9 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
         let name_str = name.as_str();
 
         if !matcher.admits(name_str) {
+            continue;
+        }
+        if !local_admits(env, &name) {
             continue;
         }
 
@@ -759,13 +801,14 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
     completions
 }
 
-fn complete_global_functions(matcher: &PrefixMatcher) -> Vec<CompletionItem> {
+fn complete_global_functions(matcher: &PrefixMatcher, env: &EnvFilter) -> Vec<CompletionItem> {
     let data = PlatformDataInner::instance();
     let all_functions = data.all_global_functions();
 
     let matching: Vec<_> = all_functions
         .iter()
         .filter(|f| matcher.admits_contiguous_bilingual(&f.name, &f.english_name))
+        .filter(|f| env.admits_context(f.context.as_ref()))
         .collect();
 
     tracing::debug!(
@@ -860,7 +903,8 @@ mod tests {
             return;
         }
 
-        let items = complete_global_functions(&PrefixMatcher::new("Начать"));
+        let items =
+            complete_global_functions(&PrefixMatcher::new("Начать"), &EnvFilter::permissive());
 
         println!("Found {} completions for 'Начать'", items.len());
         assert!(!items.is_empty(), "Should find functions starting with 'Начать'");
@@ -883,9 +927,12 @@ mod tests {
             return;
         }
 
-        let items_lower = complete_global_functions(&PrefixMatcher::new("начать"));
-        let items_upper = complete_global_functions(&PrefixMatcher::new("НАЧАТЬ"));
-        let items_mixed = complete_global_functions(&PrefixMatcher::new("Начать"));
+        let items_lower =
+            complete_global_functions(&PrefixMatcher::new("начать"), &EnvFilter::permissive());
+        let items_upper =
+            complete_global_functions(&PrefixMatcher::new("НАЧАТЬ"), &EnvFilter::permissive());
+        let items_mixed =
+            complete_global_functions(&PrefixMatcher::new("Начать"), &EnvFilter::permissive());
 
         assert_eq!(items_lower.len(), items_upper.len());
         assert_eq!(items_lower.len(), items_mixed.len());
@@ -946,10 +993,16 @@ mod tests {
 
         db.set_file_text(file_id, source);
 
-        let items = complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("Моя"), false)
-            .into_iter()
-            .map(|(i, _)| i)
-            .collect::<Vec<_>>();
+        let items = complete_user_defined_symbols(
+            &db,
+            file_id,
+            &PrefixMatcher::new("Моя"),
+            false,
+            &EnvFilter::permissive(),
+        )
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
 
         println!("Found {} items for prefix 'Моя'", items.len());
         for item in &items {
@@ -1004,21 +1057,36 @@ mod tests {
 
         db.set_file_text(file_id, source);
 
-        let items_lower =
-            complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("тест"), false)
-                .into_iter()
-                .map(|(i, _)| i)
-                .collect::<Vec<_>>();
-        let items_upper =
-            complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("ТЕСТ"), false)
-                .into_iter()
-                .map(|(i, _)| i)
-                .collect::<Vec<_>>();
-        let items_mixed =
-            complete_user_defined_symbols(&db, file_id, &PrefixMatcher::new("Тест"), false)
-                .into_iter()
-                .map(|(i, _)| i)
-                .collect::<Vec<_>>();
+        let items_lower = complete_user_defined_symbols(
+            &db,
+            file_id,
+            &PrefixMatcher::new("тест"),
+            false,
+            &EnvFilter::permissive(),
+        )
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+        let items_upper = complete_user_defined_symbols(
+            &db,
+            file_id,
+            &PrefixMatcher::new("ТЕСТ"),
+            false,
+            &EnvFilter::permissive(),
+        )
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+        let items_mixed = complete_user_defined_symbols(
+            &db,
+            file_id,
+            &PrefixMatcher::new("Тест"),
+            false,
+            &EnvFilter::permissive(),
+        )
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
 
         assert_eq!(items_lower.len(), 1);
         assert_eq!(items_upper.len(), 1);
@@ -1052,7 +1120,7 @@ mod tests {
 
         db.set_file_text(file_id, source);
 
-        let items = complete_mdo_plurals(&PrefixMatcher::new("Справ"));
+        let items = complete_mdo_plurals(&PrefixMatcher::new("Справ"), &EnvFilter::permissive());
         let _ = (&db, file_id);
 
         println!("Found {} MDO items for prefix 'Справ'", items.len());
@@ -1090,7 +1158,7 @@ mod tests {
 
         db.set_file_text(file_id, source);
 
-        let items = complete_mdo_plurals(&PrefixMatcher::new("Docu"));
+        let items = complete_mdo_plurals(&PrefixMatcher::new("Docu"), &EnvFilter::permissive());
         let _ = (&db, file_id);
 
         println!("Found {} MDO items for prefix 'Docu'", items.len());

@@ -72,15 +72,52 @@ fn inside(text: &str, needle: &str) -> u32 {
 
 #[test]
 fn completion_lists_global_export_unqualified() {
+    // From a server-capable module the global server module's export is legal
+    // and must appear unqualified.
+    let probe = "Процедура Тест()\n    Глобальн\nКонецПроцедуры\n";
+    let mut db = build_db("Процедура Пусто()\nКонецПроцедуры\n");
+    db.set_file_text(FileId::from_raw(NONGLOBAL_ID), probe);
+    let analysis = Analysis::from_database(db);
+    let offset = after(probe, "Глобальн");
+
+    let items = analysis.completions(FileId::from_raw(NONGLOBAL_ID), offset, None, ide::Locale::Ru);
+    assert!(
+        items.iter().any(|i| i.label == "ГлобальнаяСервернаяПроцедура"),
+        "global common module export must appear unqualified in completion, got {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dot_completion_offers_no_members_of_inaccessible_module() {
+    // `ГлобальныйСерверныйМодуль.` typed in the client-only module: the
+    // static receiver is exactly what ModuleAccessibility judges, so no
+    // members are offered.
+    let caller = "Процедура Тест()\n    ГлобальныйСерверныйМодуль.\nКонецПроцедуры\n";
+    let analysis = setup(caller);
+    let offset = after(caller, "ГлобальныйСерверныйМодуль.");
+
+    let items = analysis.completions(FileId::from_raw(CALLER_ID), offset, None, ide::Locale::Ru);
+    assert!(
+        !items.iter().any(|i| i.label == "ГлобальнаяСервернаяПроцедура"),
+        "members of a module the caller cannot reach must not be offered, got {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn completion_hides_server_only_global_export_in_client_module() {
+    // The client-only module cannot call the server-only global module (no
+    // ВызовСервера) — completion mirrors the ModuleAccessibility diagnostic
+    // and does not offer the export there.
     let caller = "Процедура Тест()\n    Глобальн\nКонецПроцедуры\n";
     let analysis = setup(caller);
     let offset = after(caller, "Глобальн");
 
     let items = analysis.completions(FileId::from_raw(CALLER_ID), offset, None, ide::Locale::Ru);
     assert!(
-        items.iter().any(|i| i.label == "ГлобальнаяСервернаяПроцедура"),
-        "global common module export must appear unqualified in completion, got {:?}",
-        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        !items.iter().any(|i| i.label == "ГлобальнаяСервернаяПроцедура"),
+        "a client-only module must not be offered a server-only global export"
     );
 }
 

@@ -1,4 +1,5 @@
 mod bsl_completion;
+mod env_filter;
 mod fuzzy;
 mod mdo_completion;
 mod new_expr_completion;

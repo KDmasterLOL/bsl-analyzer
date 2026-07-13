@@ -436,6 +436,22 @@ pub fn conditional_env(
     tree: &crate::conditional_tree::ConditionalTree,
     range: text_size::TextRange,
 ) -> EnvFlags {
+    conditional_env_where(tree, |node| node.contains_range(range))
+}
+
+/// [`conditional_env`] for a cursor point, with half-open containment: the
+/// position right after `#КонецЕсли` is already outside the chain.
+pub fn conditional_env_at(
+    tree: &crate::conditional_tree::ConditionalTree,
+    offset: text_size::TextSize,
+) -> EnvFlags {
+    conditional_env_where(tree, |node| node.contains(offset))
+}
+
+fn conditional_env_where(
+    tree: &crate::conditional_tree::ConditionalTree,
+    encloses: impl Fn(&text_size::TextRange) -> bool,
+) -> EnvFlags {
     use crate::conditional_tree::ConditionalKind;
     use crate::preproc_condition::PreprocCondition;
 
@@ -445,7 +461,7 @@ pub fn conditional_env(
     let mut node = None;
     let mut best_len = None;
     for (idx, data) in tree.conditionals() {
-        if data.range.contains_range(range) {
+        if encloses(&data.range) {
             let len = data.range.len();
             if best_len.is_none_or(|best| len < best) {
                 best_len = Some(len);
