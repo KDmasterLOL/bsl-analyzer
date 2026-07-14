@@ -2843,10 +2843,23 @@ impl<'db> InferenceContext<'db> {
                             found: args.len(),
                         });
                     }
+                    let params = if res.overloads.is_empty() {
+                        ParamsShape::Single(res.signature.params.to_vec().into())
+                    } else {
+                        ParamsShape::Overloaded {
+                            flat: res.signature.params.to_vec().into(),
+                            overloads: res
+                                .overloads
+                                .iter()
+                                .map(|params| params.iter().copied().collect())
+                                .collect::<Vec<_>>()
+                                .into(),
+                        }
+                    };
                     self.record_call_arg_binding(
                         call_expr,
                         args,
-                        ParamsShape::Single(res.signature.params.to_vec().into()),
+                        params,
                         res.signature.from_doc_comment,
                     );
                     return res.return_ty;
