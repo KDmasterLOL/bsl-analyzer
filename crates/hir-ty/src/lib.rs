@@ -1,5 +1,6 @@
 pub mod arg_diagnostics;
 pub mod builtin;
+pub mod call_resolution;
 pub mod db;
 pub mod field_enum;
 pub mod field_lookup;
@@ -33,6 +34,11 @@ pub mod this_object;
 pub mod this_object_attr;
 
 pub use bsl_config::VisibleConfig;
+pub use call_resolution::{
+    BuiltinCallableId, CallCandidateSet, CallParam, CallParamMode, CallSignature, CandidateId,
+    CandidateOrigin, CandidateProvenance, DuplicateCandidateId, PlatformSignatureSlot,
+    UserMethodId,
+};
 pub use field_enum::{enumerate_fields, FieldInfo, FieldOrigin};
 pub use field_lookup::lookup_field;
 pub use form_items::{
