@@ -11,6 +11,8 @@ use super::{
 };
 use crate::platform_manager_lookup::resolve_platform_manager_method;
 
+mod support;
+
 fn select_candidates(
     db: &InMemoryDb,
     method_name: &str,
@@ -139,3 +141,8 @@ fn platform_candidate_preserves_incomplete_variadic_metadata() {
     assert_eq!(candidate.variadic_param().map(|param| param.ty), Some(db.unknown()));
     assert_eq!(candidate.params[1].mode, CallParamMode::Variadic);
 }
+
+include!("tests/applicability.rs");
+include!("tests/arity.rs");
+include!("tests/rejections.rs");
+include!("tests/stability.rs");

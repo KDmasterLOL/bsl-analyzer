@@ -10,6 +10,14 @@ use vfs::FileId;
 
 use crate::lower::type_string::lower_param_type_string_typeid;
 
+mod applicability;
+
+pub use applicability::{
+    evaluate_applicability, evaluate_arity, ArgumentApplicability, ArgumentEvaluation,
+    ArgumentIndeterminateReason, ArgumentParameter, ArityMismatch, ArityUsage,
+    CandidateApplicability, CandidateEvaluation,
+};
+
 /// Stable position of a platform signature within one method record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PlatformSignatureSlot {
