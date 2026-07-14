@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "method_parameter_overrides": [
+    {
+      "canonical_type": "DOMDocument",
+      "russian_name": "ДобавитьДочерний",
+      "english_name": "AppendChild",
+      "min_version": "8.1",
+      "parameter_index": 0,
+      "replacement_type_list": [
+        "АтрибутDOM",
+        "ДокументDOM",
+        "ЭлементDOM",
+        "ОпределениеТипаДокументаDOM",
+        "НотацияDOM",
+        "АтрибутHTML",
+        "ЭлементHTML",
+        "ЭлементКнопкаHTML",
+        "ЭлементВводаHTML",
+        "ЭлементЗаголовокHTML"
+      ],
+      "evidence_source": "platform_data.json: DOMDocument.AppendChild (id 2231) and HTMLDocument.AppendChild (id 3464)",
+      "rationale": "The generic HTML document path returns HTMLElement; the comparable HTML AppendChild contract documents the HTML node categories accepted alongside the DOMDocument contract."
+    }
+  ]
+}

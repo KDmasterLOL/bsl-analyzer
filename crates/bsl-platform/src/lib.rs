@@ -5,6 +5,9 @@ pub mod security;
 pub mod standard_mdo_attributes;
 mod types;
 
+#[cfg(test)]
+mod overlays;
+
 #[allow(warnings)]
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated.rs"));

@@ -1012,6 +1012,24 @@ mod tests {
     }
 
     #[test]
+    fn curated_overlay_corrects_dom_append_child_in_both_languages() {
+        let data = PlatformDataInner::instance();
+        let via_ru = data
+            .get_method("ДокументDOM", "ДобавитьДочерний")
+            .expect("DOM append-child method must exist by Russian names");
+        let via_en = data
+            .get_method("DOMDocument", "AppendChild")
+            .expect("DOM append-child method must exist by English names");
+        let expected = "АтрибутDOM, ДокументDOM, ЭлементDOM, ОпределениеТипаДокументаDOM, НотацияDOM, АтрибутHTML, ЭлементHTML, ЭлементКнопкаHTML, ЭлементВводаHTML, ЭлементЗаголовокHTML";
+
+        assert_eq!(via_ru.id, 2231, "overlay must preserve the extracted method ID");
+        assert_eq!(via_ru.id, via_en.id, "RU and EN names must resolve to one method");
+        assert_eq!(via_ru.parameters.len(), 1, "overlay must preserve parameter order");
+        assert_eq!(via_ru.parameters[0].param_type.as_deref(), Some(expected));
+        assert_eq!(via_en.parameters[0].param_type.as_deref(), Some(expected));
+    }
+
+    #[test]
     fn user_password_policies_global_property_is_typed() {
         let data = PlatformDataInner::instance();
         if data.all_types().is_empty() {
