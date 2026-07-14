@@ -1159,7 +1159,7 @@ fn call_hierarchy_build_context(
 ) -> Result<CallHierarchyBuildContext, RunError> {
     let db = env.state.analysis_host.raw_database();
     let source_root_id = db.file_source_root_input(resolved.file_id).source_root_id(db);
-    let source_root = db.source_root_input(source_root_id).root(db);
+    let source_root = db.source_root_input(source_root_id).root(db).clone();
     let modules: Vec<ide::ModuleId> = source_root.iter().map(ide::ModuleId::new).collect();
     let mut paths = FxHashMap::default();
     let mut file_paths = HashMap::with_capacity(modules.len());

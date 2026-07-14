@@ -21,6 +21,7 @@ use crate::infer::{BodyInferenceResult, InferenceContext};
     lru = 262144,
     cycle_fn = method_return_type_cycle,
     cycle_initial = method_return_type_initial,
+    returns(copy),
 )]
 pub fn method_return_type_query<'db>(
     db: &'db dyn HirDatabase,
@@ -105,6 +106,7 @@ pub fn method_return_type_cycle<'db>(
     heap_size = crate::infer::heap_estimate::body_inference_result_heap,
     cycle_fn = infer_method_cycle,
     cycle_initial = infer_method_initial,
+    returns(clone),
 )]
 pub fn infer_method_query<'db>(
     db: &'db dyn HirDatabase,

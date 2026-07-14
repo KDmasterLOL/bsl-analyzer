@@ -1221,7 +1221,7 @@ impl<'a> GraphCtx<'a> {
     ) -> Self {
         let graph = db.workspace_call_graph(source_root_id);
         let index = db.module_index(source_root_id);
-        let source_root = db.source_root_input(source_root_id).root(db);
+        let source_root = db.source_root_input(source_root_id).root(db).clone();
         Self { db, graph, index, source_root, workspace_root }
     }
 

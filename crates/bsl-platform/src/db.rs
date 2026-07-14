@@ -690,7 +690,7 @@ pub fn platform_type_query<'db>(
 ) -> Option<PlatformType> {
     let name = input.name(db);
     let data = PlatformDataInner::instance();
-    data.get_type(&name).cloned()
+    data.get_type(name).cloned()
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -701,27 +701,27 @@ pub fn platform_method_query<'db>(
     let type_name = input.type_name(db);
     let method_name = input.method_name(db);
     let data = PlatformDataInner::instance();
-    data.get_method(&type_name, &method_name).cloned()
+    data.get_method(type_name, method_name).cloned()
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, returns(clone))]
 pub fn type_methods_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
 ) -> Arc<Vec<PlatformMethod>> {
     let type_name = input.name(db);
     let data = PlatformDataInner::instance();
-    Arc::new(data.get_type_methods(&type_name).into_iter().cloned().collect())
+    Arc::new(data.get_type_methods(type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, returns(clone))]
 pub fn manager_methods_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
 ) -> Arc<Vec<PlatformMethod>> {
     let prefix = input.name(db);
     let data = PlatformDataInner::instance();
-    Arc::new(data.get_manager_methods(&prefix).into_iter().cloned().collect())
+    Arc::new(data.get_manager_methods(prefix).into_iter().cloned().collect())
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -731,7 +731,7 @@ pub fn prefixed_method_query<'db>(
 ) -> Option<PlatformMethod> {
     let prefix = input.prefix(db);
     let method_name = input.method_name(db);
-    find_prefixed_method(&prefix, &method_name)
+    find_prefixed_method(prefix, method_name)
 }
 
 pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformMethod> {
@@ -762,17 +762,17 @@ pub fn global_function_query<'db>(
 ) -> Option<GlobalFunction> {
     let name = input.name(db);
     let data = PlatformDataInner::instance();
-    data.get_global_function(&name).cloned()
+    data.get_global_function(name).cloned()
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, returns(clone))]
 pub fn platform_constructors_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
 ) -> Arc<Vec<PlatformConstructor>> {
     let type_name = input.name(db);
     let data = PlatformDataInner::instance();
-    Arc::new(data.get_constructors(&type_name).into_iter().cloned().collect())
+    Arc::new(data.get_constructors(type_name).into_iter().cloned().collect())
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -783,17 +783,17 @@ pub fn platform_property_query<'db>(
     let type_name = input.type_name(db);
     let prop_name = input.method_name(db);
     let data = PlatformDataInner::instance();
-    data.get_property(&type_name, &prop_name).cloned()
+    data.get_property(type_name, prop_name).cloned()
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, returns(clone))]
 pub fn type_properties_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
 ) -> Arc<Vec<PlatformProperty>> {
     let type_name = input.name(db);
     let data = PlatformDataInner::instance();
-    Arc::new(data.get_type_properties(&type_name).into_iter().cloned().collect())
+    Arc::new(data.get_type_properties(type_name).into_iter().cloned().collect())
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -803,7 +803,7 @@ pub fn global_property_query<'db>(
 ) -> Option<PlatformProperty> {
     let name = input.name(db);
     let data = PlatformDataInner::instance();
-    data.get_global_property(&name).cloned()
+    data.get_global_property(name).cloned()
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -814,7 +814,7 @@ pub fn global_member_method_query<'db>(
     let global_name = input.type_name(db);
     let member_name = input.method_name(db);
     let data = PlatformDataInner::instance();
-    data.resolve_global_member(&global_name, &member_name).cloned()
+    data.resolve_global_member(global_name, member_name).cloned()
 }
 
 #[cfg(test)]

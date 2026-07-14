@@ -28,7 +28,7 @@ impl CallHierarchyIndexFrozenSnapshot {
         mem_docs: &FrozenMemDocs,
         creation_generation: u64,
     ) -> Self {
-        let source_root = db.source_root_input(source_root_id).root(db);
+        let source_root = db.source_root_input(source_root_id).root(db).clone();
         let file_set: FxHashMap<_, _> = source_root
             .iter()
             .filter_map(|file_id| {

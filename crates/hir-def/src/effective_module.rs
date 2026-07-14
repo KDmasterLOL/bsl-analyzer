@@ -32,7 +32,9 @@ use crate::{
 /// merged from. Mirrors the `#[salsa::interned(debug)]` style of `MethodIdInput`.
 #[salsa::interned(debug)]
 pub struct EffectiveModuleId<'db> {
+    #[returns(copy)]
     pub base_file: vfs::FileId,
+    #[returns(copy)]
     pub ext_file: vfs::FileId,
 }
 
@@ -166,7 +168,7 @@ fn base_method_body_range(base_parse: &Parse<SyntaxNode>, target: &str) -> Optio
 
 /// Compute the effective module text + segment map for an extension/base file pair.
 /// `None` when the extension module yields no usable merge (callers gate on this).
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn effective_module_text<'db>(
     db: &'db dyn crate::DefDatabase,
     eid: EffectiveModuleId<'db>,
@@ -187,7 +189,7 @@ pub fn effective_module_text<'db>(
 /// to the base parse so the query stays total; callers gate on
 /// [`effective_module_text`] being `Some`, so the fallback value is never the one
 /// consumed in the merged path.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn parse_effective<'db>(
     db: &'db dyn crate::DefDatabase,
     eid: EffectiveModuleId<'db>,
@@ -199,7 +201,7 @@ pub fn parse_effective<'db>(
 }
 
 /// `ItemTree` over the effective parse.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn item_tree_effective<'db>(
     db: &'db dyn crate::DefDatabase,
     eid: EffectiveModuleId<'db>,
@@ -209,7 +211,7 @@ pub fn item_tree_effective<'db>(
 
 /// `SymbolTree` over the effective parse. The effective module's identity IS the
 /// base module, so it carries the base file's `ModuleId`.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn symbol_tree_effective<'db>(
     db: &'db dyn crate::DefDatabase,
     eid: EffectiveModuleId<'db>,
@@ -228,7 +230,7 @@ pub fn symbol_tree_effective<'db>(
 /// The line index is built from the effective text (not `db.file_text`, which would
 /// be the base file's), so line-dependent lowering — method size, complexity — sees
 /// the merged module exactly as it reparses.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn module_bodies_effective<'db>(
     db: &'db dyn crate::DefDatabase,
     eid: EffectiveModuleId<'db>,

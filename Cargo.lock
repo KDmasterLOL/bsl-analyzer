@@ -3577,8 +3577,8 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "salsa"
-version = "0.27.2"
-source = "git+https://github.com/itrous/salsa.git?branch=fix%2Fevicted-cycle-head-false-panic#cdd0af431a1072a196b9158d591cc73df1581fe9"
+version = "0.28.0"
+source = "git+https://github.com/itrous/salsa.git?branch=fix%2Fevicted-cycle-head-false-panic-v0.28#3264b873d857a2792f919d5a165cb0cc726f00b9"
 dependencies = [
  "boxcar",
  "crossbeam-queue",
@@ -3602,18 +3602,17 @@ dependencies = [
 
 [[package]]
 name = "salsa-macro-rules"
-version = "0.27.2"
-source = "git+https://github.com/itrous/salsa.git?branch=fix%2Fevicted-cycle-head-false-panic#cdd0af431a1072a196b9158d591cc73df1581fe9"
+version = "0.28.0"
+source = "git+https://github.com/itrous/salsa.git?branch=fix%2Fevicted-cycle-head-false-panic-v0.28#3264b873d857a2792f919d5a165cb0cc726f00b9"
 
 [[package]]
 name = "salsa-macros"
-version = "0.27.2"
-source = "git+https://github.com/itrous/salsa.git?branch=fix%2Fevicted-cycle-head-false-panic#cdd0af431a1072a196b9158d591cc73df1581fe9"
+version = "0.28.0"
+source = "git+https://github.com/itrous/salsa.git?branch=fix%2Fevicted-cycle-head-false-panic-v0.28#3264b873d857a2792f919d5a165cb0cc726f00b9"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn",
- "synstructure",
 ]
 
 [[package]]

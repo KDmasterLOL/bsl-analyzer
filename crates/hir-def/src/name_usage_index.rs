@@ -100,7 +100,7 @@ fn file_name_usage_heap(v: &Arc<FileNameUsage>) -> usize {
     bytes
 }
 
-#[salsa::tracked(lru = 4096, heap_size = file_name_usage_heap)]
+#[salsa::tracked(lru = 4096, heap_size = file_name_usage_heap, returns(clone))]
 pub fn file_name_usage_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -144,7 +144,7 @@ fn file_name_offsets_heap(v: &Arc<FileNameOffsets>) -> usize {
 // boundaries and explicit trims, so one request over N candidate files keeps
 // N maps resident until then. The `heap_size` hook makes that residency
 // visible to `memory_report`.
-#[salsa::tracked(lru = 1024, heap_size = file_name_offsets_heap)]
+#[salsa::tracked(lru = 1024, heap_size = file_name_offsets_heap, returns(clone))]
 pub fn file_name_offsets_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -170,7 +170,7 @@ pub fn file_name_offsets_query<'db>(
     Arc::new(FileNameOffsets { by_name })
 }
 
-#[salsa::tracked(lru = 4)]
+#[salsa::tracked(lru = 4, returns(clone))]
 pub fn source_root_name_usage_query(
     db: &dyn DefDatabase,
     source_root_input: SourceRootInput,

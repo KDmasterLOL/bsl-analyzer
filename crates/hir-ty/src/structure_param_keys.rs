@@ -42,7 +42,7 @@ pub struct StructureParamSummary {
 /// Memoised per-method summary. Acyclic in salsa: it never calls itself as a query — transitive
 /// forwarding is resolved by [`compute_summary`]'s manual visited-set recursion — so a caller that
 /// is itself a fixpoint query (inference) reads a stable value.
-#[salsa::tracked(lru = 262144)]
+#[salsa::tracked(lru = 262144, returns(clone))]
 pub fn structure_param_keys_query<'db>(
     db: &'db dyn HirDatabase,
     method: MethodIdInput<'db>,

@@ -146,6 +146,7 @@ pub struct MethodId {
 
 #[salsa::interned(debug)]
 pub struct MethodIdInput {
+    #[returns(copy)]
     pub method_id: MethodId,
 }
 

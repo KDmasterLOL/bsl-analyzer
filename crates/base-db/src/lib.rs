@@ -446,7 +446,7 @@ mod tests {
         }
     }
 
-    #[salsa::tracked(lru = 10)]
+    #[salsa::tracked(lru = 10, returns(clone))]
     fn test_fileid_query<'db>(
         db: &'db dyn salsa::Database,
         file_id_input: FileIdInput<'db>,

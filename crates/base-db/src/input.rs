@@ -84,6 +84,7 @@ pub struct FileTextInput {
 /// for analysis caching but not a cryptographic guarantee.
 #[salsa::input(debug)]
 pub struct FileRevisionInput {
+    #[returns(copy)]
     pub revision: u64,
 }
 
@@ -104,11 +105,13 @@ pub struct SourceRootInput {
 
 #[salsa::input(debug)]
 pub struct FileSourceRootInput {
+    #[returns(copy)]
     pub source_root_id: SourceRootId,
 }
 
 #[salsa::interned(debug)]
 pub struct FileIdInput {
+    #[returns(copy)]
     pub file_id: vfs::FileId,
 }
 

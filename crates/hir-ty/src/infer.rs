@@ -3026,7 +3026,7 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
     mdo_type_to_plural(mdo)
 }
 
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap, returns(clone))]
 pub fn infer_query<'db>(
     db: &'db dyn HirDatabase,
     file_id_input: FileIdInput<'db>,
@@ -3091,7 +3091,7 @@ pub fn infer_query<'db>(
 /// metadata / cross-module context stays the base file. It deliberately does NOT
 /// reuse `infer_method` / `infer_module_code`: those key on `ModuleId{base_file}` and
 /// would collide with the base module's own cached inference.
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap, returns(clone))]
 pub fn infer_effective<'db>(
     db: &'db dyn HirDatabase,
     eid: EffectiveModuleId<'db>,
@@ -3217,7 +3217,7 @@ fn is_proceed_with_call_name(name: &Name) -> bool {
 /// method resolves via the base fallback (no spurious `UnresolvedMethodCall`) while
 /// configuration / metadata context stays the extension file. Single pass — the
 /// changed-return threading of effective inference is a later increment.
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap, returns(clone))]
 pub fn infer_weaving<'db>(
     db: &'db dyn HirDatabase,
     wid: hir_def::weaving::WeavingModuleId<'db>,
@@ -3331,7 +3331,7 @@ fn body_return_type(db: &dyn HirDatabase, body_result: &BodyInferenceResult) -> 
     }
 }
 
-#[salsa::tracked(lru = 1024, heap_size = heap_estimate::module_code_inference_result_heap)]
+#[salsa::tracked(lru = 1024, heap_size = heap_estimate::module_code_inference_result_heap, returns(clone))]
 pub fn infer_module_code_query<'db>(
     db: &'db dyn HirDatabase,
     file_id_input: FileIdInput<'db>,
