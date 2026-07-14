@@ -1,7 +1,6 @@
 # Workspace symbols
 
-Состояние: `WorkspaceSymbols::default()` сейчас пустой stub (см.
-`crates/ide/src/streaming/orchestrator.rs:330`, TODO в коде).
+Состояние: `WorkspaceSymbols::default()` сейчас пустой stub.
 `workspace/symbol` LSP-запрос либо не отвечает, либо отвечает
 частично через name-индекс высокого уровня.
 

@@ -47,4 +47,4 @@
 ## Roadmap и плановые документы
 
 - `roadmap/README.md` — индекс активных направлений
-- `roadmap/type-inference.md`, `roadmap/lsp-features.md`, `roadmap/workspace-symbols.md`, `roadmap/streaming-mode.md`, `roadmap/name-index*.md` — текущие планы по фичам и инфраструктуре
+- `roadmap/type-inference.md`, `roadmap/lsp-features.md`, `roadmap/workspace-symbols.md`, `roadmap/name-index*.md` — текущие планы по фичам и инфраструктуре
