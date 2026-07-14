@@ -3,7 +3,7 @@ use base_db::{DiagnosticsConfigId, FileIdInput};
 use ide_db::RootDatabase;
 use std::sync::Arc;
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(clone))]
 pub fn file_diagnostics_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,
@@ -12,7 +12,7 @@ pub fn file_diagnostics_query<'db>(
     let total_start = std::time::Instant::now();
     let file_id = file_id_input.file_id(db);
     let config_input = config_id.config(db);
-    let config = DiagnosticsConfig::from_input(&config_input);
+    let config = DiagnosticsConfig::from_input(config_input);
 
     let _span = tracing::info_span!("file_diagnostics_query", file_id = file_id.0,).entered();
 

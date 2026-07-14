@@ -1964,8 +1964,8 @@ mod vfs_race_tests {
 
         // root(0) holds the .bsl sources and never the metadata XML; metadata files
         // belong to the bootstrap-owned metadata root(1).
-        assert!(in_root(&bsl_root, bsl_a) && in_root(&bsl_root, bsl_b), "bsl in root(0)");
-        assert!(!in_root(&bsl_root, xml_a) && !in_root(&bsl_root, xml_b), "xml NOT in root(0)");
+        assert!(in_root(bsl_root, bsl_a) && in_root(bsl_root, bsl_b), "bsl in root(0)");
+        assert!(!in_root(bsl_root, xml_a) && !in_root(bsl_root, xml_b), "xml NOT in root(0)");
     }
 
     #[test]

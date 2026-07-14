@@ -419,7 +419,7 @@ fn conditional_tree_heap(v: &std::sync::Arc<ConditionalTree>) -> usize {
     bytes
 }
 
-#[salsa::tracked(lru = 256, heap_size = conditional_tree_heap)]
+#[salsa::tracked(lru = 256, heap_size = conditional_tree_heap, returns(clone))]
 pub fn conditional_tree_query<'db>(
     db: &'db dyn base_db::RootQueryDb,
     file_id_input: base_db::FileIdInput<'db>,

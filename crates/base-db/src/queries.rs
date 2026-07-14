@@ -92,7 +92,7 @@ pub fn set_parse_lru_sweep_mode(db: &mut dyn SourceDatabase, sweep: bool) {
 /// is LRU-evictable and re-derives soundly. A mismatch (the file changed under a
 /// running analysis, or a deleted/unreadable file) is a hard error, never a
 /// silently-mixed result.
-#[salsa::tracked(lru = 512)]
+#[salsa::tracked(lru = 512, returns(clone))]
 pub fn file_text_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) -> Arc<str> {
     let _span = tracing::info_span!("file_text").entered();
     let file_id = input.file_id(db);
@@ -100,7 +100,7 @@ pub fn file_text_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>
 
     if let Some(text_input) = db.try_file_text_input(file_id) {
         let text = text_input.text(db);
-        assert_revision(file_id, &text, want);
+        assert_revision(file_id, text, want);
         return Arc::from(text.as_str());
     }
 
@@ -132,7 +132,7 @@ fn disk_path(db: &dyn SourceDatabase, file_id: FileId) -> PathBuf {
     vfs_path.as_path().to_path_buf()
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(clone))]
 pub fn method_regions_query<'db>(
     db: &'db dyn SourceDatabase,
     input: FileIdInput<'db>,
@@ -193,7 +193,7 @@ fn is_api_region(name: &str) -> bool {
     API_REGIONS.contains(&name.fold_lower().as_str())
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(clone))]
 pub fn resolve_vfs_path_query(
     db: &dyn salsa::Database,
     source_root_input: SourceRootInput,

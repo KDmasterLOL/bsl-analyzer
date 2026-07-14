@@ -185,7 +185,7 @@ pub fn weaving_target<'db>(
     Some(hir::WeavingModuleId::new(db, ext_file, base_file))
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, returns(clone))]
 pub fn module_metadata_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,
@@ -236,7 +236,7 @@ pub fn module_metadata_query<'db>(
     Arc::new(metadata)
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_cfgs_heap)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_cfgs_heap, returns(clone))]
 pub fn module_cfgs_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -262,7 +262,7 @@ pub fn module_cfgs_query<'db>(
     Arc::new(hir::cfg::ModuleCfgs::new(cfgs))
 }
 
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_cfg_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_cfg_heap, returns(clone))]
 pub fn method_cfg_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -281,7 +281,7 @@ pub fn method_cfg_query<'db>(
     })
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_reaching_definitions_heap)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_reaching_definitions_heap, returns(clone))]
 pub fn module_reaching_definitions_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -341,7 +341,7 @@ pub fn module_reaching_definitions_query<'db>(
     Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results))
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_path_terminates_heap)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_path_terminates_heap, returns(clone))]
 pub fn module_path_terminates_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -377,7 +377,7 @@ pub fn module_path_terminates_query<'db>(
     Arc::new(hir::dataflow::path_terminates::ModulePathTerminates::new(results))
 }
 
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_reaching_defs_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_reaching_defs_heap, returns(clone))]
 pub fn reaching_definitions_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -394,7 +394,7 @@ pub fn reaching_definitions_query<'db>(
     module_reaching_defs.get(method_id.local_id).cloned()
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_liveness_heap)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_liveness_heap, returns(clone))]
 pub fn module_liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -451,7 +451,7 @@ pub fn module_liveness_analysis_query<'db>(
     Arc::new(hir::dataflow::liveness::ModuleLiveness::new(results))
 }
 
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_liveness_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_liveness_heap, returns(clone))]
 pub fn liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -467,7 +467,7 @@ pub fn liveness_analysis_query<'db>(
     module_liveness.get(method_id.local_id).cloned()
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_level_cfg_heap)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_level_cfg_heap, returns(clone))]
 pub fn module_level_cfg_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -492,7 +492,7 @@ pub fn module_level_cfg_query<'db>(
     Arc::new(cfg)
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_level_liveness_heap)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_level_liveness_heap, returns(clone))]
 pub fn module_level_liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
@@ -523,7 +523,7 @@ pub fn module_level_liveness_analysis_query<'db>(
     Some(Arc::new(dataflow_result))
 }
 
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::line_index_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::line_index_heap, returns(clone))]
 pub fn line_index_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,
@@ -604,7 +604,7 @@ impl ModuleCyclomatic {
     }
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_hir_metrics_heap)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_hir_metrics_heap, returns(clone))]
 pub fn module_hir_metrics_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,
@@ -635,7 +635,7 @@ pub fn module_hir_metrics_query<'db>(
     Arc::new(ModuleHirMetrics { methods, module_code })
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(clone))]
 pub fn method_hir_metrics_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -649,7 +649,7 @@ pub fn method_hir_metrics_query<'db>(
         .unwrap_or_else(|| Arc::new(hir::metrics::HirMethodMetrics::default()))
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_cyclomatic_heap)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_cyclomatic_heap, returns(clone))]
 pub fn module_cyclomatic_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,
@@ -675,7 +675,7 @@ pub fn module_cyclomatic_query<'db>(
     Arc::new(ModuleCyclomatic { methods })
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(clone))]
 pub fn method_cyclomatic_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -696,7 +696,7 @@ mod salsa_backtrace_tests {
     /// Exercises the condition the `main` panic hook relies on: inside a running
     /// query the database is attached to the thread, so `Backtrace::capture()`
     /// can resolve the query stack — impossible once `catch_unwind` has unwound.
-    #[salsa::tracked]
+    #[salsa::tracked(returns(clone))]
     fn capture_backtrace_in_query<'db>(
         db: &'db dyn RootDatabase,
         input: FileIdInput<'db>,
