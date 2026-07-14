@@ -132,7 +132,7 @@ fn salsa_cache_hit_shares_arc() {
     let input = MethodIdInput::new(&db, mid);
     let r1 = infer_method_query(&db, input);
     let r2 = infer_method_query(&db, input);
-    assert!(Arc::ptr_eq(&r1, &r2), "second call within the same revision must hit the Salsa cache");
+    assert!(Arc::ptr_eq(r1, r2), "second call within the same revision must hit the Salsa cache");
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn trait_method_delegates_to_query() {
     let via_trait = db.infer_method(input);
     let via_query = infer_method_query(&db, input);
     assert!(
-        Arc::ptr_eq(&via_trait, &via_query),
+        Arc::ptr_eq(&via_trait, via_query),
         "RootDatabaseImpl::infer_method must delegate to the query without an extra layer"
     );
 }

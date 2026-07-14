@@ -81,17 +81,38 @@ pub use queries::{
 pub trait DefDatabase: base_db::RootQueryDb {
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree>;
 
+    /// Borrowed variant of [`item_tree`](Self::item_tree) for read-only paths:
+    /// no `Arc` refcount traffic per read (`.clone()` the result if ownership
+    /// is needed after all).
+    fn item_tree_ref(&self, file_id: FileId) -> &Arc<ItemTree>;
+
     fn region_tree(&self, file_id: FileId) -> Arc<RegionTree>;
 
     fn conditional_tree(&self, file_id: FileId) -> Arc<ConditionalTree>;
+
+    /// Borrowed variant of [`conditional_tree`](Self::conditional_tree); see
+    /// [`item_tree_ref`](Self::item_tree_ref).
+    fn conditional_tree_ref(&self, file_id: FileId) -> &Arc<ConditionalTree>;
 
     fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData>;
 
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree>;
 
+    /// Borrowed variant of [`symbol_tree`](Self::symbol_tree); see
+    /// [`item_tree_ref`](Self::item_tree_ref).
+    fn symbol_tree_ref(&self, module_id: ModuleId) -> &Arc<SymbolTree>;
+
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies>;
 
+    /// Borrowed variant of [`module_bodies`](Self::module_bodies); see
+    /// [`item_tree_ref`](Self::item_tree_ref).
+    fn module_bodies_ref(&self, module_id: ModuleId) -> &Arc<ModuleBodies>;
+
     fn method_body(&self, method: MethodIdInput<'_>) -> Arc<body::Body>;
+
+    /// Borrowed variant of [`method_body`](Self::method_body); see
+    /// [`item_tree_ref`](Self::item_tree_ref).
+    fn method_body_ref<'db>(&'db self, method: MethodIdInput<'db>) -> &'db Arc<body::Body>;
 
     fn method_body_with_source_map(
         &self,
@@ -119,6 +140,13 @@ pub trait DefDatabase: base_db::RootQueryDb {
     ) -> Arc<crate::name_usage_index::SourceRootNameUsage>;
 
     fn file_name_offsets(&self, file_id: FileId) -> Arc<crate::name_usage_index::FileNameOffsets>;
+
+    /// Borrowed variant of [`file_name_offsets`](Self::file_name_offsets); see
+    /// [`item_tree_ref`](Self::item_tree_ref).
+    fn file_name_offsets_ref(
+        &self,
+        file_id: FileId,
+    ) -> &Arc<crate::name_usage_index::FileNameOffsets>;
 
     fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<ExternalRef>>;
 

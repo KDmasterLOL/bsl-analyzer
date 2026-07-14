@@ -67,7 +67,7 @@ pub fn parse_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) ->
     let _span = tracing::info_span!("parse").entered();
 
     let text = file_text_query(db, input);
-    parser::parse_with_shared_cache(&text)
+    parser::parse_with_shared_cache(text)
 }
 
 /// Switch [`parse_query`]'s LRU cap between the interactive profile and a small
@@ -92,7 +92,7 @@ pub fn set_parse_lru_sweep_mode(db: &mut dyn SourceDatabase, sweep: bool) {
 /// is LRU-evictable and re-derives soundly. A mismatch (the file changed under a
 /// running analysis, or a deleted/unreadable file) is a hard error, never a
 /// silently-mixed result.
-#[salsa::tracked(lru = 512, returns(clone))]
+#[salsa::tracked(lru = 512, returns(ref))]
 pub fn file_text_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) -> Arc<str> {
     let _span = tracing::info_span!("file_text").entered();
     let file_id = input.file_id(db);
@@ -193,7 +193,7 @@ fn is_api_region(name: &str) -> bool {
     API_REGIONS.contains(&name.fold_lower().as_str())
 }
 
-#[salsa::tracked(lru = 256, returns(clone))]
+#[salsa::tracked(lru = 256, returns(copy))]
 pub fn resolve_vfs_path_query(
     db: &dyn salsa::Database,
     source_root_input: SourceRootInput,

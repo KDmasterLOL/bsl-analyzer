@@ -106,7 +106,7 @@ pub fn method_return_type_cycle<'db>(
     heap_size = crate::infer::heap_estimate::body_inference_result_heap,
     cycle_fn = infer_method_cycle,
     cycle_initial = infer_method_initial,
-    returns(clone),
+    returns(ref),
 )]
 pub fn infer_method_query<'db>(
     db: &'db dyn HirDatabase,
@@ -120,8 +120,8 @@ pub fn infer_method_query<'db>(
     )
     .entered();
 
-    let body = db.method_body(method);
-    let mut ctx = InferenceContext::new_for_method(db, method, &body);
+    let body = db.method_body_ref(method);
+    let mut ctx = InferenceContext::new_for_method(db, method, body);
     ctx.infer_all();
     Arc::new(ctx.finish())
 }

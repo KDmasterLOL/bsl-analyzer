@@ -249,7 +249,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
     match definition {
         Definition::Method(method_id) => {
             let file_id = method_id.module.file_id;
-            let tree = db.item_tree(file_id);
+            let tree = db.item_tree_ref(file_id);
 
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == method_id.local_id as usize {
@@ -284,7 +284,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
         }
         Definition::Variable(var_id) => {
             let file_id = var_id.module.file_id;
-            let tree = db.item_tree(file_id);
+            let tree = db.item_tree_ref(file_id);
 
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == var_id.local_id as usize {
@@ -305,7 +305,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
         }
         Definition::Parameter { method_id, param_name, .. } => {
             let file_id = method_id.module.file_id;
-            let tree = db.item_tree(file_id);
+            let tree = db.item_tree_ref(file_id);
 
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == method_id.local_id as usize {
@@ -327,7 +327,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
         }
         Definition::Local { method_id, var_name } => {
             let file_id = method_id.module.file_id;
-            let tree = db.item_tree(file_id);
+            let tree = db.item_tree_ref(file_id);
 
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == method_id.local_id as usize {

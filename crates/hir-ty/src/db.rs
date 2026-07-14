@@ -33,7 +33,18 @@ pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
 
     fn infer_method(&self, method: MethodIdInput<'_>) -> Arc<BodyInferenceResult>;
 
+    /// Borrowed variant of [`infer_method`](Self::infer_method) for read-only
+    /// paths: no `Arc` refcount traffic per read.
+    fn infer_method_ref<'db>(
+        &'db self,
+        method: MethodIdInput<'db>,
+    ) -> &'db Arc<BodyInferenceResult>;
+
     fn infer_module_code(&self, file_id: FileId) -> Arc<ModuleCodeInferenceResult>;
+
+    /// Borrowed variant of [`infer_module_code`](Self::infer_module_code); see
+    /// [`infer_method_ref`](Self::infer_method_ref).
+    fn infer_module_code_ref(&self, file_id: FileId) -> &Arc<ModuleCodeInferenceResult>;
 
     fn module_reaching_definitions(
         &self,

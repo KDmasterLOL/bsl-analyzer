@@ -402,7 +402,7 @@ impl RootDatabaseImpl {
 
         let module_id = ModuleId { file_id };
         let method_ids: Vec<hir::MethodId> = self
-            .module_bodies(module_id)
+            .module_bodies_ref(module_id)
             .iter_bodies()
             .map(|(local_id, _)| hir::MethodId { module: module_id, local_id })
             .collect();
@@ -412,7 +412,7 @@ impl RootDatabaseImpl {
         let n = method_ids.len();
         method_ids.par_iter().for_each_with(self.clone(), |db, &method_id| {
             let method_input = hir::MethodIdInput::new(&*db, method_id);
-            let _ = db.infer_method(method_input);
+            let _ = db.infer_method_ref(method_input);
         });
         n
     }
@@ -1795,6 +1795,10 @@ impl SourceDatabase for RootDatabaseImpl {
     }
 
     fn file_text(&self, file_id: FileId) -> std::sync::Arc<str> {
+        self.file_text_ref(file_id).clone()
+    }
+
+    fn file_text_ref(&self, file_id: FileId) -> &std::sync::Arc<str> {
         let input = base_db::FileIdInput::new(self, file_id);
         base_db::file_text_query(self, input)
     }
@@ -1861,36 +1865,56 @@ impl RootQueryDb for RootDatabaseImpl {
 #[salsa::db]
 impl DefDatabase for RootDatabaseImpl {
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
+        self.item_tree_ref(file_id).clone()
+    }
+
+    fn item_tree_ref(&self, file_id: FileId) -> &Arc<ItemTree> {
         let file_id_input = base_db::FileIdInput::new(self, file_id);
         hir::item_tree_query(self, file_id_input)
     }
 
     fn region_tree(&self, file_id: FileId) -> Arc<RegionTree> {
         let file_id_input = base_db::FileIdInput::new(self, file_id);
-        hir::region_tree_query(self, file_id_input)
+        hir::region_tree_query(self, file_id_input).clone()
     }
 
     fn conditional_tree(&self, file_id: FileId) -> Arc<ConditionalTree> {
+        self.conditional_tree_ref(file_id).clone()
+    }
+
+    fn conditional_tree_ref(&self, file_id: FileId) -> &Arc<ConditionalTree> {
         let file_id_input = base_db::FileIdInput::new(self, file_id);
         hir::conditional_tree_query(self, file_id_input)
     }
 
     fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-        hir::module_data_query(self, file_id_input)
+        hir::module_data_query(self, file_id_input).clone()
     }
 
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
+        self.symbol_tree_ref(module_id).clone()
+    }
+
+    fn symbol_tree_ref(&self, module_id: ModuleId) -> &Arc<SymbolTree> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         hir::symbol_tree_query(self, file_id_input)
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
+        self.module_bodies_ref(module_id).clone()
+    }
+
+    fn module_bodies_ref(&self, module_id: ModuleId) -> &Arc<ModuleBodies> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         hir::module_bodies_query(self, file_id_input)
     }
 
     fn method_body(&self, method: hir::MethodIdInput<'_>) -> Arc<hir::Body> {
+        self.method_body_ref(method).clone()
+    }
+
+    fn method_body_ref<'db>(&'db self, method: hir::MethodIdInput<'db>) -> &'db Arc<hir::Body> {
         hir::method_body_query(self, method)
     }
 
@@ -1912,13 +1936,13 @@ impl DefDatabase for RootDatabaseImpl {
     }
 
     fn method_docs(&self, method: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
-        let symbol_tree = self.symbol_tree(method.module);
+        let symbol_tree = self.symbol_tree_ref(method.module);
         let method_symbol = symbol_tree.find_method_by_id(method)?;
         method_symbol.docs.clone()
     }
 
     fn variable_docs(&self, variable: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
-        let symbol_tree = self.symbol_tree(variable.module);
+        let symbol_tree = self.symbol_tree_ref(variable.module);
         let variable_symbol = symbol_tree.find_variable_by_id(variable)?;
         variable_symbol.docs.clone()
     }
@@ -1945,6 +1969,10 @@ impl DefDatabase for RootDatabaseImpl {
     }
 
     fn file_name_offsets(&self, file_id: FileId) -> Arc<hir::FileNameOffsets> {
+        self.file_name_offsets_ref(file_id).clone()
+    }
+
+    fn file_name_offsets_ref(&self, file_id: FileId) -> &Arc<hir::FileNameOffsets> {
         let file_id_input = base_db::FileIdInput::new(self, file_id);
         hir::file_name_offsets_query(self, file_id_input)
     }
@@ -2265,14 +2293,25 @@ impl hir::HirDatabase for RootDatabaseImpl {
         &self,
         method_input: hir::MethodIdInput<'_>,
     ) -> Arc<hir::proc_signature::ProcSignature> {
-        hir::proc_signature::proc_signature_query(self, method_input)
+        hir::proc_signature::proc_signature_query(self, method_input).clone()
     }
 
     fn infer_method(&self, method: hir::MethodIdInput<'_>) -> Arc<hir::BodyInferenceResult> {
+        self.infer_method_ref(method).clone()
+    }
+
+    fn infer_method_ref<'db>(
+        &'db self,
+        method: hir::MethodIdInput<'db>,
+    ) -> &'db Arc<hir::BodyInferenceResult> {
         hir::infer_method_query(self, method)
     }
 
     fn infer_module_code(&self, file_id: FileId) -> Arc<hir::ModuleCodeInferenceResult> {
+        self.infer_module_code_ref(file_id).clone()
+    }
+
+    fn infer_module_code_ref(&self, file_id: FileId) -> &Arc<hir::ModuleCodeInferenceResult> {
         let file_id_input = FileIdInput::new(self, file_id);
         hir::infer_module_code_query(self, file_id_input)
     }

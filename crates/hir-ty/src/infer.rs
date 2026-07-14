@@ -581,15 +581,15 @@ fn method_body_env(
 ) -> hir_def::execution_env::EnvFlags {
     use hir_def::execution_env;
     let metadata = db.module_metadata(hir_def::ModuleId { file_id });
-    let item_tree = db.item_tree(file_id);
-    let mut env = execution_env::method_env(&item_tree, local_id, &metadata, opts);
+    let item_tree = db.item_tree_ref(file_id);
+    let mut env = execution_env::method_env(item_tree, local_id, &metadata, opts);
     // The conditional tree costs a syntax walk per file; only files with an
     // item-level `#Если` can narrow a method's environments through it.
     if !env.is_empty() && item_tree.has_module_preproc() {
-        if let Some(range) = execution_env::method_source_range(&item_tree, local_id) {
-            let conditionals = db.conditional_tree(file_id);
+        if let Some(range) = execution_env::method_source_range(item_tree, local_id) {
+            let conditionals = db.conditional_tree_ref(file_id);
             if !conditionals.is_empty() {
-                env = env & execution_env::conditional_env(&conditionals, range);
+                env = env & execution_env::conditional_env(conditionals, range);
             }
         }
     }
@@ -762,13 +762,14 @@ impl<'db> InferenceContext<'db> {
     /// `TypeKind::Unknown` call arm performs.
     fn bare_module_method_exists(&self, name: &Name) -> bool {
         let symbol_tree = match &self.local_symbols {
-            Some(symbols) => Arc::clone(symbols),
-            None => self.db.symbol_tree(hir_def::ModuleId::new(self.context_file_id)),
+            Some(symbols) => symbols,
+            None => self.db.symbol_tree_ref(hir_def::ModuleId::new(self.context_file_id)),
         };
         if symbol_tree.find_method(name).is_some() {
             return true;
         }
-        self.weaving_base.is_some_and(|base| self.db.symbol_tree(base).find_method(name).is_some())
+        self.weaving_base
+            .is_some_and(|base| self.db.symbol_tree_ref(base).find_method(name).is_some())
     }
 
     /// Resolve a bare `Имя(...)` call against the exported methods of the visible global
@@ -790,7 +791,7 @@ impl<'db> InferenceContext<'db> {
             self.infer_expr(*arg);
         }
 
-        let symbol_tree = self.db.symbol_tree(method_id.module);
+        let symbol_tree = self.db.symbol_tree_ref(method_id.module);
         let method_symbol = symbol_tree.find_method_by_id(method_id)?;
         let signature = crate::method_resolution::materialise_signature_enriched(
             self.db,
@@ -1104,6 +1105,7 @@ impl<'db> InferenceContext<'db> {
                         self.db,
                         hir_def::MethodIdInput::new(self.db, mid),
                     )
+                    .clone()
                 };
                 let forwarder = crate::structure_param_keys::Forwarder::new(
                     self.db, &resolver, module, &self.body, &summarize,
@@ -2422,7 +2424,7 @@ impl<'db> InferenceContext<'db> {
                         // sibling that the extension does not define falls back to the paired
                         // base module's symbols (the extension shadows the base). The base tree
                         // is bound here so the borrowed method outlives the lookup.
-                        let base_tree = self.weaving_base.map(|base| self.db.symbol_tree(base));
+                        let base_tree = self.weaving_base.map(|base| self.db.symbol_tree_ref(base));
                         let resolved_method = symbol_tree.find_method(name).or_else(|| {
                             base_tree.as_ref().and_then(|base_tree| base_tree.find_method(name))
                         });
@@ -3035,7 +3037,7 @@ pub fn infer_query<'db>(
     let _p = tracing::info_span!("infer_query", ?file_id).entered();
 
     let module_id = hir_def::ModuleId { file_id };
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
     let mut result = InferenceResult::default();
 
@@ -3062,16 +3064,16 @@ pub fn infer_query<'db>(
 
     {
         let _bspan = tracing::info_span!("infer_query.body", kind = "module_code").entered();
-        let module_code = db.infer_module_code(file_id);
-        fold_module_code(&mut result, &module_code);
+        let module_code = db.infer_module_code_ref(file_id);
+        fold_module_code(&mut result, module_code);
     }
 
     for (local_id, _body) in module_bodies.iter_bodies() {
         let _bspan = tracing::info_span!("infer_query.body", kind = "method").entered();
         let method_id = hir_def::MethodId { module: module_id, local_id };
         let method_input = MethodIdInput::new(db, method_id);
-        let body_result = db.infer_method(method_input);
-        fold_body(&mut result, &body_result);
+        let body_result = db.infer_method_ref(method_input);
+        fold_body(&mut result, body_result);
     }
 
     info!(
@@ -3228,7 +3230,7 @@ pub fn infer_weaving<'db>(
 
     let base_module = hir_def::ModuleId::new(base_file);
     let ext_module = hir_def::ModuleId::new(ext_file);
-    let module_bodies = db.module_bodies(ext_module);
+    let module_bodies = db.module_bodies_ref(ext_module);
 
     // A `&Вместо("M")` interceptor's body may call `ПродолжитьВызов(...)` to re-enter the
     // original base method `M`. Pre-compute, per ext method `local_id`: (a) `M`'s return type so
@@ -3237,8 +3239,8 @@ pub fn infer_weaving<'db>(
     // skipped. The return is dropped when uninformative (Unknown/Undefined) to preserve the
     // platform default, but the arity is kept whenever `M` resolves — a procedure base has no
     // informative return yet its arguments still need checking.
-    let ext_symbols = db.symbol_tree(ext_module);
-    let base_symbols = db.symbol_tree(base_module);
+    let ext_symbols = db.symbol_tree_ref(ext_module);
+    let base_symbols = db.symbol_tree_ref(base_module);
     let ext_parse = db.parse(ext_file);
     let mut proceed_returns: FxHashMap<u32, TypeId> = FxHashMap::default();
     let mut proceed_arities: FxHashMap<u32, (usize, usize)> = FxHashMap::default();
@@ -3331,7 +3333,7 @@ fn body_return_type(db: &dyn HirDatabase, body_result: &BodyInferenceResult) -> 
     }
 }
 
-#[salsa::tracked(lru = 1024, heap_size = heap_estimate::module_code_inference_result_heap, returns(clone))]
+#[salsa::tracked(lru = 1024, heap_size = heap_estimate::module_code_inference_result_heap, returns(ref))]
 pub fn infer_module_code_query<'db>(
     db: &'db dyn HirDatabase,
     file_id_input: FileIdInput<'db>,
@@ -3340,7 +3342,7 @@ pub fn infer_module_code_query<'db>(
     let _p = tracing::info_span!("infer_module_code_query", ?file_id).entered();
 
     let module_id = hir_def::ModuleId { file_id };
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
     let Some(body) = module_bodies.module_code() else {
         return Arc::new(ModuleCodeInferenceResult::default());

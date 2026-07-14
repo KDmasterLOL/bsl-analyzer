@@ -42,7 +42,7 @@ pub struct StructureParamSummary {
 /// Memoised per-method summary. Acyclic in salsa: it never calls itself as a query — transitive
 /// forwarding is resolved by [`compute_summary`]'s manual visited-set recursion — so a caller that
 /// is itself a fixpoint query (inference) reads a stable value.
-#[salsa::tracked(lru = 262144, returns(clone))]
+#[salsa::tracked(lru = 262144, returns(ref))]
 pub fn structure_param_keys_query<'db>(
     db: &'db dyn HirDatabase,
     method: MethodIdInput<'db>,
@@ -72,8 +72,8 @@ fn compute_summary(
         return StructureParamSummary::default();
     }
 
-    let body = db.method_body(MethodIdInput::new(db, mid));
-    let symbol_tree = db.symbol_tree(mid.module);
+    let body = db.method_body_ref(MethodIdInput::new(db, mid));
+    let symbol_tree = db.symbol_tree_ref(mid.module);
     let Some(msym) = symbol_tree.find_method_by_id(mid) else {
         return StructureParamSummary::default();
     };
@@ -90,8 +90,8 @@ fn compute_summary(
     // interleaves correctly in the collector's source-ordered pass.
     let resolver = Resolver::with_builtins_and_workspace(mid.module);
     let summarize = |callee: MethodId| Arc::new(compute_summary(db, callee, visited, depth + 1));
-    let forwarder = Forwarder::new(db, &resolver, mid.module, &body, &summarize);
-    let shapes = collect_structure_shapes(&body, SeedRoots::ParamNames(&byref), Some(&forwarder));
+    let forwarder = Forwarder::new(db, &resolver, mid.module, body, &summarize);
+    let shapes = collect_structure_shapes(body, SeedRoots::ParamNames(&byref), Some(&forwarder));
 
     let mut per_param: FxHashMap<u32, Arc<Projection>> = FxHashMap::default();
     for (i, param) in msym.params.iter().enumerate() {
@@ -182,7 +182,7 @@ impl<'a> Forwarder<'a> {
             return;
         }
 
-        let callee_tree = self.db.symbol_tree(callee_mid.module);
+        let callee_tree = self.db.symbol_tree_ref(callee_mid.module);
         let callee_params = callee_tree.find_method_by_id(callee_mid).map(|m| &m.params);
 
         for (j, root) in tracked {
@@ -210,7 +210,7 @@ impl<'a> Forwarder<'a> {
                 if self.shadowing_locals.contains(&lower) {
                     return None;
                 }
-                if let Some(method) = self.db.symbol_tree(self.module).find_method(name) {
+                if let Some(method) = self.db.symbol_tree_ref(self.module).find_method(name) {
                     return Some(method.id);
                 }
                 self.global_methods().get(&lower).copied()

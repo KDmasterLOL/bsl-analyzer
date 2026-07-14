@@ -245,7 +245,7 @@ pub fn module_cfgs_query<'db>(
     let module_id = hir::ModuleId::new(file_id);
     let _span = tracing::info_span!("module_cfgs", ?module_id).entered();
 
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
     let mut cfgs = rustc_hash::FxHashMap::default();
     for (local_id, body) in module_bodies.iter_bodies() {
@@ -291,7 +291,7 @@ pub fn module_reaching_definitions_query<'db>(
     let _span = tracing::info_span!("module_reaching_definitions", ?module_id).entered();
 
     let module_cfgs = db.module_cfgs(file_id_input);
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
     let mut results = rustc_hash::FxHashMap::default();
 
@@ -351,7 +351,7 @@ pub fn module_path_terminates_query<'db>(
     let _span = tracing::info_span!("module_path_terminates", ?module_id).entered();
 
     let module_cfgs = db.module_cfgs(file_id_input);
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
     let mut results = rustc_hash::FxHashMap::default();
 
@@ -405,7 +405,7 @@ pub fn module_liveness_analysis_query<'db>(
     let total_start = Instant::now();
 
     let module_cfgs = db.module_cfgs(file_id_input);
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
     let mut results = rustc_hash::FxHashMap::default();
 
@@ -476,7 +476,7 @@ pub fn module_level_cfg_query<'db>(
     let file_id = file_id_input.file_id(db);
     let module_id = hir::ModuleId::new(file_id);
 
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
     let body = match module_bodies.module_code() {
         Some(body) => body,
@@ -501,7 +501,7 @@ pub fn module_level_liveness_analysis_query<'db>(
     let file_id = file_id_input.file_id(db);
     let module_id = hir::ModuleId::new(file_id);
 
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
     let body = match module_bodies.module_code() {
         Some(body) => body,
@@ -613,7 +613,7 @@ pub fn module_hir_metrics_query<'db>(
     let module_id = ModuleId::new(file_id);
     let _span = tracing::info_span!("module_hir_metrics", ?module_id).entered();
 
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
     let mut methods = rustc_hash::FxHashMap::default();
     for (local_id, body) in module_bodies.iter_bodies() {
         let mut metrics = hir::metrics::compute_hir_metrics(body);
@@ -659,7 +659,7 @@ pub fn module_cyclomatic_query<'db>(
 
     let module_cfgs = db.module_cfgs(file_id_input);
     let module_id = ModuleId::new(file_id);
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
     let module_metrics = module_hir_metrics_query(db, file_id_input);
     let mut methods = rustc_hash::FxHashMap::default();
     for (local_id, _body) in module_bodies.iter_bodies() {
@@ -675,7 +675,7 @@ pub fn module_cyclomatic_query<'db>(
     Arc::new(ModuleCyclomatic { methods })
 }
 
-#[salsa::tracked(lru = 256, returns(clone))]
+#[salsa::tracked(lru = 256, returns(copy))]
 pub fn method_cyclomatic_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,

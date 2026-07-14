@@ -65,7 +65,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
                     .user_common_module_exists(db, &name_node);
             let same_file_shadows = {
                 let module_id = hir::ModuleId::new(position.file_id);
-                let tree = db.symbol_tree(module_id);
+                let tree = db.symbol_tree_ref(module_id);
                 tree.find_method(&name_node).is_some() || tree.find_variable(&name_node).is_some()
             };
             if workspace_module_shadows || same_file_shadows {
@@ -472,7 +472,7 @@ fn complete_common_module_methods(
     );
 
     let module_id = hir::ModuleId::new(module_file_id);
-    let symbol_tree = db.symbol_tree(module_id);
+    let symbol_tree = db.symbol_tree_ref(module_id);
 
     let items: Vec<CompletionItem> = symbol_tree
         .methods()

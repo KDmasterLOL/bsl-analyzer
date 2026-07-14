@@ -71,7 +71,7 @@ fn salsa_cache_hit_shares_arc() {
     let input = FileIdInput::new(&db, fid);
     let r1 = infer_module_code_query(&db, input);
     let r2 = infer_module_code_query(&db, input);
-    assert!(Arc::ptr_eq(&r1, &r2), "second call within the same revision must hit the Salsa cache");
+    assert!(Arc::ptr_eq(r1, r2), "second call within the same revision must hit the Salsa cache");
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn trait_method_delegates_to_query() {
     let via_trait = db.infer_module_code(fid);
     let via_query = infer_module_code_query(&db, FileIdInput::new(&db, fid));
     assert!(
-        Arc::ptr_eq(&via_trait, &via_query),
+        Arc::ptr_eq(&via_trait, via_query),
         "RootDatabaseImpl::infer_module_code must delegate to the query without an extra layer"
     );
 }

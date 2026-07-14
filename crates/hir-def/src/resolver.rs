@@ -202,14 +202,14 @@ impl Resolver {
             return symbols.find_method(name).map(|m| m.id);
         }
         let module_id = self.module_id()?;
-        if let Some(m) = db.symbol_tree(module_id).find_method(name) {
+        if let Some(m) = db.symbol_tree_ref(module_id).find_method(name) {
             return Some(m.id);
         }
         // Weaving: an extension method calling a base-module sibling resolves against the
         // paired base module. The returned `MethodId` carries the base module, so downstream
         // type inference uses the base method's real signature.
         let base = self.module_base_fallback()?;
-        db.symbol_tree(base).find_method(name).map(|m| m.id)
+        db.symbol_tree_ref(base).find_method(name).map(|m| m.id)
     }
 
     pub fn resolve_module_variable(&self, db: &dyn DefDatabase, name: &Name) -> Option<VariableId> {
@@ -217,11 +217,11 @@ impl Resolver {
             return symbols.find_variable(name).map(|v| v.id);
         }
         let module_id = self.module_id()?;
-        if let Some(v) = db.symbol_tree(module_id).find_variable(name) {
+        if let Some(v) = db.symbol_tree_ref(module_id).find_variable(name) {
             return Some(v.id);
         }
         let base = self.module_base_fallback()?;
-        db.symbol_tree(base).find_variable(name).map(|v| v.id)
+        db.symbol_tree_ref(base).find_variable(name).map(|v| v.id)
     }
 
     pub fn user_common_module_exists(&self, db: &dyn ConfigsDatabase, module_name: &Name) -> bool {
@@ -329,7 +329,7 @@ impl Resolver {
             // appended after it.
             let mut seen = rustc_hash::FxHashSet::default();
             for module_id in candidates {
-                let symbol_tree = db.symbol_tree(module_id);
+                let symbol_tree = db.symbol_tree_ref(module_id);
                 for method in symbol_tree.exported_methods() {
                     if seen.insert(method.name.as_str().fold_lower()) {
                         exports.push((module_name.clone(), method.name.clone(), method.id));
@@ -499,7 +499,7 @@ impl Resolver {
 
         let candidates = self.locate_common_module_candidates(db, module_name)?;
         for target_module_id in candidates {
-            let symbol_tree = db.symbol_tree(target_module_id);
+            let symbol_tree = db.symbol_tree_ref(target_module_id);
             if let Some(method_symbol) = symbol_tree.find_method(method_name) {
                 return Ok(QualifiedMethodResolution {
                     method_id: method_symbol.id,
@@ -602,7 +602,7 @@ impl Resolver {
         .entered();
 
         let target_module_id = self.locate_manager_module(db, manager_type, mdo_name)?;
-        let symbol_tree = db.symbol_tree(target_module_id);
+        let symbol_tree = db.symbol_tree_ref(target_module_id);
 
         let method_symbol =
             symbol_tree.find_method(method_name).ok_or(QualifiedMethodError::NotFound)?;
@@ -660,7 +660,7 @@ impl Resolver {
             })?;
 
         let target_module_id = crate::ModuleId::new(target_file_id);
-        let symbol_tree = db.symbol_tree(target_module_id);
+        let symbol_tree = db.symbol_tree_ref(target_module_id);
 
         let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
             tracing::debug!(
@@ -728,7 +728,7 @@ impl Resolver {
             })?;
 
         let target_module_id = crate::ModuleId::new(target_file_id);
-        let symbol_tree = db.symbol_tree(target_module_id);
+        let symbol_tree = db.symbol_tree_ref(target_module_id);
 
         let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
             tracing::debug!(
@@ -796,7 +796,7 @@ impl Resolver {
             })?;
 
         let target_module_id = crate::ModuleId::new(target_file_id);
-        let symbol_tree = db.symbol_tree(target_module_id);
+        let symbol_tree = db.symbol_tree_ref(target_module_id);
 
         let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
             tracing::debug!(
