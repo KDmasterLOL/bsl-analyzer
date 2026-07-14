@@ -82,8 +82,7 @@ pub(super) fn mismatched_arg_counts(
     db: &RootDatabaseImpl,
     file_id: FileId,
 ) -> Vec<(usize, usize, usize)> {
-    db.infer(file_id)
-        .diagnostics
+    db.arg_diagnostics(file_id)
         .iter()
         .filter_map(|(_, diagnostic)| match diagnostic {
             InferenceDiagnostic::MismatchedArgCount {

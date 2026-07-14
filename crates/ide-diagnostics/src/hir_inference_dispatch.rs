@@ -30,10 +30,11 @@ pub fn collect_inference_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic
 }
 
 pub fn collect_arg_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if !ctx
-        .config
-        .any_enabled(&[DiagnosticCode::TypeMismatch, DiagnosticCode::TypeMismatchByDocComment])
-    {
+    if !ctx.config.any_enabled(&[
+        DiagnosticCode::MismatchedArgCount,
+        DiagnosticCode::TypeMismatch,
+        DiagnosticCode::TypeMismatchByDocComment,
+    ]) {
         return Vec::new();
     }
 

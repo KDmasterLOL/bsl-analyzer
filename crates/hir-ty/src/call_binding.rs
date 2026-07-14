@@ -1,24 +1,14 @@
-use std::sync::Arc;
-
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 
 use crate::call_resolution::{
-    resolve_candidates, CallCandidateSet, CallRejection, CallResolution, CallSelection,
-    CandidateDisposition, CandidateId,
+    resolve_candidates, CallCandidateSet, CallResolution, CallSelection, CandidateDisposition,
+    CandidateId,
 };
-use crate::infer::{CandidateCallBinding, ParamsShape};
+use crate::infer::CandidateCallBinding;
 
 pub(crate) struct BindingProjection {
     pub semantic: CandidateCallBinding,
-    pub params: ParamsShape,
-    pub params_from_doc_comment: bool,
-    pub arity: Option<ArityDiagnosticInput>,
-}
-
-pub(crate) struct ArityDiagnosticInput {
-    pub required_count: usize,
-    pub total_count: usize,
 }
 
 impl CallResolution {
@@ -42,58 +32,7 @@ pub(crate) fn resolve_binding(
     argument_types: &[TypeId],
 ) -> BindingProjection {
     let resolution = resolve_candidates(db, &candidates, argument_types);
-    let params = compatibility_params(&candidates, &resolution);
-    let params_from_doc_comment =
-        candidates.as_slice().iter().all(|candidate| candidate.from_doc_comment);
-    let arity = arity_diagnostic(&candidates, &resolution);
-    BindingProjection {
-        semantic: CandidateCallBinding { candidates, resolution },
-        params,
-        params_from_doc_comment,
-        arity,
-    }
-}
-
-fn compatibility_params(candidates: &CallCandidateSet, resolution: &CallResolution) -> ParamsShape {
-    let signatures = candidates.as_slice();
-    if let [signature] = signatures {
-        return ParamsShape::Single(signature.params.iter().map(|param| param.ty).collect());
-    }
-    let selected = match resolution.selection {
-        CallSelection::Unique { candidate } => Some(candidate),
-        CallSelection::Ambiguous { .. } | CallSelection::Rejected(_) => None,
-    };
-    let flat = selected
-        .and_then(|id| signature_by_id(candidates, id))
-        .map(|signature| signature.params.iter().map(|param| param.ty).collect())
-        .unwrap_or_else(|| Arc::from([]));
-    let overloads = signatures
-        .iter()
-        .map(|signature| signature.params.iter().map(|param| param.ty).collect())
-        .collect::<Vec<Arc<[TypeId]>>>()
-        .into();
-    ParamsShape::Overloaded { flat, overloads }
-}
-
-fn arity_diagnostic(
-    candidates: &CallCandidateSet,
-    resolution: &CallResolution,
-) -> Option<ArityDiagnosticInput> {
-    let CallSelection::Rejected(CallRejection::Arity { fallback }) = resolution.selection else {
-        return None;
-    };
-    let signature = signature_by_id(candidates, fallback.candidate)?;
-    Some(ArityDiagnosticInput {
-        required_count: signature.required_args,
-        total_count: signature.params.len(),
-    })
-}
-
-fn signature_by_id(
-    candidates: &CallCandidateSet,
-    id: CandidateId,
-) -> Option<&crate::call_resolution::CallSignature> {
-    candidates.as_slice().iter().find(|candidate| candidate.id == id)
+    BindingProjection { semantic: CandidateCallBinding { candidates, resolution } }
 }
 
 #[cfg(test)]
@@ -124,7 +63,12 @@ mod tests {
         assert_eq!(candidates.as_slice()[0].params.len(), 2);
 
         let projection = resolve_binding(&db, candidates, &[]);
-        let arity = projection.arity.expect("zero arguments must be rejected");
-        assert_eq!((arity.required_count, arity.total_count), (1, 2));
+        let signature = projection
+            .semantic
+            .candidates
+            .as_slice()
+            .first()
+            .expect("StrTemplate has one signature");
+        assert_eq!((signature.required_args, signature.params.len()), (1, 2));
     }
 }

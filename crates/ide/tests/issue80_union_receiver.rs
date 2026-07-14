@@ -87,7 +87,7 @@ fn issue80_union_receiver_rejects_cross_product_arguments() {
     let candidate = inference
         .call_arg_bindings
         .iter()
-        .filter_map(|binding| binding.candidate.as_ref())
+        .map(|binding| &binding.candidate)
         .find(|candidate| {
             candidate.candidates.as_slice().iter().any(|signature| {
                 matches!(

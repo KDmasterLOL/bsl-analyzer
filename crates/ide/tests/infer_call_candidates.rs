@@ -46,9 +46,16 @@ fn builtin_call_attaches_candidate_resolution() {
     let binding = inference
         .call_arg_bindings
         .iter()
-        .find(|binding| binding.candidate.is_some())
+        .find(|binding| {
+            binding
+                .candidate
+                .candidates
+                .as_slice()
+                .iter()
+                .all(|signature| signature.id.is_builtin())
+        })
         .expect("builtin call must attach candidate semantics");
-    let candidate = binding.candidate.as_ref().expect("checked above");
+    let candidate = &binding.candidate;
     assert!(candidate.candidates.as_slice().iter().all(|signature| signature.id.is_builtin()));
     assert!(candidate.resolution.unique_candidate().is_some());
     assert_eq!(candidate.resolution.return_ty, db.number(None, None));
@@ -77,9 +84,11 @@ fn user_method_call_attaches_candidate_resolution() {
     let binding = inference
         .call_arg_bindings
         .iter()
-        .find(|binding| binding.candidate.is_some())
+        .find(|binding| {
+            binding.candidate.candidates.as_slice().iter().all(|signature| signature.id.is_user())
+        })
         .expect("user method call must attach candidate semantics");
-    let candidate = binding.candidate.as_ref().expect("checked above");
+    let candidate = &binding.candidate;
     assert_eq!(candidate.candidates.as_slice().len(), 1);
     assert!(candidate.candidates.as_slice()[0].id.is_user());
     assert!(candidate.resolution.unique_candidate().is_some());
@@ -109,7 +118,10 @@ fn user_method_candidate_preserves_effective_environment() {
     let candidate = inference
         .call_arg_bindings
         .iter()
-        .find_map(|binding| binding.candidate.as_ref())
+        .map(|binding| &binding.candidate)
+        .find(|candidate| {
+            candidate.candidates.as_slice().iter().all(|signature| signature.id.is_user())
+        })
         .expect("user method call must attach candidate semantics");
     assert_eq!(candidate.candidates.as_slice()[0].environment, EnvFlags::SERVER);
 }
@@ -139,7 +151,10 @@ fn user_method_candidate_preserves_client_preprocessor_environment() {
     let candidate = inference
         .call_arg_bindings
         .iter()
-        .find_map(|binding| binding.candidate.as_ref())
+        .map(|binding| &binding.candidate)
+        .find(|candidate| {
+            candidate.candidates.as_slice().iter().all(|signature| signature.id.is_user())
+        })
         .expect("user method call must attach candidate semantics");
     assert_eq!(candidate.candidates.as_slice()[0].environment, EnvFlags::THIN_CLIENT);
 }
@@ -163,9 +178,16 @@ fn platform_manager_call_attaches_complete_candidate_resolution() {
     let binding = inference
         .call_arg_bindings
         .iter()
-        .find(|binding| binding.candidate.is_some())
+        .find(|binding| {
+            binding
+                .candidate
+                .candidates
+                .as_slice()
+                .iter()
+                .all(|signature| signature.id.is_platform())
+        })
         .expect("platform manager call must attach candidate semantics");
-    let candidate = binding.candidate.as_ref().expect("checked above");
+    let candidate = &binding.candidate;
     assert!(!candidate.candidates.as_slice().is_empty());
     assert!(candidate.candidates.as_slice().iter().all(|signature| signature.id.is_platform()));
     assert!(candidate.resolution.unique_candidate().is_some());
@@ -189,16 +211,12 @@ fn constant_refinement_updates_candidate_truth_before_resolution() {
     )]);
 
     let inference = db.infer(file_id);
-    let candidate_bindings = inference
-        .call_arg_bindings
-        .iter()
-        .filter(|binding| binding.candidate.is_some())
-        .collect::<Vec<_>>();
+    let candidate_bindings = inference.call_arg_bindings.iter().collect::<Vec<_>>();
     assert_eq!(candidate_bindings.len(), 2);
     let get = candidate_bindings
         .iter()
         .find(|binding| binding.args.is_empty())
-        .and_then(|binding| binding.candidate.as_ref())
+        .map(|binding| &binding.candidate)
         .expect("Получить binding must have no arguments");
     assert_eq!(get.resolution.return_ty, db.string(None, false));
     assert!(get
@@ -209,7 +227,7 @@ fn constant_refinement_updates_candidate_truth_before_resolution() {
     let set = candidate_bindings
         .iter()
         .find(|binding| binding.args.len() == 1)
-        .and_then(|binding| binding.candidate.as_ref())
+        .map(|binding| &binding.candidate)
         .expect("Установить binding must have one argument");
     assert!(set.candidates.as_slice().iter().all(|candidate| {
         candidate.params.first().is_some_and(|param| param.ty == db.string(None, false))

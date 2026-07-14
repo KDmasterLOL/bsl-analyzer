@@ -53,11 +53,29 @@ fn constructor_fallback_is_order_invariant_at_equal_distance() {
             },
         })
     );
-    let forward_arity = forward.arity.expect("all constructors reject arity");
-    let reverse_arity = reverse.arity.expect("all constructors reject arity");
+    let forward_signature = forward
+        .semantic
+        .candidates
+        .as_slice()
+        .iter()
+        .find(|candidate| {
+            candidate.id
+                == CandidateId::Platform { method_id: 20, signature: PlatformSignatureSlot::Base }
+        })
+        .expect("fallback candidate must exist");
+    let reverse_signature = reverse
+        .semantic
+        .candidates
+        .as_slice()
+        .iter()
+        .find(|candidate| {
+            candidate.id
+                == CandidateId::Platform { method_id: 20, signature: PlatformSignatureSlot::Base }
+        })
+        .expect("fallback candidate must exist");
     assert_eq!(
-        (forward_arity.required_count, forward_arity.total_count),
-        (reverse_arity.required_count, reverse_arity.total_count)
+        (forward_signature.required_args, forward_signature.params.len()),
+        (reverse_signature.required_args, reverse_signature.params.len())
     );
-    assert_eq!((forward_arity.required_count, forward_arity.total_count), (3, 3));
+    assert_eq!((forward_signature.required_args, forward_signature.params.len()), (3, 3));
 }

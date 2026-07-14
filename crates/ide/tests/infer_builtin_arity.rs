@@ -28,8 +28,7 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
 }
 
 fn arg_count_diags(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize, usize)> {
-    db.infer(file_id)
-        .diagnostics
+    db.arg_diagnostics(file_id)
         .iter()
         .filter_map(|(_, d)| match d {
             InferenceDiagnostic::MismatchedArgCount {

@@ -1,5 +1,6 @@
 use bsl_platform::{MethodParam, PlatformMethod};
 use bsl_types::builders::Builders;
+use bsl_types::facet::{ArgArity, FunctionFacet};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::execution_env::EnvFlags;
@@ -13,6 +14,43 @@ use super::{
 use crate::lower::type_string::lower_param_type_string_typeid;
 
 impl CallCandidateSet {
+    pub(crate) fn from_function_facet(facet: &FunctionFacet) -> Self {
+        let params = facet
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| CallParam {
+                name: param.name.as_str().into(),
+                ty: param.ty,
+                has_default: facet.defaults.get(index).is_some_and(Option::is_some),
+                mode: if param.variadic {
+                    CallParamMode::Variadic
+                } else {
+                    CallParamMode::Positional
+                },
+            })
+            .collect();
+        let max_args = match facet.max_args {
+            ArgArity::Fixed(count) => Some(count as usize),
+            ArgArity::Variadic => None,
+            _ => None,
+        };
+        Self(
+            vec![CallSignature {
+                id: CandidateId::FunctionValue,
+                params,
+                required_args: facet.min_args as usize,
+                max_args,
+                return_ty: facet.returns,
+                origin: CandidateOrigin::FunctionValue,
+                environment: EnvFlags::EMPTY,
+                provenance: CandidateProvenance::FunctionValue,
+                from_doc_comment: false,
+            }]
+            .into_boxed_slice(),
+        )
+    }
+
     pub(crate) fn from_platform_method(
         db: &dyn TypeKernelDb,
         method: &PlatformMethod,

@@ -259,6 +259,7 @@ fn type_mismatch_does_not_double_fire_on_arg_count_mismatch() {
 
     let count_mismatches: Vec<_> = infer_diags
         .iter()
+        .chain(arg_diags.iter())
         .filter(|(_, d)| matches!(d, InferenceDiagnostic::MismatchedArgCount { .. }))
         .collect();
     assert_eq!(count_mismatches.len(), 1, "exactly one MismatchedArgCount expected");

@@ -1,7 +1,7 @@
 use base_db::FileIdInput;
 use bsl_platform::deprecation::{self, ElementKind, Lookup};
 use bsl_types::builders::Builders;
-use bsl_types::facet::{ArgArity, DateComponent, FormDataFacet, MdoRefFacet, ProjectionSource};
+use bsl_types::facet::{DateComponent, FormDataFacet, MdoRefFacet, ProjectionSource};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{ConfigId, Projection, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
@@ -307,11 +307,7 @@ pub struct CallArgBinding {
 
     pub args: Vec<ExprId>,
 
-    pub candidate: Option<CandidateCallBinding>,
-
-    pub params: ParamsShape,
-
-    pub params_from_doc_comment: bool,
+    pub candidate: CandidateCallBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,13 +315,6 @@ pub struct CandidateCallBinding {
     pub candidates: crate::call_resolution::CallCandidateSet,
 
     pub resolution: crate::call_resolution::CallResolution,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParamsShape {
-    Single(Arc<[TypeId]>),
-
-    Overloaded { flat: Arc<[TypeId]>, overloads: Arc<[Arc<[TypeId]>]> },
 }
 
 pub struct InferenceContext<'db> {
@@ -1024,26 +1013,6 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    fn record_call_arg_binding(
-        &mut self,
-        call_expr: ExprId,
-        args: &[ExprId],
-        params: ParamsShape,
-        params_from_doc_comment: bool,
-    ) {
-        if self.body.is_recovered(call_expr) {
-            return;
-        }
-        self.call_arg_bindings.push(CallArgBinding {
-            owner: self.owner,
-            call_expr,
-            args: args.to_vec(),
-            candidate: None,
-            params,
-            params_from_doc_comment,
-        });
-    }
-
     fn record_candidate_call_arg_binding(
         &mut self,
         call_expr: ExprId,
@@ -1055,23 +1024,13 @@ impl<'db> InferenceContext<'db> {
             .map(|arg| self.expr_types.get(arg).copied().unwrap_or_else(|| self.db.unknown()))
             .collect::<Vec<_>>();
         let projection = crate::call_binding::resolve_binding(self.db, candidates, &argument_types);
-        if let Some(arity) = &projection.arity {
-            self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                call_expr,
-                required_count: arity.required_count,
-                total_count: arity.total_count,
-                found: args.len(),
-            });
-        }
         let return_ty = projection.semantic.resolution.return_ty;
         if !self.body.is_recovered(call_expr) {
             self.call_arg_bindings.push(CallArgBinding {
                 owner: self.owner,
                 call_expr,
                 args: args.to_vec(),
-                candidate: Some(projection.semantic),
-                params: projection.params,
-                params_from_doc_comment: projection.params_from_doc_comment,
+                candidate: projection.semantic,
             });
         }
         return_ty
@@ -1563,15 +1522,13 @@ impl<'db> InferenceContext<'db> {
                                 candidates,
                                 &argument_types,
                             );
-                            if let Some(arity) = projection.arity {
-                                self.push_inference_diagnostic(
-                                    InferenceDiagnostic::MismatchedArgCount {
-                                        call_expr: expr_id,
-                                        required_count: arity.required_count,
-                                        total_count: arity.total_count,
-                                        found: args.len(),
-                                    },
-                                );
+                            if !self.body.is_recovered(expr_id) {
+                                self.call_arg_bindings.push(CallArgBinding {
+                                    owner: self.owner,
+                                    call_expr: expr_id,
+                                    args: arg_ids,
+                                    candidate: projection.semantic,
+                                });
                             }
                         }
                     }
@@ -2273,30 +2230,9 @@ impl<'db> InferenceContext<'db> {
         let callee_kind = self.db.lookup_type(callee_ty);
         match callee_kind {
             TypeKind::Function(facet) => {
-                let total = facet.params.len();
-                let required = facet.min_args as usize;
-                let too_few = args.len() < required;
-                let too_many = match facet.max_args {
-                    ArgArity::Fixed(n) => args.len() > n as usize,
-                    ArgArity::Variadic => false,
-                    _ => false,
-                };
-                if too_few || too_many {
-                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                        call_expr: callee,
-                        required_count: required,
-                        total_count: total,
-                        found: args.len(),
-                    });
-                }
-
-                self.record_call_arg_binding(
-                    callee,
-                    args,
-                    ParamsShape::Single(facet.params.iter().map(|p| p.ty).collect()),
-                    false,
-                );
-
+                let candidates =
+                    crate::call_resolution::CallCandidateSet::from_function_facet(facet);
+                self.record_candidate_call_arg_binding(callee, args, candidates);
                 facet.returns
             }
             TypeKind::Unknown => {
@@ -3236,31 +3172,33 @@ mod tests {
     use bsl_types::testing::InMemoryDb;
 
     #[test]
-    fn params_shape_typeids_round_trip_via_ty() {
+    fn t12_function_facet_synthesizes_candidate_with_argument_diagnostics() {
+        use bsl_types::facet::{ArgArity, FunctionFacet, FunctionOrigin, ParamPassing, ParamSpec};
+
         let db = InMemoryDb::new();
         let number = db.number(None, None);
         let string = db.string(None, false);
+        let facet = FunctionFacet::new(
+            Arc::from([ParamSpec::new("value".to_string(), number, ParamPassing::ByVal, false)]),
+            Arc::from([None]),
+            1,
+            ArgArity::Fixed(1),
+            number,
+            FunctionOrigin::Unknown,
+        );
 
-        let single = ParamsShape::Single(Arc::from([number, string]));
-        match single {
-            ParamsShape::Single(ids) => {
-                assert_eq!(ids.as_ref(), &[number, string]);
-            }
-            _ => panic!("expected Single"),
-        }
+        let candidates = crate::call_resolution::CallCandidateSet::from_function_facet(&facet);
+        let resolution = crate::call_resolution::resolve_candidates(&db, &candidates, &[string]);
 
-        let overloaded = ParamsShape::Overloaded {
-            flat: Arc::from([number]),
-            overloads: Arc::from([Arc::from([number]) as Arc<[TypeId]>]),
-        };
-        match overloaded {
-            ParamsShape::Overloaded { flat, overloads } => {
-                assert_eq!(flat.as_ref(), &[number]);
-                assert_eq!(overloads.len(), 1);
-                assert_eq!(overloads[0].as_ref(), &[number]);
-            }
-            _ => panic!("expected Overloaded"),
-        }
+        assert!(matches!(
+            resolution.selection,
+            crate::call_resolution::CallSelection::Rejected(
+                crate::call_resolution::CallRejection::Type
+            )
+        ));
+        assert_eq!(resolution.return_ty, db.unknown());
+        assert_eq!(facet.returns, number);
+        assert_eq!(candidates.as_slice()[0].params[0].ty, number);
     }
 
     #[test]

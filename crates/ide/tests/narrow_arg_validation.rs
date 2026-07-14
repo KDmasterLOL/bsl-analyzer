@@ -131,7 +131,7 @@ fn arg_mismatch_in_else_branch_still_fires() {
 }
 
 #[test]
-fn arity_mismatch_still_fires_from_infer_query() {
+fn arity_mismatch_still_fires_from_arg_diagnostics() {
     let fixture = r#"
 //- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
 // Параметры:
@@ -148,12 +148,11 @@ fn arity_mismatch_still_fires_from_infer_query() {
     let (db, file_id) = setup(fixture);
 
     let arity = db
-        .infer(file_id)
-        .diagnostics
+        .arg_diagnostics(file_id)
         .iter()
         .filter(|(_, d)| matches!(d, InferenceDiagnostic::MismatchedArgCount { .. }))
         .count();
-    assert_eq!(arity, 1, "exactly one MismatchedArgCount must continue to fire from infer_query");
+    assert_eq!(arity, 1, "exactly one MismatchedArgCount must continue to fire");
 }
 
 #[test]

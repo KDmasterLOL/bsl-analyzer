@@ -20,17 +20,6 @@ fn resolution() {
         let candidates = super::CallCandidateSet::try_from(case.candidates)
             .expect("resolution fixtures have unique candidate identities");
         let result = resolve_candidates(&db, &candidates, &case.arguments);
-        let scores = result.candidates.iter().map(|fact| (fact.id, fact.score)).collect::<Vec<_>>();
-        let survivors = result
-            .candidates
-            .iter()
-            .filter(|fact| fact.disposition == CandidateDisposition::Survivor)
-            .map(|fact| fact.id)
-            .collect::<Vec<_>>();
-        println!(
-            "case={} scores={scores:?} survivors={survivors:?} return={:?} selection={:?}",
-            case.name, result.return_ty, result.selection
-        );
 
         // Then selection, survivors, scores, return aggregation, and rejection stay structured.
         assert_eq!(result.return_ty, case.expected_return, "{}", case.name);

@@ -37,9 +37,7 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
 }
 
 fn mismatched_arg_counts(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize, usize)> {
-    let infer = db.infer(file_id);
-    infer
-        .diagnostics
+    db.arg_diagnostics(file_id)
         .iter()
         .filter_map(|(_, diag)| match diag {
             InferenceDiagnostic::MismatchedArgCount {

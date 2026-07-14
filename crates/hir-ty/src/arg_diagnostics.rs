@@ -7,11 +7,16 @@ use hir_def::{DefWithBodyId, ExprId, IdConversion, ModuleId};
 use vfs::FileId;
 
 use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 
+use crate::call_resolution::{resolve_candidates, ArgumentParameter, CallRejection, CallSelection};
 use crate::db::HirDatabase;
-use crate::infer::{InferenceDiagnostic, ParamsShape};
+use crate::infer::{CallArgBinding, InferenceDiagnostic};
 use crate::narrow::{narrowed_type_at, NarrowState};
+
+#[cfg(test)]
+mod tests;
 
 pub fn arg_diagnostics_query(
     db: &dyn HirDatabase,
@@ -82,38 +87,22 @@ pub fn arg_diagnostics_query(
         let narrow = cached_narrow.as_deref();
 
         let narrow_arg_start = Instant::now();
-        let arg_types: Vec<TypeId> = binding
+        let pre_types: Vec<TypeId> = binding
             .args
             .iter()
-            .map(|arg_id| {
-                let base = infer.type_id_of_expr_in(binding.owner, *arg_id).unwrap_or(db.unknown());
-                narrow_arg(db, narrow, body, *arg_id, base)
-            })
+            .map(|arg_id| infer.type_id_of_expr_in(binding.owner, *arg_id).unwrap_or(db.unknown()))
             .collect();
+        let post_types = binding
+            .args
+            .iter()
+            .zip(pre_types)
+            .map(|(arg_id, base)| narrow_arg(db, narrow, body, *arg_id, base))
+            .collect::<Vec<_>>();
         narrow_arg_ns += narrow_arg_start.elapsed().as_nanos();
 
         let emit_start = Instant::now();
-        let from_doc_comment = binding.params_from_doc_comment;
-        match &binding.params {
-            ParamsShape::Single(params) => emit_single(
-                db,
-                &binding.args,
-                &arg_types,
-                params,
-                &mut out,
-                binding.owner,
-                from_doc_comment,
-            ),
-            ParamsShape::Overloaded { flat, overloads } => emit_overloaded(
-                db,
-                &binding.args,
-                &arg_types,
-                flat,
-                overloads,
-                &mut out,
-                binding.owner,
-                from_doc_comment,
-            ),
+        if let Some(diagnostic) = diagnostic_for_binding(db, binding, &post_types) {
+            out.push((binding.owner, diagnostic));
         }
         emit_ns += emit_start.elapsed().as_nanos();
     }
@@ -247,65 +236,47 @@ fn resolve_body(module_bodies: &hir_def::ModuleBodies, owner: DefWithBodyId) -> 
     }
 }
 
-fn emit_single(
-    db: &dyn HirDatabase,
-    args: &[ExprId],
-    arg_types: &[TypeId],
-    params: &[TypeId],
-    out: &mut Vec<(DefWithBodyId, InferenceDiagnostic)>,
-    owner: DefWithBodyId,
-    from_doc_comment: bool,
-) {
-    for ((arg_id, &arg_ty), &param_id) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
-        if !crate::subtype::is_coercible_to(db, arg_ty, param_id) {
-            out.push((
-                owner,
-                InferenceDiagnostic::TypeMismatch {
-                    expr: *arg_id,
-                    expected: param_id,
-                    actual: arg_ty,
-                    from_doc_comment,
-                },
-            ));
+fn diagnostic_for_binding(
+    db: &dyn TypeKernelDb,
+    binding: &CallArgBinding,
+    post_types: &[TypeId],
+) -> Option<InferenceDiagnostic> {
+    let resolution = resolve_candidates(db, &binding.candidate.candidates, post_types);
+    match resolution.selection {
+        CallSelection::Unique { .. } | CallSelection::Ambiguous { .. } => None,
+        CallSelection::Rejected(CallRejection::NoCandidates) => None,
+        CallSelection::Rejected(CallRejection::Arity { fallback }) => {
+            let signature = binding
+                .candidate
+                .candidates
+                .as_slice()
+                .iter()
+                .find(|candidate| candidate.id == fallback.candidate)?;
+            Some(InferenceDiagnostic::MismatchedArgCount {
+                call_expr: binding.call_expr,
+                required_count: signature.required_args,
+                total_count: signature.params.len(),
+                found: post_types.len(),
+            })
+        }
+        CallSelection::Rejected(CallRejection::Type) => {
+            let fallback = resolution.type_fallback()?;
+            let argument = fallback.argument;
+            let ArgumentParameter::Declared { ty: expected, .. } = argument.parameter else {
+                return None;
+            };
+            let signature = binding
+                .candidate
+                .candidates
+                .as_slice()
+                .iter()
+                .find(|candidate| candidate.id == fallback.candidate)?;
+            Some(InferenceDiagnostic::TypeMismatch {
+                expr: *binding.args.get(argument.index)?,
+                expected,
+                actual: argument.argument_ty,
+                from_doc_comment: signature.from_doc_comment,
+            })
         }
     }
-}
-
-// A thin emit helper threading the call's data straight to the diagnostic sink; bundling the
-// arguments into a struct would only add an indirection local to this file.
-#[allow(clippy::too_many_arguments)]
-fn emit_overloaded(
-    db: &dyn HirDatabase,
-    args: &[ExprId],
-    arg_types: &[TypeId],
-    flat: &[TypeId],
-    overloads: &[Arc<[TypeId]>],
-    out: &mut Vec<(DefWithBodyId, InferenceDiagnostic)>,
-    owner: DefWithBodyId,
-    from_doc_comment: bool,
-) {
-    if overloads.is_empty() {
-        emit_single(db, args, arg_types, flat, out, owner, from_doc_comment);
-        return;
-    }
-
-    let any_accepts = overloads.iter().any(|params| {
-        if args.len() > params.len() {
-            return false;
-        }
-        arg_types
-            .iter()
-            .zip(params.iter())
-            .all(|(&a, &p)| crate::subtype::is_coercible_to(db, a, p))
-    });
-    if any_accepts {
-        return;
-    }
-
-    let chosen: &[TypeId] = overloads
-        .iter()
-        .min_by_key(|params| params.len().abs_diff(args.len()))
-        .map(|p| p.as_ref())
-        .unwrap_or(flat);
-    emit_single(db, args, arg_types, chosen, out, owner, from_doc_comment);
 }

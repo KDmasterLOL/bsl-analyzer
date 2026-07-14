@@ -50,6 +50,13 @@ pub struct ArityFallback {
     pub distance: usize,
 }
 
+/// Candidate and argument chosen only to display a type rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeFallback {
+    pub candidate: CandidateId,
+    pub argument: ArgumentEvaluation,
+}
+
 /// Why no candidate survived resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallRejection {
@@ -72,6 +79,41 @@ pub struct CallResolution {
     pub candidates: Box<[CandidateFact]>,
     pub selection: CallSelection,
     pub return_ty: TypeId,
+}
+
+impl CallResolution {
+    /// Returns the least-incompatible rejected candidate, with stable identity breaking ties.
+    pub fn type_fallback(&self) -> Option<TypeFallback> {
+        if self.selection != CallSelection::Rejected(CallRejection::Type) {
+            return None;
+        }
+        self.candidates
+            .iter()
+            .filter_map(|fact| match &fact.disposition {
+                CandidateDisposition::Rejected(CandidateRejection::TypeIncompatible {
+                    arguments,
+                }) => {
+                    let incompatible_count = arguments
+                        .iter()
+                        .filter(|argument| {
+                            argument.applicability == ArgumentApplicability::Incompatible
+                        })
+                        .count();
+                    let first_incompatible = arguments
+                        .iter()
+                        .find(|argument| {
+                            argument.applicability == ArgumentApplicability::Incompatible
+                        })
+                        .copied()?;
+                    Some((incompatible_count, fact.id, first_incompatible))
+                }
+                CandidateDisposition::Survivor
+                | CandidateDisposition::LowerRanked
+                | CandidateDisposition::Rejected(CandidateRejection::Arity(_)) => None,
+            })
+            .min_by_key(|(incompatible_count, candidate, _)| (*incompatible_count, *candidate))
+            .map(|(_, candidate, argument)| TypeFallback { candidate, argument })
+    }
 }
 
 /// Evaluates and ranks a complete candidate set without emitting diagnostics.

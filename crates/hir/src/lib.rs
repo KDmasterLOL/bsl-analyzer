@@ -183,7 +183,7 @@ pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
     form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, EnvCalleeKind, EnvMemberKind,
     FormElementKind, InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult,
-    MetadataKind, ModuleCodeInferenceResult, ParamsShape, UnresolvedMethodKind,
+    MetadataKind, ModuleCodeInferenceResult, UnresolvedMethodKind,
 };
 
 pub use bsl_types::builders::Builders;
@@ -645,12 +645,13 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             return Vec::new();
         };
 
-        match &binding.params {
-            ParamsShape::Single(params) => params.get(active).copied().into_iter().collect(),
-            ParamsShape::Overloaded { overloads, .. } => {
-                overloads.iter().filter_map(|o| o.get(active).copied()).collect()
-            }
-        }
+        binding
+            .candidate
+            .candidates
+            .as_slice()
+            .iter()
+            .filter_map(|candidate| candidate.params.get(active).map(|param| param.ty))
+            .collect()
     }
 
     pub fn resolve_method_call_to_definition(

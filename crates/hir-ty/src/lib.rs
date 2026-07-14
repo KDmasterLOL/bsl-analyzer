@@ -41,7 +41,7 @@ pub use call_resolution::{
     ArityFallback, BuiltinCallableId, CallCandidateSet, CallParam, CallParamMode, CallRejection,
     CallResolution, CallSelection, CallSignature, CandidateDisposition, CandidateFact, CandidateId,
     CandidateOrigin, CandidateProvenance, CandidateRejection, CandidateScore, DuplicateCandidateId,
-    PlatformSignatureSlot, UserMethodId,
+    PlatformSignatureSlot, TypeFallback, UserMethodId,
 };
 pub use field_enum::{enumerate_fields, FieldInfo, FieldOrigin};
 pub use field_lookup::lookup_field;
@@ -58,8 +58,7 @@ pub use hir_def::ConfigsDatabase;
 pub use infer::{
     BodyInferenceResult, CallArgBinding, CandidateCallBinding, EnvCalleeKind, EnvMemberKind,
     ImplicitLocalAssignment, ImplicitLocalInfo, InferOwnerResult, InferenceContext,
-    InferenceDiagnostic, InferenceResult, ModuleCodeInferenceResult, ParamsShape,
-    UnresolvedMethodKind,
+    InferenceDiagnostic, InferenceResult, ModuleCodeInferenceResult, UnresolvedMethodKind,
 };
 pub use lower::TyLoweringContext;
 pub use manager_lookup::{lookup_manager_field, ManagerMemberInfo};

@@ -46,10 +46,6 @@ pub(super) fn assert_contracts(db: &InMemoryDb) {
             .iter()
             .map(|fact| (fact.id, fact.score, fact.disposition.clone()))
             .collect::<Vec<_>>();
-        println!(
-            "adversarial_case={} facts={facts:?} return={:?} selection={:?}",
-            case.name, result.return_ty, result.selection
-        );
         assert_eq!(result.selection, case.selection, "{}", case.name);
         assert_eq!(result.return_ty, case.return_ty, "{}", case.name);
         assert_eq!(facts, case.facts, "{}", case.name);

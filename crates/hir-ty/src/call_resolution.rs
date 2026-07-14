@@ -17,7 +17,7 @@ pub use applicability::{
 };
 pub use resolution::{
     resolve_candidates, ArityFallback, CallRejection, CallResolution, CallSelection,
-    CandidateDisposition, CandidateFact, CandidateRejection, CandidateScore,
+    CandidateDisposition, CandidateFact, CandidateRejection, CandidateScore, TypeFallback,
 };
 
 /// Stable position of a platform signature within one method record.
@@ -64,6 +64,7 @@ pub enum CandidateId {
     Platform { method_id: u32, signature: PlatformSignatureSlot },
     User { method: UserMethodId, signature_ordinal: usize },
     Builtin { callable: BuiltinCallableId, signature_ordinal: usize },
+    FunctionValue,
 }
 
 impl CandidateId {
@@ -86,6 +87,7 @@ pub enum CandidateOrigin {
     Platform,
     User,
     Builtin,
+    FunctionValue,
 }
 
 /// Stable source record from which a candidate was lowered.
@@ -94,6 +96,7 @@ pub enum CandidateProvenance {
     PlatformMethod { method_id: u32, signature: PlatformSignatureSlot },
     UserMethod(UserMethodId),
     Builtin(BuiltinCallableId),
+    FunctionValue,
 }
 
 /// How a parameter contributes to the call's arity.

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use hir::{Builders, HirDatabase, ParamsShape, TypeKernelDb, TypeKind, UnresolvedMethodKind};
+use hir::{Builders, HirDatabase, TypeKernelDb, TypeKind, UnresolvedMethodKind};
 use ide_db::base_db::SourceDatabase;
 
 #[path = "infer_three_level/support.rs"]
@@ -152,12 +152,15 @@ fn three_level_candidate_invalidation() {
         .call_arg_bindings
         .iter()
         .find(|binding| {
-            binding.candidate.as_ref().is_some_and(|candidate| {
-                candidate.candidates.as_slice().iter().all(|signature| signature.id.is_platform())
-            })
+            binding
+                .candidate
+                .candidates
+                .as_slice()
+                .iter()
+                .all(|signature| signature.id.is_platform())
         })
         .expect("three-level call must have a candidate-backed binding");
-    let before_candidate = before_binding.candidate.as_ref().expect("checked above");
+    let before_candidate = &before_binding.candidate;
     let before_selected = before_candidate
         .resolution
         .unique_candidate()
@@ -171,7 +174,6 @@ fn three_level_candidate_invalidation() {
         .type_id_of_expr_in(before_binding.owner, before_binding.args[0])
         .expect("argument type must feed diagnostics");
     assert_eq!(before_arg_ty, db.structure(None));
-    assert!(matches!(before_binding.params, ParamsShape::Overloaded { .. }));
     assert!(before_candidate.resolution.is_survivor(before_selected));
 
     db.set_file_text(file_id, AFTER);
@@ -186,13 +188,16 @@ fn three_level_candidate_invalidation() {
         .call_arg_bindings
         .iter()
         .find(|binding| {
-            binding.candidate.as_ref().is_some_and(|candidate| {
-                candidate.candidates.as_slice().iter().all(|signature| signature.id.is_platform())
-            })
+            binding
+                .candidate
+                .candidates
+                .as_slice()
+                .iter()
+                .all(|signature| signature.id.is_platform())
         })
         .expect("edited three-level call must remain candidate-backed");
     assert_eq!(after_binding.call_expr, before_binding.call_expr);
-    let after_candidate = after_binding.candidate.as_ref().expect("checked above");
+    let after_candidate = &after_binding.candidate;
     let after_selected = after_candidate
         .resolution
         .unique_candidate()
@@ -221,7 +226,6 @@ fn three_level_candidate_invalidation() {
         .expect("edited argument type must feed diagnostics");
     assert!(matches!(db.lookup_type(after_arg_ty), TypeKind::Date(_)));
     assert_ne!(after_arg_ty, before_arg_ty);
-    assert!(matches!(after_binding.params, ParamsShape::Overloaded { .. }));
     assert!(!after_candidate.resolution.is_survivor(before_selected));
     assert!(after_candidate.resolution.is_survivor(after_selected));
 }
