@@ -1,5 +1,5 @@
 use bsl_metadata::MdoType;
-use bsl_platform::{find_prefixed_method, PlatformMethod};
+use bsl_platform::{find_prefixed_methods, PlatformMethod};
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
@@ -17,6 +17,16 @@ pub struct PlatformMethodResolution {
     pub overloads: Vec<Vec<TypeId>>,
     /// Execution environments the method is available in.
     pub env: hir_def::execution_env::EnvFlags,
+    pub records: Vec<PlatformMethodRecordResolution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformMethodRecordResolution {
+    pub method_id: u32,
+    pub signature: FunctionSignature,
+    pub return_ty: TypeId,
+    pub overloads: Vec<Vec<TypeId>>,
+    pub env: hir_def::execution_env::EnvFlags,
 }
 
 pub fn resolve_platform_manager_method(
@@ -26,8 +36,12 @@ pub fn resolve_platform_manager_method(
     method_name: &Name,
 ) -> Option<PlatformMethodResolution> {
     let prefix = mdo_type.manager_type_prefix()?;
-    let method = find_prefixed_method(prefix, method_name.as_str())?;
-    Some(build_resolution(db, &method, mdo_type, mdo_name))
+    build_prefixed_resolution(
+        db,
+        find_prefixed_methods(prefix, method_name.as_str()),
+        mdo_type,
+        mdo_name,
+    )
 }
 
 pub fn resolve_platform_metadata_ref_method(
@@ -37,8 +51,12 @@ pub fn resolve_platform_metadata_ref_method(
     method_name: &Name,
 ) -> Option<PlatformMethodResolution> {
     let (prefix, parent_mdo) = metadata_kind_to_prefix_and_mdo(kind)?;
-    let method = find_prefixed_method(prefix, method_name.as_str())?;
-    Some(build_resolution(db, &method, parent_mdo, mdo_name))
+    build_prefixed_resolution(
+        db,
+        find_prefixed_methods(prefix, method_name.as_str()),
+        parent_mdo,
+        mdo_name,
+    )
 }
 
 pub(crate) fn build_resolution(
@@ -47,6 +65,28 @@ pub(crate) fn build_resolution(
     mdo_type: MdoType,
     mdo_name: &Name,
 ) -> PlatformMethodResolution {
+    build_method_record_resolution(db, method, mdo_type, mdo_name).into_resolution()
+}
+
+fn build_prefixed_resolution(
+    db: &dyn TypeKernelDb,
+    methods: Vec<PlatformMethod>,
+    mdo_type: MdoType,
+    mdo_name: &Name,
+) -> Option<PlatformMethodResolution> {
+    let records = methods
+        .iter()
+        .map(|method| build_method_record_resolution(db, method, mdo_type, mdo_name))
+        .collect();
+    PlatformMethodResolution::from_records(records)
+}
+
+fn build_method_record_resolution(
+    db: &dyn TypeKernelDb,
+    method: &PlatformMethod,
+    mdo_type: MdoType,
+    mdo_name: &Name,
+) -> PlatformMethodRecordResolution {
     let params: Vec<TypeId> = method
         .parameters
         .iter()
@@ -75,7 +115,8 @@ pub(crate) fn build_resolution(
         ret: return_ty,
         from_doc_comment: false,
     };
-    PlatformMethodResolution {
+    PlatformMethodRecordResolution {
+        method_id: method.id,
         signature,
         return_ty,
         overloads: lower_overloads_typeid(db, method),
@@ -90,8 +131,18 @@ pub fn resolve_platform_any_metadata_ref_method(
 ) -> Option<PlatformMethodResolution> {
     let ref_kind = MetadataKind::ref_kind_for(mdo_type)?;
     let (prefix, parent_mdo) = metadata_kind_to_prefix_and_mdo(ref_kind)?;
-    let method = find_prefixed_method(prefix, method_name.as_str())?;
+    let records = find_prefixed_methods(prefix, method_name.as_str())
+        .iter()
+        .map(|method| build_any_metadata_ref_method_record(db, method, parent_mdo))
+        .collect();
+    PlatformMethodResolution::from_records(records)
+}
 
+fn build_any_metadata_ref_method_record(
+    db: &dyn TypeKernelDb,
+    method: &PlatformMethod,
+    parent_mdo: MdoType,
+) -> PlatformMethodRecordResolution {
     let params: Vec<TypeId> = method
         .parameters
         .iter()
@@ -121,12 +172,34 @@ pub fn resolve_platform_any_metadata_ref_method(
         ret: return_ty,
         from_doc_comment: false,
     };
-    Some(PlatformMethodResolution {
+    PlatformMethodRecordResolution {
+        method_id: method.id,
         signature,
         return_ty,
-        overloads: lower_overloads_typeid(db, &method),
+        overloads: lower_overloads_typeid(db, method),
         env: hir_def::execution_env::EnvFlags::from_platform_context(method.context.as_ref()),
-    })
+    }
+}
+
+impl PlatformMethodRecordResolution {
+    fn into_resolution(self) -> PlatformMethodResolution {
+        PlatformMethodResolution {
+            signature: self.signature.clone(),
+            return_ty: self.return_ty,
+            overloads: self.overloads.clone(),
+            env: self.env,
+            records: vec![self],
+        }
+    }
+}
+
+impl PlatformMethodResolution {
+    fn from_records(records: Vec<PlatformMethodRecordResolution>) -> Option<Self> {
+        let primary = records.first()?.clone();
+        let mut resolution = primary.into_resolution();
+        resolution.records = records;
+        Some(resolution)
+    }
 }
 
 pub(crate) fn map_generic_metadata_return_type_typeid(
@@ -309,6 +382,7 @@ mod tests {
             return_ty: db.number(None, None),
             overloads: vec![vec![db.string(None, false)]],
             env: hir_def::execution_env::EnvFlags::ALL,
+            records: Vec::new(),
         };
         assert_eq!(res.return_ty, db.number(None, None));
         assert_eq!(res.overloads, vec![vec![db.string(None, false)]]);
@@ -397,6 +471,32 @@ mod tests {
             TypeKind::MetadataRef(facet) => assert_eq!(facet.kind, MetadataKind::CatalogObject),
             other => panic!("expected MetadataRef{{CatalogObject}}, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn manager_plural_lookup_exposes_all_platform_records_and_variants() {
+        let db = InMemoryDb::new();
+        let expected = bsl_platform::find_prefixed_methods("InformationRegisterManager", "Select");
+        let resolution = resolve_platform_manager_method(
+            &db,
+            MdoType::InformationRegister,
+            &Name::new("Курсы"),
+            &Name::new("Выбрать"),
+        )
+        .expect("InformationRegisterManager.Select must resolve");
+
+        assert_eq!(
+            resolution.records.iter().map(|record| record.method_id).collect::<Vec<_>>(),
+            expected.iter().map(|method| method.id).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            resolution.records.iter().map(|record| record.overloads.len()).collect::<Vec<_>>(),
+            expected.iter().map(|method| method.variants.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(resolution.signature, resolution.records[0].signature);
+        assert_eq!(resolution.return_ty, resolution.records[0].return_ty);
+        assert_eq!(resolution.overloads, resolution.records[0].overloads);
+        assert_eq!(resolution.env, resolution.records[0].env);
     }
 
     #[test]
