@@ -1,4 +1,3 @@
-
 use crate::{ContextAvailability, MethodParameter};
 use scraper::{ElementRef, Html, Selector};
 
@@ -334,7 +333,9 @@ fn extract_param_type(element: &ElementRef) -> Option<String> {
         search_depth += 1;
 
         if let Some(elem) = n.value().as_element() {
-            if elem.attr("class") == Some("V8SH_rubric") {
+            if elem.attr("class") == Some("V8SH_rubric")
+                || (elem.name() == "p" && elem.attr("class") == Some("V8SH_chapter"))
+            {
                 break;
             }
         }
@@ -360,8 +361,48 @@ fn extract_param_type(element: &ElementRef) -> Option<String> {
 fn extract_type_from_text(text: &str) -> Option<String> {
     let pos = text.find("Тип: ")?;
     let after = &text[pos + "Тип: ".len()..];
-    let end = after.find('.').or_else(|| after.find('\n')).or_else(|| after.find("<br"))?;
+    let end = find_type_end(after)?;
     finalize_type_substring(&after[..end])
+}
+
+enum TypeTerminator {
+    Period,
+    LineBreak(usize),
+}
+
+fn find_type_end(text: &str) -> Option<usize> {
+    let mut search_from = 0;
+
+    while let Some((end, terminator)) = find_next_type_terminator(text, search_from) {
+        match terminator {
+            TypeTerminator::Period => return Some(end),
+            TypeTerminator::LineBreak(line_break_len)
+                if strip_html_tags(&text[..end]).trim_end().ends_with(',') =>
+            {
+                search_from = end + line_break_len;
+                continue;
+            }
+            TypeTerminator::LineBreak(_) => return Some(end),
+        }
+    }
+
+    None
+}
+
+fn find_next_type_terminator(text: &str, search_from: usize) -> Option<(usize, TypeTerminator)> {
+    let remaining = &text[search_from..];
+    let mut terminator = remaining.find('.').map(|pos| (search_from + pos, TypeTerminator::Period));
+
+    for (pos, len) in [(remaining.find('\n'), 1), (remaining.find("<br"), 3)] {
+        if let Some(pos) = pos {
+            let candidate = (search_from + pos, TypeTerminator::LineBreak(len));
+            if terminator.as_ref().is_none_or(|current| candidate.0 < current.0) {
+                terminator = Some(candidate);
+            }
+        }
+    }
+
+    terminator
 }
 
 /// Permissive companion to [`extract_type_from_text`] — used as the
@@ -377,10 +418,9 @@ fn extract_type_from_text(text: &str) -> Option<String> {
 fn extract_type_from_text_unterminated(text: &str) -> Option<String> {
     let pos = text.find("Тип: ")?;
     let after = &text[pos + "Тип: ".len()..];
-    let end =
-        after.find('.').or_else(|| after.find('\n')).or_else(|| after.find("<br")).unwrap_or_else(
-            || after.char_indices().nth(200).map(|(idx, _)| idx).unwrap_or(after.len()),
-        );
+    let end = find_type_end(after).unwrap_or_else(|| {
+        after.char_indices().nth(200).map(|(idx, _)| idx).unwrap_or(after.len())
+    });
     finalize_type_substring(&after[..end])
 }
 
@@ -677,8 +717,7 @@ pub fn extract_examples(html_content: &str) -> Vec<CodeExample> {
 
                             current_description.clear();
                         }
-                    }
-                    else if elem_ref.value().name() != "table" {
+                    } else if elem_ref.value().name() != "table" {
                         let elem_text = elem_ref.text().collect::<String>();
                         if !elem_text.trim().is_empty() {
                             if !current_description.is_empty() {
@@ -807,6 +846,62 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_parameters_continues_comma_terminated_type_list_after_br() {
+        let html = r#"
+            <div class="V8SH_rubric">
+                <p>&lt;Значение&gt; (обязательный)</p>
+                Тип: A, B,<br></div>C, D.
+        "#;
+
+        let params = extract_parameters(html);
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].param_type, Some("A, B, C, D".to_string()));
+    }
+
+    #[test]
+    fn test_extract_parameters_continues_comma_terminated_type_list_into_sibling_element() {
+        let html = r#"
+            <div class="V8SH_rubric">
+                <p>&lt;Значение&gt; (обязательный)</p>
+                Тип: A, B,<br></div><span>C, D.</span>
+        "#;
+
+        let params = extract_parameters(html);
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].param_type, Some("A, B, C, D".to_string()));
+    }
+
+    #[test]
+    fn test_extract_parameters_stops_comma_terminated_type_list_at_next_chapter() {
+        let html = r#"
+            <div class="V8SH_rubric"><p>&lt;Значение&gt; (обязательный)</p></div>
+            Тип: A, B,
+            <p class="V8SH_chapter">Описание:</p>
+            C, D.
+        "#;
+
+        let params = extract_parameters(html);
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].param_type, Some("A, B".to_string()));
+    }
+
+    #[test]
+    fn test_extract_parameters_unterminated_type_respects_character_cap() {
+        let type_name = "A".repeat(201);
+        let html = format!(
+            "<div class=\"V8SH_rubric\"><p>&lt;Значение&gt; (обязательный)</p></div>Тип: {type_name}"
+        );
+
+        let params = extract_parameters(&html);
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].param_type.as_deref().map(str::len), Some(200));
+    }
+
+    #[test]
     fn test_extract_parameter_variants_single_overload_anonymous() {
         let html = r#"
             <p class="V8SH_chapter">Параметры:</p>
@@ -914,6 +1009,30 @@ mod tests {
         let params = extract_parameters(html);
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].param_type, Some("A, B".to_string()));
+    }
+
+    #[test]
+    fn test_extract_parameters_trailing_comma_without_continuation_is_normalised() {
+        let html = "<div class=\"V8SH_rubric\"><p>&lt;X&gt; (обязательный)</p>Тип: A, B,<br></div>";
+
+        let params = extract_parameters(html);
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].param_type, Some("A, B".to_string()));
+    }
+
+    #[test]
+    fn test_extract_parameters_continues_wrapped_type_list_through_nested_tags() {
+        let html = r#"
+            <div class="V8SH_rubric">
+                <p>&lt;Значение&gt; (обязательный)</p>
+                Тип: <strong>A, B,</strong><br></div><span><em>C</em>, <a>D</a>.</span>
+        "#;
+
+        let params = extract_parameters(html);
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].param_type, Some("A, B, C, D".to_string()));
     }
 
     #[test]
@@ -1311,7 +1430,6 @@ mod tests {
         assert!(examples[0].code.contains("НачатьТранзакцию"));
         assert!(examples[0].code.contains("ЗафиксироватьТранзакцию"));
     }
-
 
     #[test]
     fn iter_elements_array_returns_arbitrary() {
