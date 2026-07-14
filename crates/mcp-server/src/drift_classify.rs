@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::change_hub::{ChangeEntry, ChangeKind};
-use crate::graph::file_fingerprint;
+use crate::graph::scan::file_fingerprint;
 
 /// A changed path in both spellings drift consumers need. `key` is the scan-universe
 /// canonical string (diagnostics stats, resolves, and re-keys by it); `raw` is the

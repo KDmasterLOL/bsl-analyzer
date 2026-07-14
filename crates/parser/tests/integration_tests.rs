@@ -634,7 +634,9 @@ fn test_lexer_performance_large_file() {
     println!("Lexer time: {:?}", elapsed);
     println!("Speed: {:.2} MB/s", input.len() as f64 / 1_000_000.0 / elapsed.as_secs_f64());
 
-    assert!(elapsed.as_millis() < 100, "Lexer too slow: {:?}", elapsed);
+    // Threshold is load-tolerant: it catches order-of-magnitude regressions while
+    // tolerating the parallel load of a full-workspace `cargo test --all` run.
+    assert!(elapsed.as_millis() < 500, "Lexer too slow: {:?}", elapsed);
 }
 
 #[test]

@@ -1,0 +1,462 @@
+use super::lexical::lexical_code_hits;
+use super::render::format_code_hits;
+use super::semantic::semantic_code_hits;
+use super::status::search_not_ready;
+use super::types::{CodeHits, HYBRID_FETCH_MULTIPLIER};
+use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService};
+use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
+use bsl_search::{fuse_smart, FusedHit, IndexProgress, SearchEngine};
+use rmcp::model::{CallToolResult, Content};
+use rmcp::ErrorData as McpError;
+use std::fmt::Write;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+/// The unified code search: run lexical and semantic, fuse by `fuse_smart` (exact-symbol tier
+/// then semantic tail), and degrade to lexical (with a trailing note) when semantic cannot serve.
+/// This is what the `search_code` action dispatches to.
+// This is the tool-dispatch boundary: each argument is an independent runtime handle or
+// per-request value pulled straight from `SharedState`, with no natural sub-grouping that a
+// context struct would not make more obscure than the flat list.
+#[allow(clippy::too_many_arguments)]
+pub fn hybrid_code(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    workspace_search_mode: WorkspaceSearchMode,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
+    graph_root: Option<&Path>,
+    index_progress: &IndexProgress,
+    query: &str,
+    limit: usize,
+    max_output_tokens: usize,
+) -> Result<CallToolResult, McpError> {
+    // Over-fetch each modality so a hit ranked just outside `limit` in one but boosted by the
+    // other can still surface after fusion.
+    let fetch = limit.saturating_mul(HYBRID_FETCH_MULTIPLIER).max(limit);
+
+    let lexical = lexical_code_hits(
+        engine,
+        workspace_search_mode.clone(),
+        configured_baseline,
+        external_baseline.clone(),
+        query,
+        fetch,
+    )?;
+    let (lex_hits, workspace_root) = match lexical {
+        CodeHits::Ready { hits, workspace_root } => (hits, workspace_root),
+        // Lexical is the floor: if it cannot serve yet, the whole search cannot — return a
+        // structured not-ready envelope (machine status + live counters + retry hint),
+        // matching the graph tool, rather than a bare sentence a poller must parse.
+        CodeHits::Pending(message) => {
+            return Ok(search_not_ready(&message, index_progress));
+        }
+        // Lexical search is always available, so it never reports a semantic shortfall; treat
+        // it defensively as "still building".
+        CodeHits::Unavailable(_) => {
+            return Ok(search_not_ready(
+                "Search index is being built, please try again in a moment.",
+                index_progress,
+            ));
+        }
+    };
+
+    let semantic = semantic_code_hits(
+        engine,
+        semantic_runtime,
+        workspace_search_mode,
+        configured_baseline,
+        external_baseline,
+        query,
+        fetch,
+    )?;
+
+    let (mut hits, note): (Vec<FusedHit>, Option<String>) = match semantic {
+        CodeHits::Ready { hits: sem_hits, .. } => {
+            (fuse_smart(&lex_hits, &sem_hits, query, limit), None)
+        }
+        // Semantic could not serve — degrade to lexical-only by fusing against an empty semantic
+        // list, so the exact-symbol tier still floats. Surface the precise upstream pending reason
+        // (overlay warmup, local RAG indexing, or index build) verbatim rather than collapsing
+        // them to one generic note.
+        CodeHits::Pending(message) => (fuse_smart(&lex_hits, &[], query, limit), Some(message)),
+        CodeHits::Unavailable(reason) => {
+            (fuse_smart(&lex_hits, &[], query, limit), Some(reason.note()))
+        }
+    };
+    hits.truncate(limit);
+
+    if hits.is_empty() {
+        return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+    }
+
+    // Explain the per-hit modality tag once, up front — a leading line does not shift the
+    // per-hit `graph_id:` parsing (which is relative to each `#N` line).
+    let mut out = String::from(
+        "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (cross-modal agreement).\n",
+    );
+    out.push_str(&format_code_hits(
+        &hits,
+        workspace_root.as_deref(),
+        graph_root,
+        max_output_tokens,
+    ));
+    if let Some(note) = note {
+        // Append AFTER the hit lines — never before — so a client parsing `graph_id:` lines
+        // positionally is not shifted.
+        let _ = writeln!(out, "-- {note} --");
+    }
+    Ok(CallToolResult::success(vec![Content::text(out)]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::retryable_postgres_source;
+    use super::hybrid_code;
+    use crate::baseline::ConfiguredBaselineStatus;
+    use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
+    use bsl_search::{IndexProgress, SearchEngine};
+    use project_model::{ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState};
+    use rmcp::model::ErrorCode;
+    use std::fs;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    #[test]
+    fn hybrid_serves_lexical_while_semantic_indexing() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("CommonModule.bsl"), "Процедура ПроверитьИНН()\nКонецПроцедуры")
+            .unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let result = hybrid_code(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Indexing)),
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "ПроверитьИНН",
+            10,
+            usize::MAX,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("text content").text.as_str();
+
+        assert!(text.contains("ПроверитьИНН"), "{text}");
+        assert!(text.contains("-- RAG semantic index is still building"), "{text}");
+    }
+
+    #[test]
+    fn hybrid_degrades_to_lexical_with_note_when_semantic_runtime_failed() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("CommonModule.bsl"), "Процедура ПроверитьИНН()\nКонецПроцедуры")
+            .unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let result = hybrid_code(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("overlay sync failed".to_owned()))),
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "ПроверитьИНН",
+            10,
+            usize::MAX,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("text content").text.as_str();
+
+        assert!(text.contains("ПроверитьИНН"), "{text}");
+        assert!(text.contains("-- semantic skipped: runtime initialization failed --"), "{text}");
+    }
+
+    #[test]
+    fn hybrid_degrade_note_follows_hit_lines_and_empty_results_suppress_it() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("CommonModule.bsl"), "Процедура ПроверитьИНН()\nКонецПроцедуры")
+            .unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        let engine = Arc::new(Mutex::new(Some(engine)));
+        let failed = Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("boom".to_owned())));
+
+        let hit_result = hybrid_code(
+            &engine,
+            &failed,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "ПроверитьИНН",
+            10,
+            usize::MAX,
+        )
+        .unwrap();
+        let text = hit_result.content[0].raw.as_text().expect("text").text.as_str();
+        let hit_pos = text.find("ПроверитьИНН").expect("hit line present");
+        let note_pos = text.find("-- semantic skipped").expect("note present");
+        assert!(note_pos > hit_pos, "note must trail the hit lines: {text}");
+
+        let empty_result = hybrid_code(
+            &engine,
+            &failed,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "несуществующийидентификатор",
+            10,
+            usize::MAX,
+        )
+        .unwrap();
+        let empty_text = empty_result.content[0].raw.as_text().expect("text").text.as_str();
+        assert_eq!(empty_text, "No results found.");
+        assert!(!empty_text.contains("--"), "no trailing note without hits: {empty_text}");
+    }
+
+    #[test]
+    fn hybrid_code_not_ready_returns_structured_envelope() {
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Ready));
+        let progress = Arc::new(IndexProgress::default());
+        progress.active.store(true, Ordering::Relaxed);
+        progress.total_chunks.store(100, Ordering::Relaxed);
+        progress.done_chunks.store(40, Ordering::Relaxed);
+        progress.total_batches.store(10, Ordering::Relaxed);
+        progress.done_batches.store(4, Ordering::Relaxed);
+
+        let result = hybrid_code(
+            &engine,
+            &runtime,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &progress,
+            "ПроверитьИНН",
+            10,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let body = result.structured_content.as_ref().expect("structured not-ready envelope");
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["retry_after_ms"], 1500);
+        assert_eq!(body["progress"]["active"], true);
+        assert_eq!(body["progress"]["pct"], 40);
+        assert_eq!(body["progress"]["chunks"]["done"], 40);
+        assert_eq!(body["progress"]["batches"]["total"], 10);
+
+        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        let mirror: serde_json::Value =
+            serde_json::from_str(text).expect("text mirror must be valid JSON");
+        assert_eq!(&mirror, body, "text mirror must match structuredContent");
+    }
+
+    #[test]
+    fn hybrid_code_not_ready_omits_counters_when_inactive() {
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Ready));
+        let progress = Arc::new(IndexProgress::default());
+        progress.total_chunks.store(100, Ordering::Relaxed);
+        progress.done_chunks.store(100, Ordering::Relaxed);
+
+        let result = hybrid_code(
+            &engine,
+            &runtime,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &progress,
+            "ПроверитьИНН",
+            10,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let body = result.structured_content.as_ref().expect("structured not-ready envelope");
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["progress"]["active"], false);
+        assert!(body["progress"]["pct"].is_null(), "no stale pct when inactive: {body}");
+        assert!(body["progress"]["chunks"].is_null(), "no stale counters when inactive: {body}");
+    }
+
+    #[test]
+    fn code_search_returns_structured_error_when_workspace_branch_is_expired() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("workspace-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+        let configured = ConfiguredBaselineStatus {
+            backend: "postgres",
+            selection: "workspace branch feature/demo -> branch develop -> branch vendor".to_owned(),
+            issue: None,
+            support: Some(ResolvedWorkspaceBaselineSupport {
+                state: SearchBaselineSupportState::Expired,
+                workspace_branch: Some("feature/demo".to_owned()),
+                selected_branch: Some("develop".to_owned()),
+                snapshot_age_days: 45,
+                stale_after_days: 21,
+                expire_after_days: 30,
+                reason: "workspace branch 'feature/demo' uses shared baseline branch 'develop' published 45 days ago".to_owned(),
+            }),
+        };
+
+        let error = hybrid_code(
+            &engine,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            Some(&configured),
+            None,
+            None,
+            &IndexProgress::new(),
+            "Процедура",
+            10,
+            usize::MAX,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("expired"));
+        assert!(error.message.contains("Update the branch from develop"));
+    }
+
+    #[test]
+    fn code_search_rejects_local_fallback_when_postgres_baseline_is_unavailable() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура ТестоваПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let error = hybrid_code(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            Some(&ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: Some("failed to resolve PostgreSQL reader credentials".to_owned()),
+                support: None,
+            }),
+            None,
+            None,
+            &IndexProgress::new(),
+            "ТестоваПроцедура",
+            10,
+            usize::MAX,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("Shared baseline is unavailable"));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("baseline_unavailable")
+        );
+    }
+
+    #[test]
+    fn code_search_surfaces_retry_exhausted_external_baseline_errors() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура ТестоваПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let error = hybrid_code(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            Some(&ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            Some(retryable_postgres_source()),
+            None,
+            &IndexProgress::new(),
+            "ТестоваПроцедура",
+            10,
+            usize::MAX,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert!(error.message.contains("external baseline error"));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("refresh_retry_exhausted")
+        );
+    }
+
+    #[test]
+    fn code_search_surfaces_retry_exhausted_errors_for_empty_queries() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("workspace-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+
+        let error = hybrid_code(
+            &engine,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            Some(&ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            Some(retryable_postgres_source()),
+            None,
+            &IndexProgress::new(),
+            "НесуществующееСлово",
+            10,
+            usize::MAX,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("refresh_retry_exhausted")
+        );
+    }
+}

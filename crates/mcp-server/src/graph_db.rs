@@ -25,7 +25,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rustc_hash::FxHashMap;
 use vfs::FileId;
 
-use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
+use crate::graph::input::{
+    build_source_root, config_metadata_paths, db_for_files, enumerate_bsl_files,
+};
+use crate::graph::scan::scan_file_stats;
 
 /// Bumped whenever the table layout OR the persisted edge/node content changes so a
 /// stale on-disk cache from an older binary is rejected (via the `meta` row) and
@@ -623,7 +626,7 @@ fn build_graph_database_inner(
     // The whole-workspace source root, built once and shared (cheap `Arc` clone)
     // into every per-batch database, so the 25k-path file set is assembled a single
     // time for the build rather than re-cloned per batch.
-    let source_root = crate::graph::build_source_root(&files);
+    let source_root = build_source_root(&files);
 
     let mut writer = GraphDbWriter::create(out_path)?;
 
@@ -684,7 +687,7 @@ fn build_graph_database_inner(
             file_paths.get(&m.file_id).map(|p| (p.to_string_lossy().into_owned(), h))
         })
         .collect();
-    let file_rows: Vec<FileFingerprint> = crate::graph::scan_file_stats(workspace_root)
+    let file_rows: Vec<FileFingerprint> = scan_file_stats(workspace_root)
         .iter()
         .map(|s| FileFingerprint {
             fingerprint: s.fingerprint(),
@@ -943,7 +946,7 @@ pub fn update_graph_database_bodies(
         );
     }
 
-    let source_root = crate::graph::build_source_root(&files);
+    let source_root = build_source_root(&files);
     let config_cache = std::sync::Arc::new(ide::GraphConfigCache::default());
     let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
         let batch_files: Vec<(FileId, PathBuf)> =
@@ -987,10 +990,8 @@ pub fn update_graph_database_bodies(
         format!("copying graph db {} → {}", src_path.display(), out_path.display())
     })?;
 
-    let stat_fp: FxHashMap<String, u64> = crate::graph::scan_file_stats(workspace_root)
-        .iter()
-        .map(|s| (s.path.clone(), s.fingerprint()))
-        .collect();
+    let stat_fp: FxHashMap<String, u64> =
+        scan_file_stats(workspace_root).iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
 
     let mut conn = Connection::open(out_path)?;
     {
