@@ -13,25 +13,36 @@ pub(super) struct AritySpec {
     pub maximum: Option<usize>,
 }
 
-pub(super) fn signature(
-    db: &InMemoryDb,
-    params: Vec<CallParam>,
-    arity: AritySpec,
-) -> CallSignature {
+pub(super) struct CandidateSpec {
+    pub ordinal: usize,
+    pub params: Vec<CallParam>,
+    pub arity: AritySpec,
+    pub return_ty: TypeId,
+}
+
+pub(super) fn candidate(spec: CandidateSpec) -> CallSignature {
     CallSignature {
         id: CandidateId::Builtin {
             callable: BuiltinCallableId::Intrinsic(80),
-            signature_ordinal: 0,
+            signature_ordinal: spec.ordinal,
         },
-        params: params.into_boxed_slice(),
-        required_args: arity.required,
-        max_args: arity.maximum,
-        return_ty: db.undefined(),
+        params: spec.params.into_boxed_slice(),
+        required_args: spec.arity.required,
+        max_args: spec.arity.maximum,
+        return_ty: spec.return_ty,
         origin: CandidateOrigin::Builtin,
         environment: EnvFlags::EMPTY,
         provenance: CandidateProvenance::Builtin(BuiltinCallableId::Intrinsic(80)),
         from_doc_comment: false,
     }
+}
+
+pub(super) fn signature(
+    db: &InMemoryDb,
+    params: Vec<CallParam>,
+    arity: AritySpec,
+) -> CallSignature {
+    candidate(CandidateSpec { ordinal: 0, params, arity, return_ty: db.undefined() })
 }
 
 pub(super) fn positional(name: &str, ty: TypeId, has_default: bool) -> CallParam {

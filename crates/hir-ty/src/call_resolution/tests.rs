@@ -11,6 +11,8 @@ use super::{
 };
 use crate::platform_manager_lookup::resolve_platform_manager_method;
 
+mod resolution_adversarial;
+mod resolution_cases;
 mod support;
 
 fn select_candidates(
@@ -145,4 +147,5 @@ fn platform_candidate_preserves_incomplete_variadic_metadata() {
 include!("tests/applicability.rs");
 include!("tests/arity.rs");
 include!("tests/rejections.rs");
+include!("tests/resolution.rs");
 include!("tests/stability.rs");
