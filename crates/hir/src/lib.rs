@@ -238,7 +238,7 @@ pub(crate) struct MethodInfo {
 }
 
 pub(crate) fn get_method_info(id: &MethodId, db: &dyn DefDatabase) -> Option<MethodInfo> {
-    let tree = db.item_tree(id.module.file_id);
+    let tree = db.item_tree_ref(id.module.file_id);
     let item = tree.top_level_items().get(id.local_id as usize)?;
     match item {
         hir_def::item_tree::ModItem::Procedure(proc_idx) => {
@@ -324,7 +324,7 @@ pub(crate) struct VariableInfo {
 }
 
 pub(crate) fn get_variable_info(id: &VariableId, db: &dyn DefDatabase) -> Option<VariableInfo> {
-    let tree = db.item_tree(id.module.file_id);
+    let tree = db.item_tree_ref(id.module.file_id);
     let item = tree.top_level_items().get(id.local_id as usize)?;
     if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
         let var = tree.variable(*var_idx);
@@ -476,7 +476,7 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     pub fn type_of_expr(&self, file_id: FileId, node: &syntax::SyntaxNode) -> TypeId {
         let module_id = ModuleId::new(file_id);
-        let module_bodies = self.db.module_bodies(module_id);
+        let module_bodies = self.db.module_bodies_ref(module_id);
         let range = node.text_range();
 
         if let Some(result) = module_bodies.module_code_result() {
@@ -502,7 +502,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
     pub fn type_of_binding_at(&self, file_id: FileId, range: TextRange) -> Option<TypeId> {
         let module_id = ModuleId::new(file_id);
-        let module_bodies = self.db.module_bodies(module_id);
+        let module_bodies = self.db.module_bodies_ref(module_id);
 
         if let Some(result) = module_bodies.module_code_result() {
             if let Some(binding_id) = result.source_map.binding_at_range(range) {
@@ -587,7 +587,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     /// The `MethodId` of the procedure/function whose source range contains
     /// `offset` (BSL has no nested methods, so at most one matches).
     fn enclosing_method_id(&self, file_id: FileId, offset: TextSize) -> Option<MethodId> {
-        let tree = self.db.item_tree(file_id);
+        let tree = self.db.item_tree_ref(file_id);
         let module_id = ModuleId::new(file_id);
         for (idx, item) in tree.top_level_items().iter().enumerate() {
             let range = match item {
@@ -619,7 +619,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         let callee_range = callee.text_range();
 
         let module_id = ModuleId::new(file_id);
-        let module_bodies = self.db.module_bodies(module_id);
+        let module_bodies = self.db.module_bodies_ref(module_id);
 
         let mut found: Option<(DefWithBodyId, ExprId)> = None;
         if let Some(result) = module_bodies.module_code_result() {

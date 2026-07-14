@@ -704,7 +704,7 @@ pub fn platform_method_query<'db>(
     data.get_method(type_name, method_name).cloned()
 }
 
-#[salsa::tracked(lru = 128, returns(clone))]
+#[salsa::tracked(lru = 128, returns(ref))]
 pub fn type_methods_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -714,7 +714,7 @@ pub fn type_methods_query<'db>(
     Arc::new(data.get_type_methods(type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 128, returns(clone))]
+#[salsa::tracked(lru = 128, returns(ref))]
 pub fn manager_methods_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -765,7 +765,7 @@ pub fn global_function_query<'db>(
     data.get_global_function(name).cloned()
 }
 
-#[salsa::tracked(lru = 128, returns(clone))]
+#[salsa::tracked(lru = 128, returns(ref))]
 pub fn platform_constructors_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -786,7 +786,7 @@ pub fn platform_property_query<'db>(
     data.get_property(type_name, prop_name).cloned()
 }
 
-#[salsa::tracked(lru = 128, returns(clone))]
+#[salsa::tracked(lru = 128, returns(ref))]
 pub fn type_properties_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,

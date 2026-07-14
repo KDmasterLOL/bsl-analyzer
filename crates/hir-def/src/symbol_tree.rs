@@ -463,18 +463,18 @@ pub(crate) fn symbol_tree_heap(v: &Arc<SymbolTree>) -> usize {
 // Condensed per-module symbol list (no green-tree pin): on the cross-module call
 // resolution path. High cap keeps it across chunk-boundary LRU trims so a later
 // chunk resolving a call into this module doesn't re-derive it (re-parse + lower).
-#[salsa::tracked(lru = 2048, heap_size = crate::symbol_tree::symbol_tree_heap, returns(clone))]
+#[salsa::tracked(lru = 2048, heap_size = crate::symbol_tree::symbol_tree_heap, returns(ref))]
 pub fn symbol_tree_query<'db>(
     db: &'db dyn crate::DefDatabase,
     file_id_input: base_db::FileIdInput<'db>,
 ) -> std::sync::Arc<SymbolTree> {
     let _span = tracing::info_span!("symbol_tree", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
-    let item_tree = db.item_tree(file_id);
+    let item_tree = db.item_tree_ref(file_id);
     let parse = db.parse_ref(file_id);
-    let source_text = db.file_text(file_id);
+    let source_text = db.file_text_ref(file_id);
     let module_id = crate::ModuleId::new(file_id);
-    std::sync::Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, parse, &source_text))
+    std::sync::Arc::new(SymbolTree::from_item_tree(item_tree, module_id, parse, source_text))
 }
 
 #[cfg(test)]

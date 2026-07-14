@@ -82,7 +82,7 @@ pub(crate) fn find_references_in_file<DB: RootDatabase>(
     // files; the memoised per-file offsets replace a full token walk per
     // request with a lookup, so only the actual occurrences pay resolution.
     let normalized = normalize_match_name(&target_symbol.name);
-    let occurrences = db.file_name_offsets(file_id);
+    let occurrences = db.file_name_offsets_ref(file_id);
     let offsets = occurrences.offsets(&normalized);
     if offsets.is_empty() {
         return Vec::new();

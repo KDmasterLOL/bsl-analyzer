@@ -109,7 +109,7 @@ mod heap_estimate {
 // cross-module resolution path. High cap keeps it across chunk-boundary LRU trims
 // so a later chunk doesn't re-derive it. (`module_bodies` below stays low — it is
 // the heavy lowered HIR, needed only while a module's own file is analyzed.)
-#[salsa::tracked(lru = 2048, heap_size = heap_estimate::module_data_heap, returns(clone))]
+#[salsa::tracked(lru = 2048, heap_size = heap_estimate::module_data_heap, returns(ref))]
 pub fn module_data_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -121,7 +121,7 @@ pub fn module_data_query<'db>(
     Arc::new(ModuleData::from_item_tree(module_id, tree))
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_bodies_heap, returns(clone))]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_bodies_heap, returns(ref))]
 pub fn module_bodies_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -174,14 +174,14 @@ pub fn module_call_summary_query<'db>(
     let file_id = file_id_input.file_id(db);
     let module_id = ModuleId::new(file_id);
 
-    let item_tree = db.item_tree(file_id);
-    let module_bodies = db.module_bodies(module_id);
+    let item_tree = db.item_tree_ref(file_id);
+    let module_bodies = db.module_bodies_ref(module_id);
     let module_metadata = db.module_metadata(module_id);
 
     let form_handlers: &[bsl_metadata::FormEventHandler] =
         module_metadata.form.as_ref().map(|f| f.event_handlers.as_slice()).unwrap_or(&[]);
 
-    Arc::new(crate::call_graph::extract_call_summary(&item_tree, &module_bodies, form_handlers))
+    Arc::new(crate::call_graph::extract_call_summary(item_tree, module_bodies, form_handlers))
 }
 
 #[salsa::tracked(lru = 256, returns(clone))]

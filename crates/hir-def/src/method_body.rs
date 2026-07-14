@@ -5,7 +5,7 @@ use base_db::FileIdInput;
 use crate::body::{lower_method_with_externals, Body, BodySourceMap};
 use crate::{DefDatabase, MethodIdInput};
 
-#[salsa::tracked(lru = 2048, heap_size = crate::body::body_arc_heap, returns(clone))]
+#[salsa::tracked(lru = 2048, heap_size = crate::body::body_arc_heap, returns(ref))]
 pub fn method_body_query<'db>(db: &'db dyn DefDatabase, method: MethodIdInput<'db>) -> Arc<Body> {
     let mid = method.method_id(db);
     let file_id = mid.module.file_id;

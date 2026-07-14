@@ -184,13 +184,13 @@ pub fn parse_mdo_query<'db>(
 ) -> Option<Arc<bsl_metadata::MetadataObject>> {
     let _span = tracing::info_span!("parse_mdo").entered();
 
-    let main_text = db.file_text(files.main(db));
-    let predefined_text = files.predefined(db).map(|fid| db.file_text(fid));
+    let main_text = db.file_text_ref(files.main(db));
+    let predefined_text = files.predefined(db).map(|fid| db.file_text_ref(fid));
 
     bsl_metadata::parse_metadata_object_from_texts(
         files.mdo_type(db),
-        &main_text,
-        predefined_text.as_deref(),
+        main_text,
+        predefined_text.map(|t| &**t),
     )
     .map(Arc::new)
 }
@@ -377,7 +377,7 @@ impl ConfigIndex {
 /// Build a config root's name lookup from its structure listing. Tracked on the
 /// listing input alone, so it re-runs only on a structure change (add/remove/
 /// rename), not on a content edit — those flow through [`parse_mdo_query`].
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn config_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -433,8 +433,8 @@ pub fn parse_register_query(
 ) -> Option<Arc<bsl_metadata::Register>> {
     let _span = tracing::info_span!("parse_register").entered();
 
-    let main_text = db.file_text(files.main(db));
-    bsl_metadata::parse_register_from_text(files.mdo_type(db), &main_text).map(Arc::new)
+    let main_text = db.file_text_ref(files.main(db));
+    bsl_metadata::parse_register_from_text(files.mdo_type(db), main_text).map(Arc::new)
 }
 
 /// Resolve a single register within one config root, the register counterpart of
@@ -501,8 +501,8 @@ pub fn parse_defined_type_query(
 ) -> Option<Arc<bsl_metadata::DefinedType>> {
     let _span = tracing::info_span!("parse_defined_type").entered();
 
-    let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_defined_type_from_text(&main_text).map(Arc::new)
+    let main_text = db.file_text_ref(file.main(db));
+    bsl_metadata::parse_defined_type_from_text(main_text).map(Arc::new)
 }
 
 /// A config root's `lowercased-name -> defined-type file` lookup, derived from its
@@ -521,7 +521,7 @@ impl DefinedTypeIndex {
 }
 
 /// Build a config root's defined-type name lookup from its structure listing.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn defined_type_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -576,8 +576,8 @@ pub fn parse_common_module_query(
 ) -> Option<Arc<bsl_metadata::CommonModule>> {
     let _span = tracing::info_span!("parse_common_module").entered();
 
-    let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_common_module_from_text(&main_text).map(Arc::new)
+    let main_text = db.file_text_ref(file.main(db));
+    bsl_metadata::parse_common_module_from_text(main_text).map(Arc::new)
 }
 
 /// A config root's common-module lookup, derived from its [`MetadataListingInput`]'s
@@ -612,7 +612,7 @@ impl CommonModuleIndex {
 }
 
 /// Build a config root's common-module lookup from its structure listing.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn common_module_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -692,9 +692,9 @@ pub fn parse_http_service_query(
     let _span = tracing::info_span!("parse_http_service").entered();
 
     let main = file.main(db);
-    let main_text = db.file_text(main);
+    let main_text = db.file_text_ref(main);
     let name = service_name_from_main_file(db, main);
-    bsl_metadata::parse_http_service_from_text(&main_text, &name).map(Arc::new)
+    bsl_metadata::parse_http_service_from_text(main_text, &name).map(Arc::new)
 }
 
 #[derive(Default, PartialEq, Eq, Debug)]
@@ -718,7 +718,7 @@ impl HTTPServiceIndex {
     }
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn http_service_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -782,9 +782,9 @@ pub fn parse_web_service_query(
     let _span = tracing::info_span!("parse_web_service").entered();
 
     let main = file.main(db);
-    let main_text = db.file_text(main);
+    let main_text = db.file_text_ref(main);
     let name = service_name_from_main_file(db, main);
-    bsl_metadata::parse_web_service_from_text(&main_text, &name).map(Arc::new)
+    bsl_metadata::parse_web_service_from_text(main_text, &name).map(Arc::new)
 }
 
 #[derive(Default, PartialEq, Eq, Debug)]
@@ -808,7 +808,7 @@ impl WebServiceIndex {
     }
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn web_service_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -872,9 +872,9 @@ pub fn parse_integration_service_query(
     let _span = tracing::info_span!("parse_integration_service").entered();
 
     let main = file.main(db);
-    let main_text = db.file_text(main);
+    let main_text = db.file_text_ref(main);
     let name = service_name_from_main_file(db, main);
-    bsl_metadata::parse_integration_service_from_text(&main_text, &name).map(Arc::new)
+    bsl_metadata::parse_integration_service_from_text(main_text, &name).map(Arc::new)
 }
 
 #[derive(Default, PartialEq, Eq, Debug)]
@@ -898,7 +898,7 @@ impl IntegrationServiceIndex {
     }
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn integration_service_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -966,8 +966,8 @@ pub fn parse_event_subscription_query(
 ) -> Option<Arc<bsl_metadata::EventSubscription>> {
     let _span = tracing::info_span!("parse_event_subscription").entered();
 
-    let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_event_subscription_from_text(&main_text).map(Arc::new)
+    let main_text = db.file_text_ref(file.main(db));
+    bsl_metadata::parse_event_subscription_from_text(main_text).map(Arc::new)
 }
 
 /// A config root's event-subscription lookup, derived from its
@@ -986,7 +986,7 @@ impl EventSubscriptionIndex {
 }
 
 /// Build a config root's event-subscription name lookup from its structure listing.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn event_subscription_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1039,8 +1039,8 @@ pub fn parse_scheduled_job_query(
 ) -> Option<Arc<bsl_metadata::ScheduledJob>> {
     let _span = tracing::info_span!("parse_scheduled_job").entered();
 
-    let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_scheduled_job_from_text(&main_text).map(Arc::new)
+    let main_text = db.file_text_ref(file.main(db));
+    bsl_metadata::parse_scheduled_job_from_text(main_text).map(Arc::new)
 }
 
 /// A config root's scheduled-job lookup, derived from its
@@ -1059,7 +1059,7 @@ impl ScheduledJobIndex {
 }
 
 /// Build a config root's scheduled-job name lookup from its structure listing.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn scheduled_job_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1109,9 +1109,9 @@ pub fn parse_role_query(
 ) -> Option<Arc<bsl_metadata::Role>> {
     let _span = tracing::info_span!("parse_role").entered();
 
-    let main_text = db.file_text(files.main(db));
-    let rights_text = files.rights(db).map(|fid| db.file_text(fid));
-    bsl_metadata::parse_role_from_texts(&main_text, rights_text.as_deref()).map(Arc::new)
+    let main_text = db.file_text_ref(files.main(db));
+    let rights_text = files.rights(db).map(|fid| db.file_text_ref(fid));
+    bsl_metadata::parse_role_from_texts(main_text, rights_text.map(|t| &**t)).map(Arc::new)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1131,7 +1131,7 @@ impl RoleIndex {
     }
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn role_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1185,8 +1185,8 @@ pub fn parse_subsystem_query(
 ) -> Option<Arc<bsl_metadata::Subsystem>> {
     let _span = tracing::info_span!("parse_subsystem").entered();
 
-    let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_subsystem_from_text(&main_text).map(Arc::new)
+    let main_text = db.file_text_ref(file.main(db));
+    bsl_metadata::parse_subsystem_from_text(main_text).map(Arc::new)
 }
 
 /// A config root's subsystem lookup, derived from its [`MetadataListingInput`]'s
@@ -1205,7 +1205,7 @@ impl SubsystemIndex {
 }
 
 /// Build a config root's subsystem name lookup from its structure listing.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn subsystem_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,

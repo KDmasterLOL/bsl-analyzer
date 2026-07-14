@@ -44,7 +44,7 @@ pub fn resolve_qualified_call(
             }
         })?;
 
-    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
     let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
         "method_id returned by Resolver must exist in symbol_tree — \
          symbol_tree / Resolver are out of sync",
@@ -69,7 +69,7 @@ pub fn resolve_three_level_call(
             }
         })?;
 
-    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
     let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
         "method_id returned by Resolver must exist in symbol_tree — \
          symbol_tree / Resolver are out of sync",
@@ -186,7 +186,7 @@ pub fn resolve_record_set_module_call(
             }
         })?;
 
-    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
     let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
         "method_id returned by Resolver must exist in symbol_tree — \
          symbol_tree / Resolver are out of sync",
@@ -213,7 +213,7 @@ pub fn resolve_object_module_call(
             }
         })?;
 
-    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
     let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
         "method_id returned by Resolver must exist in symbol_tree — \
          symbol_tree / Resolver are out of sync",
@@ -238,7 +238,7 @@ pub fn resolve_aliased_manager_call(
         }
     })?;
 
-    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
     let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
         "method_id returned by Resolver must exist in symbol_tree — \
          symbol_tree / Resolver are out of sync",
