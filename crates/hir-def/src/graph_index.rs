@@ -116,6 +116,37 @@ impl GraphIndex {
         }
     }
 
+    /// [`Self::add_batch`] fused with per-module extraction of the pair-relevant
+    /// call-summary subset (see [`ModuleCallSummary::method_pair_subset`]), in the
+    /// same parallel region — so each module's parse tree is forced once and serves
+    /// both the item-tree extraction and the body lowering, instead of being
+    /// re-parsed by a second workspace pass. Returns the retained subsets in
+    /// `batch` order for deferred pair resolution against the completed index.
+    pub fn add_batch_extracting_pair_intents<DB: ConfigsDatabase + Clone + Send>(
+        &mut self,
+        pool: &rayon::ThreadPool,
+        db: &DB,
+        batch: &[ModuleId],
+    ) -> Vec<(ModuleId, crate::call_graph::ModuleCallSummary)> {
+        extract_batch_index_and_pair_intents(pool, db, batch)
+            .into_iter()
+            .map(|extraction| self.insert_extraction(extraction))
+            .collect()
+    }
+
+    /// The fold half of [`extract_batch_index_and_pair_intents`]: index one
+    /// module's extracted declarations and hand back its retained pair intents.
+    /// Order-independent across modules, so a pipelined build may fold batches in
+    /// any completion order.
+    pub fn insert_extraction(
+        &mut self,
+        extraction: ModuleIndexExtraction,
+    ) -> (ModuleId, crate::call_graph::ModuleCallSummary) {
+        let ModuleIndexExtraction { module, entries, module_dispatch, pair_intents } = extraction;
+        self.insert_module_data(module, entries, module_dispatch);
+        (module, pair_intents)
+    }
+
     /// The read-only half of [`Self::add_module`]: force a module's item tree and
     /// metadata and extract its method entries + module-level dispatch. Touches no
     /// shared index state, so it is safe to run for many modules concurrently.
@@ -293,9 +324,24 @@ pub fn resolve_module_summary_via_index(
     module: ModuleId,
     index: &GraphIndex,
 ) -> ResolvedModuleSummary {
+    let summary = db.module_call_summary(module);
+    resolve_summary_via_index(db, module, &summary, index)
+}
+
+/// The resolution core of [`resolve_module_summary_via_index`], parameterized over
+/// an already-extracted summary. This lets a deferred consumer (the fused
+/// call-hierarchy build) resolve a summary subset retained from an earlier batch
+/// pass long after that batch's database is gone: everything read from `db` here is
+/// path/configuration state (module index, config metadata), never module texts, so
+/// any database with the same source root and config inputs resolves identically.
+pub fn resolve_summary_via_index(
+    db: &dyn ConfigsDatabase,
+    module: ModuleId,
+    summary: &crate::call_graph::ModuleCallSummary,
+    index: &GraphIndex,
+) -> ResolvedModuleSummary {
     use crate::call_graph::CallTarget;
 
-    let summary = db.module_call_summary(module);
     let resolver = Resolver::with_workspace_scope(module);
 
     let mut edges = Vec::with_capacity(summary.call_edges.len());
@@ -453,7 +499,7 @@ pub fn resolve_module_summary_via_index(
         };
     let global_modules = resolver.global_common_module_names(db);
     edges.extend(crate::queries::resolve_callback_edges(
-        &summary,
+        summary,
         find_local,
         find_qualified,
         &global_modules,
@@ -469,22 +515,75 @@ pub fn resolve_module_summary_via_index(
 /// method callers and method targets, so module code, unresolved calls, metadata,
 /// query, form, subscription, role, subsystem, register, and `SetAction` facts do
 /// not enter the call hierarchy.
-pub fn project_batch_method_call_pairs(
-    db: &dyn ConfigsDatabase,
+///
+/// Each module's summary resolution (which lowers that module's own bodies) runs
+/// in parallel on `pool`; the fold below walks the results in `batch` order and
+/// each module's pairs are already sorted, so the output is deterministic
+/// regardless of completion order.
+pub fn project_batch_method_call_pairs<DB: ConfigsDatabase + Clone + Send>(
+    pool: &rayon::ThreadPool,
+    db: &DB,
     index: &GraphIndex,
     batch: &[ModuleId],
 ) -> Vec<MethodCallPair> {
+    let per_module = parallel_per_module(pool, db, batch, |db, module| {
+        let summary = resolve_module_summary_via_index(db, module, index);
+        resolved_summary_method_pairs(&summary)
+    });
+
     let mut pairs = Vec::new();
     let mut seen = FxHashSet::default();
-
-    for &module in batch {
-        let summary = resolve_module_summary_via_index(db, module, index);
-        pairs.extend(
-            resolved_summary_method_pairs(&summary).into_iter().filter(|pair| seen.insert(*pair)),
-        );
+    for module_pairs in per_module {
+        pairs.extend(module_pairs.into_iter().filter(|pair| seen.insert(*pair)));
     }
 
     pairs
+}
+
+/// One module's read-only extraction for the fused call-hierarchy build: its
+/// index declarations plus the retained pair-relevant call-summary subset. Kept
+/// opaque so the fold ([`GraphIndex::insert_extraction`]) stays the only way the
+/// data enters an index.
+pub struct ModuleIndexExtraction {
+    pub module: ModuleId,
+    entries: Vec<GraphMethodEntry>,
+    module_dispatch: Option<MethodDispatch>,
+    pair_intents: crate::call_graph::ModuleCallSummary,
+}
+
+/// The parallel half of the fused extraction (see
+/// [`GraphIndex::add_batch_extracting_pair_intents`]): safe to run on a dedicated
+/// pool/database while another batch's extraction is in flight elsewhere, because
+/// it touches no shared index state.
+pub fn extract_batch_index_and_pair_intents<DB: ConfigsDatabase + Clone + Send>(
+    pool: &rayon::ThreadPool,
+    db: &DB,
+    batch: &[ModuleId],
+) -> Vec<ModuleIndexExtraction> {
+    parallel_per_module(pool, db, batch, |db, module| {
+        let (entries, module_dispatch) = GraphIndex::extract_module_data(db, module);
+        let pair_intents = db.module_call_summary(module).method_pair_subset();
+        ModuleIndexExtraction { module, entries, module_dispatch, pair_intents }
+    })
+}
+
+/// Resolve retained pair intents (from
+/// [`GraphIndex::add_batch_extracting_pair_intents`]) for many modules in parallel
+/// against the COMPLETED index, yielding each module's sorted, deduplicated method
+/// pairs in `intents` order. Resolution reads only path/configuration state from
+/// `db` (module index, config metadata) — never module texts — so the database
+/// only needs every file registered, not loaded.
+pub fn project_method_pairs_from_intents<DB: ConfigsDatabase + Clone + Send>(
+    pool: &rayon::ThreadPool,
+    db: &DB,
+    index: &GraphIndex,
+    intents: &[(ModuleId, crate::call_graph::ModuleCallSummary)],
+) -> Vec<(ModuleId, Vec<MethodCallPair>)> {
+    let warm = intents.first().map(|&(module, _)| module);
+    parallel_per_item(pool, db, intents, warm, |db, (module, summary)| {
+        let resolved = resolve_summary_via_index(db, *module, summary, index);
+        (*module, resolved_summary_method_pairs(&resolved))
+    })
 }
 
 fn resolved_summary_method_pairs(summary: &ResolvedModuleSummary) -> Vec<MethodCallPair> {
@@ -838,6 +937,25 @@ where
     R: Send,
     F: Fn(&DB, ModuleId) -> R + Sync + Send,
 {
+    parallel_per_item(pool, db, batch, batch.first().copied(), |db, &module| f(db, module))
+}
+
+/// The generic core of [`parallel_per_module`]: run `f` over arbitrary
+/// module-keyed items. `warm` must name a module of the workspace (any one) so the
+/// pre-pool warm-up can seed the configuration loader (see the comment below).
+fn parallel_per_item<DB, T, R, F>(
+    pool: &rayon::ThreadPool,
+    db: &DB,
+    items: &[T],
+    warm: Option<ModuleId>,
+    f: F,
+) -> Vec<R>
+where
+    DB: ConfigsDatabase + Clone + Send,
+    T: Sync,
+    R: Send,
+    F: Fn(&DB, &T) -> R + Sync + Send,
+{
     use rayon::prelude::*;
 
     // Warm the configuration loader ONCE on THIS thread before the parallel region.
@@ -852,21 +970,21 @@ where
     // never open a nested scope; their own per-file metadata/visibility work runs in
     // the pool. It is the only internally parallel query the build reaches (no type
     // inference), so this one warm-up closes the window.
-    if let Some(&first) = batch.first() {
+    if let Some(first) = warm {
         let _ = db.configurations(first.file_id);
         let _ = db.module_metadata(first);
     }
 
     let seed = db.clone();
     pool.install(move || {
-        batch
+        items
             .par_iter()
-            .map_with(seed, |db, &module| {
+            .map_with(seed, |db, item| {
                 // Mark the job so internally-parallel entry points (the metadata
                 // loader) can detect that the warm-up above failed to keep them off
                 // this pool, instead of deadlocking silently.
                 let _guard = stdx::par_guard::enter_no_nested_parallelism();
-                f(&*db, module)
+                f(&*db, item)
             })
             .collect()
     })

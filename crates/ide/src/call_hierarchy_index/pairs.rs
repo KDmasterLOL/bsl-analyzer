@@ -1,8 +1,8 @@
 use hir::{
-    graph_index::{project_batch_method_call_pairs, GraphIndex},
-    CallHierarchyReverseIndex, MethodCallPair,
+    call_graph::ModuleCallSummary,
+    graph_index::{project_method_pairs_from_intents, GraphIndex},
+    CallHierarchyReverseIndex, MethodCallPair, ModuleId,
 };
-use rustc_hash::FxHashMap;
 
 use super::{
     BatchLifecycle, CallHierarchyBatchPhase, CallHierarchyIndexBuildError,
@@ -10,108 +10,120 @@ use super::{
 };
 use crate::graph::{run_batch_db, BatchDbOpener, BatchDbRelease};
 
-pub(super) fn project_and_fold_method_pairs(
+/// How many extraction batches one resolve chunk spans. Resolution reads only
+/// path and configuration state — never module texts — so its databases parse
+/// nothing and a chunk can be much wider than an extraction batch. It must not
+/// be the WHOLE workspace, though: an extension caller's visibility check
+/// materialises a merged configuration (a deep clone of the base) per extension
+/// inside the live database, so one workspace-wide database would hold every
+/// extension's merge simultaneously. Chunking restores a residency bound while
+/// keeping the per-chunk locate memos shared across thousands of modules.
+const RESOLVE_CHUNK_BATCHES: usize = 16;
+
+/// Resolves the retained pair intents against the completed `graph_index` and
+/// folds the result into the compact reverse index.
+///
+/// Runs as one lifecycle batch per resolve chunk. A chunk's database registers
+/// only that chunk's caller modules (registration matters: reading an
+/// unregistered file's source root panics, and the caller-scoped resolvers read
+/// their callers' source roots); target modules are resolved through the
+/// resident `graph_index`, never through the database.
+pub(super) fn resolve_and_fold_method_pairs(
     request: CallHierarchyIndexBuildRequest<'_>,
     open_batch: &mut BatchDbOpener<'_>,
     pool: &rayon::ThreadPool,
     graph_index: &GraphIndex,
+    intents: &[(ModuleId, ModuleCallSummary)],
     lifecycle: &mut BatchLifecycle<'_>,
 ) -> Result<CallHierarchyReverseIndex, CallHierarchyIndexBuildError> {
-    let batch_size = request.batch_size.max(1);
-    let mut layout_hashes = FxHashMap::default();
-    let mut module_pairs = FxHashMap::default();
-    for &module in request.modules {
-        let layout_hash = graph_index
-            .module_layout_hash(module)
-            .ok_or(CallHierarchyIndexBuildError::MissingLayoutHash(module))?;
-        layout_hashes.insert(module, layout_hash);
-        module_pairs.insert(module, Vec::new());
-    }
+    let chunk_size = request.batch_size.max(1).saturating_mul(RESOLVE_CHUNK_BATCHES);
+    let mut per_module: Vec<(ModuleId, Vec<MethodCallPair>)> =
+        Vec::with_capacity(request.modules.len());
 
-    for (batch_index, batch) in request.modules.chunks(batch_size).enumerate() {
+    for (chunk_index, (chunk_modules, chunk_intents)) in
+        request.modules.chunks(chunk_size).zip(intents.chunks(chunk_size)).enumerate()
+    {
+        debug_assert!(
+            chunk_modules.len() == chunk_intents.len()
+                && chunk_modules
+                    .iter()
+                    .zip(chunk_intents)
+                    .all(|(&module, &(intent_module, _))| module == intent_module),
+            "retained intents must align with request.modules — a chunk registers \
+             exactly its callers' files",
+        );
         let _batch_span = tracing::info_span!(
             "call_hierarchy_index_build_batch",
             phase = "pass2",
-            batch_index,
-            batch_size = batch.len(),
+            batch_index = chunk_index,
+            batch_size = chunk_modules.len(),
             implementation = "compact_reverse_index",
             workspace_call_graph = false,
         )
         .entered();
         tracing::debug!(
             phase = "pass2",
-            batch_index,
-            batch_size = batch.len(),
-            "call hierarchy compact index batch started"
+            batch_index = chunk_index,
+            module_count = chunk_modules.len(),
+            "call hierarchy compact index pair resolution started"
         );
-        lifecycle.started(CallHierarchyBatchPhase::MethodPairs, batch_index, batch.len());
-        run_batch_db(
-            batch,
+        lifecycle.started(CallHierarchyBatchPhase::MethodPairs, chunk_index, chunk_modules.len());
+        let resolved = run_batch_db(
+            chunk_modules,
             open_batch,
             pool,
-            |db| {
-                let pairs = project_batch_method_call_pairs(db, graph_index, batch);
-                let pair_count = pairs.len();
-                for (module, pairs) in MethodCallPair::group_by_caller_module(&pairs) {
-                    module_pairs.entry(module).or_default().extend(pairs);
-                }
-                pair_count
-            },
+            |db| project_method_pairs_from_intents(pool, db, graph_index, chunk_intents),
             |release| {
-                let &pair_count = match release {
-                    BatchDbRelease::DatabaseDropped(count)
-                    | BatchDbRelease::NodeCachesCleared(count) => count,
+                let resolved = match release {
+                    BatchDbRelease::DatabaseDropped(resolved)
+                    | BatchDbRelease::NodeCachesCleared(resolved) => resolved,
                 };
+                let pair_count = resolved.iter().map(|(_, pairs)| pairs.len()).sum();
                 match release {
                     BatchDbRelease::DatabaseDropped(_) => {
                         tracing::debug!(
                             phase = "pass2",
-                            batch_index,
-                            batch_size = batch.len(),
+                            batch_index = chunk_index,
+                            module_count = chunk_modules.len(),
                             pair_count,
-                            "call hierarchy compact index batch database dropped"
+                            "call hierarchy compact index pair resolution database dropped"
                         );
                         lifecycle.database_dropped(
                             CallHierarchyBatchPhase::MethodPairs,
-                            batch_index,
-                            batch.len(),
+                            chunk_index,
+                            chunk_modules.len(),
                             pair_count,
                         );
                     }
                     BatchDbRelease::NodeCachesCleared(_) => {
-                        lifecycle.node_caches_cleared(
-                            pool,
-                            CallHierarchyBatchPhase::MethodPairs,
-                            batch_index,
-                        );
+                        lifecycle
+                            .node_caches_cleared(CallHierarchyBatchPhase::MethodPairs, chunk_index);
                         lifecycle.completed(
                             CallHierarchyBatchPhase::MethodPairs,
-                            batch_index,
-                            batch.len(),
+                            chunk_index,
+                            chunk_modules.len(),
                             pair_count,
                         );
                         tracing::debug!(
                             phase = "pass2",
-                            batch_index,
-                            batch_size = batch.len(),
+                            batch_index = chunk_index,
+                            module_count = chunk_modules.len(),
                             pair_count,
-                            "call hierarchy compact index batch completed"
+                            "call hierarchy compact index pair resolution completed"
                         );
                     }
                 }
             },
         );
+        per_module.extend(resolved);
     }
 
-    let modules = request
-        .modules
-        .iter()
-        .map(|&module| {
-            let layout_hash = layout_hashes
-                .get(&module)
-                .copied()
+    let modules = per_module
+        .into_iter()
+        .map(|(module, pairs)| {
+            let layout_hash = graph_index
+                .module_layout_hash(module)
                 .ok_or(CallHierarchyIndexBuildError::MissingLayoutHash(module))?;
-            let pairs = module_pairs.remove(&module).unwrap_or_default();
             Ok((module, pairs, layout_hash))
         })
         .collect::<Result<Vec<_>, CallHierarchyIndexBuildError>>()?;
