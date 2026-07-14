@@ -1,5 +1,6 @@
 pub mod arg_diagnostics;
 pub mod builtin;
+mod call_binding;
 pub mod call_resolution;
 pub mod db;
 pub mod field_enum;
@@ -11,6 +12,7 @@ pub mod infer;
 pub mod iteration_lookup;
 pub mod lower;
 pub mod manager_lookup;
+mod method_environment;
 pub mod method_graph;
 pub mod method_lookup;
 pub mod method_resolution;
@@ -32,12 +34,14 @@ pub mod structure_param_keys;
 pub mod subtype;
 pub mod this_object;
 pub mod this_object_attr;
+mod user_call_candidates;
 
 pub use bsl_config::VisibleConfig;
 pub use call_resolution::{
-    BuiltinCallableId, CallCandidateSet, CallParam, CallParamMode, CallSignature, CandidateId,
-    CandidateOrigin, CandidateProvenance, DuplicateCandidateId, PlatformSignatureSlot,
-    UserMethodId,
+    ArityFallback, BuiltinCallableId, CallCandidateSet, CallParam, CallParamMode, CallRejection,
+    CallResolution, CallSelection, CallSignature, CandidateDisposition, CandidateFact, CandidateId,
+    CandidateOrigin, CandidateProvenance, CandidateRejection, CandidateScore, DuplicateCandidateId,
+    PlatformSignatureSlot, UserMethodId,
 };
 pub use field_enum::{enumerate_fields, FieldInfo, FieldOrigin};
 pub use field_lookup::lookup_field;
@@ -52,9 +56,10 @@ pub use hir_def::ty::{
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::ConfigsDatabase;
 pub use infer::{
-    BodyInferenceResult, CallArgBinding, EnvCalleeKind, EnvMemberKind, ImplicitLocalAssignment,
-    ImplicitLocalInfo, InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult,
-    ModuleCodeInferenceResult, ParamsShape, UnresolvedMethodKind,
+    BodyInferenceResult, CallArgBinding, CandidateCallBinding, EnvCalleeKind, EnvMemberKind,
+    ImplicitLocalAssignment, ImplicitLocalInfo, InferOwnerResult, InferenceContext,
+    InferenceDiagnostic, InferenceResult, ModuleCodeInferenceResult, ParamsShape,
+    UnresolvedMethodKind,
 };
 pub use lower::TyLoweringContext;
 pub use manager_lookup::{lookup_manager_field, ManagerMemberInfo};

@@ -3,28 +3,31 @@ use bsl_types::intern::TypeKernelDb;
 use hir_def::execution_env::EnvFlags;
 use hir_def::ty::FunctionSignature;
 use rustc_hash::FxHashMap;
+use smol_str::SmolStr;
 use std::sync::OnceLock;
-use stdx::case::CaseExt;
 
 use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
+use crate::BuiltinCallableId;
+
+pub(crate) mod candidates;
+pub use candidates::builtin_functions;
 
 static BUILTIN_FUNCTIONS: OnceLock<BuiltinFunctions> = OnceLock::new();
-
-pub fn builtin_functions() -> &'static BuiltinFunctions {
-    BUILTIN_FUNCTIONS.get_or_init(BuiltinFunctions::new)
-}
 
 #[derive(Debug)]
 pub struct BuiltinFunctions {
     signatures: FxHashMap<String, Vec<BuiltinSignature>>,
+    callable_ids: FxHashMap<String, BuiltinCallableId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltinSignature {
+    names: Box<[SmolStr]>,
     params: Box<[ParamTypeSpec]>,
     defaults: Box<[bool]>,
     ret: ReturnTypeSpec,
     max_args: Option<u32>,
+    variadic_param: Option<usize>,
     env: EnvFlags,
 }
 
@@ -86,36 +89,6 @@ impl BuiltinSignature {
 
     pub fn required_count(&self) -> usize {
         self.defaults.iter().rposition(|has_default| !*has_default).map_or(0, |i| i + 1)
-    }
-}
-
-impl BuiltinFunctions {
-    fn new() -> Self {
-        let mut signatures: FxHashMap<String, Vec<BuiltinSignature>> = FxHashMap::default();
-
-        let platform = bsl_platform::PlatformData::instance();
-        for func in platform.all_global_functions() {
-            let sigs = descriptors_from_global_function(func);
-            signatures.insert(func.name.fold_lower(), sigs.clone());
-            signatures.insert(func.english_name.fold_lower(), sigs);
-        }
-
-        for (ru, legacy_en) in bsl_platform::LEGACY_GLOBAL_FUNCTION_EN_ALIASES {
-            if let Some(sigs) = signatures.get(&ru.fold_lower()).cloned() {
-                signatures.entry(legacy_en.fold_lower()).or_insert(sigs);
-            }
-        }
-
-        register_fallbacks(&mut signatures);
-
-        tracing::debug!("initialized {} built-in function signature keys", signatures.len());
-
-        Self { signatures }
-    }
-
-    pub fn get(&self, name: &str) -> Option<&[BuiltinSignature]> {
-        let name_lower = name.fold_lower();
-        self.signatures.get(&name_lower).map(|v| v.as_slice())
     }
 }
 
@@ -198,8 +171,10 @@ pub(crate) fn descriptor_from_params(
     ret: ReturnTypeSpec,
 ) -> BuiltinSignature {
     let mut params = Vec::with_capacity(params_in.len());
+    let mut names = Vec::with_capacity(params_in.len());
     let mut defaults = Vec::with_capacity(params_in.len());
     for param in params_in {
+        names.push(param.name.clone());
         params.push(
             param
                 .param_type
@@ -211,6 +186,13 @@ pub(crate) fn descriptor_from_params(
     }
 
     let last = params_in.last();
+    let variadic_param = last
+        .filter(|param| {
+            param.is_variadic
+                || name_implies_unbounded_variadic(param.name.as_str())
+                || variadic_param_max(param.name.as_str()).is_some()
+        })
+        .map(|_| params_in.len() - 1);
     let max_args = if last.is_some_and(|p| p.is_variadic)
         || last.is_some_and(|p| name_implies_unbounded_variadic(p.name.as_str()))
     {
@@ -222,10 +204,12 @@ pub(crate) fn descriptor_from_params(
     };
 
     BuiltinSignature {
+        names: names.into_boxed_slice(),
         params: params.into_boxed_slice(),
         defaults: defaults.into_boxed_slice(),
         ret,
         max_args,
+        variadic_param,
         env: EnvFlags::ALL,
     }
 }
@@ -290,10 +274,12 @@ fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<BuiltinSignature>>) {
         sigs,
         ("новый", "new"),
         BuiltinSignature {
+            names: Box::new(["Тип".into()]),
             params: Box::new([ParamTypeSpec::TypeDescriptor]),
             defaults: Box::new([false]),
             ret: ReturnTypeSpec::Unknown,
             max_args: Some(1),
+            variadic_param: None,
             env: EnvFlags::ALL,
         },
     );
@@ -302,10 +288,12 @@ fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<BuiltinSignature>>) {
         sigs,
         ("описаниетипов", "typedescription"),
         BuiltinSignature {
+            names: Box::new(["Тип".into()]),
             params: Box::new([ParamTypeSpec::Unknown]),
             defaults: Box::new([false]),
             ret: ReturnTypeSpec::Unknown,
             max_args: None,
+            variadic_param: Some(0),
             env: EnvFlags::ALL,
         },
     );
@@ -587,6 +575,7 @@ mod tests {
     fn fallback_does_not_shadow_json_derived_signature() {
         let mut sigs: FxHashMap<String, Vec<BuiltinSignature>> = FxHashMap::default();
         let json_like = BuiltinSignature {
+            names: Box::new(["Первый".into(), "Второй".into()]),
             params: Box::new([
                 ParamTypeSpec::Raw("Число".to_string()),
                 ParamTypeSpec::Raw("Число".to_string()),
@@ -594,16 +583,19 @@ mod tests {
             defaults: Box::new([false, false]),
             ret: ReturnTypeSpec::Raw("Число".to_string()),
             max_args: Some(2),
+            variadic_param: None,
             env: EnvFlags::ALL,
         };
         sigs.insert("foo".into(), vec![json_like.clone()]);
         sigs.insert("bar".into(), vec![json_like.clone()]);
 
         let fallback = BuiltinSignature {
+            names: Box::new(["Значение".into()]),
             params: Box::new([ParamTypeSpec::Raw("Строка".to_string())]),
             defaults: Box::new([false]),
             ret: ReturnTypeSpec::Raw("Строка".to_string()),
             max_args: Some(1),
+            variadic_param: None,
             env: EnvFlags::ALL,
         };
         insert_pair(&mut sigs, ("foo", "bar"), fallback);

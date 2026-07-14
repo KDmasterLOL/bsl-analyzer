@@ -108,6 +108,19 @@ fn candidate_identity_rejects_duplicates() {
 }
 
 #[test]
+fn checked_candidate_set_rejects_duplicates_in_release() {
+    let db = InMemoryDb::new();
+    let resolution = select_candidates(&db, "Select");
+    let duplicate = resolution.candidates.as_slice()[0].clone();
+    let duplicate_id = duplicate.id;
+
+    assert_eq!(
+        CallCandidateSet::try_from(vec![duplicate.clone(), duplicate]),
+        Err(DuplicateCandidateId { id: duplicate_id })
+    );
+}
+
+#[test]
 fn platform_candidate_preserves_incomplete_variadic_metadata() {
     let db = InMemoryDb::new();
     let method = PlatformMethod {

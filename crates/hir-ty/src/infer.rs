@@ -11,7 +11,6 @@ use hir_def::effective_module::EffectiveModuleId;
 use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
 use hir_def::symbol_tree::SymbolTree;
-use hir_def::ty::FunctionSignature;
 use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
 use once_cell::sync::Lazy;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -308,9 +307,18 @@ pub struct CallArgBinding {
 
     pub args: Vec<ExprId>,
 
+    pub candidate: Option<CandidateCallBinding>,
+
     pub params: ParamsShape,
 
     pub params_from_doc_comment: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateCallBinding {
+    pub candidates: crate::call_resolution::CallCandidateSet,
+
+    pub resolution: crate::call_resolution::CallResolution,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -570,32 +578,6 @@ pub fn infer_owner(
     }
 }
 
-/// Execution environments a method's body is compiled for: the module's base
-/// set intersected with the compilation directive and with the item-level
-/// preprocessor regions enclosing the method.
-fn method_body_env(
-    db: &dyn HirDatabase,
-    file_id: FileId,
-    local_id: u32,
-    opts: &hir_def::execution_env::EnvOptions,
-) -> hir_def::execution_env::EnvFlags {
-    use hir_def::execution_env;
-    let metadata = db.module_metadata(hir_def::ModuleId { file_id });
-    let item_tree = db.item_tree_ref(file_id);
-    let mut env = execution_env::method_env(item_tree, local_id, &metadata, opts);
-    // The conditional tree costs a syntax walk per file; only files with an
-    // item-level `#Если` can narrow a method's environments through it.
-    if !env.is_empty() && item_tree.has_module_preproc() {
-        if let Some(range) = execution_env::method_source_range(item_tree, local_id) {
-            let conditionals = db.conditional_tree_ref(file_id);
-            if !conditionals.is_empty() {
-                env = env & execution_env::conditional_env(conditionals, range);
-            }
-        }
-    }
-    env
-}
-
 impl<'db> InferenceContext<'db> {
     pub fn new(
         db: &'db dyn HirDatabase,
@@ -618,7 +600,11 @@ impl<'db> InferenceContext<'db> {
             hir_def::execution_env::EnvFlags::EMPTY
         } else {
             match owner {
-                DefWithBodyId::Method(local_id) => method_body_env(db, file_id, local_id, &opts),
+                DefWithBodyId::Method(local_id) => crate::method_environment::effective_method_env(
+                    db,
+                    hir_def::MethodId { module: hir_def::ModuleId { file_id }, local_id },
+                    &opts,
+                ),
                 DefWithBodyId::ModuleCode => {
                     let metadata = db.module_metadata(hir_def::ModuleId { file_id });
                     hir_def::execution_env::module_code_env(&metadata, &opts)
@@ -799,26 +785,12 @@ impl<'db> InferenceContext<'db> {
             method_symbol,
         );
 
-        let total = signature.params.len();
-        let required = signature.required_count();
-        if args.len() < required || args.len() > total {
-            self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                call_expr: callee,
-                required_count: required,
-                total_count: total,
-                found: args.len(),
-            });
-        }
-
-        self.record_call_arg_binding(
-            callee,
-            args,
-            ParamsShape::Single(signature.params.iter().copied().collect()),
-            signature.from_doc_comment,
-        );
-
         self.expr_types.insert(callee, self.db.unknown());
-        Some(self.effective_local_return(method_id, signature.ret))
+        let return_ty = self.effective_local_return(method_id, signature.ret);
+        let candidates =
+            crate::user_call_candidates::for_resolved_method(self.db, name, method_id, return_ty)
+                .ok()?;
+        Some(self.record_candidate_call_arg_binding(callee, args, candidates))
     }
 
     fn push_inference_diagnostic(&mut self, diag: InferenceDiagnostic) {
@@ -979,7 +951,14 @@ impl<'db> InferenceContext<'db> {
             Some(&env) => env,
             None => {
                 let opts = self.db.env_options();
-                let env = method_body_env(self.db, self.context_file_id, callee_local_id, &opts);
+                let env = crate::method_environment::effective_method_env(
+                    self.db,
+                    hir_def::MethodId {
+                        module: hir_def::ModuleId { file_id: self.context_file_id },
+                        local_id: callee_local_id,
+                    },
+                    &opts,
+                );
                 self.local_callee_env.insert(callee_local_id, env);
                 env
             }
@@ -1059,9 +1038,43 @@ impl<'db> InferenceContext<'db> {
             owner: self.owner,
             call_expr,
             args: args.to_vec(),
+            candidate: None,
             params,
             params_from_doc_comment,
         });
+    }
+
+    fn record_candidate_call_arg_binding(
+        &mut self,
+        call_expr: ExprId,
+        args: &[ExprId],
+        candidates: crate::call_resolution::CallCandidateSet,
+    ) -> TypeId {
+        let argument_types = args
+            .iter()
+            .map(|arg| self.expr_types.get(arg).copied().unwrap_or_else(|| self.db.unknown()))
+            .collect::<Vec<_>>();
+        let projection = crate::call_binding::resolve_binding(self.db, candidates, &argument_types);
+        if let Some(arity) = &projection.arity {
+            self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
+                call_expr,
+                required_count: arity.required_count,
+                total_count: arity.total_count,
+                found: args.len(),
+            });
+        }
+        let return_ty = projection.semantic.resolution.return_ty;
+        if !self.body.is_recovered(call_expr) {
+            self.call_arg_bindings.push(CallArgBinding {
+                owner: self.owner,
+                call_expr,
+                args: args.to_vec(),
+                candidate: Some(projection.semantic),
+                params: projection.params,
+                params_from_doc_comment: projection.params_from_doc_comment,
+            });
+        }
+        return_ty
     }
 
     fn get_resolver(&self) -> Resolver {
@@ -1515,69 +1528,51 @@ impl<'db> InferenceContext<'db> {
 
                 if let Some(name) = type_name {
                     let platform = bsl_platform::PlatformDataInner::instance();
-                    if !platform.is_ambiguous_type_name(name.as_str()) {
-                        if let Some(platform_type) = platform.get_type(name.as_str()) {
-                            let env = hir_def::execution_env::EnvFlags::from_platform_context(
+                    let platform_type = platform.get_type(name.as_str());
+                    let environment = platform_type.map_or(
+                        hir_def::execution_env::EnvFlags::ALL,
+                        |platform_type| {
+                            hir_def::execution_env::EnvFlags::from_platform_context(
                                 platform_type.context.as_ref(),
-                            );
-                            self.check_member_env(expr_id, name, env, EnvMemberKind::Type);
-                        }
+                            )
+                        },
+                    );
+                    if !platform.is_ambiguous_type_name(name.as_str()) && platform_type.is_some() {
+                        self.check_member_env(expr_id, name, environment, EnvMemberKind::Type);
                     }
                     let ctors = platform.get_constructors(name.as_str());
                     if !ctors.is_empty() {
-                        let arg_count = args.len();
-                        let sigs: Vec<builtin::BuiltinSignature> = ctors
-                            .iter()
-                            .map(|ctor| {
-                                builtin::descriptor_from_params(
-                                    &ctor.parameters,
-                                    builtin::ReturnTypeSpec::Unknown,
-                                )
-                            })
-                            .collect();
-
-                        let mut arity_match: Option<usize> = None;
-                        let mut best_idx = 0usize;
-                        let mut best_distance = usize::MAX;
-                        for (idx, sig) in sigs.iter().enumerate() {
-                            let required = sig
-                                .defaults()
+                        if let Ok(candidates) = builtin::candidates::constructor_candidates(
+                            self.db,
+                            &ctors,
+                            environment,
+                        ) {
+                            let argument_types = args
                                 .iter()
-                                .rposition(|has_default| !*has_default)
-                                .map_or(0, |i| i + 1);
-                            let too_few = arg_count < required;
-                            let too_many = sig.max_args().is_some_and(|m| arg_count > m as usize);
-                            if !too_few && !too_many {
-                                arity_match = Some(idx);
-                                break;
-                            }
-                            let upper = sig.max_args().map_or(arg_count, |m| m as usize);
-                            let distance = if too_few {
-                                required - arg_count
-                            } else {
-                                arg_count.saturating_sub(upper)
-                            };
-                            if distance < best_distance {
-                                best_distance = distance;
-                                best_idx = idx;
-                            }
-                        }
-
-                        if arity_match.is_none() {
-                            let sig = &sigs[best_idx];
-                            let required = sig
-                                .defaults()
-                                .iter()
-                                .rposition(|has_default| !*has_default)
-                                .map_or(0, |i| i + 1);
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::MismatchedArgCount {
-                                    call_expr: expr_id,
-                                    required_count: required,
-                                    total_count: sig.param_count(),
-                                    found: arg_count,
-                                },
+                                .copied()
+                                .map(ExprId::from_idx)
+                                .map(|arg| {
+                                    self.expr_types
+                                        .get(&arg)
+                                        .copied()
+                                        .unwrap_or_else(|| self.db.unknown())
+                                })
+                                .collect::<Vec<_>>();
+                            let projection = crate::call_binding::resolve_binding(
+                                self.db,
+                                candidates,
+                                &argument_types,
                             );
+                            if let Some(arity) = projection.arity {
+                                self.push_inference_diagnostic(
+                                    InferenceDiagnostic::MismatchedArgCount {
+                                        call_expr: expr_id,
+                                        required_count: arity.required_count,
+                                        total_count: arity.total_count,
+                                        found: args.len(),
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -1972,29 +1967,18 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        let total = resolution.signature.params.len();
-                        let required = resolution.signature.required_count();
-                        if args.len() < required || args.len() > total {
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::MismatchedArgCount {
-                                    call_expr: callee,
-                                    required_count: required,
-                                    total_count: total,
-                                    found: args.len(),
-                                },
-                            );
-                        }
-                        self.record_call_arg_binding(
-                            callee,
-                            args,
-                            ParamsShape::Single(
-                                resolution.signature.params.iter().copied().collect(),
-                            ),
-                            resolution.signature.from_doc_comment,
-                        );
                         self.expr_types.insert(callee, self.db.unknown());
-                        return self
+                        let return_ty = self
                             .effective_local_return(resolution.method_id, resolution.return_type);
+                        let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                            self.db,
+                            &method_name,
+                            resolution.method_id,
+                            return_ty,
+                        ) else {
+                            return self.db.unknown();
+                        };
+                        return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
                     Err(
@@ -2035,29 +2019,18 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        let total = resolution.signature.params.len();
-                        let required = resolution.signature.required_count();
-                        if args.len() < required || args.len() > total {
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::MismatchedArgCount {
-                                    call_expr: callee,
-                                    required_count: required,
-                                    total_count: total,
-                                    found: args.len(),
-                                },
-                            );
-                        }
-                        self.record_call_arg_binding(
-                            callee,
-                            args,
-                            ParamsShape::Single(
-                                resolution.signature.params.iter().copied().collect(),
-                            ),
-                            resolution.signature.from_doc_comment,
-                        );
                         self.expr_types.insert(callee, self.db.unknown());
-                        return self
+                        let return_ty = self
                             .effective_local_return(resolution.method_id, resolution.return_type);
+                        let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                            self.db,
+                            &method_name,
+                            resolution.method_id,
+                            return_ty,
+                        ) else {
+                            return self.db.unknown();
+                        };
+                        return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
                     Err(
@@ -2101,29 +2074,18 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        let total = resolution.signature.params.len();
-                        let required = resolution.signature.required_count();
-                        if args.len() < required || args.len() > total {
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::MismatchedArgCount {
-                                    call_expr: callee,
-                                    required_count: required,
-                                    total_count: total,
-                                    found: args.len(),
-                                },
-                            );
-                        }
-                        self.record_call_arg_binding(
-                            callee,
-                            args,
-                            ParamsShape::Single(
-                                resolution.signature.params.iter().copied().collect(),
-                            ),
-                            resolution.signature.from_doc_comment,
-                        );
                         self.expr_types.insert(callee, self.db.unknown());
-                        return self
+                        let return_ty = self
                             .effective_local_return(resolution.method_id, resolution.return_type);
+                        let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                            self.db,
+                            &method_name,
+                            resolution.method_id,
+                            return_ty,
+                        ) else {
+                            return self.db.unknown();
+                        };
+                        return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
                     Err(
@@ -2266,84 +2228,21 @@ impl<'db> InferenceContext<'db> {
                     );
                 }
 
-                let sigs: Vec<FunctionSignature> = sigs.iter().map(|s| s.lower(self.db)).collect();
-
                 for arg in args {
                     self.infer_expr(*arg);
                 }
-
-                let arg_count = args.len();
-                let inferred: Vec<TypeId> = args
-                    .iter()
-                    .map(|a| self.expr_types.get(a).copied().unwrap_or_else(|| self.db.unknown()))
-                    .collect();
-
-                let mut full_match: Option<usize> = None;
-                let mut arity_match: Option<usize> = None;
-                let mut best_idx = 0usize;
-                let mut best_distance = usize::MAX;
-                for (idx, sig) in sigs.iter().enumerate() {
-                    let required = sig.required_count();
-                    let too_few = arg_count < required;
-                    let too_many = sig.max_args.is_some_and(|m| arg_count > m as usize);
-                    if !too_few && !too_many {
-                        if arity_match.is_none() {
-                            arity_match = Some(idx);
-                        }
-                        let types_ok =
-                            inferred.iter().zip(sig.params.iter()).all(|(actual, expected)| {
-                                crate::subtype::is_assignable(self.db, *actual, *expected)
-                            });
-                        if types_ok && full_match.is_none() {
-                            full_match = Some(idx);
-                            break;
-                        }
-                    }
-                    let upper = sig.max_args.map_or(arg_count, |m| m as usize);
-                    let distance = if too_few {
-                        required - arg_count
-                    } else {
-                        arg_count.saturating_sub(upper)
-                    };
-                    if distance < best_distance {
-                        best_distance = distance;
-                        best_idx = idx;
-                    }
-                }
-
-                let chosen = match full_match.or(arity_match) {
-                    Some(idx) => &sigs[idx],
-                    None => {
-                        let sig = &sigs[best_idx];
-                        let required = sig.required_count();
-                        self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                            call_expr: callee,
-                            required_count: required,
-                            total_count: sig.params.len(),
-                            found: arg_count,
-                        });
-                        sig
-                    }
+                let Some(callable) = builtin::builtin_functions().callable_id(name.as_str()) else {
+                    return self.db.unknown();
                 };
-
-                let overloads_arc: Arc<[Arc<[TypeId]>]> = sigs
-                    .iter()
-                    .map(|s| s.params.iter().copied().collect())
-                    .collect::<Vec<_>>()
-                    .into();
-                self.record_call_arg_binding(
-                    callee,
-                    args,
-                    ParamsShape::Overloaded {
-                        flat: chosen.params.iter().copied().collect(),
-                        overloads: overloads_arc,
-                    },
-                    chosen.from_doc_comment,
-                );
-                let mut ret = if sigs.len() == 1 {
-                    chosen.ret
-                } else {
-                    self.db.union(sigs.iter().map(|s| s.ret).collect())
+                let Ok(mut candidates) = crate::call_resolution::CallCandidateSet::try_from(
+                    sigs.iter()
+                        .enumerate()
+                        .map(|(ordinal, signature)| {
+                            signature.to_call_signature(self.db, callable, ordinal)
+                        })
+                        .collect::<Vec<_>>(),
+                ) else {
+                    return self.db.unknown();
                 };
                 // Weaving `&Вместо`: a bare `ПродолжитьВызов(...)` invokes the original base
                 // method, so (a) its result is that method's return type, not the platform
@@ -2353,8 +2252,13 @@ impl<'db> InferenceContext<'db> {
                 // `&Вместо` interceptor (`proceed_*` are `None` everywhere else → no change).
                 if is_proceed_with_call_name(&name) {
                     if let Some(proceed_ty) = self.proceed_return {
-                        ret = proceed_ty;
+                        for candidate in candidates.signatures_mut() {
+                            candidate.return_ty = proceed_ty;
+                        }
                     }
+                }
+                let ret = self.record_candidate_call_arg_binding(callee, args, candidates);
+                if is_proceed_with_call_name(&name) {
                     if let Some((required, total)) = self.proceed_arity {
                         if args.len() < required || args.len() > total {
                             self.push_inference_diagnostic(
@@ -2440,22 +2344,22 @@ impl<'db> InferenceContext<'db> {
                             // In effective (`&ИзменениеИКонтроль`) inference, prefer the
                             // CHANGED body's return over the base-keyed query, so inserted
                             // code that consumes a changed sibling's result types correctly.
-                            if let Some(ret) = self
+                            let effective_ret = self
                                 .local_effective_returns
                                 .as_ref()
                                 .and_then(|m| m.get(&method.id.local_id).copied())
-                            {
-                                if !self.is_unknown(ret) {
-                                    return ret;
-                                }
-                            }
+                                .filter(|ret| !self.is_unknown(*ret));
                             let sig = crate::method_resolution::materialise_signature_enriched(
                                 self.db, method.id, method,
                             );
-                            let ret = sig.ret;
-                            if !self.is_unknown(ret) {
-                                return ret;
-                            }
+                            let return_ty = effective_ret.unwrap_or(sig.ret);
+                            let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                                self.db, name, method.id, return_ty,
+                            ) else {
+                                return self.db.unknown();
+                            };
+                            return self
+                                .record_candidate_call_arg_binding(callee, args, candidates);
                         }
                     }
                 }
@@ -2509,40 +2413,29 @@ impl<'db> InferenceContext<'db> {
                     );
                 }
 
-                let total = resolution.signature.params.len();
-                let required = resolution.signature.required_count();
-                if args.len() < required || args.len() > total {
-                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                        call_expr,
-                        required_count: required,
-                        total_count: total,
-                        found: args.len(),
-                    });
-                }
-
-                self.record_call_arg_binding(
-                    call_expr,
-                    args,
-                    ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
-                    resolution.signature.from_doc_comment,
-                );
-
                 // `ОбщегоНазначения.ОбщийМодуль("Имя")` returns the named common module as a
                 // value. Its own inferred return is uninformative — `Unknown` from `Вычислить`,
                 // or `Undefined` because the real БСП body has an `Иначе Модуль = Неопределено`
                 // arm that wins under flow-insensitive typing. Narrowing on either gives the
                 // receiver a `CommonModule` type for member resolution / hover / completion,
                 // without overriding a method that declares a genuinely useful return type.
-                if (self.is_unknown(resolution.return_type)
-                    || self.is_undefined(resolution.return_type))
+                let mut return_ty = resolution.return_type;
+                if (self.is_unknown(return_ty) || self.is_undefined(resolution.return_type))
                     && method_name.as_str().fold_lower() == "общиймодуль"
                 {
                     if let Some(ty) = self.common_module_type_from_args(args) {
-                        return ty;
+                        return_ty = ty;
                     }
                 }
-
-                resolution.return_type
+                let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                    self.db,
+                    method_name,
+                    resolution.method_id,
+                    return_ty,
+                ) else {
+                    return self.db.unknown();
+                };
+                self.record_candidate_call_arg_binding(call_expr, args, candidates)
             }
             Err(kind) => {
                 if matches!(kind, UnresolvedMethodKind::MethodNotFound) {
@@ -2793,25 +2686,15 @@ impl<'db> InferenceContext<'db> {
                     });
                 }
 
-                let total = resolution.signature.params.len();
-                let required = resolution.signature.required_count();
-                if args.len() < required || args.len() > total {
-                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                        call_expr,
-                        required_count: required,
-                        total_count: total,
-                        found: args.len(),
-                    });
-                }
-
-                self.record_call_arg_binding(
-                    call_expr,
-                    args,
-                    ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
-                    resolution.signature.from_doc_comment,
-                );
-
-                resolution.return_type
+                let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                    self.db,
+                    method_name,
+                    resolution.method_id,
+                    resolution.return_type,
+                ) else {
+                    return self.db.unknown();
+                };
+                self.record_candidate_call_arg_binding(call_expr, args, candidates)
             }
             Err(UnresolvedMethodKind::MethodNotFound) => {
                 let mdo_type_opt = bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str());
@@ -2820,49 +2703,12 @@ impl<'db> InferenceContext<'db> {
                     .and_then(|mdo_type| {
                         resolve_platform_manager_method(self.db, mdo_type, mdo_name, method_name)
                     });
-                if let Some(mut res) = plat_res {
+                if let Some(res) = plat_res {
+                    let mut candidates = res.candidates;
                     if mdo_type_opt == Some(bsl_metadata::MdoType::Constant) {
-                        let mut return_ty = res.return_ty;
-                        let mut params: Vec<TypeId> = res.signature.params.to_vec();
-                        self.refine_constant_method(
-                            mdo_name,
-                            method_name,
-                            &mut return_ty,
-                            &mut params,
-                        );
-                        res.return_ty = return_ty;
-                        res.signature.params = params.into_boxed_slice();
+                        self.refine_constant_candidates(mdo_name, method_name, &mut candidates);
                     }
-                    let total = res.signature.params.len();
-                    let required = res.signature.required_count();
-                    if args.len() < required || args.len() > total {
-                        self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                            call_expr,
-                            required_count: required,
-                            total_count: total,
-                            found: args.len(),
-                        });
-                    }
-                    let params = if res.overloads.is_empty() {
-                        ParamsShape::Single(res.signature.params.to_vec().into())
-                    } else {
-                        ParamsShape::Overloaded {
-                            flat: res.signature.params.to_vec().into(),
-                            overloads: res
-                                .overloads
-                                .iter()
-                                .map(|params| params.iter().copied().collect())
-                                .collect::<Vec<_>>()
-                                .into(),
-                        }
-                    };
-                    self.record_call_arg_binding(
-                        call_expr,
-                        args,
-                        params,
-                        res.signature.from_doc_comment,
-                    );
-                    return res.return_ty;
+                    return self.record_candidate_call_arg_binding(call_expr, args, candidates);
                 }
 
                 self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
@@ -2932,6 +2778,26 @@ impl<'db> InferenceContext<'db> {
             *return_ty = value_ty;
         } else if is_set {
             params[0] = value_ty;
+        }
+    }
+
+    fn refine_constant_candidates(
+        &self,
+        mdo_name: &Name,
+        method_name: &Name,
+        candidates: &mut crate::call_resolution::CallCandidateSet,
+    ) {
+        for candidate in candidates.signatures_mut() {
+            let mut params = candidate.params.iter().map(|param| param.ty).collect::<Vec<_>>();
+            self.refine_constant_method(
+                mdo_name,
+                method_name,
+                &mut candidate.return_ty,
+                &mut params,
+            );
+            for (param, ty) in candidate.params.iter_mut().zip(params) {
+                param.ty = ty;
+            }
         }
     }
 }
@@ -3548,7 +3414,7 @@ mod tests {
         db: &dyn bsl_types::intern::TypeKernelDb,
         builtins: &builtin::BuiltinFunctions,
         name: &str,
-    ) -> FunctionSignature {
+    ) -> hir_def::ty::FunctionSignature {
         let sigs = builtins.get(name).unwrap_or_else(|| panic!("{name} should exist"));
         sigs[0].lower(db)
     }

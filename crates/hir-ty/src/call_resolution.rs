@@ -1,16 +1,12 @@
 use std::fmt;
 
-use bsl_platform::{MethodParam, PlatformMethod};
-use bsl_types::builders::Builders;
-use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::execution_env::EnvFlags;
 use smol_str::SmolStr;
 use vfs::FileId;
 
-use crate::lower::type_string::lower_param_type_string_typeid;
-
 mod applicability;
+mod candidate_builders;
 mod resolution;
 
 pub use applicability::{
@@ -67,6 +63,20 @@ pub enum CandidateId {
     Platform { method_id: u32, signature: PlatformSignatureSlot },
     User { method: UserMethodId, signature_ordinal: usize },
     Builtin { callable: BuiltinCallableId, signature_ordinal: usize },
+}
+
+impl CandidateId {
+    pub const fn is_platform(self) -> bool {
+        matches!(self, Self::Platform { .. })
+    }
+
+    pub const fn is_user(self) -> bool {
+        matches!(self, Self::User { .. })
+    }
+
+    pub const fn is_builtin(self) -> bool {
+        matches!(self, Self::Builtin { .. })
+    }
 }
 
 /// Layer that supplied a call candidate.
@@ -132,23 +142,8 @@ impl CallCandidateSet {
         &self.0
     }
 
-    pub(crate) fn from_platform_method(
-        db: &dyn TypeKernelDb,
-        method: &PlatformMethod,
-        return_ty: TypeId,
-    ) -> Self {
-        let context = PlatformCandidateContext {
-            db,
-            method,
-            return_ty,
-            environment: EnvFlags::from_platform_context(method.context.as_ref()),
-        };
-        let mut candidates = Vec::with_capacity(method.variants.len() + 1);
-        candidates.push(context.lower(PlatformSignatureSlot::Base, &method.parameters));
-        candidates.extend(method.variants.iter().enumerate().map(|(ordinal, variant)| {
-            context.lower(PlatformSignatureSlot::Variant(ordinal), &variant.parameters)
-        }));
-        Self(candidates.into_boxed_slice())
+    pub(crate) fn signatures_mut(&mut self) -> &mut [CallSignature] {
+        &mut self.0
     }
 }
 
@@ -179,58 +174,6 @@ impl fmt::Display for DuplicateCandidateId {
 }
 
 impl std::error::Error for DuplicateCandidateId {}
-
-struct PlatformCandidateContext<'a> {
-    db: &'a dyn TypeKernelDb,
-    method: &'a PlatformMethod,
-    return_ty: TypeId,
-    environment: EnvFlags,
-}
-
-impl PlatformCandidateContext<'_> {
-    fn lower(&self, signature: PlatformSignatureSlot, parameters: &[MethodParam]) -> CallSignature {
-        let params: Box<[CallParam]> = parameters
-            .iter()
-            .map(|param| CallParam {
-                name: param.name.clone(),
-                ty: param
-                    .param_type
-                    .as_deref()
-                    .map(|raw| lower_param_type_string_typeid(self.db, raw))
-                    .unwrap_or_else(|| self.db.unknown()),
-                has_default: param.is_optional,
-                mode: if param.is_variadic {
-                    CallParamMode::Variadic
-                } else {
-                    CallParamMode::Positional
-                },
-            })
-            .collect();
-        let required_args = params
-            .iter()
-            .rposition(|param| !param.has_default && param.mode == CallParamMode::Positional)
-            .map_or(0, |index| index + 1);
-        let max_args = params
-            .iter()
-            .all(|param| param.mode == CallParamMode::Positional)
-            .then_some(params.len());
-        let id = CandidateId::Platform { method_id: self.method.id, signature };
-        CallSignature {
-            id,
-            params,
-            required_args,
-            max_args,
-            return_ty: self.return_ty,
-            origin: CandidateOrigin::Platform,
-            environment: self.environment,
-            provenance: CandidateProvenance::PlatformMethod {
-                method_id: self.method.id,
-                signature,
-            },
-            from_doc_comment: false,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests;

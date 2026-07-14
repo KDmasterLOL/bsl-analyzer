@@ -1,0 +1,119 @@
+use bsl_platform::{MethodParam, PlatformMethod};
+use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
+use hir_def::execution_env::EnvFlags;
+use hir_def::symbol_tree::MethodSymbol;
+use hir_def::ty::FunctionSignature;
+
+use super::{
+    CallCandidateSet, CallParam, CallParamMode, CallSignature, CandidateId, CandidateOrigin,
+    CandidateProvenance, PlatformSignatureSlot, UserMethodId,
+};
+use crate::lower::type_string::lower_param_type_string_typeid;
+
+impl CallCandidateSet {
+    pub(crate) fn from_platform_method(
+        db: &dyn TypeKernelDb,
+        method: &PlatformMethod,
+        return_ty: TypeId,
+    ) -> Self {
+        let context = PlatformCandidateContext {
+            db,
+            method,
+            return_ty,
+            environment: EnvFlags::from_platform_context(method.context.as_ref()),
+        };
+        let mut candidates = Vec::with_capacity(method.variants.len() + 1);
+        candidates.push(context.lower(PlatformSignatureSlot::Base, &method.parameters));
+        candidates.extend(method.variants.iter().enumerate().map(|(ordinal, variant)| {
+            context.lower(PlatformSignatureSlot::Variant(ordinal), &variant.parameters)
+        }));
+        Self(candidates.into_boxed_slice())
+    }
+}
+
+impl CallSignature {
+    pub(crate) fn from_user_method(
+        method: &MethodSymbol,
+        signature: &FunctionSignature,
+        return_ty: TypeId,
+        environment: EnvFlags,
+    ) -> Self {
+        let params = method
+            .params
+            .iter()
+            .zip(signature.params.iter().copied())
+            .map(|(param, ty)| CallParam {
+                name: param.name.as_str().into(),
+                ty,
+                has_default: param.has_default,
+                mode: CallParamMode::Positional,
+            })
+            .collect();
+        let method_id = UserMethodId::from(method.id);
+        Self {
+            id: CandidateId::User { method: method_id, signature_ordinal: 0 },
+            params,
+            required_args: signature.required_count(),
+            max_args: signature.max_args.map(|count| count as usize),
+            return_ty,
+            origin: CandidateOrigin::User,
+            environment,
+            provenance: CandidateProvenance::UserMethod(method_id),
+            from_doc_comment: signature.from_doc_comment,
+        }
+    }
+}
+
+struct PlatformCandidateContext<'a> {
+    db: &'a dyn TypeKernelDb,
+    method: &'a PlatformMethod,
+    return_ty: TypeId,
+    environment: EnvFlags,
+}
+
+impl PlatformCandidateContext<'_> {
+    fn lower(&self, signature: PlatformSignatureSlot, parameters: &[MethodParam]) -> CallSignature {
+        let params: Box<[CallParam]> = parameters
+            .iter()
+            .map(|param| CallParam {
+                name: param.name.clone(),
+                ty: param
+                    .param_type
+                    .as_deref()
+                    .map(|raw| lower_param_type_string_typeid(self.db, raw))
+                    .unwrap_or_else(|| self.db.unknown()),
+                has_default: param.is_optional,
+                mode: if param.is_variadic {
+                    CallParamMode::Variadic
+                } else {
+                    CallParamMode::Positional
+                },
+            })
+            .collect();
+        let required_args = params
+            .iter()
+            .rposition(|param| !param.has_default && param.mode == CallParamMode::Positional)
+            .map_or(0, |index| index + 1);
+        let max_args = params
+            .iter()
+            .all(|param| param.mode == CallParamMode::Positional)
+            .then_some(params.len());
+        let id = CandidateId::Platform { method_id: self.method.id, signature };
+        CallSignature {
+            id,
+            params,
+            required_args,
+            max_args,
+            return_ty: self.return_ty,
+            origin: CandidateOrigin::Platform,
+            environment: self.environment,
+            provenance: CandidateProvenance::PlatformMethod {
+                method_id: self.method.id,
+                signature,
+            },
+            from_doc_comment: false,
+        }
+    }
+}
