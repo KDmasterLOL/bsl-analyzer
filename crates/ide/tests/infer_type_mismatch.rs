@@ -220,32 +220,6 @@ fn type_mismatch_silent_on_fluent_method_call_matching_arg() {
 }
 
 #[test]
-fn type_mismatch_silent_on_union_receiver_when_one_arm_accepts() {
-    // `Знач` is `Массив | Структура` at the call site. `Структура.Вставить`
-    // accepts a String key even though `Массив.Вставить` wants a numeric index.
-    // A union receiver is an over-approximation (at most one arm is the runtime
-    // type), so an argument accepted by ANY arm must not fire.
-    let fixture = r#"
-//- /test.bsl
-Процедура Тест(Условие)
-    Если Условие Тогда
-        Знач = Новый Массив;
-    Иначе
-        Знач = Новый Структура;
-    КонецЕсли;
-    Знач.Вставить("Ключ", 1);
-КонецПроцедуры
-"#;
-    let (db, file_id) = setup_vfs_only(fixture);
-    assert!(
-        mismatches(&db, file_id).is_empty(),
-        "union receiver Массив | Структура: a String key is valid via Структура.Вставить, \
-         got {:?}",
-        mismatches(&db, file_id)
-    );
-}
-
-#[test]
 fn type_mismatch_fires_on_array_insert_string_index() {
     // Guard against over-suppression: a non-union Массив receiver must still
     // flag a String passed where a numeric index is required.

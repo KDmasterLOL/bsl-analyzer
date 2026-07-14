@@ -7,6 +7,7 @@ use vfs::FileId;
 
 mod applicability;
 mod candidate_builders;
+mod candidate_set;
 mod resolution;
 
 pub use applicability::{
@@ -144,20 +145,6 @@ impl CallCandidateSet {
 
     pub(crate) fn signatures_mut(&mut self) -> &mut [CallSignature] {
         &mut self.0
-    }
-}
-
-impl TryFrom<Vec<CallSignature>> for CallCandidateSet {
-    type Error = DuplicateCandidateId;
-
-    fn try_from(mut candidates: Vec<CallSignature>) -> Result<Self, Self::Error> {
-        candidates.sort_by_key(|candidate| candidate.id);
-        if let Some(duplicate) =
-            candidates.windows(2).find(|pair| pair[0].id == pair[1].id).map(|pair| pair[0].id)
-        {
-            return Err(DuplicateCandidateId { id: duplicate });
-        }
-        Ok(Self(candidates.into_boxed_slice()))
     }
 }
 

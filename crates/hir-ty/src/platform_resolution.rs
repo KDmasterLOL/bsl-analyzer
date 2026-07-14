@@ -12,6 +12,7 @@ use hir_def::execution_env::EnvFlags;
 use hir_def::Name;
 use smol_str::SmolStr;
 
+use crate::call_resolution::CallCandidateSet;
 use crate::method_lookup::{
     build_tabular_section_method_info, platform_type_key_id, to_method_info, MethodInfo,
 };
@@ -77,19 +78,13 @@ impl PlatformMethodHandle {
 pub struct ResolvedPlatformMethod {
     pub handle: PlatformMethodHandle,
     pub return_ty: TypeId,
-    pub params: Vec<TypeId>,
-    pub overloads: Vec<Vec<TypeId>>,
+    pub candidates: CallCandidateSet,
     pub env: EnvFlags,
 }
 
 impl ResolvedPlatformMethod {
     pub fn into_method_info(self) -> MethodInfo {
-        MethodInfo {
-            return_ty: self.return_ty,
-            params: self.params,
-            overloads: self.overloads,
-            env: self.env,
-        }
+        MethodInfo { return_ty: self.return_ty, candidates: self.candidates, env: self.env }
     }
 }
 
@@ -117,22 +112,24 @@ fn resolve_method_inner(
             .filter(|m| !matches!(kernel_db.lookup_type(*m), TypeKind::Undefined | TypeKind::Null))
             .collect();
         let mut returns: Vec<TypeId> = Vec::with_capacity(live.len());
+        let mut signatures = Vec::new();
         let mut chosen: Option<ResolvedPlatformMethod> = None;
         let mut env = EnvFlags::EMPTY;
         for member in live {
             if let Some(res) = resolve_method_inner(salsa_db, kernel_db, member, method_name) {
                 returns.push(res.return_ty);
                 env = env | res.env;
+                signatures.extend(res.candidates.as_slice().iter().cloned());
                 if chosen.is_none() {
                     chosen = Some(res);
                 }
             }
         }
-        return chosen.map(|mut r| {
-            r.return_ty = kernel_db.union(returns);
-            r.env = env;
-            r
-        });
+        let mut result = chosen?;
+        result.return_ty = kernel_db.union(returns);
+        result.candidates = CallCandidateSet::merge_by_id(kernel_db, signatures).ok()?;
+        result.env = env;
+        return Some(result);
     }
 
     match kernel_db.lookup_type(receiver) {
@@ -151,8 +148,7 @@ fn resolve_method_inner(
                     },
                 },
                 return_ty: resolution.return_ty,
-                params: resolution.signature.params.to_vec(),
-                overloads: resolution.overloads.clone(),
+                candidates: resolution.candidates,
                 env: resolution.env,
             })
         }
@@ -178,8 +174,7 @@ fn resolve_method_inner(
                     origin: PlatformMethodOrigin::Scalar { type_name: SmolStr::from(key) },
                 },
                 return_ty: info.return_ty,
-                params: info.params,
-                overloads: info.overloads,
+                candidates: info.candidates,
                 env: info.env,
             })
         }
@@ -204,8 +199,7 @@ fn resolve_metadata_ref(
                 },
             },
             return_ty: info.return_ty,
-            params: info.params,
-            overloads: info.overloads,
+            candidates: info.candidates,
             env: info.env,
         });
     }
@@ -223,8 +217,7 @@ fn resolve_metadata_ref(
                     },
                 },
                 return_ty: resolution.return_ty,
-                params: resolution.signature.params.to_vec(),
-                overloads: resolution.overloads.clone(),
+                candidates: resolution.candidates,
                 env: resolution.env,
             });
         }
@@ -239,8 +232,7 @@ fn resolve_metadata_ref(
                     origin: PlatformMethodOrigin::Scalar { type_name: SmolStr::from(scalar_key) },
                 },
                 return_ty: info.return_ty,
-                params: info.params,
-                overloads: info.overloads,
+                candidates: info.candidates,
                 env: info.env,
             });
         }
@@ -400,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn composite_multi_overload_method_populates_overloads() {
+    fn composite_multi_overload_method_populates_candidates() {
         let db = db();
         let kdb = InMemoryDb::new();
         let receiver =
@@ -411,11 +403,9 @@ mod tests {
             return;
         };
         assert!(
-            !res.overloads.is_empty(),
-            "InformationRegisterManager.Получить must surface multi-overload variants; \
-             got params={:?}, overloads={:?}",
-            res.params,
-            res.overloads,
+            res.candidates.as_slice().len() > 1,
+            "InformationRegisterManager.Получить must surface all candidates: {:?}",
+            res.candidates,
         );
     }
 
@@ -480,24 +470,16 @@ mod tests {
     }
 
     #[test]
-    fn into_method_info_drops_handle() {
+    fn into_method_info_preserves_candidates_and_drops_handle() {
+        let salsa_db = db();
         let db = InMemoryDb::new();
-        let return_ty = db.number(None, None);
-        let params = vec![db.string(None, false)];
-        let overloads = vec![vec![db.boolean()]];
-        let res = ResolvedPlatformMethod {
-            env: EnvFlags::ALL,
-            handle: PlatformMethodHandle {
-                method_id: 1,
-                origin: PlatformMethodOrigin::Scalar { type_name: SmolStr::from("X") },
-            },
-            return_ty,
-            params: params.clone(),
-            overloads: overloads.clone(),
-        };
+        let receiver = db.platform_object("XBase".to_string());
+        let res = resolve_for_test(&salsa_db, &db, receiver, &Name::new("Найти"))
+            .expect("XBase.Find must resolve");
+        let return_ty = res.return_ty;
+        let candidates = res.candidates.clone();
         let info = res.into_method_info();
         assert_eq!(info.return_ty, return_ty);
-        assert_eq!(info.params, params);
-        assert_eq!(info.overloads, overloads);
+        assert_eq!(info.candidates, candidates);
     }
 }

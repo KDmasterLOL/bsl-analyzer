@@ -2124,32 +2124,19 @@ impl<'db> InferenceContext<'db> {
                         false,
                     );
                     self.check_member_env(callee, &method_name, info.env, EnvMemberKind::Method);
-                    let mut return_ty = info.return_ty;
-                    let mut params: Vec<TypeId> = info.params.to_vec();
-                    let overloads: Vec<Arc<[TypeId]>> =
-                        info.overloads.iter().cloned().map(Arc::from).collect();
+                    let mut candidates = info.candidates;
                     let manager_receiver_kind = self.db.lookup_type(manager_receiver_ty);
                     if let TypeKind::ObjectManager(facet) = manager_receiver_kind {
                         if facet.mdo == bsl_metadata::MdoType::Constant {
                             let mdo_name = hir_def::Name::new(&facet.name);
-                            self.refine_constant_method(
+                            self.refine_constant_candidates(
                                 &mdo_name,
                                 &method_name,
-                                &mut return_ty,
-                                &mut params,
+                                &mut candidates,
                             );
                         }
                     }
-                    self.record_call_arg_binding(
-                        callee,
-                        args,
-                        ParamsShape::Overloaded {
-                            flat: params.into(),
-                            overloads: overloads.into(),
-                        },
-                        false,
-                    );
-                    return_ty
+                    self.record_candidate_call_arg_binding(callee, args, candidates)
                 }
                 None => {
                     if let Some(receiver_name) = receiver_display_name(self.db, receiver_ty) {
