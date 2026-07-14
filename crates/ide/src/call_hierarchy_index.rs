@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use hir::{graph_index::GraphIndex, CallHierarchyReverseIndex, ModuleId};
 
-use crate::graph::{clear_node_caches, BatchDbOpener};
+use crate::graph::BatchDbOpener;
 
 mod pairs;
 mod reproject;
@@ -10,16 +10,35 @@ mod target_index;
 
 pub use reproject::{reproject_call_hierarchy_index_modules, CallHierarchyIndexModuleProjection};
 
+/// The default number of batch databases the extraction pass keeps in flight.
+/// Extra lanes overlap one batch's serial windows (database open, drop, and the
+/// tail where a batch's largest module finishes alone) with another batch's
+/// parallel region, at the cost of one extra batch's transient residency per
+/// lane. Every lane runs a full-width rayon pool, so past ~cores/4 lanes stop
+/// overlapping stalls and start thrashing caches: on a 6C/12T ERP bench 3 lanes
+/// beat 2 by ~15% and 4 regressed. Hence cores/4, clamped to [1, 3].
+pub fn default_build_concurrency() -> usize {
+    std::thread::available_parallelism().map_or(1, |threads| threads.get() / 4).clamp(1, 3)
+}
+
 /// Borrowed inputs for a bounded call-hierarchy build.
 #[derive(Clone, Copy)]
 pub struct CallHierarchyIndexBuildRequest<'a> {
     pub modules: &'a [ModuleId],
     pub batch_size: usize,
+    /// Upper bound on concurrently live batch databases during extraction
+    /// (clamped to at least 1). Peak RSS grows roughly linearly with it.
+    pub concurrency: usize,
 }
 
 impl<'a> CallHierarchyIndexBuildRequest<'a> {
-    pub const fn new(modules: &'a [ModuleId], batch_size: usize) -> Self {
-        Self { modules, batch_size }
+    pub fn new(modules: &'a [ModuleId], batch_size: usize) -> Self {
+        Self { modules, batch_size, concurrency: default_build_concurrency() }
+    }
+
+    pub const fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency;
+        self
     }
 }
 
@@ -119,13 +138,10 @@ impl<'a> BatchLifecycle<'a> {
         );
     }
 
-    fn node_caches_cleared(
-        &mut self,
-        pool: &rayon::ThreadPool,
-        phase: CallHierarchyBatchPhase,
-        batch_index: usize,
-    ) {
-        clear_node_caches(pool);
+    /// Record the node-cache clear checkpoint. The clear itself already happened —
+    /// `run_batch_db` (or the pipelined lane) performs it right after the batch
+    /// database drop — so this only notifies the observer and samples RSS.
+    fn node_caches_cleared(&mut self, phase: CallHierarchyBatchPhase, batch_index: usize) {
         self.observer.on_node_caches_cleared(phase, batch_index);
         self.rss_samples.push(rss_sample(phase, batch_index));
     }
@@ -226,13 +242,19 @@ fn build_call_hierarchy_index_with_observer(
             events: &mut events,
             rss_samples: &mut rss_samples,
         };
-        let (graph_index, method_count) =
-            target_index::build_graph_index(request, open_batch, &pool, &mut lifecycle);
-        let index = pairs::project_and_fold_method_pairs(
+        let (graph_index, method_count, intents) =
+            target_index::build_graph_index_extracting_intents(
+                request,
+                open_batch,
+                &pool,
+                &mut lifecycle,
+            )?;
+        let index = pairs::resolve_and_fold_method_pairs(
             request,
             open_batch,
             &pool,
             &graph_index,
+            &intents,
             &mut lifecycle,
         )?;
 

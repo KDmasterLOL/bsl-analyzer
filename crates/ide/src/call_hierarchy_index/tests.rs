@@ -31,7 +31,7 @@ enum ProbeEvent {
 
 struct Probe {
     events: Rc<std::cell::RefCell<Vec<ProbeEvent>>>,
-    live: Rc<Cell<bool>>,
+    live: Rc<Cell<usize>>,
     cache_clears: usize,
 }
 
@@ -42,7 +42,9 @@ impl BatchObserver for Probe {
                 ProbeEvent::Started(event.phase, event.batch_index)
             }
             CallHierarchyBatchEventKind::DatabaseDropped => {
-                assert!(self.live.replace(false), "database must be live until its drop event");
+                let live = self.live.get();
+                assert!(live > 0, "a database must be live until its drop event");
+                self.live.set(live - 1);
                 ProbeEvent::Dropped(event.phase, event.batch_index)
             }
             CallHierarchyBatchEventKind::Completed => {
@@ -58,15 +60,19 @@ impl BatchObserver for Probe {
     }
 }
 
+// The first module exercises every cross-module pair shape the fused build
+// retains as intents: a direct local call, a qualified cross-module call, a
+// module-receiver notify callback, and a current-module idle handler (whose
+// pair collapses into the direct local one after dedup).
 fn fixture() -> [FixtureFile; 3] {
     [
         FixtureFile {
             path: "/src/CommonModules/Первый/Ext/Module.bsl",
-            text: "Процедура Начать()\nВнутренний();\nКонецПроцедуры\n\nПроцедура Внутренний()\nКонецПроцедуры",
+            text: "Процедура Начать()\nВнутренний();\nВторой.Продолжить();\nОп = Новый ОписаниеОповещения(\"Завершить\", Второй);\nПодключитьОбработчикОжидания(\"Внутренний\", 1);\nКонецПроцедуры\n\nПроцедура Внутренний() Экспорт\nКонецПроцедуры",
         },
         FixtureFile {
             path: "/src/CommonModules/Второй/Ext/Module.bsl",
-            text: "Процедура Продолжить()\nЗавершить();\nКонецПроцедуры\n\nПроцедура Завершить()\nКонецПроцедуры",
+            text: "Процедура Продолжить() Экспорт\nЗавершить();\nКонецПроцедуры\n\nПроцедура Завершить() Экспорт\nКонецПроцедуры",
         },
         FixtureFile {
             path: "/src/CommonModules/Третий/Ext/Module.bsl",
@@ -90,28 +96,40 @@ fn batch_database(files: &[FixtureFile], batch: &[ModuleId]) -> RootDatabaseImpl
     db
 }
 
+// Two lanes, regardless of the host's core count, so event sequences and
+// live-database bounds are machine-independent.
 fn build(batch_size: usize) -> (CallHierarchyIndexBuildResult, Vec<ProbeEvent>, usize) {
+    build_with_concurrency(batch_size, 2)
+}
+
+fn build_with_concurrency(
+    batch_size: usize,
+    concurrency: usize,
+) -> (CallHierarchyIndexBuildResult, Vec<ProbeEvent>, usize) {
     let files = fixture();
     let modules = [ModuleId::new(FileId(0)), ModuleId::new(FileId(1)), ModuleId::new(FileId(2))];
     let events = Rc::new(std::cell::RefCell::new(Vec::new()));
-    let live = Rc::new(Cell::new(false));
+    let live = Rc::new(Cell::new(0usize));
+    let max_live = concurrency.max(1);
     let open_events = Rc::clone(&events);
     let open_live = Rc::clone(&live);
     let mut open_batch = move |batch: &[ModuleId]| {
-        assert!(!open_live.replace(true), "at most one batch database may be live");
+        let live = open_live.get() + 1;
+        assert!(live <= max_live, "at most {max_live} batch databases may be live, saw {live}");
+        open_live.set(live);
         open_events.borrow_mut().push(ProbeEvent::Opened);
         batch_database(&files, batch)
     };
     let mut probe = Probe { events: Rc::clone(&events), live: Rc::clone(&live), cache_clears: 0 };
 
     let result = build_call_hierarchy_index_with_observer(
-        CallHierarchyIndexBuildRequest::new(&modules, batch_size),
+        CallHierarchyIndexBuildRequest::new(&modules, batch_size).with_concurrency(concurrency),
         &mut open_batch,
         &mut probe,
     )
     .expect("fixture builder should succeed");
 
-    assert!(!live.get(), "the final batch database must be dropped");
+    assert_eq!(live.get(), 0, "every batch database must be dropped");
     let recorded_events = std::mem::take(&mut *events.borrow_mut());
     (result, recorded_events, probe.cache_clears)
 }
@@ -152,13 +170,52 @@ fn bounded_call_hierarchy_index_builder_drops_batches_and_clears_node_caches() {
     // Given: three modules processed one at a time.
     let (result, events, cache_clears) = build(1);
 
-    // When: the builder completes both passes.
+    // When: the builder completes the extraction batches and the resolve step.
 
-    // Then: every database is dropped before the next open and every batch clears caches.
+    // Then: two batches may be in flight, every batch is folded (drop + cache
+    // clear) in batch order, and pair resolution runs as one whole-workspace
+    // lifecycle batch.
     assert_eq!(result.method_count, 6);
-    assert_eq!(result.pair_count, 3);
-    assert_eq!(cache_clears, 6);
-    assert_eq!(result.rss_samples.len(), 6);
+    assert_eq!(result.pair_count, 5);
+    assert_eq!(cache_clears, 4);
+    assert_eq!(result.rss_samples.len(), 4);
+    assert_eq!(
+        events,
+        vec![
+            ProbeEvent::Started(CallHierarchyBatchPhase::Index, 0),
+            ProbeEvent::Opened,
+            ProbeEvent::Started(CallHierarchyBatchPhase::Index, 1),
+            ProbeEvent::Opened,
+            ProbeEvent::Dropped(CallHierarchyBatchPhase::Index, 0),
+            ProbeEvent::CacheCleared(CallHierarchyBatchPhase::Index, 0),
+            ProbeEvent::Completed(CallHierarchyBatchPhase::Index, 0),
+            ProbeEvent::Started(CallHierarchyBatchPhase::Index, 2),
+            ProbeEvent::Opened,
+            ProbeEvent::Dropped(CallHierarchyBatchPhase::Index, 1),
+            ProbeEvent::CacheCleared(CallHierarchyBatchPhase::Index, 1),
+            ProbeEvent::Completed(CallHierarchyBatchPhase::Index, 1),
+            ProbeEvent::Dropped(CallHierarchyBatchPhase::Index, 2),
+            ProbeEvent::CacheCleared(CallHierarchyBatchPhase::Index, 2),
+            ProbeEvent::Completed(CallHierarchyBatchPhase::Index, 2),
+            ProbeEvent::Started(CallHierarchyBatchPhase::MethodPairs, 0),
+            ProbeEvent::Opened,
+            ProbeEvent::Dropped(CallHierarchyBatchPhase::MethodPairs, 0),
+            ProbeEvent::CacheCleared(CallHierarchyBatchPhase::MethodPairs, 0),
+            ProbeEvent::Completed(CallHierarchyBatchPhase::MethodPairs, 0),
+        ],
+    );
+}
+
+#[test]
+fn bounded_call_hierarchy_index_builder_serializes_batches_without_concurrency() {
+    // Given: three modules processed one at a time with a single lane.
+    let (result, events, cache_clears) = build_with_concurrency(1, 1);
+
+    // Then: every database is dropped before the next open.
+    assert_eq!(result.method_count, 6);
+    assert_eq!(result.pair_count, 5);
+    assert_eq!(cache_clears, 4);
+    assert_eq!(result.rss_samples.len(), 4);
     assert_eq!(
         events,
         vec![
@@ -182,32 +239,25 @@ fn bounded_call_hierarchy_index_builder_drops_batches_and_clears_node_caches() {
             ProbeEvent::Dropped(CallHierarchyBatchPhase::MethodPairs, 0),
             ProbeEvent::CacheCleared(CallHierarchyBatchPhase::MethodPairs, 0),
             ProbeEvent::Completed(CallHierarchyBatchPhase::MethodPairs, 0),
-            ProbeEvent::Started(CallHierarchyBatchPhase::MethodPairs, 1),
-            ProbeEvent::Opened,
-            ProbeEvent::Dropped(CallHierarchyBatchPhase::MethodPairs, 1),
-            ProbeEvent::CacheCleared(CallHierarchyBatchPhase::MethodPairs, 1),
-            ProbeEvent::Completed(CallHierarchyBatchPhase::MethodPairs, 1),
-            ProbeEvent::Started(CallHierarchyBatchPhase::MethodPairs, 2),
-            ProbeEvent::Opened,
-            ProbeEvent::Dropped(CallHierarchyBatchPhase::MethodPairs, 2),
-            ProbeEvent::CacheCleared(CallHierarchyBatchPhase::MethodPairs, 2),
-            ProbeEvent::Completed(CallHierarchyBatchPhase::MethodPairs, 2),
         ],
     );
 }
 
 #[test]
 fn bounded_call_hierarchy_index_builder_has_the_same_digest_for_every_batch_size() {
-    // Given: the same modules with one, two, and all modules in a batch.
+    // Given: the same modules with one, two, and all modules in a batch, with and
+    // without pipelined lanes.
     let (single, _, _) = build(1);
     let (two, _, _) = build(2);
     let (all, _, _) = build(fixture().len());
+    let (single_lane, _, _) = build_with_concurrency(1, 1);
 
     // When: each build completes.
 
-    // Then: batching changes residency only, not the compact index.
+    // Then: batching and pipelining change residency only, not the compact index.
     assert_eq!(digest(&single), digest(&two));
     assert_eq!(digest(&single), digest(&all));
+    assert_eq!(digest(&single), digest(&single_lane));
 }
 
 #[test]

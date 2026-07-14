@@ -2737,9 +2737,10 @@ fn project_batch_method_pairs_include_resolved_callbacks_and_exclude_non_methods
     // Given: direct, qualified, manager, and callback calls in one caller module.
     let base = make_db(BASE_CALLER);
     let index = GraphIndex::build(&base, &modules);
+    let pool = rayon::ThreadPoolBuilder::new().build().expect("projection pool");
 
     // When: the index-backed batch projection resolves the caller module.
-    let pairs = project_batch_method_call_pairs(&base, &index, &modules);
+    let pairs = project_batch_method_call_pairs(&pool, &base, &index, &modules);
     let main = hir::MethodId { module: ModuleId::new(client), local_id: 0 };
 
     // Then: every supported target is emitted once as a method pair.
@@ -2780,7 +2781,7 @@ fn project_batch_method_pairs_include_resolved_callbacks_and_exclude_non_methods
 
     // When/Then: ignored graph domains cannot change the method-pair digest.
     assert_eq!(
-        project_batch_method_call_pairs(&ignored, &index, &modules),
+        project_batch_method_call_pairs(&pool, &ignored, &index, &modules),
         pairs,
         "module code, MDO, query, and SetAction additions must not alter the method-pair digest",
     );
@@ -3098,18 +3099,19 @@ fn method_call_digest_from_fold(
     }))
 }
 
-fn compact_call_hierarchy_index(
-    db: &dyn hir::ConfigsDatabase,
+fn compact_call_hierarchy_index<DB: hir::ConfigsDatabase + Clone + Send>(
+    db: &DB,
     modules: &[ModuleId],
     batch_size: usize,
 ) -> (hir::graph_index::GraphIndex, hir::CallHierarchyReverseIndex) {
     use hir::graph_index::{project_batch_method_call_pairs, GraphIndex};
 
     let graph_index = GraphIndex::build(db, modules);
+    let pool = rayon::ThreadPoolBuilder::new().build().expect("projection pool");
 
     let mut reverse_index = hir::CallHierarchyReverseIndex::new();
     for batch in modules.chunks(batch_size.max(1)) {
-        let pairs = project_batch_method_call_pairs(db, &graph_index, batch);
+        let pairs = project_batch_method_call_pairs(&pool, db, &graph_index, batch);
         for &module in batch {
             let layout_hash = graph_index
                 .module_layout_hash(module)

@@ -28,7 +28,7 @@ pub fn reproject_call_hierarchy_index_modules(
             open_batch,
             &pool,
             |db| {
-                let pairs = project_batch_method_call_pairs(db, graph_index, batch);
+                let pairs = project_batch_method_call_pairs(&pool, db, graph_index, batch);
                 let mut refreshed_layouts = GraphIndex::new();
                 refreshed_layouts.add_batch(&pool, db, batch);
                 (pairs, refreshed_layouts)
