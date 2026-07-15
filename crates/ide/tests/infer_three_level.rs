@@ -152,12 +152,8 @@ fn three_level_candidate_invalidation() {
         .call_arg_bindings
         .iter()
         .find(|binding| {
-            binding
-                .candidate
-                .candidates
-                .as_slice()
-                .iter()
-                .all(|signature| signature.id.is_platform())
+            let candidates = binding.candidate.candidates.as_slice();
+            candidates.len() == 3 && candidates.iter().all(|signature| signature.id.is_platform())
         })
         .expect("three-level call must have a candidate-backed binding");
     let before_candidate = &before_binding.candidate;
@@ -188,12 +184,8 @@ fn three_level_candidate_invalidation() {
         .call_arg_bindings
         .iter()
         .find(|binding| {
-            binding
-                .candidate
-                .candidates
-                .as_slice()
-                .iter()
-                .all(|signature| signature.id.is_platform())
+            let candidates = binding.candidate.candidates.as_slice();
+            candidates.len() == 3 && candidates.iter().all(|signature| signature.id.is_platform())
         })
         .expect("edited three-level call must remain candidate-backed");
     assert_eq!(after_binding.call_expr, before_binding.call_expr);

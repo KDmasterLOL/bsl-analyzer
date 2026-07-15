@@ -1506,13 +1506,13 @@ impl<'db> InferenceContext<'db> {
                             &ctors,
                             environment,
                         ) {
-                            let argument_types = args
+                            let arg_ids: Vec<ExprId> =
+                                args.iter().copied().map(ExprId::from_idx).collect();
+                            let argument_types = arg_ids
                                 .iter()
-                                .copied()
-                                .map(ExprId::from_idx)
                                 .map(|arg| {
                                     self.expr_types
-                                        .get(&arg)
+                                        .get(arg)
                                         .copied()
                                         .unwrap_or_else(|| self.db.unknown())
                                 })

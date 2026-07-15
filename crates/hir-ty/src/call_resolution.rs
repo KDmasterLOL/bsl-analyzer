@@ -49,6 +49,12 @@ impl From<hir_def::MethodId> for UserMethodId {
     }
 }
 
+impl From<UserMethodId> for hir_def::MethodId {
+    fn from(method: UserMethodId) -> Self {
+        Self { module: hir_def::ModuleId::new(method.file_id), local_id: method.local_id }
+    }
+}
+
 /// Stable identity of a built-in callable's defining registry entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BuiltinCallableId {

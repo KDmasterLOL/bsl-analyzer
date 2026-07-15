@@ -320,10 +320,10 @@ fn completion_unresolved_call_arg_does_not_leak_outer_context() {
 }
 
 #[test]
-fn completion_constructor_arg_does_not_leak_outer_context() {
-    // Cursor is in a constructor argument (`Новый Тип(…)`). Constructor arg types
-    // are not computed, and the outer assignment type must NOT leak in, so the
-    // Число local is not boosted.
+fn completion_constructor_arg_uses_constructor_type_not_outer_context() {
+    // Cursor is in a constructor argument (`Новый Тип(…)`). The constructor's own
+    // parameter type is used, and the outer assignment type must NOT leak in.
+    // Array constructor accepts `Произвольный`, so a `Число` local matches.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -334,8 +334,8 @@ fn completion_constructor_arg_does_not_leak_outer_context() {
     );
     assert_eq!(
         typematch_digit(&items, "Сумма"),
-        Some('1'),
-        "outer assignment type must not leak into a constructor argument"
+        Some('0'),
+        "constructor parameter type must be used, not the outer assignment type"
     );
 }
 

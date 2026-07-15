@@ -143,4 +143,11 @@ impl BuiltinFunctions {
     pub fn callable_id(&self, name: &str) -> Option<BuiltinCallableId> {
         self.callable_ids.get(&name.fold_lower()).copied()
     }
+
+    pub fn canonical_name(&self, callable: BuiltinCallableId) -> Option<&str> {
+        self.callable_ids
+            .iter()
+            .filter_map(|(name, id)| (*id == callable).then_some(name.as_str()))
+            .min()
+    }
 }

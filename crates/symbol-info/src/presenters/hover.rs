@@ -16,7 +16,11 @@ pub fn render_hover_markdown(sig: &SymbolSignature, _lang: Lang) -> String {
         }
     }
 
-    let inline = render_signature_help(sig, 0).signature;
+    let inline = render_signature_help(std::slice::from_ref(sig), 0, None)
+        .signatures
+        .first()
+        .map(|s| s.signature.clone())
+        .unwrap_or_default();
     out.push_str("**Синтаксис:**\n```bsl\n");
     out.push_str(&inline);
     out.push_str("\n```\n\n");

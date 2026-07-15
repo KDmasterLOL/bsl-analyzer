@@ -125,8 +125,9 @@ fn form_handler_card(
     let module_id = ModuleId::new(resolved.file_id);
     let method = Name::new(member);
     let callee = CalleeKind::LocalMethod { module_id, method };
-    let sig = build_signature(db, resolved.file_id, &callee)?;
-    let mut card = card_from_method_sig(db, symbol, &sig, Some(form_container(resolved)), req);
+    let sigs = build_signature(db, resolved.file_id, &callee)?;
+    let sig = sigs.first()?;
+    let mut card = card_from_method_sig(db, symbol, sig, Some(form_container(resolved)), req);
     card.graph_id = form_handler_graph_id(
         db,
         resolved.file_id,

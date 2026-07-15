@@ -9,10 +9,16 @@ pub(super) fn build(
     db: &dyn RootDatabase,
     module_id: ModuleId,
     method: &Name,
-) -> Option<SymbolSignature> {
+) -> Option<Vec<SymbolSignature>> {
     let resolver = Resolver::for_module(module_id);
     let method_id = resolver.resolve_module_method(db, method)?;
+    Some(vec![build_from_method_id(db, method_id)?])
+}
 
+pub(super) fn build_from_method_id(
+    db: &dyn RootDatabase,
+    method_id: hir::MethodId,
+) -> Option<SymbolSignature> {
     let item_tree = db.item_tree(method_id.module.file_id);
     let item = item_tree.top_level_items().get(method_id.local_id as usize)?;
     let docs = db.method_docs(method_id);
@@ -46,6 +52,7 @@ pub(super) fn build(
     };
 
     Some(SymbolSignature {
+        candidate_ordinal: Some(0),
         kind,
         name_russian: SmolStr::new(&name_ru),
         name_english: None,
@@ -61,5 +68,6 @@ pub(super) fn build(
         is_export,
         source: SignatureSource::Local,
         method_id: Some(method_id),
+        platform_id: None,
     })
 }

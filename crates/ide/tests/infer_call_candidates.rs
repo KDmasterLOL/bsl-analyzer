@@ -9,6 +9,26 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
     setup_for(fixture_text, "/test.bsl")
 }
 
+#[test]
+fn constructor_call_attaches_candidate_resolution() {
+    let (db, file_id) = setup(
+        r#"
+//- /test.bsl
+Процедура Тест()
+    Массив = Новый Массив();
+КонецПроцедуры
+"#,
+    );
+
+    let inference = db.infer(file_id);
+    let binding = inference
+        .call_arg_bindings
+        .iter()
+        .find(|binding| binding.candidate.candidates.as_slice().iter().all(|s| s.id.is_platform()))
+        .expect("constructor call must attach candidate semantics");
+    assert!(binding.candidate.resolution.unique_candidate().is_some());
+}
+
 fn setup_for(fixture_text: &str, target_path: &str) -> (RootDatabaseImpl, FileId) {
     let fixture = Fixture::parse(fixture_text);
     let mut db = RootDatabaseImpl::new();

@@ -144,9 +144,13 @@ fn signature_help_for_bare_global_export() {
         .signature_help(FileId::from_raw(CALLER_ID), offset)
         .expect("signature help for a bare global export");
     assert!(
-        help.signature.contains("ГлобальнаяСервернаяПроцедура"),
+        help.signatures
+            .first()
+            .expect("at least one signature")
+            .signature
+            .contains("ГлобальнаяСервернаяПроцедура"),
         "signature must name the global export, got {:?}",
-        help.signature
+        help.signatures.first().expect("at least one signature").signature
     );
 }
 

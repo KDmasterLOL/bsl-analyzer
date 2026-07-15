@@ -498,7 +498,9 @@ pub(super) fn render_common_module_method(
     let callee =
         CalleeKind::CommonModuleMethod { module: module_name.clone(), method: method.name.clone() };
     match build_signature(db, file_id, &callee) {
-        Some(sig) => item_from_signature(&sig),
+        Some(sigs) => {
+            sigs.first().map(item_from_signature).unwrap_or_else(|| fallback_item(method))
+        }
         None => fallback_item(method),
     }
 }
@@ -589,15 +591,19 @@ fn complete_platform_methods(
 
 pub(super) fn render_manager_method(method: &PlatformMethod) -> CompletionItem {
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
-    let mut sig = from_platform_method(method, docs.as_ref());
-    sig.source = SignatureSource::PlatformManager;
-    item_from_signature(&sig)
+    let mut sigs = from_platform_method(method, docs.as_ref());
+    if let Some(sig) = sigs.first_mut() {
+        sig.source = SignatureSource::PlatformManager;
+    }
+    let sig = sigs.first().expect("from_platform_method returns at least one signature");
+    item_from_signature(sig)
 }
 
 pub(super) fn render_platform_method(method: &PlatformMethod) -> CompletionItem {
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
-    let sig = from_platform_method(method, docs.as_ref());
-    item_from_signature(&sig)
+    let sigs = from_platform_method(method, docs.as_ref());
+    let sig = sigs.first().expect("from_platform_method returns at least one signature");
+    item_from_signature(sig)
 }
 
 pub(super) fn render_platform_property(

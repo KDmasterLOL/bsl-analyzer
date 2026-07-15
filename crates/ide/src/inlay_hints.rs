@@ -57,7 +57,10 @@ fn parameter_hints_for_arg_list<DB: RootDatabase>(
     let Some(callee) = resolver.resolve_arg_list(arg_list) else {
         return;
     };
-    let Some(signature) = build_signature(db, file_id, &callee) else {
+    let Some(signatures) = build_signature(db, file_id, &callee) else {
+        return;
+    };
+    let Some(signature) = signatures.first() else {
         return;
     };
 

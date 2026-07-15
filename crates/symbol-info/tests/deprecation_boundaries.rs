@@ -25,14 +25,23 @@ fn platform_method_adapter_keeps_deprecation_outside_source_docs() {
         see_also: Vec::new(),
     };
 
-    // When: symbol-info builds a platform method signature.
+    // When: symbol-info builds a platform method signature.first().expect("at least one signature").
     let signature = from_platform_method(&method, Some(&docs));
 
     // Then: platform prose stays descriptive; source-doc deprecation remains absent.
-    assert_eq!(signature.source, SignatureSource::Platform);
-    assert_eq!(signature.description.as_deref(), Some("Deprecated. Use ReplacementMethod()."));
-    assert_eq!(signature.notes.as_deref(), Some("Устарела. Используйте НовыйМетод()."));
-    assert!(signature.deprecation.is_none());
+    assert_eq!(
+        signature.first().expect("at least one signature").source,
+        SignatureSource::Platform
+    );
+    assert_eq!(
+        signature.first().expect("at least one signature").description.as_deref(),
+        Some("Deprecated. Use ReplacementMethod().")
+    );
+    assert_eq!(
+        signature.first().expect("at least one signature").notes.as_deref(),
+        Some("Устарела. Используйте НовыйМетод().")
+    );
+    assert!(signature.first().expect("at least one signature").deprecation.is_none());
 }
 
 #[test]
@@ -58,12 +67,21 @@ fn global_function_adapter_keeps_deprecation_outside_source_docs() {
         see_also: Vec::new(),
     };
 
-    // When: symbol-info builds a global function signature.
+    // When: symbol-info builds a global function signature.first().expect("at least one signature").
     let signature = from_global_function(&function, Some(&docs));
 
     // Then: platform docs do not enter the source-comment deprecation slot.
-    assert_eq!(signature.source, SignatureSource::GlobalFunction);
-    assert_eq!(signature.description.as_deref(), Some("Устарела. Используйте НоваяФункция()."));
-    assert_eq!(signature.notes.as_deref(), Some("Deprecated. Use NewFunction()."));
-    assert!(signature.deprecation.is_none());
+    assert_eq!(
+        signature.first().expect("at least one signature").source,
+        SignatureSource::GlobalFunction
+    );
+    assert_eq!(
+        signature.first().expect("at least one signature").description.as_deref(),
+        Some("Устарела. Используйте НоваяФункция().")
+    );
+    assert_eq!(
+        signature.first().expect("at least one signature").notes.as_deref(),
+        Some("Deprecated. Use NewFunction().")
+    );
+    assert!(signature.first().expect("at least one signature").deprecation.is_none());
 }

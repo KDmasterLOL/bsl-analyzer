@@ -11,7 +11,7 @@ pub(super) fn build(
     caller_file: FileId,
     module: &Name,
     method: &Name,
-) -> Option<SymbolSignature> {
+) -> Option<Vec<SymbolSignature>> {
     let source_root_input = db.file_source_root_input(caller_file);
     let source_root_id = source_root_input.source_root_id(db);
     let module_index = db.module_index(source_root_id);
@@ -44,7 +44,8 @@ pub(super) fn build(
         ModItem::Variable(_) => return None,
     };
 
-    Some(SymbolSignature {
+    Some(vec![SymbolSignature {
+        candidate_ordinal: Some(0),
         kind,
         name_russian: SmolStr::new(method.as_str()),
         name_english: None,
@@ -60,5 +61,6 @@ pub(super) fn build(
         is_export: method_symbol.is_export,
         source: SignatureSource::CommonModule,
         method_id: Some(method_symbol.id),
-    })
+        platform_id: None,
+    }])
 }

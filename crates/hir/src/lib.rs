@@ -6,6 +6,8 @@ pub mod type_facade;
 pub use bsl_types::intern::TypeKernelDb;
 pub use bsl_types::kind::{MetadataReferenceKind, TypeId, TypeKind};
 pub use definition::{Definition, ReferenceScope};
+pub use hir_ty::builtin::builtin_functions;
+pub use hir_ty::infer::CandidateCallBinding;
 pub use hir_ty::method_lookup::platform_type_key_id;
 pub use hir_ty::resolve_platform_global_property_type;
 pub use hir_ty::this_object::coerce_to_metadata_ref_id;
@@ -166,6 +168,11 @@ pub use hir_def::weaving::{
 };
 pub use hir_def::ConfigsDatabase;
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
+pub use hir_ty::call_resolution::{
+    BuiltinCallableId, CallCandidateSet, CallParam, CallParamMode, CallResolution, CallSelection,
+    CallSignature, CandidateId, CandidateOrigin, CandidateProvenance, PlatformSignatureSlot,
+    UserMethodId,
+};
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
 pub use hir_ty::infer::{
@@ -602,6 +609,59 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         None
     }
 
+    /// Resolves the call whose argument list contains `offset`.
+    pub fn call_resolution_at(&self, file_id: FileId, offset: TextSize) -> Option<CallResolution> {
+        self.call_binding_at(file_id, offset).map(|binding| binding.resolution)
+    }
+
+    /// Returns the stored candidate binding for the call whose argument list contains `offset`.
+    pub fn call_binding_at(
+        &self,
+        file_id: FileId,
+        offset: TextSize,
+    ) -> Option<CandidateCallBinding> {
+        let parse = self.db.parse(file_id);
+        let (callee, _) = call_arg_at_offset(&parse.syntax_node(), offset)?;
+        let callee_range = callee.text_range();
+        let call_range = callee
+            .ancestors()
+            .find(|node| {
+                matches!(node.kind(), syntax::SyntaxKind::CALL_EXPR | syntax::SyntaxKind::NEW_EXPR)
+            })
+            .map(|call| call.text_range());
+
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.db.module_bodies(module_id);
+
+        if let Some(result) = module_bodies.module_code_result() {
+            let routed = infer_owner(self.db, file_id, DefWithBodyId::ModuleCode);
+            if let Some(binding) = routed.call_arg_bindings().iter().find(|binding| {
+                result.source_map.expr_range(binding.call_expr).is_some_and(|range| {
+                    [Some(callee_range), call_range]
+                        .into_iter()
+                        .flatten()
+                        .any(|target| target == range)
+                })
+            }) {
+                return Some(binding.candidate.clone());
+            }
+        }
+        for (local_id, _body, source_map) in module_bodies.method_bodies() {
+            let routed = infer_owner(self.db, file_id, DefWithBodyId::Method(local_id));
+            if let Some(binding) = routed.call_arg_bindings().iter().find(|binding| {
+                source_map.expr_range(binding.call_expr).is_some_and(|range| {
+                    [Some(callee_range), call_range]
+                        .into_iter()
+                        .flatten()
+                        .any(|target| target == range)
+                })
+            }) {
+                return Some(binding.candidate.clone());
+            }
+        }
+        None
+    }
+
     /// Expected parameter type(s) at a call-argument completion position.
     ///
     /// Locates the innermost call argument list around `offset` and the active
@@ -726,8 +786,14 @@ fn call_arg_at_offset(
     };
 
     let arg_list = token.parent_ancestors().find(|node| node.kind() == SyntaxKind::ARG_LIST)?;
-    let call_expr = arg_list.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR)?;
-    let callee = call_expr.children().next()?;
+    let call_expr = arg_list
+        .parent()
+        .filter(|p| p.kind() == SyntaxKind::CALL_EXPR || p.kind() == SyntaxKind::NEW_EXPR)?;
+    let callee = match call_expr.kind() {
+        SyntaxKind::CALL_EXPR => call_expr.children().next()?,
+        SyntaxKind::NEW_EXPR => call_expr.clone(),
+        _ => unreachable!(),
+    };
 
     let mut active = 0usize;
     for child in arg_list.children_with_tokens() {
