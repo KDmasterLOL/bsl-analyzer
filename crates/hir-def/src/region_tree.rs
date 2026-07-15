@@ -385,7 +385,7 @@ fn region_tree_heap(v: &std::sync::Arc<RegionTree>) -> usize {
     bytes
 }
 
-#[salsa::tracked(lru = 256, heap_size = region_tree_heap)]
+#[salsa::tracked(lru = 256, heap_size = region_tree_heap, returns(ref))]
 pub fn region_tree_query<'db>(
     db: &'db dyn base_db::RootQueryDb,
     file_id_input: base_db::FileIdInput<'db>,

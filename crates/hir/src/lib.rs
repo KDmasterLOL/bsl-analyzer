@@ -6,6 +6,8 @@ pub mod type_facade;
 pub use bsl_types::intern::TypeKernelDb;
 pub use bsl_types::kind::{MetadataReferenceKind, TypeId, TypeKind};
 pub use definition::{Definition, ReferenceScope};
+pub use hir_ty::builtin::builtin_functions;
+pub use hir_ty::infer::CandidateCallBinding;
 pub use hir_ty::method_lookup::platform_type_key_id;
 pub use hir_ty::resolve_platform_global_property_type;
 pub use hir_ty::this_object::coerce_to_metadata_ref_id;
@@ -14,19 +16,22 @@ pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYP
 pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
 pub use name_classify::{classify_token, NameClass};
 pub use semantic_symbol::{
-    SemanticSymbol, SemanticSymbolKey, SemanticSymbolKind, SymbolDeclaration,
+    FileSymbolCtx, SemanticSymbol, SemanticSymbolKey, SemanticSymbolKind, SymbolDeclaration,
 };
 pub use type_facade::{
     form_element_type, kernel_type_label, module_implicit_field_names, module_implicit_fields,
     Field, HirFieldOrigin, Type,
 };
 
+pub use hir_def::execution_env;
 pub use hir_def::{all_sdbl_in_file_query, sdbl_hir_for_file_query, SdblHirEntries, SdblInFile};
 pub use hir_def::{
     BindingId, DefWithBodyId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId,
 };
+pub use hir_def::{
+    CallHierarchyReverseIndex, MethodCallPair, MethodId, ModuleData, ModuleId, VariableId,
+};
 pub use hir_def::{ExecutionContext, QualifiedName};
-pub use hir_def::{MethodId, ModuleData, ModuleId, VariableId};
 pub use hir_def::{RedundantAccessKind, SdblExprId};
 
 pub use hir_def::body::{
@@ -63,6 +68,7 @@ pub use hir_def::docs::{
     is_dotted_type_reference, MethodDocs, ParameterDoc, TypeDoc, VariableDocs,
 };
 pub use hir_def::graph_index;
+pub use hir_def::graph_index::{call_hierarchy_method_digest, MethodCallDigest};
 pub use hir_def::{
     method_outbound_facts, resolved_module_summary_query, workspace_call_graph_query, ManagerRef,
     MethodOutboundFacts,
@@ -130,7 +136,8 @@ pub mod dataflow {
 
 pub use hir_def::compute_execution_context;
 pub use hir_def::name_usage_index::{
-    normalize_name as normalize_usage_name, FileNameUsage, SourceRootNameUsage,
+    normalize_match_name, normalize_name as normalize_usage_name, FileNameOffsets, FileNameUsage,
+    SourceRootNameUsage,
 };
 pub use hir_def::region_tree::lower_regions;
 pub use hir_def::resolver::Resolution;
@@ -139,10 +146,11 @@ pub use hir_def::MethodIdInput;
 
 pub use hir_def::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query,
-    file_name_usage_query, item_tree_query, method_body_query, method_body_with_source_map_query,
-    module_bodies_query, module_call_summary_query, module_data_query, module_index_query,
-    region_tree_query, set_module_bodies_lru_sweep_mode, source_root_name_usage_query,
-    symbol_tree_query, workspace_index_query, workspace_symbols_query,
+    file_name_offsets_query, file_name_usage_query, item_tree_query, method_body_query,
+    method_body_with_source_map_query, module_bodies_query, module_call_summary_query,
+    module_data_query, module_index_query, region_tree_query, set_module_bodies_lru_sweep_mode,
+    source_root_name_usage_query, symbol_tree_query, workspace_index_query,
+    workspace_symbols_query,
 };
 
 pub use bsl_config::VisibleConfig;
@@ -160,6 +168,11 @@ pub use hir_def::weaving::{
 };
 pub use hir_def::ConfigsDatabase;
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
+pub use hir_ty::call_resolution::{
+    BuiltinCallableId, CallCandidateSet, CallParam, CallParamMode, CallResolution, CallSelection,
+    CallSignature, CandidateId, CandidateOrigin, CandidateProvenance, PlatformSignatureSlot,
+    UserMethodId,
+};
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
 pub use hir_ty::infer::{
@@ -168,13 +181,16 @@ pub use hir_ty::infer::{
 };
 pub use hir_ty::method_graph::{infer_method_query, method_return_type_query};
 pub use hir_ty::method_resolution::{resolve_qualified_call, MethodResolution};
-pub use hir_ty::narrow::{narrow_or_base, narrow_query, narrowed_type_at, NarrowState};
+pub use hir_ty::narrow::{
+    narrow_or_base, narrow_or_base_indexed, narrow_query, narrowed_type_at, NarrowExprIndex,
+    NarrowState,
+};
 pub use hir_ty::proc_signature;
 pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
-    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, FormElementKind,
-    InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult, MetadataKind,
-    ModuleCodeInferenceResult, ParamsShape, UnresolvedMethodKind,
+    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, EnvCalleeKind, EnvMemberKind,
+    FormElementKind, InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult,
+    MetadataKind, ModuleCodeInferenceResult, UnresolvedMethodKind,
 };
 
 pub use bsl_types::builders::Builders;
@@ -229,7 +245,7 @@ pub(crate) struct MethodInfo {
 }
 
 pub(crate) fn get_method_info(id: &MethodId, db: &dyn DefDatabase) -> Option<MethodInfo> {
-    let tree = db.item_tree(id.module.file_id);
+    let tree = db.item_tree_ref(id.module.file_id);
     let item = tree.top_level_items().get(id.local_id as usize)?;
     match item {
         hir_def::item_tree::ModItem::Procedure(proc_idx) => {
@@ -315,7 +331,7 @@ pub(crate) struct VariableInfo {
 }
 
 pub(crate) fn get_variable_info(id: &VariableId, db: &dyn DefDatabase) -> Option<VariableInfo> {
-    let tree = db.item_tree(id.module.file_id);
+    let tree = db.item_tree_ref(id.module.file_id);
     let item = tree.top_level_items().get(id.local_id as usize)?;
     if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
         let var = tree.variable(*var_idx);
@@ -395,104 +411,7 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             .find(|method| method.name().eq_ignore_case(&search_name))
     }
 
-    pub fn resolve_name_to_definition(
-        &self,
-        file_id: FileId,
-        token: &syntax::SyntaxToken,
-    ) -> Option<crate::definition::Definition> {
-        use crate::definition::Definition;
-
-        let _span = tracing::info_span!("resolve_name_to_definition").entered();
-
-        if token.kind() != syntax::SyntaxKind::IDENT && field_name_receiver(token).is_none() {
-            return None;
-        }
-
-        let token_text = token.text();
-        let name = Name::new(token_text);
-
-        if let Some(def) = self.try_resolve_qualified_name_for_token(file_id, token) {
-            tracing::debug!(?def, "resolved as qualified name");
-            return Some(def);
-        }
-
-        if field_name_receiver(token).is_some() {
-            tracing::debug!("skipping free-name resolution: token is field-name in FIELD_EXPR");
-            return None;
-        }
-
-        let module_id = ModuleId::new(file_id);
-        let resolver = hir_def::resolver::Resolver::for_module(module_id);
-
-        // A global common module export extends the global context and so shadows a
-        // same-named platform global. Resolved before builtins to keep Local → Module →
-        // Global-CM → Platform consistent with name inference and signature help; the helper
-        // gates on nearer scopes (local/parameter, same-module method/variable) missing.
-        if let Some(def) = self.global_export_definition(file_id, token) {
-            tracing::debug!(?def, "resolved as global common module export");
-            return Some(def);
-        }
-
-        if let Some(def) = self.try_resolve_builtin(token_text) {
-            tracing::debug!(?def, "resolved as builtin");
-            return Some(def);
-        }
-
-        if let Some(def) = self.resolve_local_to_definition(file_id, token) {
-            tracing::debug!(?def, "resolved as local symbol");
-            return Some(def);
-        }
-
-        if bsl_metadata::MdoType::is_plural_form(token_text) {
-            if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(token_text) {
-                tracing::debug!(?mdo_type, "resolved as MDO collection");
-                return Some(Definition::MdoCollectionType(mdo_type));
-            }
-        }
-
-        if let Some(method_id) = resolver.resolve_module_method(self.db, &name) {
-            tracing::debug!(?method_id, "resolved as module method");
-            return Some(Definition::Method(method_id));
-        }
-
-        if let Some(var_id) = resolver.resolve_module_variable(self.db, &name) {
-            tracing::debug!(?var_id, "resolved as module variable");
-            return Some(Definition::Variable(var_id));
-        }
-
-        tracing::debug!("unresolved identifier: {}", token_text);
-        None
-    }
-
-    /// Resolve a bare identifier to an exported method of a GLOBAL common module — callable
-    /// unqualified because a global common module extends the global context. Returns `None`
-    /// when a nearer scope owns the name (a local/parameter, or a same-module method or
-    /// variable), so the global context only fills the gap below module scope. Shared by the
-    /// free-name and definition resolvers so goto/hover/refs and inference agree on precedence.
-    pub(crate) fn global_export_definition(
-        &self,
-        file_id: FileId,
-        token: &syntax::SyntaxToken,
-    ) -> Option<crate::definition::Definition> {
-        let name = Name::new(token.text());
-        let module_id = ModuleId::new(file_id);
-        let resolver = hir_def::resolver::Resolver::for_module(module_id);
-
-        let shadowed = self.resolve_local_to_definition(file_id, token).is_some()
-            || resolver.resolve_module_method(self.db, &name).is_some()
-            || resolver.resolve_module_variable(self.db, &name).is_some();
-        if shadowed {
-            return None;
-        }
-
-        hir_def::resolver::Resolver::with_workspace_scope(module_id)
-            .global_common_module_exports(self.db)
-            .into_iter()
-            .find(|(_, method_name, _)| method_name.eq_ignore_case(&name))
-            .map(|(_, _, method_id)| crate::definition::Definition::Method(method_id))
-    }
-
-    fn try_resolve_qualified_name_for_token(
+    pub(crate) fn try_resolve_qualified_name_for_token(
         &self,
         file_id: FileId,
         token: &syntax::SyntaxToken,
@@ -535,68 +454,7 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         None
     }
 
-    fn resolve_local_to_definition(
-        &self,
-        file_id: FileId,
-        token: &syntax::SyntaxToken,
-    ) -> Option<crate::definition::Definition> {
-        use crate::definition::Definition;
-        use hir_def::scope::{ExprScopes, ScopeDef};
-
-        let _span = tracing::debug_span!("resolve_local_to_definition").entered();
-
-        let name = Name::new(token.text());
-        let module_id = ModuleId::new(file_id);
-
-        let mut node = token.parent()?;
-        loop {
-            let (scopes, method_range) =
-                if let Some(proc_def) = syntax::ast::ProcedureDef::cast(node.clone()) {
-                    (ExprScopes::from_procedure(&proc_def), proc_def.syntax().text_range())
-                } else if let Some(func_def) = syntax::ast::FunctionDef::cast(node.clone()) {
-                    (ExprScopes::from_function(&func_def), func_def.syntax().text_range())
-                } else {
-                    node = node.parent()?;
-                    continue;
-                };
-
-            let root_scope = scopes.root_scope();
-            let scope_def = scopes.resolve_name(root_scope, &name)?;
-
-            let tree = self.db.item_tree(file_id);
-            for (idx, item) in tree.top_level_items().iter().enumerate() {
-                let (params, source_range) = match item {
-                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                        let p = tree.procedure(*proc_idx);
-                        (&p.params, p.source_range)
-                    }
-                    hir_def::item_tree::ModItem::Function(func_idx) => {
-                        let f = tree.function(*func_idx);
-                        (&f.params, f.source_range)
-                    }
-                    _ => continue,
-                };
-                if source_range != method_range {
-                    continue;
-                }
-                let method_id = MethodId { module: module_id, local_id: idx as u32 };
-                return Some(match scope_def {
-                    ScopeDef::Parameter => {
-                        let param_index =
-                            params.iter().position(|p| p.name.eq_ignore_case(&name)).unwrap_or(0)
-                                as u32;
-                        Definition::Parameter { method_id, param_name: name.clone(), param_index }
-                    }
-                    ScopeDef::LocalVariable => {
-                        Definition::Local { method_id, var_name: name.clone() }
-                    }
-                });
-            }
-            return None;
-        }
-    }
-
-    fn try_resolve_builtin(&self, name: &str) -> Option<crate::definition::Definition> {
+    pub(crate) fn try_resolve_builtin(&self, name: &str) -> Option<crate::definition::Definition> {
         if bsl_platform::PlatformDataInner::instance().get_global_function(name).is_some() {
             return Some(Definition::BuiltinFunction(Name::new(name)));
         }
@@ -625,7 +483,7 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     pub fn type_of_expr(&self, file_id: FileId, node: &syntax::SyntaxNode) -> TypeId {
         let module_id = ModuleId::new(file_id);
-        let module_bodies = self.db.module_bodies(module_id);
+        let module_bodies = self.db.module_bodies_ref(module_id);
         let range = node.text_range();
 
         if let Some(result) = module_bodies.module_code_result() {
@@ -651,7 +509,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
     pub fn type_of_binding_at(&self, file_id: FileId, range: TextRange) -> Option<TypeId> {
         let module_id = ModuleId::new(file_id);
-        let module_bodies = self.db.module_bodies(module_id);
+        let module_bodies = self.db.module_bodies_ref(module_id);
 
         if let Some(result) = module_bodies.module_code_result() {
             if let Some(binding_id) = result.source_map.binding_at_range(range) {
@@ -736,7 +594,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     /// The `MethodId` of the procedure/function whose source range contains
     /// `offset` (BSL has no nested methods, so at most one matches).
     fn enclosing_method_id(&self, file_id: FileId, offset: TextSize) -> Option<MethodId> {
-        let tree = self.db.item_tree(file_id);
+        let tree = self.db.item_tree_ref(file_id);
         let module_id = ModuleId::new(file_id);
         for (idx, item) in tree.top_level_items().iter().enumerate() {
             let range = match item {
@@ -746,6 +604,59 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             };
             if range.contains(offset) {
                 return Some(MethodId { module: module_id, local_id: idx as u32 });
+            }
+        }
+        None
+    }
+
+    /// Resolves the call whose argument list contains `offset`.
+    pub fn call_resolution_at(&self, file_id: FileId, offset: TextSize) -> Option<CallResolution> {
+        self.call_binding_at(file_id, offset).map(|binding| binding.resolution)
+    }
+
+    /// Returns the stored candidate binding for the call whose argument list contains `offset`.
+    pub fn call_binding_at(
+        &self,
+        file_id: FileId,
+        offset: TextSize,
+    ) -> Option<CandidateCallBinding> {
+        let parse = self.db.parse(file_id);
+        let (callee, _) = call_arg_at_offset(&parse.syntax_node(), offset)?;
+        let callee_range = callee.text_range();
+        let call_range = callee
+            .ancestors()
+            .find(|node| {
+                matches!(node.kind(), syntax::SyntaxKind::CALL_EXPR | syntax::SyntaxKind::NEW_EXPR)
+            })
+            .map(|call| call.text_range());
+
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.db.module_bodies(module_id);
+
+        if let Some(result) = module_bodies.module_code_result() {
+            let routed = infer_owner(self.db, file_id, DefWithBodyId::ModuleCode);
+            if let Some(binding) = routed.call_arg_bindings().iter().find(|binding| {
+                result.source_map.expr_range(binding.call_expr).is_some_and(|range| {
+                    [Some(callee_range), call_range]
+                        .into_iter()
+                        .flatten()
+                        .any(|target| target == range)
+                })
+            }) {
+                return Some(binding.candidate.clone());
+            }
+        }
+        for (local_id, _body, source_map) in module_bodies.method_bodies() {
+            let routed = infer_owner(self.db, file_id, DefWithBodyId::Method(local_id));
+            if let Some(binding) = routed.call_arg_bindings().iter().find(|binding| {
+                source_map.expr_range(binding.call_expr).is_some_and(|range| {
+                    [Some(callee_range), call_range]
+                        .into_iter()
+                        .flatten()
+                        .any(|target| target == range)
+                })
+            }) {
+                return Some(binding.candidate.clone());
             }
         }
         None
@@ -768,7 +679,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         let callee_range = callee.text_range();
 
         let module_id = ModuleId::new(file_id);
-        let module_bodies = self.db.module_bodies(module_id);
+        let module_bodies = self.db.module_bodies_ref(module_id);
 
         let mut found: Option<(DefWithBodyId, ExprId)> = None;
         if let Some(result) = module_bodies.module_code_result() {
@@ -794,12 +705,13 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             return Vec::new();
         };
 
-        match &binding.params {
-            ParamsShape::Single(params) => params.get(active).copied().into_iter().collect(),
-            ParamsShape::Overloaded { overloads, .. } => {
-                overloads.iter().filter_map(|o| o.get(active).copied()).collect()
-            }
-        }
+        binding
+            .candidate
+            .candidates
+            .as_slice()
+            .iter()
+            .filter_map(|candidate| candidate.params.get(active).map(|param| param.ty))
+            .collect()
     }
 
     pub fn resolve_method_call_to_definition(
@@ -807,22 +719,15 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         file_id: FileId,
         token: &syntax::SyntaxToken,
     ) -> Option<crate::definition::Definition> {
-        use crate::definition::Definition;
+        crate::FileSymbolCtx::new(self.db, file_id).resolve_method_call_to_definition(token)
+    }
 
-        if !token.kind().is_name_token() {
-            return None;
-        }
-
-        let receiver_node = field_name_receiver(token)?;
-        let receiver_id = self.type_of_expr(file_id, &receiver_node);
-        if matches!(self.db.lookup_type(receiver_id), TypeKind::Unknown) {
-            return None;
-        }
-
-        let method_name = Name::new(token.text());
-        let resolution = hir_ty::resolve_method(self.db, receiver_id, &method_name)?;
-
-        Some(Definition::BuiltinMethodHandle { handle: resolution.handle, method_name })
+    pub fn resolve_name_to_definition(
+        &self,
+        file_id: FileId,
+        token: &syntax::SyntaxToken,
+    ) -> Option<crate::definition::Definition> {
+        crate::FileSymbolCtx::new(self.db, file_id).resolve_name_to_definition(token)
     }
 }
 
@@ -881,8 +786,14 @@ fn call_arg_at_offset(
     };
 
     let arg_list = token.parent_ancestors().find(|node| node.kind() == SyntaxKind::ARG_LIST)?;
-    let call_expr = arg_list.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR)?;
-    let callee = call_expr.children().next()?;
+    let call_expr = arg_list
+        .parent()
+        .filter(|p| p.kind() == SyntaxKind::CALL_EXPR || p.kind() == SyntaxKind::NEW_EXPR)?;
+    let callee = match call_expr.kind() {
+        SyntaxKind::CALL_EXPR => call_expr.children().next()?,
+        SyntaxKind::NEW_EXPR => call_expr.clone(),
+        _ => unreachable!(),
+    };
 
     let mut active = 0usize;
     for child in arg_list.children_with_tokens() {

@@ -190,12 +190,6 @@ impl AbsPath {
         AbsPathBuf::try_from(self.0.to_path_buf()).unwrap()
     }
 
-    pub fn canonicalize(&self) -> ! {
-        panic!(
-            "We explicitly do not provide canonicalization API, as that is almost always a wrong solution, see #14430"
-        )
-    }
-
     pub fn strip_prefix(&self, base: &AbsPath) -> Option<&RelPath> {
         self.0.strip_prefix(base).ok().map(RelPath::new_unchecked)
     }
@@ -224,14 +218,6 @@ impl AbsPath {
     }
     pub fn as_str(&self) -> &str {
         self.0.as_str()
-    }
-    #[deprecated(note = "use Display instead")]
-    pub fn display(&self) -> ! {
-        unimplemented!()
-    }
-    #[deprecated(note = "use std::fs::metadata().is_ok() instead")]
-    pub fn exists(&self) -> ! {
-        unimplemented!()
     }
 
     pub fn components(&self) -> Utf8Components<'_> {

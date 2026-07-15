@@ -28,11 +28,12 @@ use crate::{
         EdgeKind, EdgeProvenance, GraphMethodEntry, GraphNode, MethodDispatch, ResolvedCallEdge,
         ResolvedModuleSummary, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
     },
+    call_hierarchy_index::MethodCallPair,
     configs::ConfigsDatabase,
     module_index::{module_key_for_path, ModuleKey},
     name::Name,
     resolver::Resolver,
-    MethodId, ModuleId,
+    CallHierarchyReverseIndex, MethodId, ModuleId,
 };
 
 /// A module's methods as seen from the item tree alone (no body lowering).
@@ -113,6 +114,37 @@ impl GraphIndex {
         for (module, (all, module_dispatch)) in extracted {
             self.insert_module_data(module, all, module_dispatch);
         }
+    }
+
+    /// [`Self::add_batch`] fused with per-module extraction of the pair-relevant
+    /// call-summary subset (see [`ModuleCallSummary::method_pair_subset`]), in the
+    /// same parallel region — so each module's parse tree is forced once and serves
+    /// both the item-tree extraction and the body lowering, instead of being
+    /// re-parsed by a second workspace pass. Returns the retained subsets in
+    /// `batch` order for deferred pair resolution against the completed index.
+    pub fn add_batch_extracting_pair_intents<DB: ConfigsDatabase + Clone + Send>(
+        &mut self,
+        pool: &rayon::ThreadPool,
+        db: &DB,
+        batch: &[ModuleId],
+    ) -> Vec<(ModuleId, crate::call_graph::ModuleCallSummary)> {
+        extract_batch_index_and_pair_intents(pool, db, batch)
+            .into_iter()
+            .map(|extraction| self.insert_extraction(extraction))
+            .collect()
+    }
+
+    /// The fold half of [`extract_batch_index_and_pair_intents`]: index one
+    /// module's extracted declarations and hand back its retained pair intents.
+    /// Order-independent across modules, so a pipelined build may fold batches in
+    /// any completion order.
+    pub fn insert_extraction(
+        &mut self,
+        extraction: ModuleIndexExtraction,
+    ) -> (ModuleId, crate::call_graph::ModuleCallSummary) {
+        let ModuleIndexExtraction { module, entries, module_dispatch, pair_intents } = extraction;
+        self.insert_module_data(module, entries, module_dispatch);
+        (module, pair_intents)
     }
 
     /// The read-only half of [`Self::add_module`]: force a module's item tree and
@@ -200,6 +232,34 @@ impl GraphIndex {
         Some(hasher.finish())
     }
 
+    /// A body-free resident layout hash of one module's methods: the ordered
+    /// (`local_id`, original-spelling name, `is_export`, effective dispatch) of every
+    /// method in declaration order. It deliberately includes the top-level position
+    /// encoded in `local_id`, unlike [`Self::module_sig_hash`], so resident identity
+    /// can detect declaration-layout shifts without widening the durable contract.
+    /// Excludes source ranges and bodies. `None` if the module is not indexed.
+    pub fn module_layout_hash(&self, module: ModuleId) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+
+        let methods = self.methods.get(&module)?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for entry in &methods.all {
+            entry.local_id.hash(&mut hasher);
+            entry.name.as_str().hash(&mut hasher);
+            entry.is_export.hash(&mut hasher);
+            match self.node_dispatch.get(&MethodId { module, local_id: entry.local_id }) {
+                Some(d) => {
+                    true.hash(&mut hasher);
+                    d.can_run_on_client.hash(&mut hasher);
+                    d.can_run_on_server.hash(&mut hasher);
+                    d.no_context.hash(&mut hasher);
+                }
+                None => false.hash(&mut hasher),
+            }
+        }
+        Some(hasher.finish())
+    }
+
     /// A module's methods as `(original-spelling name, is_export)` in declaration
     /// order, for the incremental caller-delta eligibility check (comparing the
     /// resolvable name surface across an edit). `None` if the module is not indexed.
@@ -264,9 +324,24 @@ pub fn resolve_module_summary_via_index(
     module: ModuleId,
     index: &GraphIndex,
 ) -> ResolvedModuleSummary {
+    let summary = db.module_call_summary(module);
+    resolve_summary_via_index(db, module, &summary, index)
+}
+
+/// The resolution core of [`resolve_module_summary_via_index`], parameterized over
+/// an already-extracted summary. This lets a deferred consumer (the fused
+/// call-hierarchy build) resolve a summary subset retained from an earlier batch
+/// pass long after that batch's database is gone: everything read from `db` here is
+/// path/configuration state (module index, config metadata), never module texts, so
+/// any database with the same source root and config inputs resolves identically.
+pub fn resolve_summary_via_index(
+    db: &dyn ConfigsDatabase,
+    module: ModuleId,
+    summary: &crate::call_graph::ModuleCallSummary,
+    index: &GraphIndex,
+) -> ResolvedModuleSummary {
     use crate::call_graph::CallTarget;
 
-    let summary = db.module_call_summary(module);
     let resolver = Resolver::with_workspace_scope(module);
 
     let mut edges = Vec::with_capacity(summary.call_edges.len());
@@ -278,9 +353,14 @@ pub fn resolve_module_summary_via_index(
                 edge.kind,
             ),
             CallTarget::QualifiedModule { module_name, method_name } => {
-                match resolver.locate_common_module(db, module_name) {
-                    Ok(target_module) => match index.find_method(target_module, method_name) {
-                        Some(m) if m.is_export => (
+                match resolver.locate_common_module_candidates(db, module_name) {
+                    // Base body first, then the caller's own extension body —
+                    // the first hit mirrors `resolve_qualified_method`.
+                    Ok(candidates) => match candidates
+                        .iter()
+                        .find_map(|&m| index.find_method(m, method_name).map(|hit| (m, hit)))
+                    {
+                        Some((target_module, m)) if m.is_export => (
                             ResolvedTarget::Method(MethodId {
                                 module: target_module,
                                 local_id: m.local_id,
@@ -400,13 +480,18 @@ pub fn resolve_module_summary_via_index(
     };
     let find_qualified =
         |module_name: &crate::name::Name, method_name: &crate::name::Name| match resolver
-            .locate_common_module(db, module_name)
+            .locate_common_module_candidates(db, module_name)
         {
-            Ok(target_module) => match index.find_method(target_module, method_name) {
-                Some(m) if m.is_export => crate::queries::QualifiedLookup::Resolved(MethodId {
-                    module: target_module,
-                    local_id: m.local_id,
-                }),
+            Ok(candidates) => match candidates
+                .iter()
+                .find_map(|&m| index.find_method(m, method_name).map(|hit| (m, hit)))
+            {
+                Some((target_module, m)) if m.is_export => {
+                    crate::queries::QualifiedLookup::Resolved(MethodId {
+                        module: target_module,
+                        local_id: m.local_id,
+                    })
+                }
                 Some(_) => crate::queries::QualifiedLookup::VisibilityBlocked,
                 None => crate::queries::QualifiedLookup::Absent,
             },
@@ -414,13 +499,170 @@ pub fn resolve_module_summary_via_index(
         };
     let global_modules = resolver.global_common_module_names(db);
     edges.extend(crate::queries::resolve_callback_edges(
-        &summary,
+        summary,
         find_local,
         find_qualified,
         &global_modules,
     ));
 
     ResolvedModuleSummary { module, edges }
+}
+
+/// Projects a batch's resolved semantic calls to deterministic method-only pairs.
+///
+/// The index-backed resolver supplies direct, qualified-module, manager-user-method,
+/// notify, and idle-handler targets. This projection intentionally retains only
+/// method callers and method targets, so module code, unresolved calls, metadata,
+/// query, form, subscription, role, subsystem, register, and `SetAction` facts do
+/// not enter the call hierarchy.
+///
+/// Each module's summary resolution (which lowers that module's own bodies) runs
+/// in parallel on `pool`; the fold below walks the results in `batch` order and
+/// each module's pairs are already sorted, so the output is deterministic
+/// regardless of completion order.
+pub fn project_batch_method_call_pairs<DB: ConfigsDatabase + Clone + Send>(
+    pool: &rayon::ThreadPool,
+    db: &DB,
+    index: &GraphIndex,
+    batch: &[ModuleId],
+) -> Vec<MethodCallPair> {
+    let per_module = parallel_per_module(pool, db, batch, |db, module| {
+        let summary = resolve_module_summary_via_index(db, module, index);
+        resolved_summary_method_pairs(&summary)
+    });
+
+    let mut pairs = Vec::new();
+    let mut seen = FxHashSet::default();
+    for module_pairs in per_module {
+        pairs.extend(module_pairs.into_iter().filter(|pair| seen.insert(*pair)));
+    }
+
+    pairs
+}
+
+/// One module's read-only extraction for the fused call-hierarchy build: its
+/// index declarations plus the retained pair-relevant call-summary subset. Kept
+/// opaque so the fold ([`GraphIndex::insert_extraction`]) stays the only way the
+/// data enters an index.
+pub struct ModuleIndexExtraction {
+    pub module: ModuleId,
+    entries: Vec<GraphMethodEntry>,
+    module_dispatch: Option<MethodDispatch>,
+    pair_intents: crate::call_graph::ModuleCallSummary,
+}
+
+/// The parallel half of the fused extraction (see
+/// [`GraphIndex::add_batch_extracting_pair_intents`]): safe to run on a dedicated
+/// pool/database while another batch's extraction is in flight elsewhere, because
+/// it touches no shared index state.
+pub fn extract_batch_index_and_pair_intents<DB: ConfigsDatabase + Clone + Send>(
+    pool: &rayon::ThreadPool,
+    db: &DB,
+    batch: &[ModuleId],
+) -> Vec<ModuleIndexExtraction> {
+    parallel_per_module(pool, db, batch, |db, module| {
+        let (entries, module_dispatch) = GraphIndex::extract_module_data(db, module);
+        let pair_intents = db.module_call_summary(module).method_pair_subset();
+        ModuleIndexExtraction { module, entries, module_dispatch, pair_intents }
+    })
+}
+
+/// Resolve retained pair intents (from
+/// [`GraphIndex::add_batch_extracting_pair_intents`]) for many modules in parallel
+/// against the COMPLETED index, yielding each module's sorted, deduplicated method
+/// pairs in `intents` order. Resolution reads only path/configuration state from
+/// `db` (module index, config metadata) — never module texts — so the database
+/// only needs every file registered, not loaded.
+pub fn project_method_pairs_from_intents<DB: ConfigsDatabase + Clone + Send>(
+    pool: &rayon::ThreadPool,
+    db: &DB,
+    index: &GraphIndex,
+    intents: &[(ModuleId, crate::call_graph::ModuleCallSummary)],
+) -> Vec<(ModuleId, Vec<MethodCallPair>)> {
+    let warm = intents.first().map(|&(module, _)| module);
+    parallel_per_item(pool, db, intents, warm, |db, (module, summary)| {
+        let resolved = resolve_summary_via_index(db, *module, summary, index);
+        (*module, resolved_summary_method_pairs(&resolved))
+    })
+}
+
+fn resolved_summary_method_pairs(summary: &ResolvedModuleSummary) -> Vec<MethodCallPair> {
+    let mut pairs = Vec::new();
+    for edge in &summary.edges {
+        if let Some(pair) = MethodCallPair::from_resolved_edge(summary.module, edge) {
+            pairs.push(pair);
+        }
+    }
+    pairs.sort_unstable_by_key(|pair| {
+        (pair.caller.local_id, pair.target.module.file_id, pair.target.local_id)
+    });
+    pairs.dedup();
+    pairs
+}
+
+#[cfg(test)]
+mod method_only_call_pair_tests {
+    use super::resolved_summary_method_pairs;
+    use bsl_metadata::MdoType;
+    use syntax::{TextRange, TextSize};
+    use vfs::FileId;
+
+    use crate::{
+        call_graph::{
+            CallTarget, CallerId, EdgeKind, EdgeProvenance, ResolvedCallEdge,
+            ResolvedModuleSummary, ResolvedTarget,
+        },
+        call_hierarchy_index::MethodCallPair,
+        name::Name,
+        MethodId, ModuleId,
+    };
+
+    fn edge(caller: CallerId, target: ResolvedTarget) -> ResolvedCallEdge {
+        ResolvedCallEdge {
+            caller,
+            target,
+            kind: EdgeKind::DirectLocal,
+            range: TextRange::empty(TextSize::from(0)),
+            provenance: EdgeProvenance::Resolved,
+        }
+    }
+
+    #[test]
+    fn method_only_call_pairs_drop_non_method_edges_and_deduplicate() {
+        // Given: resolved edges to methods, metadata, an unresolved target, and module code.
+        let module = ModuleId::new(FileId(0));
+        let local = MethodId { module, local_id: 1 };
+        let other = MethodId { module: ModuleId::new(FileId(1)), local_id: 0 };
+        let summary = ResolvedModuleSummary {
+            module,
+            edges: vec![
+                edge(CallerId::Method(0), ResolvedTarget::Method(other)),
+                edge(CallerId::Method(0), ResolvedTarget::Method(local)),
+                edge(CallerId::Method(0), ResolvedTarget::Method(other)),
+                edge(CallerId::ModuleCode, ResolvedTarget::Method(other)),
+                edge(
+                    CallerId::Method(0),
+                    ResolvedTarget::Mdo {
+                        mdo_type: MdoType::Catalog,
+                        object_name: Name::new("Контрагенты"),
+                    },
+                ),
+                edge(CallerId::Method(0), ResolvedTarget::Unresolved(CallTarget::Unresolved)),
+            ],
+        };
+
+        // When: the resolved summary is projected to hierarchy pairs.
+        let pairs = resolved_summary_method_pairs(&summary);
+
+        // Then: only unique method-to-method pairs remain in target order.
+        assert_eq!(
+            pairs,
+            vec![
+                MethodCallPair::new(MethodId { module, local_id: 0 }, local),
+                MethodCallPair::new(MethodId { module, local_id: 0 }, other)
+            ],
+        );
+    }
 }
 
 /// Build the whole-config call graph over `modules` using the resident `index`
@@ -496,9 +738,13 @@ pub fn extract_unresolved_refs(
     for edge in &summary.call_edges {
         match &edge.target {
             CallTarget::QualifiedModule { module_name, method_name } => {
-                if let Ok(target) = resolver.locate_common_module(db, module_name) {
-                    if unresolved(index.find_method(target, method_name)) {
-                        out.push((target, method_name.as_str().fold_lower()));
+                if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
+                    // No candidate resolves the call: track every body so adding
+                    // the method to either (base or own extension) reprojects.
+                    if candidates.iter().all(|&m| unresolved(index.find_method(m, method_name))) {
+                        for target in candidates {
+                            out.push((target, method_name.as_str().fold_lower()));
+                        }
                     }
                 }
             }
@@ -523,9 +769,12 @@ pub fn extract_unresolved_refs(
     // `module_call_summary` invalidation.
     for reg in &summary.notify_regs {
         if let crate::call_graph::NotifyTarget::Module(module_name) = &reg.target {
-            if let Ok(target) = resolver.locate_common_module(db, module_name) {
-                if unresolved(index.find_method(target, &reg.callback_name)) {
-                    out.push((target, reg.callback_name.as_str().fold_lower()));
+            if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
+                if candidates.iter().all(|&m| unresolved(index.find_method(m, &reg.callback_name)))
+                {
+                    for target in candidates {
+                        out.push((target, reg.callback_name.as_str().fold_lower()));
+                    }
                 }
             }
         }
@@ -688,6 +937,25 @@ where
     R: Send,
     F: Fn(&DB, ModuleId) -> R + Sync + Send,
 {
+    parallel_per_item(pool, db, batch, batch.first().copied(), |db, &module| f(db, module))
+}
+
+/// The generic core of [`parallel_per_module`]: run `f` over arbitrary
+/// module-keyed items. `warm` must name a module of the workspace (any one) so the
+/// pre-pool warm-up can seed the configuration loader (see the comment below).
+fn parallel_per_item<DB, T, R, F>(
+    pool: &rayon::ThreadPool,
+    db: &DB,
+    items: &[T],
+    warm: Option<ModuleId>,
+    f: F,
+) -> Vec<R>
+where
+    DB: ConfigsDatabase + Clone + Send,
+    T: Sync,
+    R: Send,
+    F: Fn(&DB, &T) -> R + Sync + Send,
+{
     use rayon::prelude::*;
 
     // Warm the configuration loader ONCE on THIS thread before the parallel region.
@@ -702,21 +970,21 @@ where
     // never open a nested scope; their own per-file metadata/visibility work runs in
     // the pool. It is the only internally parallel query the build reaches (no type
     // inference), so this one warm-up closes the window.
-    if let Some(&first) = batch.first() {
+    if let Some(first) = warm {
         let _ = db.configurations(first.file_id);
         let _ = db.module_metadata(first);
     }
 
     let seed = db.clone();
     pool.install(move || {
-        batch
+        items
             .par_iter()
-            .map_with(seed, |db, &module| {
+            .map_with(seed, |db, item| {
                 // Mark the job so internally-parallel entry points (the metadata
                 // loader) can detect that the warm-up above failed to keep them off
                 // this pool, instead of deadlocking silently.
                 let _guard = stdx::par_guard::enter_no_nested_parallelism();
-                f(&*db, module)
+                f(&*db, item)
             })
             .collect()
     })
@@ -1733,9 +2001,56 @@ pub struct EdgeRow {
 }
 
 /// Encodes graph nodes/edges to durable rows at build time — method names/ranges
-/// from the resident [`GraphIndex`], paths from the file set, no database. Produces
-/// the SAME durable id strings as `ide::graph` (a parity test in `ide-db` guards
-/// this), so ids an agent holds survive the in-memory → SQLite switch.
+/// Canonical target/caller rows used to compare call-hierarchy storage backends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodCallDigest {
+    rows: Vec<(String, String)>,
+}
+
+impl MethodCallDigest {
+    /// Sort and deduplicate durable `(target_method_id, caller_method_id)` rows.
+    pub fn from_rows(rows: impl IntoIterator<Item = (String, String)>) -> Self {
+        let mut rows: Vec<_> = rows.into_iter().collect();
+        rows.sort_unstable();
+        rows.dedup();
+        Self { rows }
+    }
+
+    pub fn rows(&self) -> &[(String, String)] {
+        &self.rows
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// Encode compact-index method pairs with the durable graph id rules used by SQLite.
+pub fn call_hierarchy_method_digest(
+    reverse_index: &CallHierarchyReverseIndex,
+    graph_index: &GraphIndex,
+    paths: &FxHashMap<FileId, String>,
+    workspace_root: Option<&Path>,
+) -> MethodCallDigest {
+    let encoder = GraphRowEncoder::new(graph_index, paths, workspace_root);
+    let mut rows = Vec::new();
+    for target in graph_index.method_nodes() {
+        let target_id = encoder.encode(&GraphNode::Method(target)).0;
+        rows.extend(reverse_index.callers(target).iter().map(|caller| {
+            let caller_id = encoder.encode(&GraphNode::Method(*caller)).0;
+            (target_id.clone(), caller_id)
+        }));
+    }
+    MethodCallDigest::from_rows(rows)
+}
+
+/// Encodes durable graph rows from the resident [`GraphIndex`] and file-set paths,
+/// with no database access. It produces the SAME durable ids as `ide::graph`, so ids
+/// an agent holds survive the in-memory → SQLite switch.
 pub struct GraphRowEncoder<'a> {
     index: &'a GraphIndex,
     paths: &'a FxHashMap<FileId, String>,
@@ -2111,5 +2426,56 @@ mod role_rls_tests {
     fn rls_drops_macro_template_without_false_edge() {
         // A legacy `#`-macro template parses with errors → dropped; no spurious object.
         assert!(objs("#ПоЗначениям(\"Справочник.Организации\")").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod module_layout_hash_tests {
+    use super::*;
+
+    fn hashes(source: &str) -> (u64, u64) {
+        let module = ModuleId::new(FileId(0));
+        let parse = parser::parse(source);
+        let methods =
+            crate::call_graph::extract_graph_methods(&crate::ItemTree::from_parse(&parse));
+        let mut index = GraphIndex::new();
+        index.insert_module_data(module, methods, None);
+
+        (
+            index.module_sig_hash(module).expect("indexed module has a signature hash"),
+            index.module_layout_hash(module).expect("indexed module has a layout hash"),
+        )
+    }
+
+    #[test]
+    fn module_layout_hash_changes_when_a_top_level_variable_shifts_method_local_ids() {
+        // Given: the same method declaration, with a new preceding top-level variable.
+        let before = hashes("Процедура Выполнить() Экспорт\nКонецПроцедуры");
+        let after = hashes("Перем Счетчик;\nПроцедура Выполнить() Экспорт\nКонецПроцедуры");
+
+        // Then: durable signature identity is stable, while resident layout identity moves.
+        assert_eq!(before.0, after.0);
+        assert_ne!(before.1, after.1);
+    }
+
+    #[test]
+    fn module_layout_hash_ignores_method_body_edits() {
+        // Given: the same declaration surface with a body-only edit.
+        let before = hashes("Процедура Выполнить() Экспорт\nСообщить(\"до\");\nКонецПроцедуры");
+        let after = hashes("Процедура Выполнить() Экспорт\nСообщить(\"после\");\nКонецПроцедуры");
+
+        // Then: neither durable signature nor resident layout identity changes.
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn module_layout_hash_changes_with_signature_and_effective_dispatch() {
+        // Given: a declaration whose spelling, export, and effective dispatch all change.
+        let before = hashes("&НаКлиенте\nПроцедура Выполнить() Экспорт\nКонецПроцедуры");
+        let after = hashes("&НаСервере\nПроцедура ВыполнитьНаСервере()\nКонецПроцедуры");
+
+        // Then: both declaration contracts change.
+        assert_ne!(before.0, after.0);
+        assert_ne!(before.1, after.1);
     }
 }

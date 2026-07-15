@@ -93,6 +93,21 @@ fn bench_item_tree_cache_hit(c: &mut Criterion) {
     });
 }
 
+/// Same warm read as `item_tree_cache_hit`, through the borrowed accessor:
+/// the delta between the two is the per-read `Arc` clone the owned wrapper pays.
+fn bench_item_tree_ref_cache_hit(c: &mut Criterion) {
+    let db = setup_db(100);
+    let file_id = FileId(50);
+
+    let _ = db.item_tree_ref(file_id);
+
+    c.bench_function("item_tree_ref_cache_hit", |b| {
+        b.iter(|| {
+            let _ = black_box(db.item_tree_ref(black_box(file_id)));
+        });
+    });
+}
+
 fn bench_item_tree_incremental(c: &mut Criterion) {
     c.bench_function("item_tree_incremental", |b| {
         let mut db = setup_db(100);
@@ -131,6 +146,20 @@ fn bench_symbol_tree_cache_hit(c: &mut Criterion) {
     c.bench_function("symbol_tree_cache_hit", |b| {
         b.iter(|| {
             let _ = db.symbol_tree(black_box(module_id));
+        });
+    });
+}
+
+/// Borrowed counterpart of `symbol_tree_cache_hit`; see `item_tree_ref_cache_hit`.
+fn bench_symbol_tree_ref_cache_hit(c: &mut Criterion) {
+    let db = setup_db(100);
+    let module_id = hir::ModuleId::new(FileId(50));
+
+    let _ = db.symbol_tree_ref(module_id);
+
+    c.bench_function("symbol_tree_ref_cache_hit", |b| {
+        b.iter(|| {
+            let _ = black_box(db.symbol_tree_ref(black_box(module_id)));
         });
     });
 }
@@ -297,8 +326,10 @@ criterion_group!(
     bench_cache_hit,
     bench_incremental_update,
     bench_item_tree_cache_hit,
+    bench_item_tree_ref_cache_hit,
     bench_item_tree_incremental,
     bench_symbol_tree_cache_hit,
+    bench_symbol_tree_ref_cache_hit,
     bench_large_file_set,
     bench_metadata_revalidation_after_bsl_edit,
     bench_validate_no_change

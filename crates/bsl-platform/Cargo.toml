@@ -14,7 +14,6 @@ once_cell = { workspace = true }
 salsa = { workspace = true }
 
 [build-dependencies]
-serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

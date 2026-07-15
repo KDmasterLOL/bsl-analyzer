@@ -72,15 +72,52 @@ fn inside(text: &str, needle: &str) -> u32 {
 
 #[test]
 fn completion_lists_global_export_unqualified() {
+    // From a server-capable module the global server module's export is legal
+    // and must appear unqualified.
+    let probe = "Процедура Тест()\n    Глобальн\nКонецПроцедуры\n";
+    let mut db = build_db("Процедура Пусто()\nКонецПроцедуры\n");
+    db.set_file_text(FileId::from_raw(NONGLOBAL_ID), probe);
+    let analysis = Analysis::from_database(db);
+    let offset = after(probe, "Глобальн");
+
+    let items = analysis.completions(FileId::from_raw(NONGLOBAL_ID), offset, None, ide::Locale::Ru);
+    assert!(
+        items.iter().any(|i| i.label == "ГлобальнаяСервернаяПроцедура"),
+        "global common module export must appear unqualified in completion, got {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dot_completion_offers_no_members_of_inaccessible_module() {
+    // `ГлобальныйСерверныйМодуль.` typed in the client-only module: the
+    // static receiver is exactly what ModuleAccessibility judges, so no
+    // members are offered.
+    let caller = "Процедура Тест()\n    ГлобальныйСерверныйМодуль.\nКонецПроцедуры\n";
+    let analysis = setup(caller);
+    let offset = after(caller, "ГлобальныйСерверныйМодуль.");
+
+    let items = analysis.completions(FileId::from_raw(CALLER_ID), offset, None, ide::Locale::Ru);
+    assert!(
+        !items.iter().any(|i| i.label == "ГлобальнаяСервернаяПроцедура"),
+        "members of a module the caller cannot reach must not be offered, got {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn completion_hides_server_only_global_export_in_client_module() {
+    // The client-only module cannot call the server-only global module (no
+    // ВызовСервера) — completion mirrors the ModuleAccessibility diagnostic
+    // and does not offer the export there.
     let caller = "Процедура Тест()\n    Глобальн\nКонецПроцедуры\n";
     let analysis = setup(caller);
     let offset = after(caller, "Глобальн");
 
     let items = analysis.completions(FileId::from_raw(CALLER_ID), offset, None, ide::Locale::Ru);
     assert!(
-        items.iter().any(|i| i.label == "ГлобальнаяСервернаяПроцедура"),
-        "global common module export must appear unqualified in completion, got {:?}",
-        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        !items.iter().any(|i| i.label == "ГлобальнаяСервернаяПроцедура"),
+        "a client-only module must not be offered a server-only global export"
     );
 }
 
@@ -107,9 +144,13 @@ fn signature_help_for_bare_global_export() {
         .signature_help(FileId::from_raw(CALLER_ID), offset)
         .expect("signature help for a bare global export");
     assert!(
-        help.signature.contains("ГлобальнаяСервернаяПроцедура"),
+        help.signatures
+            .first()
+            .expect("at least one signature")
+            .signature
+            .contains("ГлобальнаяСервернаяПроцедура"),
         "signature must name the global export, got {:?}",
-        help.signature
+        help.signatures.first().expect("at least one signature").signature
     );
 }
 
@@ -142,12 +183,13 @@ fn bare_global_call_runs_full_call_contract() {
     let caller = "Процедура Тест()\n    ГлобальнаяСервернаяПроцедура(1);\nКонецПроцедуры\n";
     let db = build_db(caller);
     let result = db.infer(FileId::from_raw(CALLER_ID));
-    let diagnostics = format!("{:?}", result.diagnostics);
+    let arg_diagnostics = db.arg_diagnostics(FileId::from_raw(CALLER_ID));
 
     assert!(
-        diagnostics.contains("MismatchedArgCount"),
-        "bare global export call must be argument-count checked, got {diagnostics}"
+        format!("{arg_diagnostics:?}").contains("MismatchedArgCount"),
+        "bare global export call must be argument-count checked, got {arg_diagnostics:?}"
     );
+    let diagnostics = format!("{:?}", result.diagnostics);
     assert!(
         !diagnostics.contains("UnresolvedMethodCall"),
         "a resolved global export must not be reported unresolved, got {diagnostics}"

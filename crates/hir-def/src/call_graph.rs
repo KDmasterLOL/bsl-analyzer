@@ -30,6 +30,74 @@ pub struct ModuleCallSummary {
     pub form_entries: Vec<FormEventEntry>,
 }
 
+impl ModuleCallSummary {
+    /// The subset of this summary that can still influence method-only call pairs
+    /// (see [`crate::call_hierarchy_index::MethodCallPair::from_resolved_edge`]):
+    /// method-caller edges whose target shape can resolve to a user method
+    /// (local, qualified-module, manager access with a method), plus method-caller
+    /// notify and idle-handler registrations. Everything else — module-code
+    /// callers, manager/register touches without a resolvable method, `SetAction`,
+    /// name literals, form entries — can never produce a pair and is dropped.
+    ///
+    /// Source ranges are zeroed and entries deduplicated: pairs carry no ranges and
+    /// resolution never reads them, so this keeps the retained residency of a
+    /// whole-workspace build proportional to the distinct call facts, not to the
+    /// call-site count.
+    pub fn method_pair_subset(&self) -> ModuleCallSummary {
+        let zero = TextRange::empty(TextSize::from(0));
+
+        let mut seen_edges = FxHashSet::default();
+        let call_edges = self
+            .call_edges
+            .iter()
+            .filter(|edge| {
+                matches!(edge.caller, CallerId::Method(_))
+                    && matches!(
+                        edge.target,
+                        CallTarget::Local { .. }
+                            | CallTarget::QualifiedModule { .. }
+                            | CallTarget::ManagerAccess { method_name: Some(_), .. }
+                    )
+            })
+            .filter(|edge| seen_edges.insert((edge.caller, edge.target.clone(), edge.kind)))
+            .map(|edge| CallEdge { range: zero, ..edge.clone() })
+            .collect();
+
+        let mut seen_notify = FxHashSet::default();
+        let notify_regs = self
+            .notify_regs
+            .iter()
+            .filter(|reg| {
+                matches!(reg.caller, CallerId::Method(_))
+                    && !matches!(reg.target, NotifyTarget::Unsupported)
+            })
+            .filter(|reg| {
+                seen_notify.insert((reg.caller, reg.callback_name.clone(), reg.target.clone()))
+            })
+            .map(|reg| NotifyReg { range: zero, ..reg.clone() })
+            .collect();
+
+        let mut seen_idle = FxHashSet::default();
+        let idle_handler_regs = self
+            .idle_handler_regs
+            .iter()
+            .filter(|reg| matches!(reg.caller, CallerId::Method(_)))
+            .filter(|reg| seen_idle.insert((reg.caller, reg.handler_name.clone())))
+            .map(|reg| IdleReg { range: zero, one_shot: false, ..reg.clone() })
+            .collect();
+
+        ModuleCallSummary {
+            methods: Vec::new(),
+            call_edges,
+            notify_regs,
+            idle_handler_regs,
+            set_action_regs: Vec::new(),
+            name_literal_refs: Vec::new(),
+            form_entries: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodSummary {
     pub local_id: u32,
@@ -247,7 +315,7 @@ pub enum CallerId {
 /// `Option` because "no module" and "receiver we can't classify" must not collapse:
 /// the graph resolves `ThisObject` to a current-module method but must NOT invent an
 /// edge for an `Unsupported` receiver.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NotifyTarget {
     /// `ЭтотОбъект` / `ЭтаФорма` (or English forms) — handler is in the current module.
     ThisObject,
@@ -1046,6 +1114,161 @@ fn extract_string_literal(body: &Body, idx: ExprIdx) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn method_pair_subset_keeps_only_pair_relevant_facts() {
+        // Given: a summary mixing pair-relevant call facts with everything the
+        // method-only hierarchy ignores, plus duplicate call sites at distinct ranges.
+        let range = |start: u32| TextRange::new(TextSize::from(start), TextSize::from(start + 1));
+        let edge =
+            |caller, target, kind, start| CallEdge { caller, target, kind, range: range(start) };
+        let qualified = || CallTarget::QualifiedModule {
+            module_name: Name::new("Сервер"),
+            method_name: Name::new("Считать"),
+        };
+        let summary = ModuleCallSummary {
+            methods: vec![MethodSummary {
+                local_id: 0,
+                name: Name::new("Главная"),
+                dispatch: MethodDispatch::from_annotation(None),
+                is_export: true,
+            }],
+            call_edges: vec![
+                edge(
+                    CallerId::Method(0),
+                    CallTarget::Local { callee_local_id: 1 },
+                    EdgeKind::DirectLocal,
+                    0,
+                ),
+                edge(CallerId::Method(0), qualified(), EdgeKind::DirectQualifiedModule, 10),
+                // A repeated call site: same fact, different range.
+                edge(CallerId::Method(0), qualified(), EdgeKind::DirectQualifiedModule, 20),
+                edge(
+                    CallerId::Method(0),
+                    CallTarget::ManagerAccess {
+                        manager_type: ManagerType::Catalogs,
+                        object_name: Name::new("Контрагенты"),
+                        method_name: Some(Name::new("НайтиПоИНН")),
+                    },
+                    EdgeKind::DirectQualifiedModule,
+                    30,
+                ),
+                // Dropped: module-code caller, method-less manager touch, movement.
+                edge(
+                    CallerId::ModuleCode,
+                    CallTarget::Local { callee_local_id: 1 },
+                    EdgeKind::DirectLocal,
+                    40,
+                ),
+                edge(
+                    CallerId::Method(0),
+                    CallTarget::ManagerAccess {
+                        manager_type: ManagerType::Catalogs,
+                        object_name: Name::new("Контрагенты"),
+                        method_name: None,
+                    },
+                    EdgeKind::DirectQualifiedModule,
+                    50,
+                ),
+                edge(
+                    CallerId::Method(0),
+                    CallTarget::RegisterMovement { register_name: Name::new("Продажи") },
+                    EdgeKind::RegisterMovement,
+                    60,
+                ),
+            ],
+            notify_regs: vec![
+                NotifyReg {
+                    caller: CallerId::Method(0),
+                    callback_name: Name::new("Обработчик"),
+                    target: NotifyTarget::ThisObject,
+                    range: range(70),
+                },
+                NotifyReg {
+                    caller: CallerId::Method(0),
+                    callback_name: Name::new("Обработчик"),
+                    target: NotifyTarget::Unsupported,
+                    range: range(80),
+                },
+            ],
+            idle_handler_regs: vec![
+                IdleReg {
+                    caller: CallerId::Method(0),
+                    handler_name: Name::new("ОбновитьЭкран"),
+                    one_shot: true,
+                    range: range(90),
+                },
+                // A duplicate that differs only in one_shot/range: same resolved pair.
+                IdleReg {
+                    caller: CallerId::Method(0),
+                    handler_name: Name::new("ОбновитьЭкран"),
+                    one_shot: false,
+                    range: range(100),
+                },
+            ],
+            set_action_regs: vec![SetActionReg {
+                caller: CallerId::Method(0),
+                handler_name: Name::new("ОбработчикДействия"),
+                range: range(110),
+            }],
+            name_literal_refs: vec![1],
+            form_entries: Vec::new(),
+        };
+
+        // When: the pair-relevant subset is taken.
+        let subset = summary.method_pair_subset();
+
+        // Then: only method-caller edges whose target can resolve to a user method
+        // survive, deduplicated with zeroed ranges, and non-pair domains are empty.
+        let zero = TextRange::empty(TextSize::from(0));
+        assert_eq!(
+            subset.call_edges,
+            vec![
+                edge(
+                    CallerId::Method(0),
+                    CallTarget::Local { callee_local_id: 1 },
+                    EdgeKind::DirectLocal,
+                    0
+                ),
+                edge(CallerId::Method(0), qualified(), EdgeKind::DirectQualifiedModule, 0),
+                edge(
+                    CallerId::Method(0),
+                    CallTarget::ManagerAccess {
+                        manager_type: ManagerType::Catalogs,
+                        object_name: Name::new("Контрагенты"),
+                        method_name: Some(Name::new("НайтиПоИНН")),
+                    },
+                    EdgeKind::DirectQualifiedModule,
+                    0,
+                ),
+            ]
+            .into_iter()
+            .map(|edge| CallEdge { range: zero, ..edge })
+            .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            subset.notify_regs,
+            vec![NotifyReg {
+                caller: CallerId::Method(0),
+                callback_name: Name::new("Обработчик"),
+                target: NotifyTarget::ThisObject,
+                range: zero,
+            }],
+        );
+        assert_eq!(
+            subset.idle_handler_regs,
+            vec![IdleReg {
+                caller: CallerId::Method(0),
+                handler_name: Name::new("ОбновитьЭкран"),
+                one_shot: false,
+                range: zero,
+            }],
+        );
+        assert!(subset.methods.is_empty());
+        assert!(subset.set_action_regs.is_empty());
+        assert!(subset.name_literal_refs.is_empty());
+        assert!(subset.form_entries.is_empty());
+    }
 
     #[test]
     fn dispatch_from_execution_context_maps_each_variant() {

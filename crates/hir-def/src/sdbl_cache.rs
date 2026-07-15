@@ -68,7 +68,7 @@ fn sdbl_hir_for_file_heap(v: &SdblHirEntries) -> usize {
     bytes
 }
 
-#[salsa::tracked(lru = 128, heap_size = all_sdbl_in_file_heap)]
+#[salsa::tracked(lru = 128, heap_size = all_sdbl_in_file_heap, returns(clone))]
 pub fn all_sdbl_in_file_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -100,7 +100,7 @@ pub fn all_sdbl_in_file_query<'db>(
     Arc::new(result)
 }
 
-#[salsa::tracked(lru = 64, heap_size = sdbl_hir_for_file_heap)]
+#[salsa::tracked(lru = 64, heap_size = sdbl_hir_for_file_heap, returns(clone))]
 pub fn sdbl_hir_for_file_query<'db>(
     db: &'db dyn ConfigsDatabase,
     file_id_input: FileIdInput<'db>,

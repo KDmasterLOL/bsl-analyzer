@@ -24,6 +24,8 @@ fn pre_if_elsif_else_materializes_preproc_conditions() {
     let else_stmt = body.stmts_mut().alloc(Stmt::Expr(value));
     let after_preproc = body.stmts_mut().alloc(Stmt::Expr(value));
     let preproc = body.stmts_mut().alloc(Stmt::PreprocIf(Box::new(PreprocIfStmt {
+        condition: hir_def::preproc_condition::PreprocCondition::Unknown,
+        elsif_conditions: Box::new([hir_def::preproc_condition::PreprocCondition::Unknown]),
         condition_range: range(1, 7),
         directive_range: range(0, 13),
         full_range: range(0, 44),

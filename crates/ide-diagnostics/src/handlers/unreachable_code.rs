@@ -43,12 +43,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         };
         let exit = cfg.exit_point();
 
-        let reachable = compute_reachable_vertices(cfg, entry);
-
-        let locally_unreachable = compute_locally_unreachable(cfg, &reachable);
+        let dead_tail_vertices = compute_dead_tail_vertices(cfg, entry);
 
         let unreachable_ranges = collect_unreachable_ranges(cfg, source_map, entry, exit, |idx| {
-            locally_unreachable.contains(&idx)
+            dead_tail_vertices.contains(&idx)
         });
 
         create_diagnostics(&mut diagnostics, unreachable_ranges, source_text.as_str(), code, ctx);
@@ -66,11 +64,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         if let Some(entry) = cfg.entry_point() {
             let exit = cfg.exit_point();
-            let reachable = compute_reachable_vertices(&cfg, entry);
+            let dead_tail_vertices = compute_dead_tail_vertices(&cfg, entry);
 
             let unreachable_ranges =
                 collect_unreachable_ranges(&cfg, source_map, entry, exit, |idx| {
-                    !reachable.contains(&idx)
+                    dead_tail_vertices.contains(&idx)
                 });
 
             create_diagnostics(
@@ -113,7 +111,7 @@ where
                     ranges.push(range);
                 }
             }
-        } else if let Some(range) = get_vertex_range(vertex, source_map) {
+        } else if let Some(range) = get_vertex_range(cfg, vertex_idx, vertex, source_map) {
             ranges.push(range);
         }
     }
@@ -175,13 +173,31 @@ fn merge_ranges(mut ranges: Vec<TextRange>, source_text: &str) -> Vec<TextRange>
     merged
 }
 
-fn compute_reachable_vertices(
+fn compute_dead_tail_vertices(
     cfg: &hir::cfg::ControlFlowGraph,
     entry: hir::cfg::NodeIndex,
 ) -> std::collections::HashSet<hir::cfg::NodeIndex> {
-    use std::collections::HashSet;
+    let reachable_with_all_edges = compute_reachable_vertices(cfg, entry, |_| true);
+    let reachable_without_dead_edges =
+        compute_reachable_vertices(cfg, entry, |edge_type| !edge_type.is_dead_code_edge());
+    let exit = cfg.exit_point();
 
-    let mut reachable = HashSet::new();
+    reachable_with_all_edges
+        .difference(&reachable_without_dead_edges)
+        .copied()
+        .filter(|&vertex| vertex != entry && vertex != exit)
+        .collect()
+}
+
+fn compute_reachable_vertices<F>(
+    cfg: &hir::cfg::ControlFlowGraph,
+    entry: hir::cfg::NodeIndex,
+    can_traverse: F,
+) -> std::collections::HashSet<hir::cfg::NodeIndex>
+where
+    F: Fn(&hir::cfg::CfgEdgeType) -> bool,
+{
+    let mut reachable = std::collections::HashSet::new();
     let mut worklist = vec![entry];
 
     while let Some(node) = worklist.pop() {
@@ -190,7 +206,7 @@ fn compute_reachable_vertices(
         }
 
         for (target, edge_type) in cfg.outgoing_edges(node) {
-            if !edge_type.is_dead_code_edge() && !reachable.contains(&target) {
+            if can_traverse(edge_type) && !reachable.contains(&target) {
                 worklist.push(target);
             }
         }
@@ -199,56 +215,18 @@ fn compute_reachable_vertices(
     reachable
 }
 
-fn compute_locally_unreachable(
+fn get_vertex_range(
     cfg: &hir::cfg::ControlFlowGraph,
-    reachable: &std::collections::HashSet<hir::cfg::NodeIndex>,
-) -> std::collections::HashSet<hir::cfg::NodeIndex> {
-    use std::collections::HashSet;
-
-    let mut locally_unreachable = HashSet::new();
-
-    for (idx, _vertex) in cfg.vertices() {
-        if reachable.contains(&idx) {
-            continue;
-        }
-
-        if can_reach_reachable_backwards(cfg, idx, reachable) {
-            locally_unreachable.insert(idx);
-        }
+    vertex_idx: hir::cfg::NodeIndex,
+    vertex: &CfgVertex,
+    source_map: &hir::BodySourceMap,
+) -> Option<TextRange> {
+    if let Some(range) =
+        cfg.source_stmt_id(vertex_idx).and_then(|stmt_id| source_map.stmt_range(stmt_id))
+    {
+        return Some(range);
     }
 
-    locally_unreachable
-}
-
-fn can_reach_reachable_backwards(
-    cfg: &hir::cfg::ControlFlowGraph,
-    start: hir::cfg::NodeIndex,
-    reachable: &std::collections::HashSet<hir::cfg::NodeIndex>,
-) -> bool {
-    use std::collections::HashSet;
-
-    let mut visited = HashSet::new();
-    let mut worklist = vec![start];
-
-    while let Some(node) = worklist.pop() {
-        if !visited.insert(node) {
-            continue;
-        }
-
-        for (source, _edge_type) in cfg.incoming_edges(node) {
-            if reachable.contains(&source) {
-                return true;
-            }
-            if !visited.contains(&source) {
-                worklist.push(source);
-            }
-        }
-    }
-
-    false
-}
-
-fn get_vertex_range(vertex: &CfgVertex, source_map: &hir::BodySourceMap) -> Option<TextRange> {
     match vertex {
         CfgVertex::BasicBlock(block) => {
             let statements = block.statements();
@@ -718,7 +696,7 @@ mod tests {
             UnreachableCode @ 172:5..172:13
               message: Недостижимый код
               severity: Error
-            UnreachableCode @ 176:5..179:13
+            UnreachableCode @ 175:1..180:11
               message: Недостижимый код
               severity: Error
             UnreachableCode @ 182:1..183:9
@@ -821,6 +799,130 @@ mod tests {
             DiagnosticCode::UnreachableCode,
             expect![[r#"
             UnreachableCode @ 7:5..7:13
+              message: Недостижимый код
+              severity: Error"#]],
+        );
+    }
+
+    #[test]
+    fn unreachable_if_after_return_starts_at_if_header() {
+        let code = r#"
+Процедура Тест()
+    Возврат;
+    Если Условие Тогда
+        Метод();
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 4:5..6:15
+              message: Недостижимый код
+              severity: Error"#]],
+        );
+    }
+
+    #[test]
+    fn unreachable_try_after_return_starts_at_try_header() {
+        let code = r#"
+Процедура Тест()
+    Возврат;
+    Попытка
+        Метод();
+    Исключение
+        Метод2();
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 4:5..8:18
+              message: Недостижимый код
+              severity: Error"#]],
+        );
+    }
+
+    #[test]
+    fn unreachable_while_after_return_covers_whole_loop() {
+        let code = r#"
+Процедура Тест()
+    Возврат;
+    Пока Условие Цикл
+        Метод();
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 4:5..6:16
+              message: Недостижимый код
+              severity: Error"#]],
+        );
+    }
+
+    #[test]
+    fn unreachable_label_after_return_is_in_diagnostic_range() {
+        let code = r#"
+Процедура Тест()
+    Возврат;
+    ~Метка:
+    Сообщить("Недостижимо");
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 4:5..5:28
+              message: Недостижимый код
+              severity: Error"#]],
+        );
+    }
+
+    #[test]
+    fn reachable_goto_target_after_return_has_no_diagnostic() {
+        let code = r#"
+Процедура Тест()
+    Если Условие Тогда
+        Перейти ~Продолжение;
+    КонецЕсли;
+    Возврат;
+    ~Продолжение:
+    Сообщить("Достижимо");
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnreachableCode, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn unreachable_if_ranges_match_in_module_and_method_code() {
+        let code = r#"
+Возврат;
+Если Условие Тогда
+    Метод();
+КонецЕсли;
+
+Процедура Тест()
+    Возврат;
+    Если Условие Тогда
+        Метод();
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 3:1..5:11
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 9:5..11:15
               message: Недостижимый код
               severity: Error"#]],
         );

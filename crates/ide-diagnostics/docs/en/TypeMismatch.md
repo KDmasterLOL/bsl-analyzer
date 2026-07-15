@@ -3,21 +3,32 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-This diagnostic is reserved for cases where the inferred type of an expression does not match the type expected by the surrounding context.
+This diagnostic is reported when a call argument's inferred type is incompatible with the parameter types of every arity-compatible candidate.
 
-At the moment, the handler and metadata already exist, but the live emitter in type inference is still disabled. So this diagnostic is not yet produced for user code.
+Currently, `TypeMismatch` is active for call-argument validation. When a function or method is called, the analyzer collects all candidate signatures, evaluates arity and applicability, and reports a mismatch only when the call is rejected.
 
-When the emitter is enabled, the expected use case is reporting situations such as assigning a value of an incompatible type, passing an argument of the wrong type, or returning a value that does not match the declared expectations of the surrounding context.
+### Candidate Resolution Flow
+
+The analyzer resolves each call into exactly one of three mutually exclusive selection states:
+
+1. **Unique**: After ranking, exactly one candidate is the best known-applicable survivor. Its parameter types are used for validation.
+2. **Ambiguous**: Either multiple known-applicable candidates tie for the best score, or one or more indeterminate candidates survive while no known-applicable candidate exists. If at least one candidate survives, no `TypeMismatch` is reported.
+3. **Rejected**: No candidate survives. The arguments are incompatible with every arity-compatible signature, or no candidate matches the call's arity. `TypeMismatch` fires only for a type rejection, reporting the deterministic least-incompatible rejected candidate's first incompatible argument.
+
+### Key Rules
+
+- **Doc-Comment Split**: Mismatches where the expected type is derived from JSDoc comments are reported as `TypeMismatchByDocComment` to distinguish between platform-enforced types and user-defined documentation.
+- **Unknown Arguments**: An argument or parameter of type `Unknown` is indeterminate and does not itself cause `TypeMismatch`. Other concrete incompatible arguments can still reject the call.
+- **Ambiguity**: Ambiguity in type resolution does not trigger a `TypeMismatch`. The diagnostic only fires when the candidate selection is explicitly rejected.
 
 ## Examples
 
-Planned future example:
-
 ```bsl
-Value = 1;
-Value = "text"; // type mismatch in a stricter typed context
+// ValueTable.Insert expects a Number for the index
+ValueTable.Insert("not a number"); // Type mismatch: expected 'Number', found 'String'
 ```
 
 ## Sources
 
 - Internal type-inference based diagnostic in `hir-ty`
+- Platform metadata and curated overlays in `bsl-platform`

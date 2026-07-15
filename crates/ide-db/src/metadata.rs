@@ -6,6 +6,7 @@ use stdx::case::CaseExt;
 #[salsa::interned(debug)]
 pub struct ConfigurationPathInput {
     pub path: String,
+    #[returns(copy)]
     pub root_revision: u32,
 }
 
@@ -25,6 +26,7 @@ pub fn intern_configuration_path<'db>(
 /// instead of a single global counter invalidating every configuration.
 #[salsa::input(debug)]
 pub struct ConfigRevisionInput {
+    #[returns(copy)]
     pub revision: u32,
 }
 
@@ -43,6 +45,7 @@ pub(crate) fn canonicalize_configuration_path(raw_path: &str) -> String {
 
 #[salsa::input(singleton, debug)]
 pub struct WorkspaceConfigsInput {
+    #[returns(clone)]
     pub paths: Vec<(Option<String>, PathBuf)>,
 }
 
@@ -53,6 +56,7 @@ pub struct WorkspaceConfigsInput {
 /// there is exactly one global fallback per database.
 #[salsa::input(singleton, debug)]
 pub struct GlobalConfigRevisionInput {
+    #[returns(copy)]
     pub revision: u32,
 }
 
@@ -69,6 +73,7 @@ pub struct GlobalConfigRevisionInput {
 /// flip then invalidates anything that resolved against the gated stub.
 #[salsa::input(singleton, debug)]
 pub struct WorkspaceLoadStateInput {
+    #[returns(copy)]
     pub complete: bool,
 }
 
@@ -79,7 +84,7 @@ pub struct WorkspaceLoadStateInput {
 // re-enter the metadata loader's `rayon::scope` inside a worker thread), so an eviction
 // under the cap would let that load run in parallel and break the build's concurrency
 // invariant. 1024 is far above any real extension count while still bounded.
-#[salsa::tracked(lru = 1024)]
+#[salsa::tracked(lru = 1024, returns(clone))]
 pub fn load_configuration<'db>(
     db: &'db dyn salsa::Database,
     path_input: ConfigurationPathInput<'db>,
@@ -112,7 +117,7 @@ pub fn load_configuration<'db>(
 /// heavily-extended project. Keyed on the two path inputs (which carry the config-root
 /// revisions), so the merge runs once per extension and re-runs only when a config
 /// actually changes. The result is identical to the inline merge, just shared.
-#[salsa::tracked(lru = 1024)]
+#[salsa::tracked(lru = 1024, returns(clone))]
 pub fn merged_configuration<'db>(
     db: &'db dyn MetadataDb,
     main_input: ConfigurationPathInput<'db>,
@@ -133,8 +138,11 @@ pub fn merged_configuration<'db>(
 /// revisions drive invalidation, so editing one MDO's XML re-parses only it.
 #[salsa::interned(debug)]
 pub struct MdoFiles<'db> {
+    #[returns(copy)]
     pub mdo_type: bsl_metadata::MdoType,
+    #[returns(copy)]
     pub main: vfs::FileId,
+    #[returns(copy)]
     pub predefined: Option<vfs::FileId>,
 }
 
@@ -169,20 +177,20 @@ fn warn_on_stem_name_divergence(kind: &str, stem_key: &str, xml_name: &str) {
 /// VFS (`file_text`). Memoised per MDO and backdated on an unchanged object, so a
 /// reload re-parses only the files that actually changed and only that object's
 /// consumers are invalidated.
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_mdo_query<'db>(
     db: &'db dyn base_db::SourceDatabase,
     files: MdoFiles<'db>,
 ) -> Option<Arc<bsl_metadata::MetadataObject>> {
     let _span = tracing::info_span!("parse_mdo").entered();
 
-    let main_text = db.file_text(files.main(db));
-    let predefined_text = files.predefined(db).map(|fid| db.file_text(fid));
+    let main_text = db.file_text_ref(files.main(db));
+    let predefined_text = files.predefined(db).map(|fid| db.file_text_ref(fid));
 
     bsl_metadata::parse_metadata_object_from_texts(
         files.mdo_type(db),
-        &main_text,
-        predefined_text.as_deref(),
+        main_text,
+        predefined_text.map(|t| &**t),
     )
     .map(Arc::new)
 }
@@ -369,7 +377,7 @@ impl ConfigIndex {
 /// Build a config root's name lookup from its structure listing. Tracked on the
 /// listing input alone, so it re-runs only on a structure change (add/remove/
 /// rename), not on a content edit — those flow through [`parse_mdo_query`].
-#[salsa::tracked]
+#[salsa::tracked(returns(ref))]
 pub fn config_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -396,7 +404,7 @@ pub fn config_index(
 /// resolutions in the same root stay memoised. An add/remove re-runs
 /// `config_index`, so an absent-name miss correctly invalidates when the MDO later
 /// appears. Extension overlay across roots is composed by callers, not here.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_metadata_object(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -418,22 +426,22 @@ pub fn resolve_metadata_object(
 /// [`MdoFiles`] (registers have no predefined sidecar) but a separate tracked fn,
 /// so a register and an object never share a memo. Backdates on an unchanged
 /// register.
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_register_query(
     db: &dyn base_db::SourceDatabase,
     files: MdoFiles<'_>,
 ) -> Option<Arc<bsl_metadata::Register>> {
     let _span = tracing::info_span!("parse_register").entered();
 
-    let main_text = db.file_text(files.main(db));
-    bsl_metadata::parse_register_from_text(files.mdo_type(db), &main_text).map(Arc::new)
+    let main_text = db.file_text_ref(files.main(db));
+    bsl_metadata::parse_register_from_text(files.mdo_type(db), main_text).map(Arc::new)
 }
 
 /// Resolve a single register within one config root, the register counterpart of
 /// [`resolve_metadata_object`]. Shares [`config_index`] (the listing carries
 /// register entries too) but parses via [`parse_register_query`]. Extension
 /// overlay across roots is composed by callers.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_register(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -456,7 +464,7 @@ pub fn resolve_register(
 /// [`parse_register_query`]. Same per-MDO granularity and absent-name
 /// invalidation as [`resolve_register`]; extension overlay across roots is
 /// composed by callers.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_register_by_name(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -477,6 +485,7 @@ pub fn resolve_register_by_name(
 /// drives invalidation, so editing one defined type re-parses only it.
 #[salsa::interned(debug)]
 pub struct DefinedTypeFile<'db> {
+    #[returns(copy)]
     pub main: vfs::FileId,
 }
 
@@ -485,15 +494,15 @@ pub struct DefinedTypeFile<'db> {
 /// so [`resolve_defined_type`] can flag a stem-vs-`<Name>` divergence, then projects
 /// to the underlying type (the resolution unit; an extension overlay replaces it
 /// wholesale). Backdates on an unchanged defined type.
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_defined_type_query(
     db: &dyn base_db::SourceDatabase,
     file: DefinedTypeFile<'_>,
 ) -> Option<Arc<bsl_metadata::DefinedType>> {
     let _span = tracing::info_span!("parse_defined_type").entered();
 
-    let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_defined_type_from_text(&main_text).map(Arc::new)
+    let main_text = db.file_text_ref(file.main(db));
+    bsl_metadata::parse_defined_type_from_text(main_text).map(Arc::new)
 }
 
 /// A config root's `lowercased-name -> defined-type file` lookup, derived from its
@@ -512,7 +521,7 @@ impl DefinedTypeIndex {
 }
 
 /// Build a config root's defined-type name lookup from its structure listing.
-#[salsa::tracked]
+#[salsa::tracked(returns(ref))]
 pub fn defined_type_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -531,7 +540,7 @@ pub fn defined_type_index(
 /// per-defined-type Salsa granularity. The defined-type counterpart of
 /// [`resolve_metadata_object`]; extension overlay across roots is composed by
 /// callers (an extension replaces the underlying type wholesale).
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_defined_type(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -552,6 +561,7 @@ pub fn resolve_defined_type(
 /// drives invalidation, so editing one common module re-parses only it.
 #[salsa::interned(debug)]
 pub struct CommonModuleFile<'db> {
+    #[returns(copy)]
     pub main: vfs::FileId,
 }
 
@@ -559,15 +569,15 @@ pub struct CommonModuleFile<'db> {
 /// VFS. The common-module counterpart of [`parse_defined_type_query`]; only metadata
 /// (flags + name) is read — the module body is resolved through the symbol tree.
 /// Backdates on unchanged metadata.
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_common_module_query(
     db: &dyn base_db::SourceDatabase,
     file: CommonModuleFile<'_>,
 ) -> Option<Arc<bsl_metadata::CommonModule>> {
     let _span = tracing::info_span!("parse_common_module").entered();
 
-    let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_common_module_from_text(&main_text).map(Arc::new)
+    let main_text = db.file_text_ref(file.main(db));
+    bsl_metadata::parse_common_module_from_text(main_text).map(Arc::new)
 }
 
 /// A config root's common-module lookup, derived from its [`MetadataListingInput`]'s
@@ -602,7 +612,7 @@ impl CommonModuleIndex {
 }
 
 /// Build a config root's common-module lookup from its structure listing.
-#[salsa::tracked]
+#[salsa::tracked(returns(ref))]
 pub fn common_module_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -627,7 +637,7 @@ pub fn common_module_index(
 /// per-common-module Salsa granularity. The common-module counterpart of
 /// [`resolve_defined_type`]; extension overlay across roots is composed by callers
 /// (an extension replaces the module wholesale).
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_common_module(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -647,7 +657,7 @@ pub fn resolve_common_module(
 /// Resolve the common module whose `Ext/Module.bsl` is `module_file` within one
 /// config root. Answers "which common module owns this `.bsl`?" via the reverse
 /// index, then parses that module's metadata at per-common-module granularity.
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_common_module_by_file(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -670,10 +680,11 @@ fn service_name_from_main_file(db: &dyn crate::RootDatabase, main: vfs::FileId) 
 
 #[salsa::interned(debug)]
 pub struct HTTPServiceFile<'db> {
+    #[returns(copy)]
     pub main: vfs::FileId,
 }
 
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_http_service_query(
     db: &dyn crate::RootDatabase,
     file: HTTPServiceFile<'_>,
@@ -681,9 +692,9 @@ pub fn parse_http_service_query(
     let _span = tracing::info_span!("parse_http_service").entered();
 
     let main = file.main(db);
-    let main_text = db.file_text(main);
+    let main_text = db.file_text_ref(main);
     let name = service_name_from_main_file(db, main);
-    bsl_metadata::parse_http_service_from_text(&main_text, &name).map(Arc::new)
+    bsl_metadata::parse_http_service_from_text(main_text, &name).map(Arc::new)
 }
 
 #[derive(Default, PartialEq, Eq, Debug)]
@@ -707,7 +718,7 @@ impl HTTPServiceIndex {
     }
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(ref))]
 pub fn http_service_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -728,7 +739,7 @@ pub fn http_service_index(
     Arc::new(HTTPServiceIndex { by_name, by_module_file, module_file_by_name })
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_http_service(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -742,7 +753,7 @@ pub fn resolve_http_service(
     parse_http_service_query(db, file)
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_http_service_by_file(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -759,10 +770,11 @@ pub fn resolve_http_service_by_file(
 
 #[salsa::interned(debug)]
 pub struct WebServiceFile<'db> {
+    #[returns(copy)]
     pub main: vfs::FileId,
 }
 
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_web_service_query(
     db: &dyn crate::RootDatabase,
     file: WebServiceFile<'_>,
@@ -770,9 +782,9 @@ pub fn parse_web_service_query(
     let _span = tracing::info_span!("parse_web_service").entered();
 
     let main = file.main(db);
-    let main_text = db.file_text(main);
+    let main_text = db.file_text_ref(main);
     let name = service_name_from_main_file(db, main);
-    bsl_metadata::parse_web_service_from_text(&main_text, &name).map(Arc::new)
+    bsl_metadata::parse_web_service_from_text(main_text, &name).map(Arc::new)
 }
 
 #[derive(Default, PartialEq, Eq, Debug)]
@@ -796,7 +808,7 @@ impl WebServiceIndex {
     }
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(ref))]
 pub fn web_service_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -817,7 +829,7 @@ pub fn web_service_index(
     Arc::new(WebServiceIndex { by_name, by_module_file, module_file_by_name })
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_web_service(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -831,7 +843,7 @@ pub fn resolve_web_service(
     parse_web_service_query(db, file)
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_web_service_by_file(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -848,10 +860,11 @@ pub fn resolve_web_service_by_file(
 
 #[salsa::interned(debug)]
 pub struct IntegrationServiceFile<'db> {
+    #[returns(copy)]
     pub main: vfs::FileId,
 }
 
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_integration_service_query(
     db: &dyn crate::RootDatabase,
     file: IntegrationServiceFile<'_>,
@@ -859,9 +872,9 @@ pub fn parse_integration_service_query(
     let _span = tracing::info_span!("parse_integration_service").entered();
 
     let main = file.main(db);
-    let main_text = db.file_text(main);
+    let main_text = db.file_text_ref(main);
     let name = service_name_from_main_file(db, main);
-    bsl_metadata::parse_integration_service_from_text(&main_text, &name).map(Arc::new)
+    bsl_metadata::parse_integration_service_from_text(main_text, &name).map(Arc::new)
 }
 
 #[derive(Default, PartialEq, Eq, Debug)]
@@ -885,7 +898,7 @@ impl IntegrationServiceIndex {
     }
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(ref))]
 pub fn integration_service_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -906,7 +919,7 @@ pub fn integration_service_index(
     Arc::new(IntegrationServiceIndex { by_name, by_module_file, module_file_by_name })
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_integration_service(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -920,7 +933,7 @@ pub fn resolve_integration_service(
     parse_integration_service_query(db, file)
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_integration_service_by_file(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -940,20 +953,21 @@ pub fn resolve_integration_service_by_file(
 /// revision drives invalidation, so editing one subscription re-parses only it.
 #[salsa::interned(debug)]
 pub struct EventSubscriptionFile<'db> {
+    #[returns(copy)]
     pub main: vfs::FileId,
 }
 
 /// Parse one event subscription from its main XML, read through the versioned VFS.
 /// Backdates on unchanged metadata.
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_event_subscription_query(
     db: &dyn base_db::SourceDatabase,
     file: EventSubscriptionFile<'_>,
 ) -> Option<Arc<bsl_metadata::EventSubscription>> {
     let _span = tracing::info_span!("parse_event_subscription").entered();
 
-    let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_event_subscription_from_text(&main_text).map(Arc::new)
+    let main_text = db.file_text_ref(file.main(db));
+    bsl_metadata::parse_event_subscription_from_text(main_text).map(Arc::new)
 }
 
 /// A config root's event-subscription lookup, derived from its
@@ -972,7 +986,7 @@ impl EventSubscriptionIndex {
 }
 
 /// Build a config root's event-subscription name lookup from its structure listing.
-#[salsa::tracked]
+#[salsa::tracked(returns(ref))]
 pub fn event_subscription_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -990,7 +1004,7 @@ pub fn event_subscription_index(
 /// Resolve a single event subscription's metadata by name within one config root,
 /// at per-event-subscription Salsa granularity. Extension overlay across roots is
 /// composed by callers (an extension replaces the subscription wholesale).
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_event_subscription(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1011,21 +1025,22 @@ pub fn resolve_event_subscription(
 /// drives invalidation, so editing one scheduled job re-parses only it.
 #[salsa::interned(debug)]
 pub struct ScheduledJobFile<'db> {
+    #[returns(copy)]
     pub main: vfs::FileId,
 }
 
 /// Parse one scheduled job from its main XML, read through the versioned VFS. The
 /// scheduled-job counterpart of [`parse_event_subscription_query`]; backdates on
 /// unchanged metadata.
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_scheduled_job_query(
     db: &dyn base_db::SourceDatabase,
     file: ScheduledJobFile<'_>,
 ) -> Option<Arc<bsl_metadata::ScheduledJob>> {
     let _span = tracing::info_span!("parse_scheduled_job").entered();
 
-    let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_scheduled_job_from_text(&main_text).map(Arc::new)
+    let main_text = db.file_text_ref(file.main(db));
+    bsl_metadata::parse_scheduled_job_from_text(main_text).map(Arc::new)
 }
 
 /// A config root's scheduled-job lookup, derived from its
@@ -1044,7 +1059,7 @@ impl ScheduledJobIndex {
 }
 
 /// Build a config root's scheduled-job name lookup from its structure listing.
-#[salsa::tracked]
+#[salsa::tracked(returns(ref))]
 pub fn scheduled_job_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1063,7 +1078,7 @@ pub fn scheduled_job_index(
 /// per-scheduled-job Salsa granularity. The scheduled-job counterpart of
 /// [`resolve_event_subscription`]; extension overlay across roots is composed by
 /// callers (an extension replaces the job wholesale).
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_scheduled_job(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1081,20 +1096,22 @@ pub fn resolve_scheduled_job(
 
 #[salsa::interned(debug)]
 pub struct RoleFiles<'db> {
+    #[returns(copy)]
     pub main: vfs::FileId,
+    #[returns(copy)]
     pub rights: Option<vfs::FileId>,
 }
 
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_role_query(
     db: &dyn base_db::SourceDatabase,
     files: RoleFiles<'_>,
 ) -> Option<Arc<bsl_metadata::Role>> {
     let _span = tracing::info_span!("parse_role").entered();
 
-    let main_text = db.file_text(files.main(db));
-    let rights_text = files.rights(db).map(|fid| db.file_text(fid));
-    bsl_metadata::parse_role_from_texts(&main_text, rights_text.as_deref()).map(Arc::new)
+    let main_text = db.file_text_ref(files.main(db));
+    let rights_text = files.rights(db).map(|fid| db.file_text_ref(fid));
+    bsl_metadata::parse_role_from_texts(main_text, rights_text.map(|t| &**t)).map(Arc::new)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1114,7 +1131,7 @@ impl RoleIndex {
     }
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(ref))]
 pub fn role_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1132,7 +1149,7 @@ pub fn role_index(
     Arc::new(RoleIndex { by_name })
 }
 
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_role(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1154,21 +1171,22 @@ pub fn resolve_role(
 /// subsystem counterpart of [`ScheduledJobFile`].
 #[salsa::interned(debug)]
 pub struct SubsystemFile<'db> {
+    #[returns(copy)]
     pub main: vfs::FileId,
 }
 
 /// Parse one subsystem from its main XML, read through the versioned VFS. The
 /// subsystem counterpart of [`parse_scheduled_job_query`]; backdates on
 /// unchanged metadata.
-#[salsa::tracked(lru = 8192)]
+#[salsa::tracked(lru = 8192, returns(clone))]
 pub fn parse_subsystem_query(
     db: &dyn base_db::SourceDatabase,
     file: SubsystemFile<'_>,
 ) -> Option<Arc<bsl_metadata::Subsystem>> {
     let _span = tracing::info_span!("parse_subsystem").entered();
 
-    let main_text = db.file_text(file.main(db));
-    bsl_metadata::parse_subsystem_from_text(&main_text).map(Arc::new)
+    let main_text = db.file_text_ref(file.main(db));
+    bsl_metadata::parse_subsystem_from_text(main_text).map(Arc::new)
 }
 
 /// A config root's subsystem lookup, derived from its [`MetadataListingInput`]'s
@@ -1187,7 +1205,7 @@ impl SubsystemIndex {
 }
 
 /// Build a config root's subsystem name lookup from its structure listing.
-#[salsa::tracked]
+#[salsa::tracked(returns(ref))]
 pub fn subsystem_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1207,7 +1225,7 @@ pub fn subsystem_index(
 /// [`resolve_scheduled_job`]; extension overlay across roots is composed by
 /// callers (an extension adds to a same-name base via
 /// [`bsl_metadata::Subsystem::merge_from`]).
-#[salsa::tracked]
+#[salsa::tracked(returns(clone))]
 pub fn resolve_subsystem(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,

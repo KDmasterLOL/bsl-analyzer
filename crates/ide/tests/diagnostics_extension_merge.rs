@@ -244,3 +244,193 @@ fn goto_definition_on_change_and_validate_annotation_jumps_to_base_method() {
     assert_eq!(target.file_id, fx.main_file, "must navigate to the base module file");
     assert_eq!(target.name, "Цель");
 }
+
+// ---------------------------------------------------------------------------
+// Adopted common module: cross-module qualified calls.
+//
+// A module adopted by an extension shares its base module's name. Qualified
+// calls must see the base body from anywhere, the extension's additions only
+// from that extension's own code:
+//   - base-config caller → base methods resolve, extension-added methods stay
+//     unresolved (the extension can be detached at any time);
+//   - the adopting extension's caller → base methods AND its own additions;
+//   - a sibling extension's caller → base methods only.
+
+const ADOPTED_BASE: &str = "Функция БазовыйМетод() Экспорт\n\tВозврат 1;\nКонецФункции";
+const ADOPTED_EXT: &str = "&Вместо(\"БазовыйМетод\")\nФункция X_БазовыйМетод()\n\tВозврат ПродолжитьВызов();\nКонецФункции\n\nФункция ДобавленныйМетод() Экспорт\n\tВозврат 2;\nКонецФункции";
+const ADOPTED_CALLER: &str = "Процедура Проверка() Экспорт\n\tА = М.БазовыйМетод();\n\tБ = М.ДобавленныйМетод();\nКонецПроцедуры";
+
+struct AdoptedFixture {
+    analysis: Analysis,
+    base_caller: FileId,
+    own_ext_caller: FileId,
+    other_ext_caller: FileId,
+}
+
+// The metadata loader discovers a common module only when both the sibling
+// `<name>.xml` and the `<name>/Ext/Module.bsl` body exist on disk, so the body
+// text is written to the filesystem as well as into the VFS.
+fn write_common_module(root: &std::path::Path, name: &str, uuid_tail: &str, body: &str) {
+    std::fs::create_dir_all(root.join(format!("CommonModules/{name}/Ext"))).unwrap();
+    std::fs::write(root.join(format!("CommonModules/{name}/Ext/Module.bsl")), body).unwrap();
+    std::fs::write(
+        root.join(format!("CommonModules/{name}.xml")),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="00000000-0000-0000-0000-0000000000{uuid_tail}">
+        <Properties>
+            <Name>{name}</Name>
+            <Global>false</Global>
+            <Server>true</Server>
+        </Properties>
+    </CommonModule>
+</MetaDataObject>"#,
+        ),
+    )
+    .unwrap();
+}
+
+fn setup_adopted() -> AdoptedFixture {
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("src/cf");
+    let ext_x_root = temp.path().join("src/cfe/X");
+    let ext_y_root = temp.path().join("src/cfe/Y");
+    let write_config = |root: &std::path::Path, name: &str, modules: &[&str]| {
+        std::fs::create_dir_all(root).unwrap();
+        let children = modules
+            .iter()
+            .map(|m| format!("            <CommonModule>{m}</CommonModule>\n"))
+            .collect::<String>();
+        std::fs::write(
+            root.join("Configuration.xml"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="11111111-1111-1111-1111-111111111111">
+        <Properties>
+            <Name>{name}</Name>
+        </Properties>
+        <ChildObjects>
+{children}        </ChildObjects>
+    </Configuration>
+</MetaDataObject>"#,
+            ),
+        )
+        .unwrap();
+    };
+    write_config(&main_root, "Тестовая", &["М", "Вызывающий"]);
+    write_config(&ext_x_root, "X", &["М", "СвойМодульИкс"]);
+    write_config(&ext_y_root, "Y", &["ЧужойМодульИгрек"]);
+    std::mem::forget(temp);
+
+    write_common_module(&main_root, "М", "01", ADOPTED_BASE);
+    write_common_module(&main_root, "Вызывающий", "02", ADOPTED_CALLER);
+    write_common_module(&ext_x_root, "М", "03", ADOPTED_EXT);
+    write_common_module(&ext_x_root, "СвойМодульИкс", "04", ADOPTED_CALLER);
+    write_common_module(&ext_y_root, "ЧужойМодульИгрек", "05", ADOPTED_CALLER);
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_x_root.clone()),
+        (Some("Y".to_string()), ext_y_root.clone()),
+    ]);
+
+    // The extension's adopted body is inserted BEFORE the base body — the
+    // adversarial order for a last-write-wins name index.
+    let ext_module = FileId(0);
+    let base_module = FileId(1);
+    let base_caller = FileId(2);
+    let own_ext_caller = FileId(3);
+    let other_ext_caller = FileId(4);
+    let mut file_set = FileSet::default();
+    let insert = |fs: &mut FileSet, id, path: std::path::PathBuf| {
+        fs.insert(id, VfsPath::new(path.to_string_lossy().as_ref()));
+    };
+    insert(&mut file_set, ext_module, ext_x_root.join("CommonModules/М/Ext/Module.bsl"));
+    insert(&mut file_set, base_module, main_root.join("CommonModules/М/Ext/Module.bsl"));
+    insert(&mut file_set, base_caller, main_root.join("CommonModules/Вызывающий/Ext/Module.bsl"));
+    insert(
+        &mut file_set,
+        own_ext_caller,
+        ext_x_root.join("CommonModules/СвойМодульИкс/Ext/Module.bsl"),
+    );
+    insert(
+        &mut file_set,
+        other_ext_caller,
+        ext_y_root.join("CommonModules/ЧужойМодульИгрек/Ext/Module.bsl"),
+    );
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for id in [ext_module, base_module, base_caller, own_ext_caller, other_ext_caller] {
+        db.set_file_source_root(id, SourceRootId(0));
+    }
+    db.set_file_text(ext_module, ADOPTED_EXT);
+    db.set_file_text(base_module, ADOPTED_BASE);
+    db.set_file_text(base_caller, ADOPTED_CALLER);
+    db.set_file_text(own_ext_caller, ADOPTED_CALLER);
+    db.set_file_text(other_ext_caller, ADOPTED_CALLER);
+
+    AdoptedFixture {
+        analysis: Analysis::from_database(db),
+        base_caller,
+        own_ext_caller,
+        other_ext_caller,
+    }
+}
+
+fn unresolved_method_messages(analysis: &Analysis, file: FileId) -> Vec<String> {
+    analysis
+        .diagnostics(file, &DiagnosticsConfig::all_enabled())
+        .into_iter()
+        .filter(|d| d.code == ide::DiagnosticCode::UnresolvedMethodCall)
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn base_caller_resolves_base_method_of_adopted_module() {
+    let fx = setup_adopted();
+    let unresolved = unresolved_method_messages(&fx.analysis, fx.base_caller);
+    assert!(
+        !unresolved.iter().any(|m| m.contains("БазовыйМетод")),
+        "a base-only exported method must resolve from base-config code even though an \
+         extension adopts the module; got {unresolved:?}",
+    );
+}
+
+#[test]
+fn base_caller_does_not_see_extension_added_method() {
+    let fx = setup_adopted();
+    let unresolved = unresolved_method_messages(&fx.analysis, fx.base_caller);
+    assert!(
+        unresolved.iter().any(|m| m.contains("ДобавленныйМетод")),
+        "an extension-added export must stay unresolved for base-config code; got {unresolved:?}",
+    );
+}
+
+#[test]
+fn adopting_extension_caller_sees_base_and_own_added_methods() {
+    let fx = setup_adopted();
+    let unresolved = unresolved_method_messages(&fx.analysis, fx.own_ext_caller);
+    assert!(
+        unresolved.is_empty(),
+        "the adopting extension's code must see both the base method and its own added \
+         method; got {unresolved:?}",
+    );
+}
+
+#[test]
+fn sibling_extension_caller_sees_base_but_not_foreign_added_method() {
+    let fx = setup_adopted();
+    let unresolved = unresolved_method_messages(&fx.analysis, fx.other_ext_caller);
+    assert!(
+        !unresolved.iter().any(|m| m.contains("БазовыйМетод")),
+        "the base method must resolve from a sibling extension; got {unresolved:?}",
+    );
+    assert!(
+        unresolved.iter().any(|m| m.contains("ДобавленныйМетод")),
+        "another extension's added export must stay unresolved for a sibling extension; \
+         got {unresolved:?}",
+    );
+}

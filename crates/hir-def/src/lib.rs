@@ -1,11 +1,13 @@
 pub mod body;
 pub mod call_graph;
+pub mod call_hierarchy_index;
 pub mod catch_class;
 pub mod common_module_ref;
 pub mod conditional_tree;
 pub mod configs;
 pub mod docs;
 pub mod effective_module;
+pub mod execution_env;
 pub mod extension_merge;
 pub mod graph_index;
 pub(crate) mod heap_estimate;
@@ -18,6 +20,7 @@ pub mod module_structure;
 pub mod name;
 pub mod name_usage_index;
 pub mod path;
+pub mod preproc_condition;
 pub mod queries;
 pub mod region_tree;
 pub mod resolver;
@@ -40,6 +43,7 @@ pub use body::{
     lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, DeprecatedKind8312,
     ExistingBindingKind, ExternalRef, LowerResult, ManagerType, RedundantAccessKind,
 };
+pub use call_hierarchy_index::{CallHierarchyReverseIndex, MethodCallPair};
 pub use hir::{BinaryOp, Binding, Expr, IfStmt, Literal, Stmt, UnaryOp};
 
 pub use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
@@ -52,8 +56,8 @@ pub use module_index::{
 };
 pub use name::Name;
 pub use name_usage_index::{
-    file_name_usage_query, normalize_name, source_root_name_usage_query, FileNameUsage,
-    SourceRootNameUsage,
+    file_name_offsets_query, file_name_usage_query, normalize_match_name, normalize_name,
+    source_root_name_usage_query, FileNameOffsets, FileNameUsage, SourceRootNameUsage,
 };
 pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
@@ -77,17 +81,38 @@ pub use queries::{
 pub trait DefDatabase: base_db::RootQueryDb {
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree>;
 
+    /// Borrowed variant of [`item_tree`](Self::item_tree) for read-only paths:
+    /// no `Arc` refcount traffic per read (`.clone()` the result if ownership
+    /// is needed after all).
+    fn item_tree_ref(&self, file_id: FileId) -> &Arc<ItemTree>;
+
     fn region_tree(&self, file_id: FileId) -> Arc<RegionTree>;
 
     fn conditional_tree(&self, file_id: FileId) -> Arc<ConditionalTree>;
+
+    /// Borrowed variant of [`conditional_tree`](Self::conditional_tree); see
+    /// [`item_tree_ref`](Self::item_tree_ref).
+    fn conditional_tree_ref(&self, file_id: FileId) -> &Arc<ConditionalTree>;
 
     fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData>;
 
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree>;
 
+    /// Borrowed variant of [`symbol_tree`](Self::symbol_tree); see
+    /// [`item_tree_ref`](Self::item_tree_ref).
+    fn symbol_tree_ref(&self, module_id: ModuleId) -> &Arc<SymbolTree>;
+
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies>;
 
+    /// Borrowed variant of [`module_bodies`](Self::module_bodies); see
+    /// [`item_tree_ref`](Self::item_tree_ref).
+    fn module_bodies_ref(&self, module_id: ModuleId) -> &Arc<ModuleBodies>;
+
     fn method_body(&self, method: MethodIdInput<'_>) -> Arc<body::Body>;
+
+    /// Borrowed variant of [`method_body`](Self::method_body); see
+    /// [`item_tree_ref`](Self::item_tree_ref).
+    fn method_body_ref<'db>(&'db self, method: MethodIdInput<'db>) -> &'db Arc<body::Body>;
 
     fn method_body_with_source_map(
         &self,
@@ -113,6 +138,15 @@ pub trait DefDatabase: base_db::RootQueryDb {
         &self,
         source_root_id: SourceRootId,
     ) -> Arc<crate::name_usage_index::SourceRootNameUsage>;
+
+    fn file_name_offsets(&self, file_id: FileId) -> Arc<crate::name_usage_index::FileNameOffsets>;
+
+    /// Borrowed variant of [`file_name_offsets`](Self::file_name_offsets); see
+    /// [`item_tree_ref`](Self::item_tree_ref).
+    fn file_name_offsets_ref(
+        &self,
+        file_id: FileId,
+    ) -> &Arc<crate::name_usage_index::FileNameOffsets>;
 
     fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<ExternalRef>>;
 
@@ -140,6 +174,7 @@ pub struct MethodId {
 
 #[salsa::interned(debug)]
 pub struct MethodIdInput {
+    #[returns(copy)]
     pub method_id: MethodId,
 }
 
@@ -307,7 +342,11 @@ impl ModuleBodies {
                     });
                     if !is_inside_method {
                         collect_module_vars(&node, &mut result.module_vars);
-                        top_level_idx += 1;
+                        top_level_idx += node
+                            .children_with_tokens()
+                            .filter_map(|element| element.into_token())
+                            .filter(|token| token.kind() == SyntaxKind::IDENT)
+                            .count() as u32;
                     }
                 }
                 SyntaxKind::PROCEDURE_DEF => {
@@ -599,6 +638,14 @@ mod module_bodies_order_tests {
         let from_lower_results: Vec<u32> = bodies.iter_lower_results().map(|(id, _)| id).collect();
         assert_eq!(from_iter, from_method_bodies);
         assert_eq!(from_iter, from_lower_results);
+    }
+
+    #[test]
+    fn method_after_multi_name_var_decl_uses_item_tree_local_id() {
+        let bodies = lower("Перем A, B; Процедура P() КонецПроцедуры");
+
+        assert!(bodies.body(2).is_some());
+        assert!(bodies.body(1).is_none());
     }
 }
 

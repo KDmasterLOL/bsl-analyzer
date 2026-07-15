@@ -223,8 +223,18 @@ impl ConditionalTreeBuilder {
 
         self.tree.conditionals[if_idx].siblings = siblings;
 
+        // Only the then-branch subtree belongs to the `If` itself: ElsIf/Else
+        // clauses have already collected their nested directives under their
+        // own parent, and descending into them again would duplicate every
+        // nested conditional once per nesting level.
         self.parent_stack.push(if_idx);
-        self.collect_nested_conditionals(node);
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::PRE_ELSIF_CLAUSE | SyntaxKind::PRE_ELSE_CLAUSE => {}
+                SyntaxKind::PRE_IF_DIR => self.process_if_directive(&child),
+                _ => self.collect_nested_conditionals(&child),
+            }
+        }
         self.parent_stack.pop();
     }
 
@@ -310,32 +320,13 @@ impl ConditionalTreeBuilder {
         let text = node.text().to_string();
         let first_line = text.lines().next().unwrap_or(&text);
 
-        let mut condition = first_line.to_string();
-
-        for keyword in &[
-            "#Если ",
-            "#если ",
-            "#If ",
-            "#if ",
-            "#ИначеЕсли ",
-            "#иначеесли ",
-            "#ElsIf ",
-            "#elsif ",
-        ] {
-            if condition.starts_with(keyword) {
-                condition = condition[keyword.len()..].to_string();
-                break;
-            }
-        }
-
-        for suffix in &[" Тогда", " тогда", " Then", " then", " ТОГДА", " THEN"] {
-            if condition.ends_with(suffix) {
-                condition = condition[..condition.len() - suffix.len()].to_string();
-                break;
-            }
-        }
-
-        let condition = condition.trim().to_string();
+        // The shared header parser strips the directive keyword and the
+        // trailing `Тогда` in any case and around any whitespace; fall back
+        // to the raw line for malformed headers so the display text stays
+        // non-empty (such a condition never parses as a valid one anyway).
+        let condition = crate::preproc_condition::extract_condition_text(first_line)
+            .unwrap_or(first_line.trim())
+            .to_string();
 
         let condition_range = node
             .children()
@@ -428,7 +419,7 @@ fn conditional_tree_heap(v: &std::sync::Arc<ConditionalTree>) -> usize {
     bytes
 }
 
-#[salsa::tracked(lru = 256, heap_size = conditional_tree_heap)]
+#[salsa::tracked(lru = 256, heap_size = conditional_tree_heap, returns(ref))]
 pub fn conditional_tree_query<'db>(
     db: &'db dyn base_db::RootQueryDb,
     file_id_input: base_db::FileIdInput<'db>,
@@ -453,6 +444,42 @@ mod tests {
         let tree = parse_and_lower("");
         assert!(tree.is_empty());
         assert_eq!(tree.root_conditionals().len(), 0);
+    }
+
+    #[test]
+    fn nested_conditional_in_elsif_clause_lowered_once() {
+        let code = r#"
+#Если Клиент Тогда
+Процедура А()
+КонецПроцедуры
+#ИначеЕсли Сервер Тогда
+#Если НЕ ВебКлиент Тогда
+Процедура Б()
+КонецПроцедуры
+#КонецЕсли
+#КонецЕсли
+"#;
+        let tree = parse_and_lower(code);
+
+        // if + elsif + one nested if; a duplicate of the nested node would
+        // both inflate the arena and hang it under the wrong parent.
+        assert_eq!(tree.len(), 3);
+        let nested: Vec<_> = tree
+            .conditionals()
+            .filter(|(_, data)| data.condition_text.as_deref() == Some("НЕ ВебКлиент"))
+            .collect();
+        assert_eq!(nested.len(), 1);
+        let (_, nested_data) = nested[0];
+        let parent = tree.conditional(nested_data.parent.expect("nested must have a parent"));
+        assert_eq!(parent.kind, ConditionalKind::ElsIf);
+    }
+
+    #[test]
+    fn condition_text_strips_keyword_in_any_case() {
+        let tree = parse_and_lower("#ЕСЛИ ВебКлиент ТОГДА\n#КонецЕсли\n");
+        assert_eq!(tree.len(), 1);
+        let cond = tree.conditional(tree.root_conditionals()[0]);
+        assert_eq!(cond.condition_text.as_deref(), Some("ВебКлиент"));
     }
 
     #[test]

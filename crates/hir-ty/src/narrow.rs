@@ -606,6 +606,30 @@ pub fn narrow_or_base<DB: HirDatabase + ?Sized>(
     narrowed_type_at(db, &result, body, expr_id.to_idx(), name).unwrap_or(base)
 }
 
+/// [`narrow_or_base`] for callers that hold the body's dataflow result and
+/// its [`NarrowExprIndex`], paying the vertex lookup instead of a CFG scan.
+pub fn narrow_or_base_indexed<DB: HirDatabase + ?Sized>(
+    db: &DB,
+    body: &Body,
+    result: &dataflow::DataflowResult<NarrowState>,
+    index: &NarrowExprIndex,
+    expr_id: ExprId,
+    base: TypeId,
+) -> TypeId {
+    let Expr::Path(name) = body.expr(expr_id) else {
+        return base;
+    };
+    let narrowed = || -> Option<TypeId> {
+        let node = index.vertex_of(expr_id.to_idx())?;
+        let arms = result.block_in(node)?.get(name)?;
+        if arms.is_empty() {
+            return None;
+        }
+        Some(db.union(arms.to_vec()))
+    };
+    narrowed().unwrap_or(base)
+}
+
 fn containing_vertex(
     body: &Body,
     cfg: &cfg::ControlFlowGraph,
@@ -638,62 +662,146 @@ fn containing_vertex(
     None
 }
 
-fn stmt_covers_expr(body: &Body, stmt_idx: StmtIdx, target: ExprIdx) -> bool {
+/// Expression roots a statement contributes to its basic block, i.e. the
+/// trees [`stmt_covers_expr`] searches. Control statements contribute none:
+/// their conditions live on dedicated CFG vertices.
+fn for_each_stmt_expr_root(body: &Body, stmt_idx: StmtIdx, f: &mut impl FnMut(ExprIdx)) {
     match body.stmt_idx(stmt_idx) {
-        Stmt::Expr(e) => expr_covers_expr(body, *e, target),
+        Stmt::Expr(e) => f(*e),
         Stmt::Assign { target: lhs, value } => {
-            expr_covers_expr(body, *lhs, target) || expr_covers_expr(body, *value, target)
+            f(*lhs);
+            f(*value);
         }
         Stmt::Return { value } | Stmt::Raise { value } => {
-            value.as_ref().is_some_and(|v| expr_covers_expr(body, *v, target))
+            if let Some(v) = value {
+                f(*v);
+            }
         }
-        Stmt::Execute { expr } => expr_covers_expr(body, *expr, target),
+        Stmt::Execute { expr } => f(*expr),
         Stmt::AddHandler { event, handler } | Stmt::RemoveHandler { event, handler } => {
-            expr_covers_expr(body, *event, target) || expr_covers_expr(body, *handler, target)
+            f(*event);
+            f(*handler);
         }
-        Stmt::VarDecl { .. } | Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Label(_) => {
-            false
-        }
+        Stmt::VarDecl { .. } | Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Label(_) => {}
         Stmt::If(_)
         | Stmt::PreprocIf(_)
         | Stmt::While { .. }
         | Stmt::For { .. }
         | Stmt::ForEach { .. }
-        | Stmt::Try { .. } => false,
+        | Stmt::Try { .. } => {}
     }
+}
+
+fn for_each_expr_child(body: &Body, root: ExprIdx, f: &mut impl FnMut(ExprIdx)) {
+    match body.expr_idx(root) {
+        Expr::Missing | Expr::Path(_) | Expr::QualifiedPath(_) | Expr::Literal(_) => {}
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            f(*lhs);
+            f(*rhs);
+        }
+        Expr::UnaryOp { expr, .. } => f(*expr),
+        Expr::Ternary { condition, then_expr, else_expr } => {
+            f(*condition);
+            f(*then_expr);
+            f(*else_expr);
+        }
+        Expr::Call { callee, args } => {
+            f(*callee);
+            args.iter().copied().for_each(f);
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            f(*receiver);
+            args.iter().copied().for_each(f);
+        }
+        Expr::Index { base, index } => {
+            f(*base);
+            f(*index);
+        }
+        Expr::Field { base, .. } => f(*base),
+        Expr::New { args, .. } => args.iter().copied().for_each(f),
+        Expr::Array(elems) => elems.iter().copied().for_each(f),
+        Expr::Await { expr } => f(*expr),
+    }
+}
+
+fn stmt_covers_expr(body: &Body, stmt_idx: StmtIdx, target: ExprIdx) -> bool {
+    let mut found = false;
+    for_each_stmt_expr_root(body, stmt_idx, &mut |root| {
+        if !found {
+            found = expr_covers_expr(body, root, target);
+        }
+    });
+    found
 }
 
 fn expr_covers_expr(body: &Body, root: ExprIdx, target: ExprIdx) -> bool {
     if root == target {
         return true;
     }
-    match body.expr_idx(root) {
-        Expr::Missing | Expr::Path(_) | Expr::QualifiedPath(_) | Expr::Literal(_) => false,
-        Expr::BinaryOp { lhs, rhs, .. } => {
-            expr_covers_expr(body, *lhs, target) || expr_covers_expr(body, *rhs, target)
+    let mut found = false;
+    for_each_expr_child(body, root, &mut |child| {
+        if !found {
+            found = expr_covers_expr(body, child, target);
         }
-        Expr::UnaryOp { expr, .. } => expr_covers_expr(body, *expr, target),
-        Expr::Ternary { condition, then_expr, else_expr } => {
-            expr_covers_expr(body, *condition, target)
-                || expr_covers_expr(body, *then_expr, target)
-                || expr_covers_expr(body, *else_expr, target)
+    });
+    found
+}
+
+/// Inverted [`containing_vertex`]: every expression of a body mapped to its
+/// CFG vertex in one pass. `containing_vertex` walks all vertices per lookup,
+/// which is fine for a one-off query but quadratic when a caller resolves
+/// narrowed types for every path expression of a body (semantic
+/// highlighting).
+pub struct NarrowExprIndex {
+    expr_to_vertex: FxHashMap<ExprIdx, cfg::NodeIndex>,
+}
+
+impl NarrowExprIndex {
+    /// First vertex in `cfg.vertices()` order whose roots cover the
+    /// expression — the same winner `containing_vertex` picks.
+    pub fn build(body: &Body, cfg: &cfg::ControlFlowGraph) -> Self {
+        use cfg::CfgVertex;
+
+        let mut expr_to_vertex = FxHashMap::default();
+        for (node_idx, vertex) in cfg.vertices() {
+            let mut add_tree = |root: ExprIdx| {
+                collect_expr_tree(body, root, node_idx, &mut expr_to_vertex);
+            };
+            match vertex {
+                CfgVertex::BasicBlock(bb) => {
+                    for stmt_id in bb.statements() {
+                        for_each_stmt_expr_root(body, stmt_id.to_idx(), &mut add_tree);
+                    }
+                }
+                CfgVertex::Conditional(v) => add_tree(v.condition.to_idx()),
+                CfgVertex::WhileLoop(v) => add_tree(v.condition.to_idx()),
+                CfgVertex::ForLoop(v) => {
+                    add_tree(v.from.to_idx());
+                    add_tree(v.to.to_idx());
+                }
+                CfgVertex::ForEachLoop(v) => add_tree(v.collection.to_idx()),
+                CfgVertex::TryExcept(_)
+                | CfgVertex::Label(_)
+                | CfgVertex::PreprocCondition(_)
+                | CfgVertex::Exit => {}
+            }
         }
-        Expr::Call { callee, args } => {
-            expr_covers_expr(body, *callee, target)
-                || args.iter().any(|a| expr_covers_expr(body, *a, target))
-        }
-        Expr::MethodCall { receiver, args, .. } => {
-            expr_covers_expr(body, *receiver, target)
-                || args.iter().any(|a| expr_covers_expr(body, *a, target))
-        }
-        Expr::Index { base, index } => {
-            expr_covers_expr(body, *base, target) || expr_covers_expr(body, *index, target)
-        }
-        Expr::Field { base, .. } => expr_covers_expr(body, *base, target),
-        Expr::New { args, .. } => args.iter().any(|a| expr_covers_expr(body, *a, target)),
-        Expr::Array(elems) => elems.iter().any(|e| expr_covers_expr(body, *e, target)),
-        Expr::Await { expr } => expr_covers_expr(body, *expr, target),
+        Self { expr_to_vertex }
     }
+
+    pub fn vertex_of(&self, expr: ExprIdx) -> Option<cfg::NodeIndex> {
+        self.expr_to_vertex.get(&expr).copied()
+    }
+}
+
+fn collect_expr_tree(
+    body: &Body,
+    root: ExprIdx,
+    node: cfg::NodeIndex,
+    out: &mut FxHashMap<ExprIdx, cfg::NodeIndex>,
+) {
+    out.entry(root).or_insert(node);
+    for_each_expr_child(body, root, &mut |child| collect_expr_tree(body, child, node, out));
 }
 
 #[cfg(test)]

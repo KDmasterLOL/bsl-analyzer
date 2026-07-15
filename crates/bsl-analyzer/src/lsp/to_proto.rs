@@ -150,6 +150,33 @@ pub fn code_action(
     code_action_with_encoding(line_index, text, uri, diag, fix, PositionEncoding::Utf16)
 }
 
+/// The `source.fixAll` kind this server advertises and emits. It is a subkind of the
+/// standard `source.fixAll`, so a client requesting either matches it.
+pub const FIX_ALL_BSL: &str = "source.fixAll.bsl-analyzer";
+
+/// Convert edits to LSP, all-or-nothing: if any edit's range cannot be encoded (a stale,
+/// out-of-bounds offset) the whole set is rejected, so a fix is never applied partially.
+fn convert_edits(
+    line_index: &LineIndex,
+    text: &str,
+    edits: &[ide::TextEdit],
+    encoding: PositionEncoding,
+) -> Option<Vec<lsp_types::TextEdit>> {
+    edits
+        .iter()
+        .map(|edit| {
+            let edit_range = range_with_encoding(line_index, text, edit.range, encoding)?;
+            Some(lsp_types::TextEdit { range: edit_range, new_text: edit.new_text.clone() })
+        })
+        .collect()
+}
+
+fn workspace_edit(uri: &Url, edits: Vec<lsp_types::TextEdit>) -> lsp_types::WorkspaceEdit {
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(uri.clone(), edits);
+    lsp_types::WorkspaceEdit { changes: Some(changes), ..Default::default() }
+}
+
 pub fn code_action_with_encoding(
     line_index: &LineIndex,
     text: &str,
@@ -158,28 +185,44 @@ pub fn code_action_with_encoding(
     fix: &ide::Fix,
     encoding: PositionEncoding,
 ) -> Option<lsp_types::CodeAction> {
-    let edits: Vec<lsp_types::TextEdit> = fix
-        .edits
-        .iter()
-        .filter_map(|edit| {
-            let edit_range = range_with_encoding(line_index, text, edit.range, encoding)?;
-            Some(lsp_types::TextEdit { range: edit_range, new_text: edit.new_text.clone() })
-        })
-        .collect();
-
+    let edits = convert_edits(line_index, text, &fix.edits, encoding)?;
     if edits.is_empty() {
         return None;
     }
-
-    let mut changes = std::collections::HashMap::new();
-    changes.insert(uri.clone(), edits);
 
     Some(lsp_types::CodeAction {
         title: fix.label.clone(),
         kind: Some(lsp_types::CodeActionKind::QUICKFIX),
         diagnostics: Some(vec![diagnostic_with_encoding(line_index, text, diag, encoding)?]),
-        edit: Some(lsp_types::WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+        edit: Some(workspace_edit(uri, edits)),
         is_preferred: Some(true),
+        ..Default::default()
+    })
+}
+
+/// Build an aggregate code action (a `source.fixAll` batch, or a "fix all occurrences of
+/// X" quick fix) from already-merged edits. Unlike a single quick fix it carries no
+/// attached diagnostic and is not `preferred`.
+pub fn aggregate_code_action(
+    line_index: &LineIndex,
+    text: &str,
+    uri: &Url,
+    title: String,
+    kind: lsp_types::CodeActionKind,
+    edits: &[ide::TextEdit],
+    encoding: PositionEncoding,
+) -> Option<lsp_types::CodeAction> {
+    let edits = convert_edits(line_index, text, edits, encoding)?;
+    if edits.is_empty() {
+        return None;
+    }
+
+    Some(lsp_types::CodeAction {
+        title,
+        kind: Some(kind),
+        diagnostics: None,
+        edit: Some(workspace_edit(uri, edits)),
+        is_preferred: None,
         ..Default::default()
     })
 }

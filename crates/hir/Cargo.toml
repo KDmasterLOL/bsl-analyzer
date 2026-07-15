@@ -16,6 +16,7 @@ bsl-types.workspace = true
 syntax.workspace = true
 vfs.workspace = true
 stdx.workspace = true
+rustc-hash.workspace = true
 tracing.workspace = true
 cfg.workspace = true
 dataflow.workspace = true

@@ -63,6 +63,27 @@ pub trait ConfigsDatabase: DefDatabase {
         name: &str,
     ) -> Option<Arc<bsl_metadata::CommonModule>>;
 
+    /// Body file candidates of the common module `name` visible to `file_id`:
+    /// the base-configuration body first, then the body adopted by the file's
+    /// own extension. A base file and its extension sibling share one module
+    /// name, so qualified lookup must see both — the base declares the
+    /// canonical surface, the extension adds its own exported methods, and no
+    /// other extension's adoption is visible to this file.
+    ///
+    /// `None` means the provider has no visibility-scoped body lookup — the
+    /// caller falls back to the path-derived module index. An empty `Some`
+    /// means the configs know the module but no body file mapped (metadata-URI
+    /// drift); callers should degrade to the path index rather than report the
+    /// module missing.
+    fn resolve_common_module_file_candidates(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Vec<FileId>> {
+        let _ = (file_id, name);
+        None
+    }
+
     /// Resolve the event subscription `name` visible to `file_id` at
     /// per-event-subscription Salsa granularity: base + the file's own extension
     /// (extension priority). Depending on this records a dependency on just that

@@ -52,7 +52,7 @@ pub(crate) fn lookup_form_item_field(
         ty: lower_form_element(db, form, element, &obj_resolver),
         value_ty: None,
         is_readonly: true,
-        origin: FieldOrigin::PlatformProperty,
+        origin: FieldOrigin::PlatformProperty { env: hir_def::execution_env::EnvFlags::ALL },
     })
 }
 
@@ -135,7 +135,7 @@ pub(crate) fn refine_form_control_property(
         ty,
         value_ty: None,
         is_readonly,
-        origin: FieldOrigin::PlatformProperty,
+        origin: FieldOrigin::PlatformProperty { env: hir_def::execution_env::EnvFlags::ALL },
     })
 }
 

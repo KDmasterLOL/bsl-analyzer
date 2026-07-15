@@ -6,7 +6,7 @@ use ide_db::RootDatabase;
 use crate::adapters::params::build_platform_params;
 use crate::domain::{CodeExample, MethodKind, SignatureSource, SymbolSignature, TypeRef};
 
-pub(super) fn build(db: &dyn RootDatabase, name: &str) -> Option<SymbolSignature> {
+pub(super) fn build(db: &dyn RootDatabase, name: &str) -> Option<Vec<SymbolSignature>> {
     let input = TypeNameInput::new(db, name.to_string());
     let function = global_function_query(db, input)?;
     let docs = PlatformDataInner::instance().get_global_function_docs(function.id);
@@ -16,6 +16,25 @@ pub(super) fn build(db: &dyn RootDatabase, name: &str) -> Option<SymbolSignature
 pub fn from_global_function(
     function: &GlobalFunction,
     docs: Option<&MethodDocs>,
+) -> Vec<SymbolSignature> {
+    let mut signatures = Vec::new();
+    signatures.push(build_signature_from_params(function, &function.parameters, docs, None));
+    for (candidate_ordinal, variant) in function.variants.iter().enumerate() {
+        signatures.push(build_signature_from_params(
+            function,
+            &variant.parameters,
+            docs,
+            Some(candidate_ordinal),
+        ));
+    }
+    signatures
+}
+
+fn build_signature_from_params(
+    function: &GlobalFunction,
+    parameters: &[bsl_platform::MethodParam],
+    docs: Option<&MethodDocs>,
+    candidate_ordinal: Option<usize>,
 ) -> SymbolSignature {
     let kind =
         if function.return_type.is_some() { MethodKind::Function } else { MethodKind::Procedure };
@@ -34,12 +53,13 @@ pub fn from_global_function(
         .unwrap_or_default();
 
     SymbolSignature {
+        candidate_ordinal,
         kind,
         name_russian: function.name.clone(),
         name_english: Some(function.english_name.clone()),
         qualifier: None,
         prefix: None,
-        params: build_platform_params(&function.parameters, docs),
+        params: build_platform_params(parameters, docs),
         returns,
         purpose: docs.map(|d| d.description.clone()).filter(|s| !s.is_empty()),
         description: docs.map(|d| d.description.clone()).filter(|s| !s.is_empty()),
@@ -59,5 +79,6 @@ pub fn from_global_function(
         is_export: true,
         source: SignatureSource::GlobalFunction,
         method_id: None,
+        platform_id: Some(function.id),
     }
 }

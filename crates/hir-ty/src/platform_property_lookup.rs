@@ -11,6 +11,8 @@ use crate::method_lookup::platform_type_key_id;
 pub struct PlatformPropertyResolution {
     pub return_ty: TypeId,
     pub is_readonly: bool,
+    /// Execution environments the property is available in.
+    pub env: hir_def::execution_env::EnvFlags,
 }
 
 pub fn lookup_platform_property(
@@ -28,7 +30,13 @@ pub fn lookup_platform_property(
         });
     }
     let type_key = platform_type_key_id(db, receiver)?;
-    lookup_platform_property_by_type(db, &type_key, prop_name)
+    let mut res = lookup_platform_property_by_type(db, &type_key, prop_name)?;
+    // Availability resolved through a homonymous type name may belong to the
+    // wrong namesake — don't judge it.
+    if PlatformData::instance().is_ambiguous_type_name(&type_key) {
+        res.env = hir_def::execution_env::EnvFlags::ALL;
+    }
+    Some(res)
 }
 
 pub(crate) fn lookup_platform_property_by_type(
@@ -48,6 +56,7 @@ pub(crate) fn to_resolution(
     PlatformPropertyResolution {
         return_ty: map_property_type_list(db, &prop.property_types),
         is_readonly: prop.is_readonly,
+        env: hir_def::execution_env::EnvFlags::from_platform_context(prop.context.as_ref()),
     }
 }
 

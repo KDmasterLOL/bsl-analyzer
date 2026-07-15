@@ -54,15 +54,15 @@ fn edit_in_one_method_keeps_other_methods_infer_cell_warm() {
 
     let a_input = MethodIdInput::new(&db, mid_a);
     let b_input = MethodIdInput::new(&db, mid_b);
-    let a_before: Arc<_> = infer_method_query(&db, a_input);
-    let b_before: Arc<_> = infer_method_query(&db, b_input);
+    let a_before: Arc<_> = infer_method_query(&db, a_input).clone();
+    let b_before: Arc<_> = infer_method_query(&db, b_input).clone();
 
     db.set_file_text(file_id, SOURCE_AFTER);
 
     let a_input2 = MethodIdInput::new(&db, mid_a);
     let b_input2 = MethodIdInput::new(&db, mid_b);
-    let a_after: Arc<_> = infer_method_query(&db, a_input2);
-    let b_after: Arc<_> = infer_method_query(&db, b_input2);
+    let a_after: Arc<_> = infer_method_query(&db, a_input2).clone();
+    let b_after: Arc<_> = infer_method_query(&db, b_input2).clone();
 
     assert!(
         Arc::ptr_eq(&a_before, &a_after),
@@ -104,8 +104,8 @@ fn repeated_narrow_queries_within_revision_share_arc() {
     let r2 = infer_method_query(&db, a_input);
     let r3 = infer_method_query(&db, a_input);
 
-    assert!(Arc::ptr_eq(&r1, &r2));
-    assert!(Arc::ptr_eq(&r2, &r3));
+    assert!(Arc::ptr_eq(r1, r2));
+    assert!(Arc::ptr_eq(r2, r3));
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn warming_one_method_does_not_invalidate_other() {
     let a_second = infer_method_query(&db, a_input);
 
     assert!(
-        Arc::ptr_eq(&a_first, &a_second),
+        Arc::ptr_eq(a_first, a_second),
         "Querying B's cell invalidated A's cell — cross-method Salsa \
          cache leak"
     );

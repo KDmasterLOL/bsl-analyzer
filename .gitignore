@@ -44,6 +44,7 @@ coverage/
 # Local planning / env
 .env
 .codex
+/opencode.json
 AGENTS.md
 plans/
 
@@ -55,3 +56,4 @@ plans/
 bsl-platform-shcntx/
 bsl-json.json
 .bsl-ls-cache/
+__pycache__/

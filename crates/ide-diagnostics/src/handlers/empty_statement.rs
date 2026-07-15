@@ -30,10 +30,10 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),
-        fixes: vec![Fix {
-            label: "Удалить пустой оператор".to_string(),
-            edits: vec![TextEdit { range, new_text: String::new() }],
-        }],
+        fixes: vec![Fix::safe(
+            "Удалить пустой оператор",
+            vec![TextEdit { range, new_text: String::new() }],
+        )],
     })
 }
 

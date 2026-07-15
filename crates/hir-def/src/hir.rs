@@ -88,8 +88,14 @@ pub struct PreprocIfStmt {
     pub condition_range: text_size::TextRange,
     pub directive_range: text_size::TextRange,
     pub full_range: text_size::TextRange,
+    /// Parsed `#Если` condition; [`PreprocCondition::Unknown`] when malformed.
+    ///
+    /// [`PreprocCondition::Unknown`]: crate::preproc_condition::PreprocCondition::Unknown
+    pub condition: crate::preproc_condition::PreprocCondition,
     pub then_branch: Box<[StmtIdx]>,
     pub elsif_branches: Box<[(text_size::TextRange, text_size::TextRange, Box<[StmtIdx]>)]>,
+    /// Parsed `#ИначеЕсли` conditions, aligned with `elsif_branches`.
+    pub elsif_conditions: Box<[crate::preproc_condition::PreprocCondition]>,
     pub else_branch: Option<Box<[StmtIdx]>>,
 }
 
@@ -212,6 +218,8 @@ mod preproc_if_stmt_branches_tests {
             condition_range,
             directive_range: range(0, 1),
             full_range: range(0, 1),
+            condition: crate::preproc_condition::PreprocCondition::Unknown,
+            elsif_conditions: Box::new([]),
             then_branch: Box::new([stmt_idx(0)]),
             elsif_branches: Box::new([]),
             else_branch: None,
@@ -231,6 +239,8 @@ mod preproc_if_stmt_branches_tests {
             condition_range: range(0, 1),
             directive_range: range(0, 1),
             full_range: range(0, 1),
+            condition: crate::preproc_condition::PreprocCondition::Unknown,
+            elsif_conditions: Box::new([]),
             then_branch: Box::new([stmt_idx(0)]),
             elsif_branches: Box::new([]),
             else_branch: Some(Box::new([stmt_idx(1)])),
@@ -254,6 +264,11 @@ mod preproc_if_stmt_branches_tests {
             condition_range: range(0, 1),
             directive_range: range(0, 1),
             full_range: range(0, 1),
+            condition: crate::preproc_condition::PreprocCondition::Unknown,
+            elsif_conditions: Box::new([
+                crate::preproc_condition::PreprocCondition::Unknown,
+                crate::preproc_condition::PreprocCondition::Unknown,
+            ]),
             then_branch: Box::new([stmt_idx(0)]),
             elsif_branches: Box::new([
                 (elsif_1_condition, elsif_1_directive, Box::new([stmt_idx(1)])),
@@ -283,6 +298,8 @@ mod preproc_if_stmt_branches_tests {
             condition_range: range(0, 1),
             directive_range: range(0, 1),
             full_range: range(0, 1),
+            condition: crate::preproc_condition::PreprocCondition::Unknown,
+            elsif_conditions: Box::new([crate::preproc_condition::PreprocCondition::Unknown]),
             then_branch: Box::new([stmt_idx(0)]),
             elsif_branches: Box::new([(elsif_condition, elsif_directive, Box::new([stmt_idx(1)]))]),
             else_branch: None,

@@ -5,6 +5,9 @@ pub mod security;
 pub mod standard_mdo_attributes;
 mod types;
 
+#[cfg(test)]
+mod overlays;
+
 #[allow(warnings)]
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated.rs"));
@@ -18,11 +21,12 @@ pub use standard_mdo_attributes::{
 };
 
 pub use db::{
-    find_prefixed_method, global_function_query, global_member_method_query, global_property_query,
-    manager_methods_query, platform_constructors_query, platform_method_query,
-    platform_property_query, platform_type_query, prefixed_method_query, type_methods_query,
-    type_properties_query, MethodLookupInput, PlatformData, PlatformDataInner,
+    find_prefixed_method, find_prefixed_methods, global_function_query, global_member_method_query,
+    global_property_query, manager_methods_query, platform_constructors_query,
+    platform_method_query, platform_property_query, platform_type_query, prefixed_method_query,
+    type_methods_query, type_properties_query, MethodLookupInput, PlatformData, PlatformDataInner,
     PrefixedMethodLookupInput, TypeNameInput, GLOBAL_CONTEXT_OWNER,
+    LEGACY_GLOBAL_FUNCTION_EN_ALIASES,
 };
 pub use types::*;
 

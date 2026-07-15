@@ -174,6 +174,32 @@ mod tests {
     }
 
     #[test]
+    fn module_comma_var_receiver_under_pre_if_stays_silent() {
+        let fixture = r#"
+//- /test.bsl
+#Если Сервер Тогда
+Перем Запрос, Выборка;
+#КонецЕсли
+
+Процедура Инициализировать()
+    Запрос = Новый Запрос;
+    Выборка = Запрос.Выполнить().Выбрать();
+КонецПроцедуры
+
+Процедура Использовать()
+    Выборка.Сбросить();
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        let unresolved: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert!(
+            unresolved.is_empty(),
+            "declared receiver from comma `Перем` under `#Если Сервер` must stay silent, got: {diags:?}"
+        );
+    }
+
+    #[test]
     fn platform_global_method_call_resolves_silently() {
         let code = r#"
 Процедура Тест()

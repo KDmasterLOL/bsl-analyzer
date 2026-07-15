@@ -126,7 +126,7 @@ impl ReleaseProvider for GitHubProvider {
             }
         }
 
-        Ok(Manifest { version: version.to_string(), timestamp: String::new(), files })
+        Ok(Manifest { version: version.to_string(), files })
     }
 
     fn download_url(&self, version: &str, file_name: &str) -> String {

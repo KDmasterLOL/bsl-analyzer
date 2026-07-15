@@ -122,6 +122,20 @@ pub(crate) fn is_tabular_row_name(name: &str) -> bool {
         || lc == "tabularsectionrow"
 }
 
+/// The form-collection row item (ДанныеФормыЭлементКоллекции) — what a
+/// tabular-section row is at runtime on a managed form.
+pub(crate) fn is_form_data_collection_item_type_name(name: &str) -> bool {
+    stdx::case::eq_ignore_case(name, "ДанныеФормыЭлементКоллекции")
+        || stdx::case::eq_ignore_case(name, "FormDataCollectionItem")
+}
+
+/// Generic row spellings that must collapse back onto the concrete
+/// `TabularSectionRow` facet: the platform row name and the form-data row
+/// item the same facet represents on a managed form.
+pub(crate) fn is_row_like_platform_type_name(name: &str) -> bool {
+    is_tabular_row_name(name) || is_form_data_collection_item_type_name(name)
+}
+
 /// Names every concrete→generic bridge accepts as a target (manager, object,
 /// form control, form-data container, tabular section/row). Reused by the lowering
 /// gate so a parameter documented with one of them keeps its nominal phantom.

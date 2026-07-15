@@ -30,7 +30,11 @@ pub enum FieldOrigin {
     RegisterResource,
     RegisterAttribute,
     MetadataReference,
-    PlatformProperty,
+    /// A property from the platform API, carrying its documented
+    /// execution-environment availability.
+    PlatformProperty {
+        env: hir_def::execution_env::EnvFlags,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,7 +230,7 @@ fn push_platform_prefix_properties(
             ty,
             value_ty: None,
             is_readonly: res.is_readonly,
-            origin: FieldOrigin::PlatformProperty,
+            origin: FieldOrigin::PlatformProperty { env: res.env },
         };
         push_unique(out, seen, info);
     }
@@ -397,7 +401,9 @@ fn enumerate_register_fields(
                 ),
                 value_ty: None,
                 is_readonly: true,
-                origin: FieldOrigin::PlatformProperty,
+                origin: FieldOrigin::PlatformProperty {
+                    env: hir_def::execution_env::EnvFlags::ALL,
+                },
             };
             push_unique(&mut out, &mut seen, info);
         }
@@ -547,7 +553,7 @@ fn enumerate_filter_fields(
             ty: db.platform_object("ЭлементОтбора".to_string()),
             value_ty: Some(value_ty),
             is_readonly: false,
-            origin: FieldOrigin::PlatformProperty,
+            origin: FieldOrigin::PlatformProperty { env: hir_def::execution_env::EnvFlags::ALL },
         };
         push_unique(&mut out, &mut seen, info);
     }
@@ -643,7 +649,7 @@ fn enumerate_tabular_row_fields(
                 ty: prop.return_ty,
                 value_ty: None,
                 is_readonly: prop.is_readonly,
-                origin: FieldOrigin::PlatformProperty,
+                origin: FieldOrigin::PlatformProperty { env: prop.env },
             });
         }
     }
@@ -1226,7 +1232,7 @@ mod tests {
             .iter()
             .find(|f| f.name.as_str() == "НомерСтроки")
             .expect("НомерСтроки must appear via platform fall-through");
-        assert_eq!(nr.origin, FieldOrigin::PlatformProperty);
+        assert!(matches!(nr.origin, FieldOrigin::PlatformProperty { .. }));
         assert!(nr.is_readonly);
         assert_eq!(nr.ty, number());
     }

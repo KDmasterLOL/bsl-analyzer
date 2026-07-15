@@ -19,14 +19,14 @@ pub struct ProcSignature {
 
 // Cross-module call-resolution currency (declared params + return type, cheap):
 // high cap keeps it across chunk-boundary LRU trims so dependent chunks reuse it.
-#[salsa::tracked(lru = 262144)]
+#[salsa::tracked(lru = 262144, returns(ref))]
 pub fn proc_signature_query<'db>(
     db: &'db dyn HirDatabase,
     method_input: MethodIdInput<'db>,
 ) -> Arc<ProcSignature> {
     let method_id = method_input.method_id(db);
 
-    let symbol_tree = db.symbol_tree(method_id.module);
+    let symbol_tree = db.symbol_tree_ref(method_id.module);
     let Some(method_symbol) = symbol_tree.find_method_by_id(method_id) else {
         return Arc::new(ProcSignature { params: Vec::new(), return_ty: db.unknown() });
     };

@@ -1,4 +1,6 @@
 mod sdbl;
+#[cfg(test)]
+mod token_stream_tests;
 
 use ide_db::{RootDatabase, TextRange};
 use syntax::{
@@ -117,6 +119,11 @@ pub(crate) struct HighlightContext<'db, DB: RootDatabase> {
     pub(crate) db: &'db DB,
     pub(crate) file_id: FileId,
 
+    /// Shared per-file resolution state: binding indexes, scope caches and
+    /// module-level lookup tables built once instead of per name token.
+    /// Binding types are skipped — highlighting never reads `SemanticSymbol::ty`.
+    symbol_ctx: hir::FileSymbolCtx<'db, DB>,
+
     pub(crate) line_index: Option<Vec<usize>>,
 
     pub(crate) sdbl_literal_ranges: rustc_hash::FxHashSet<TextRange>,
@@ -129,6 +136,7 @@ impl<'db, DB: RootDatabase> HighlightContext<'db, DB> {
         Self {
             db,
             file_id,
+            symbol_ctx: hir::FileSymbolCtx::new(db, file_id).without_binding_types(),
             line_index,
             sdbl_literal_ranges: rustc_hash::FxHashSet::default(),
             resolved_external_files: rustc_hash::FxHashSet::default(),
@@ -202,8 +210,7 @@ fn highlight_name_semantic<DB: RootDatabase>(
 
     tracing::debug!("highlight_name_semantic: processing token={}", token.text());
 
-    let sema = hir::Semantics::new(ctx.db);
-    let symbol = sema.symbol_for_token(ctx.file_id, token)?;
+    let symbol = ctx.symbol_ctx.symbol_for_token(token)?;
 
     tracing::debug!("highlight_name_semantic: {} resolved to {:?}", token.text(), symbol);
 

@@ -1,4 +1,5 @@
-use ide_db::RootDatabase;
+use ide_db::{base_db::Locale, RootDatabase};
+use smol_str::SmolStr;
 use vfs::FileId;
 
 use crate::domain::{CalleeKind, SymbolSignature};
@@ -20,7 +21,7 @@ pub fn build_signature(
     db: &dyn RootDatabase,
     file_id: FileId,
     callee: &CalleeKind,
-) -> Option<SymbolSignature> {
+) -> Option<Vec<SymbolSignature>> {
     match callee {
         CalleeKind::PlatformMethod { type_name, method_name } => {
             platform_method::build(db, type_name, method_name)
@@ -39,5 +40,174 @@ pub fn build_signature(
             local_method::build(db, *module_id, method)
         }
         CalleeKind::PlatformConstructor { type_name } => platform_constructor::build(db, type_name),
+    }
+}
+
+pub fn build_signature_from_resolution(
+    db: &dyn RootDatabase,
+    binding: &hir::CandidateCallBinding,
+) -> Option<Vec<SymbolSignature>> {
+    let signatures = binding
+        .candidates
+        .as_slice()
+        .iter()
+        .filter_map(|candidate| build_signature_from_candidate(db, candidate))
+        .collect::<Vec<_>>();
+    (!signatures.is_empty()).then_some(signatures)
+}
+
+fn build_signature_from_candidate(
+    db: &dyn RootDatabase,
+    candidate: &hir::CallSignature,
+) -> Option<SymbolSignature> {
+    match candidate.provenance {
+        hir::CandidateProvenance::PlatformMethod { method_id, signature } => {
+            let data = bsl_platform::PlatformDataInner::instance();
+            if let Some(projected) = constructor_signature(db, candidate) {
+                return Some(projected);
+            }
+            let method = data.all_methods().iter().find(|method| method.id == method_id);
+            match method {
+                Some(method) => {
+                    let docs = data.get_method_docs(method_id);
+                    from_platform_method(method, docs.as_ref()).into_iter().find(|projected| {
+                        projected.platform_id == Some(method_id)
+                            && projected.candidate_ordinal == platform_ordinal(signature)
+                    })
+                }
+                None => None,
+            }
+        }
+        hir::CandidateProvenance::Builtin(hir::BuiltinCallableId::PlatformGlobal(id)) => {
+            let data = bsl_platform::PlatformDataInner::instance();
+            let function = data.all_global_functions().iter().find(|function| function.id == id)?;
+            let docs = data.get_global_function_docs(id);
+            let ordinal = match candidate.id {
+                hir::CandidateId::Builtin { signature_ordinal, .. }
+                    if function.variants.is_empty() && signature_ordinal == 0 =>
+                {
+                    None
+                }
+                hir::CandidateId::Builtin { signature_ordinal, .. } => Some(signature_ordinal),
+                hir::CandidateId::Platform { .. }
+                | hir::CandidateId::User { .. }
+                | hir::CandidateId::FunctionValue => return None,
+            };
+            from_global_function(function, docs.as_ref())
+                .into_iter()
+                .find(|projected| projected.candidate_ordinal == ordinal)
+        }
+        hir::CandidateProvenance::Builtin(hir::BuiltinCallableId::Intrinsic(id)) => {
+            let callable = hir::BuiltinCallableId::Intrinsic(id);
+            let name = hir::builtin_functions().canonical_name(callable)?;
+            Some(minimal_signature(db, candidate, name, candidate_ordinal(candidate)))
+        }
+        hir::CandidateProvenance::UserMethod(method) => {
+            let mut projected = local_method::build_from_method_id(db, method.into())?;
+            projected.candidate_ordinal = candidate_ordinal(candidate);
+            Some(projected)
+        }
+        hir::CandidateProvenance::FunctionValue => {
+            Some(minimal_signature(db, candidate, "Функция", None))
+        }
+    }
+}
+
+fn constructor_signature(
+    db: &dyn RootDatabase,
+    candidate: &hir::CallSignature,
+) -> Option<SymbolSignature> {
+    if matches!(db.lookup_type(candidate.return_ty), hir::TypeKind::Undefined) {
+        return None;
+    }
+    let hir::CandidateId::Platform { method_id: id, .. } = candidate.id else {
+        return None;
+    };
+    let data = bsl_platform::PlatformDataInner::instance();
+    let constructor = data.all_constructors().iter().find(|constructor| {
+        constructor.id == id
+            && constructor.parameters.len() == candidate.params.len()
+            && constructor
+                .parameters
+                .iter()
+                .zip(candidate.params.iter())
+                .all(|(parameter, candidate)| parameter.name == candidate.name)
+    })?;
+    let type_name = data
+        .get_type(&constructor.type_name)
+        .map(|platform_type| platform_type.name.as_str())
+        .unwrap_or(constructor.type_name.as_str());
+    platform_constructor::build(db, type_name)?
+        .into_iter()
+        .find(|projected| projected.platform_id == Some(id))
+}
+
+fn minimal_signature(
+    db: &dyn RootDatabase,
+    candidate: &hir::CallSignature,
+    name: &str,
+    candidate_ordinal: Option<usize>,
+) -> SymbolSignature {
+    let params = candidate
+        .params
+        .iter()
+        .map(|param| crate::domain::SignatureParam {
+            name: param.name.clone(),
+            types: vec![crate::domain::TypeRef {
+                russian: SmolStr::new(hir::kernel_type_label(db, param.ty, Locale::Ru, false)),
+                english: None,
+                description: None,
+                is_hyperlink: false,
+            }],
+            is_optional: param.has_default,
+            default_value: None,
+            description: None,
+            is_val: false,
+        })
+        .collect();
+    SymbolSignature {
+        candidate_ordinal,
+        kind: crate::domain::MethodKind::Function,
+        name_russian: SmolStr::new(name),
+        name_english: None,
+        qualifier: None,
+        prefix: None,
+        params,
+        returns: vec![crate::domain::TypeRef {
+            russian: SmolStr::new(hir::kernel_type_label(
+                db,
+                candidate.return_ty,
+                Locale::Ru,
+                false,
+            )),
+            english: None,
+            description: None,
+            is_hyperlink: false,
+        }],
+        purpose: None,
+        description: None,
+        examples: Vec::new(),
+        notes: None,
+        deprecation: None,
+        is_export: true,
+        source: crate::domain::SignatureSource::GlobalFunction,
+        method_id: None,
+        platform_id: None,
+    }
+}
+
+fn candidate_ordinal(candidate: &hir::CallSignature) -> Option<usize> {
+    match candidate.id {
+        hir::CandidateId::Platform { signature, .. } => platform_ordinal(signature),
+        hir::CandidateId::User { signature_ordinal, .. }
+        | hir::CandidateId::Builtin { signature_ordinal, .. } => Some(signature_ordinal),
+        hir::CandidateId::FunctionValue => None,
+    }
+}
+
+fn platform_ordinal(signature: hir::PlatformSignatureSlot) -> Option<usize> {
+    match signature {
+        hir::PlatformSignatureSlot::Base => None,
+        hir::PlatformSignatureSlot::Variant(ordinal) => Some(ordinal),
     }
 }

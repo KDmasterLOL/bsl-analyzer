@@ -1,10 +1,11 @@
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
+use hir_def::execution_env::EnvFlags;
 use hir_def::Name;
 
 pub(crate) enum PlatformGlobalLookup {
-    Resolved(TypeId),
+    Resolved { ty: TypeId, env: EnvFlags },
     KnownContainerMissingMember,
     NotAContainer,
 }
@@ -27,7 +28,10 @@ pub(crate) fn try_resolve_platform_global_member(
                 lowering.lower_bare_name_id(db, &Name::new(s.as_str()))
             })
             .unwrap_or(db.unknown());
-        return PlatformGlobalLookup::Resolved(return_ty);
+        return PlatformGlobalLookup::Resolved {
+            ty: return_ty,
+            env: EnvFlags::from_platform_context(method.context.as_ref()),
+        };
     }
 
     if platform.get_global_property(receiver_name.as_str()).is_some() {
@@ -38,10 +42,22 @@ pub(crate) fn try_resolve_platform_global_member(
 }
 
 pub fn resolve_platform_global_property_type(db: &dyn TypeKernelDb, name: &Name) -> Option<TypeId> {
+    resolve_platform_global_property(db, name).map(|(ty, _)| ty)
+}
+
+/// Like [`resolve_platform_global_property_type`], additionally returning the
+/// property's execution-environment availability.
+pub(crate) fn resolve_platform_global_property(
+    db: &dyn TypeKernelDb,
+    name: &Name,
+) -> Option<(TypeId, EnvFlags)> {
     let prop = bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())?;
     let declared = prop.property_types.first()?;
     let lowering = crate::lower::TyLoweringContext::new();
-    Some(lowering.lower_bare_name_id(db, &Name::new(declared.as_str())))
+    Some((
+        lowering.lower_bare_name_id(db, &Name::new(declared.as_str())),
+        EnvFlags::from_platform_context(prop.context.as_ref()),
+    ))
 }
 
 /// Resolve a bare identifier that names a platform **system enumeration**

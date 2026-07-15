@@ -334,6 +334,46 @@ fn hover_chained_keyword_method() {
 }
 
 #[test]
+fn hover_platform_method_renders_unique_semantic_candidate() {
+    let fixture = r#"//- /test.bsl
+Процедура Тест()
+    Значение = Новый Массив;
+    Значение.Вста$0вить(0, Неизвестно);
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let hover = analysis
+        .hover(file_id, offset, ide::Locale::Ru)
+        .expect("hover on a uniquely resolved platform method must produce a result");
+    assert!(hover.markup.contains("Массив"), "got: {}", hover.markup);
+    assert!(!hover.markup.contains("\n\n---\n\n"), "got: {}", hover.markup);
+}
+
+#[test]
+fn hover_platform_method_renders_ambiguous_semantic_candidates() {
+    let fixture = r#"//- /CommonModules/ФабрикаКриптографии/Ext/Module.bsl
+// Возвращаемое значение:
+//   СертификатКриптографии, КонтейнерКлючейКриптографии
+Функция Получить() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест(Условие)
+    Значение = ФабрикаКриптографии.Получить();
+    Значение.Выгру$0зить(Неизвестно, Неизвестно);
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let hover = analysis
+        .hover(file_id, offset, ide::Locale::Ru)
+        .expect("hover on an ambiguously resolved platform method must produce a result");
+    assert!(hover.markup.contains("СертификатКриптографии"), "got: {}", hover.markup);
+    assert!(hover.markup.contains("КонтейнерКлючейКриптографии"), "got: {}", hover.markup);
+    assert!(hover.markup.contains("\n\n---\n\n"), "got: {}", hover.markup);
+}
+
+#[test]
 fn hover_global_execute_statement_does_not_render_query_method() {
     let fixture = r#"//- /test.bsl
 Процедура Тест()

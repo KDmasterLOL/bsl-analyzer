@@ -1,3 +1,6 @@
+pub mod batch_fixes;
+mod call_hierarchy;
+mod call_hierarchy_index;
 mod completion;
 pub mod config_finder;
 pub mod diagnostics_catalog;
@@ -8,12 +11,24 @@ pub mod formatting;
 mod goto_definition;
 pub mod graph;
 mod hover;
+mod inlay_hints;
 mod references;
+mod rename;
+mod selection_range;
 mod signature_help;
 pub mod streaming;
 pub mod symbol_info;
 mod syntax_highlighting;
+mod type_definition;
+mod workspace_symbols;
 
+pub use call_hierarchy::{CallHierarchyCall, CallHierarchyItem};
+pub use call_hierarchy_index::{
+    build_call_hierarchy_index, reproject_call_hierarchy_index_modules, CallHierarchyBatchEvent,
+    CallHierarchyBatchEventKind, CallHierarchyBatchPhase, CallHierarchyIndexBuildError,
+    CallHierarchyIndexBuildRequest, CallHierarchyIndexBuildResult,
+    CallHierarchyIndexModuleProjection, CallHierarchyRssSample,
+};
 pub use completion::{CompletionItem, CompletionItemKind};
 pub use diagnostics_catalog::{catalog_entry, diagnostic_catalog, CatalogEntry, SeverityBucket};
 pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
@@ -30,6 +45,7 @@ pub use graph::{
 };
 pub use hir::graph_index;
 pub use hir::ModuleId;
+pub use hir::{call_hierarchy_method_digest, MethodCallDigest};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
 pub use ide_db::{GraphConfigCache, RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};
@@ -38,14 +54,17 @@ pub use ide_diagnostics::{
     file_diagnostics, file_diagnostics_query, get_metadata, CleanCodeAttribute, Diagnostic,
     DiagnosticCode, DiagnosticOutput, DiagnosticSeverityLevel, DiagnosticTag, DiagnosticType,
     DiagnosticsConfig, DiagnosticsContext, Fix, ImpactSeverity, MetadataTag, Severity,
-    SoftwareQuality,
+    SoftwareQuality, TextEdit,
 };
-pub use signature_help::{ParameterInfo, SignatureHelp};
+pub use inlay_hints::{InlayHint, InlayHintKind};
+pub use rename::{prepare_rename, rename, RenameError, RenameTarget};
+pub use signature_help::{ParameterInfo, SignatureHelp, SignatureInformation};
 pub use symbol_info::{
     symbol_info, SymbolContainer, SymbolDefinition, SymbolInfoCard, SymbolInfoRequest,
     SymbolInfoSections, SymbolMember, SymbolPosition,
 };
 pub use syntax_highlighting::{highlight, HighlightResult, HlMod, HlRange, HlTag};
+pub use workspace_symbols::WorkspaceSymbol;
 
 use ide_db::base_db::DiagnosticsConfigInput;
 use std::path::PathBuf;
@@ -84,6 +103,50 @@ impl Analysis {
         references::find_references(&self.db, file_id, offset)
     }
 
+    pub fn type_definition(&self, file_id: FileId, offset: u32) -> Option<NavigationTarget> {
+        let offset = TextSize::from(offset);
+        type_definition::type_definition(&self.db, file_id, offset)
+    }
+
+    pub fn prepare_call_hierarchy(
+        &self,
+        file_id: FileId,
+        offset: u32,
+    ) -> Option<CallHierarchyItem> {
+        let offset = TextSize::from(offset);
+        call_hierarchy::prepare_call_hierarchy(&self.db, file_id, offset)
+    }
+
+    pub fn call_hierarchy_incoming_from_index(
+        &self,
+        file_id: FileId,
+        offset: u32,
+        index: Arc<hir::CallHierarchyReverseIndex>,
+    ) -> Option<Vec<CallHierarchyCall>> {
+        let offset = TextSize::from(offset);
+        call_hierarchy::incoming_calls(&self.db, file_id, offset, &index)
+    }
+
+    pub fn call_hierarchy_outgoing(&self, file_id: FileId, offset: u32) -> Vec<CallHierarchyCall> {
+        let offset = TextSize::from(offset);
+        call_hierarchy::outgoing_calls(&self.db, file_id, offset)
+    }
+
+    pub fn prepare_rename(&self, file_id: FileId, offset: u32) -> Option<RenameTarget> {
+        let offset = TextSize::from(offset);
+        rename::prepare_rename(&self.db, file_id, offset)
+    }
+
+    pub fn rename(
+        &self,
+        file_id: FileId,
+        offset: u32,
+        new_name: &str,
+    ) -> Result<Vec<Location>, RenameError> {
+        let offset = TextSize::from(offset);
+        rename::rename(&self.db, file_id, offset, new_name)
+    }
+
     pub fn document_highlights(&self, file_id: FileId, offset: u32) -> Vec<DocumentHighlight> {
         let offset = TextSize::from(offset);
         document_highlight::document_highlights(&self.db, file_id, offset)
@@ -91,6 +154,19 @@ impl Analysis {
 
     pub fn folding_ranges(&self, file_id: FileId) -> Vec<FoldingRange> {
         folding::folding_ranges(&self.db, file_id)
+    }
+
+    pub fn inlay_hints(&self, file_id: FileId, range: TextRange) -> Vec<InlayHint> {
+        inlay_hints::inlay_hints(&self.db, file_id, range)
+    }
+
+    pub fn workspace_symbols(&self, query: &str) -> Vec<WorkspaceSymbol> {
+        use ide_db::base_db::SourceRootId;
+        workspace_symbols::workspace_symbols(&self.db, SourceRootId(0), query)
+    }
+
+    pub fn selection_ranges(&self, file_id: FileId, offsets: &[TextSize]) -> Vec<Vec<TextRange>> {
+        selection_range::selection_ranges(&self.db, file_id, offsets)
     }
 
     pub fn completions(

@@ -48,6 +48,10 @@ pub trait SourceDatabase: salsa::Database {
     /// bytes against the file's content revision. LRU-evictable.
     fn file_text(&self, file_id: FileId) -> Arc<str>;
 
+    /// Borrowed variant of [`file_text`](Self::file_text) for read-only paths:
+    /// no `Arc` refcount traffic per read.
+    fn file_text_ref(&self, file_id: FileId) -> &Arc<str>;
+
     fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId);
 
     fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot);
@@ -383,6 +387,10 @@ mod tests {
         }
 
         fn file_text(&self, file_id: FileId) -> Arc<str> {
+            self.file_text_ref(file_id).clone()
+        }
+
+        fn file_text_ref(&self, file_id: FileId) -> &Arc<str> {
             let input = FileIdInput::new(self, file_id);
             file_text_query(self, input)
         }
@@ -446,7 +454,7 @@ mod tests {
         }
     }
 
-    #[salsa::tracked(lru = 10)]
+    #[salsa::tracked(lru = 10, returns(copy))]
     fn test_fileid_query<'db>(
         db: &'db dyn salsa::Database,
         file_id_input: FileIdInput<'db>,

@@ -1,7 +1,7 @@
 use base_db::FileIdInput;
 use bsl_platform::deprecation::{self, ElementKind, Lookup};
 use bsl_types::builders::Builders;
-use bsl_types::facet::{ArgArity, DateComponent, FormDataFacet, MdoRefFacet, ProjectionSource};
+use bsl_types::facet::{DateComponent, FormDataFacet, MdoRefFacet, ProjectionSource};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{ConfigId, Projection, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
@@ -11,8 +11,9 @@ use hir_def::effective_module::EffectiveModuleId;
 use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
 use hir_def::symbol_tree::SymbolTree;
-use hir_def::ty::FunctionSignature;
-use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
+use hir_def::{
+    sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId, StmtId,
+};
 use once_cell::sync::Lazy;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -254,6 +255,42 @@ pub enum InferenceDiagnostic {
         module: Name,
         args: Vec<bool>,
     },
+
+    /// A resolved platform member is not available in some of the execution
+    /// environments this body runs in (`missing` — the EDT-style
+    /// "[Web client]" qualifier set).
+    UnavailableInEnvironment {
+        expr: ExprId,
+        name: Name,
+        member_kind: EnvMemberKind,
+        missing: hir_def::execution_env::EnvFlags,
+    },
+
+    /// User code (a common module or a same-module method) is called from an
+    /// execution environment it is not compiled for: a server-only common
+    /// module without `ВызовСервера` called from client code, or a
+    /// `&НаКлиенте` form method called from server-side code.
+    ModuleAccessibility {
+        expr: ExprId,
+        name: Name,
+        callee_kind: EnvCalleeKind,
+        missing: hir_def::execution_env::EnvFlags,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvMemberKind {
+    Method,
+    Property,
+    GlobalFunction,
+    GlobalProperty,
+    Type,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvCalleeKind {
+    CommonModule,
+    LocalMethod,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,16 +309,14 @@ pub struct CallArgBinding {
 
     pub args: Vec<ExprId>,
 
-    pub params: ParamsShape,
-
-    pub params_from_doc_comment: bool,
+    pub candidate: CandidateCallBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParamsShape {
-    Single(Arc<[TypeId]>),
+pub struct CandidateCallBinding {
+    pub candidates: crate::call_resolution::CallCandidateSet,
 
-    Overloaded { flat: Arc<[TypeId]>, overloads: Arc<[Arc<[TypeId]>]> },
+    pub resolution: crate::call_resolution::CallResolution,
 }
 
 pub struct InferenceContext<'db> {
@@ -349,6 +384,16 @@ pub struct InferenceContext<'db> {
 
     call_arg_bindings: Vec<CallArgBinding>,
 
+    /// Execution environments this body runs in (module base ∩ compilation
+    /// directive). Empty = unknown → availability checks are skipped.
+    body_env: hir_def::execution_env::EnvFlags,
+
+    /// Environments availability diagnostics may report on
+    /// ([`EnvOptions::checked_environments`]) — the missing set is clipped to
+    /// this mask, keeping opt-in environments (external connection, mobile)
+    /// out of default verdicts.
+    checked_env: hir_def::execution_env::EnvFlags,
+
     /// Lazily-built lookup of unqualified-callable exports of the GLOBAL common modules
     /// visible to this body: lowercased method name → owning `MethodId` (first global
     /// module wins on a name collision). Built once per inference run on first bare-call
@@ -361,6 +406,16 @@ pub struct InferenceContext<'db> {
     /// enrich a structure local's type with its keys on each read. Empty for bodies with no such
     /// construction → byte-identical default typing. See [`crate::structure_keys`].
     structure_shapes: FxHashMap<String, crate::structure_keys::StructureShape>,
+
+    /// Physical-flag accessibility verdict per callee common module, so a body
+    /// calling the same module many times reads its metadata once instead of
+    /// recording a salsa dependency per call. `None` — not a common module
+    /// (skip); `Some((env, server_call))` — feed the environment compare.
+    callee_module_env: FxHashMap<FileId, Option<(hir_def::execution_env::EnvFlags, bool)>>,
+
+    /// [`method_body_env`] per same-module callee, for the local cross-directive
+    /// accessibility check.
+    local_callee_env: FxHashMap<u32, hir_def::execution_env::EnvFlags>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,6 +576,32 @@ impl<'db> InferenceContext<'db> {
         owner: DefWithBodyId,
         body: &Arc<Body>,
     ) -> Self {
+        Self::new_impl(db, file_id, owner, body, true)
+    }
+
+    fn new_impl(
+        db: &'db dyn HirDatabase,
+        file_id: FileId,
+        owner: DefWithBodyId,
+        body: &Arc<Body>,
+        with_body_env: bool,
+    ) -> Self {
+        let opts = db.env_options();
+        let body_env = if !with_body_env {
+            hir_def::execution_env::EnvFlags::EMPTY
+        } else {
+            match owner {
+                DefWithBodyId::Method(local_id) => crate::method_environment::effective_method_env(
+                    db,
+                    hir_def::MethodId { module: hir_def::ModuleId { file_id }, local_id },
+                    &opts,
+                ),
+                DefWithBodyId::ModuleCode => {
+                    let metadata = db.module_metadata(hir_def::ModuleId { file_id });
+                    hir_def::execution_env::module_code_env(&metadata, &opts)
+                }
+            }
+        };
         Self {
             db,
             context_file_id: file_id,
@@ -539,8 +620,12 @@ impl<'db> InferenceContext<'db> {
             diagnostics: Vec::new(),
             call_arg_bindings: Vec::new(),
             return_expr_ids: Vec::new(),
+            body_env,
+            checked_env: opts.checked_environments,
             global_exports: None,
             structure_shapes: FxHashMap::default(),
+            callee_module_env: FxHashMap::default(),
+            local_callee_env: FxHashMap::default(),
         }
     }
 
@@ -564,7 +649,10 @@ impl<'db> InferenceContext<'db> {
         owner: DefWithBodyId,
         body: &Arc<Body>,
     ) -> Self {
-        let mut ctx = Self::new(db, base_file_id, owner, body);
+        // The effective module's local_ids do not match the base file's item
+        // tree, so a directive computed against it may belong to another
+        // method — disable availability checks rather than misattribute them.
+        let mut ctx = Self::new_impl(db, base_file_id, owner, body, false);
         ctx.local_symbols = Some(local_symbols);
         ctx
     }
@@ -581,7 +669,9 @@ impl<'db> InferenceContext<'db> {
         owner: DefWithBodyId,
         body: &Arc<Body>,
     ) -> Self {
-        let mut ctx = Self::new(db, ext_file_id, owner, body);
+        // A weaving interceptor's effective directive comes from the base
+        // method it intercepts, unknown at this layer — no availability checks.
+        let mut ctx = Self::new_impl(db, ext_file_id, owner, body, false);
         ctx.weaving_base = Some(base_module);
         ctx
     }
@@ -649,13 +739,14 @@ impl<'db> InferenceContext<'db> {
     /// `TypeKind::Unknown` call arm performs.
     fn bare_module_method_exists(&self, name: &Name) -> bool {
         let symbol_tree = match &self.local_symbols {
-            Some(symbols) => Arc::clone(symbols),
-            None => self.db.symbol_tree(hir_def::ModuleId::new(self.context_file_id)),
+            Some(symbols) => symbols,
+            None => self.db.symbol_tree_ref(hir_def::ModuleId::new(self.context_file_id)),
         };
         if symbol_tree.find_method(name).is_some() {
             return true;
         }
-        self.weaving_base.is_some_and(|base| self.db.symbol_tree(base).find_method(name).is_some())
+        self.weaving_base
+            .is_some_and(|base| self.db.symbol_tree_ref(base).find_method(name).is_some())
     }
 
     /// Resolve a bare `Имя(...)` call against the exported methods of the visible global
@@ -671,11 +762,13 @@ impl<'db> InferenceContext<'db> {
     ) -> Option<TypeId> {
         let method_id = self.global_export_map().get(&name.as_str().fold_lower()).copied()?;
 
+        self.check_common_module_callee_env(callee, None, method_id.module);
+
         for arg in args {
             self.infer_expr(*arg);
         }
 
-        let symbol_tree = self.db.symbol_tree(method_id.module);
+        let symbol_tree = self.db.symbol_tree_ref(method_id.module);
         let method_symbol = symbol_tree.find_method_by_id(method_id)?;
         let signature = crate::method_resolution::materialise_signature_enriched(
             self.db,
@@ -683,26 +776,12 @@ impl<'db> InferenceContext<'db> {
             method_symbol,
         );
 
-        let total = signature.params.len();
-        let required = signature.required_count();
-        if args.len() < required || args.len() > total {
-            self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                call_expr: callee,
-                required_count: required,
-                total_count: total,
-                found: args.len(),
-            });
-        }
-
-        self.record_call_arg_binding(
-            callee,
-            args,
-            ParamsShape::Single(signature.params.iter().copied().collect()),
-            signature.from_doc_comment,
-        );
-
         self.expr_types.insert(callee, self.db.unknown());
-        Some(self.effective_local_return(method_id, signature.ret))
+        let return_ty = self.effective_local_return(method_id, signature.ret);
+        let candidates =
+            crate::user_call_candidates::for_resolved_method(self.db, name, method_id, return_ty)
+                .ok()?;
+        Some(self.record_candidate_call_arg_binding(callee, args, candidates))
     }
 
     fn push_inference_diagnostic(&mut self, diag: InferenceDiagnostic) {
@@ -715,6 +794,8 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
             InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
             InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
+            InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
+            InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
         };
         if self.body.is_recovered(key) {
             return;
@@ -735,6 +816,157 @@ impl<'db> InferenceContext<'db> {
             return None;
         };
         Some(Name::new(facet.name.as_str()))
+    }
+
+    /// Report a resolved platform member that is missing from some of the
+    /// environments this body runs in. Free when nothing is wrong: one u8
+    /// mask compare against availability already carried by the lookup
+    /// result. `#Если` branches narrow the body mask per their condition
+    /// (see the `Stmt::PreprocIf` arm); the check is skipped when either
+    /// side is unknown.
+    fn check_member_env(
+        &mut self,
+        expr: ExprId,
+        name: &Name,
+        member_env: hir_def::execution_env::EnvFlags,
+        member_kind: EnvMemberKind,
+    ) {
+        if self.body_env.is_empty() || member_env.is_empty() {
+            return;
+        }
+        let missing = self.body_env.without(member_env) & self.checked_env;
+        if missing.is_empty() {
+            return;
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::UnavailableInEnvironment {
+            expr,
+            name: name.clone(),
+            member_kind,
+            missing,
+        });
+    }
+
+    /// Accessibility of a cross-module call to `callee_module` (a common
+    /// module): every environment this body runs in must either be one the
+    /// callee is compiled for, or — for `ВызовСервера` modules — a client
+    /// environment making a remote server call.
+    /// `module_name` is the name as written at the call site; `None` (a bare
+    /// call to a global module's export) falls back to the module's metadata
+    /// name.
+    fn check_common_module_callee_env(
+        &mut self,
+        expr: ExprId,
+        module_name: Option<&Name>,
+        callee_module: hir_def::ModuleId,
+    ) {
+        use hir_def::execution_env::{self, EnvFlags};
+        if self.body_env.is_empty() || callee_module.file_id == self.context_file_id {
+            return;
+        }
+        // Physical flags per callee module are cached per body: a body calling
+        // the same module many times must not record a salsa dependency per
+        // call.
+        let cached = match self.callee_module_env.get(&callee_module.file_id) {
+            Some(v) => *v,
+            None => {
+                let opts = self.db.env_options();
+                let metadata = self.db.module_metadata(callee_module);
+                let v = metadata
+                    .common_module
+                    .as_ref()
+                    .map(|cm| (execution_env::common_module_env(cm, &opts), cm.is_server_call()));
+                self.callee_module_env.insert(callee_module.file_id, v);
+                v
+            }
+        };
+        let Some((physical_env, physical_server_call)) = cached else { return };
+
+        let missing_with = |env: EnvFlags, server_call: bool| {
+            if env.is_empty() {
+                return EnvFlags::EMPTY;
+            }
+            let mut missing = self.body_env.without(env) & self.checked_env;
+            if server_call {
+                missing = missing.without(EnvFlags::ALL_CLIENTS);
+            }
+            missing
+        };
+
+        // Fast path on the resolved body's physical flags. An extension that
+        // NARROWS an adopted module's flags slips through here as a missed
+        // diagnostic — accepted: adoption in practice widens access
+        // (`ВызовСервера`, client contexts), and the trade keeps the
+        // configuration-scoped lookup off the hot path entirely.
+        if missing_with(physical_env, physical_server_call).is_empty() {
+            return;
+        }
+
+        let metadata = self.db.module_metadata(callee_module);
+        let Some(physical) = metadata.common_module.as_ref() else { return };
+        let name = match module_name {
+            Some(name) => name.clone(),
+            None => Name::new(bsl_metadata::MdObject::name(physical.as_ref())),
+        };
+        // The caller's own extension may adopt the module and replace its
+        // flags wholesale (enable `ВызовСервера` or client contexts), so
+        // before reporting, re-judge against the flags visible TO THE CALLER.
+        // The physical flags stand when the provider has no configuration
+        // scoping.
+        let opts = self.db.env_options();
+        let caller_scoped = self.db.resolve_common_module(self.context_file_id, name.as_str());
+        let cm = caller_scoped.as_deref().unwrap_or(physical);
+        let missing =
+            missing_with(execution_env::common_module_env(cm, &opts), cm.is_server_call());
+        if missing.is_empty() {
+            return;
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::ModuleAccessibility {
+            expr,
+            name,
+            callee_kind: EnvCalleeKind::CommonModule,
+            missing,
+        });
+    }
+
+    /// Accessibility of a same-module call across compilation directives.
+    /// A client-side caller invoking a server method is the form's regular
+    /// remote server call, so only the server side is ever a violation: code
+    /// compiled for the server cannot reach a method that exists only on the
+    /// client.
+    fn check_local_callee_env(&mut self, expr: ExprId, name: &Name, callee_local_id: u32) {
+        use hir_def::execution_env::EnvFlags;
+        if self.body_env.is_empty() {
+            return;
+        }
+        let callee_env = match self.local_callee_env.get(&callee_local_id) {
+            Some(&env) => env,
+            None => {
+                let opts = self.db.env_options();
+                let env = crate::method_environment::effective_method_env(
+                    self.db,
+                    hir_def::MethodId {
+                        module: hir_def::ModuleId { file_id: self.context_file_id },
+                        local_id: callee_local_id,
+                    },
+                    &opts,
+                );
+                self.local_callee_env.insert(callee_local_id, env);
+                env
+            }
+        };
+        if callee_env.is_empty() {
+            return;
+        }
+        let missing = self.body_env.without(callee_env) & self.checked_env & EnvFlags::SERVER_SIDE;
+        if missing.is_empty() {
+            return;
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::ModuleAccessibility {
+            expr,
+            name: name.clone(),
+            callee_kind: EnvCalleeKind::LocalMethod,
+            missing,
+        });
     }
 
     fn push_deprecated_platform_member_diagnostic(
@@ -783,23 +1015,27 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    fn record_call_arg_binding(
+    fn record_candidate_call_arg_binding(
         &mut self,
         call_expr: ExprId,
         args: &[ExprId],
-        params: ParamsShape,
-        params_from_doc_comment: bool,
-    ) {
-        if self.body.is_recovered(call_expr) {
-            return;
+        candidates: crate::call_resolution::CallCandidateSet,
+    ) -> TypeId {
+        let argument_types = args
+            .iter()
+            .map(|arg| self.expr_types.get(arg).copied().unwrap_or_else(|| self.db.unknown()))
+            .collect::<Vec<_>>();
+        let projection = crate::call_binding::resolve_binding(self.db, candidates, &argument_types);
+        let return_ty = projection.semantic.resolution.return_ty;
+        if !self.body.is_recovered(call_expr) {
+            self.call_arg_bindings.push(CallArgBinding {
+                owner: self.owner,
+                call_expr,
+                args: args.to_vec(),
+                candidate: projection.semantic,
+            });
         }
-        self.call_arg_bindings.push(CallArgBinding {
-            owner: self.owner,
-            call_expr,
-            args: args.to_vec(),
-            params,
-            params_from_doc_comment,
-        });
+        return_ty
     }
 
     fn get_resolver(&self) -> Resolver {
@@ -818,6 +1054,83 @@ impl<'db> InferenceContext<'db> {
     fn body_declares_binding(&self, name: &hir_def::Name) -> bool {
         let target = name.as_str().fold_lower();
         self.body.bindings_iter().any(|(_, b)| b.name.as_str().fold_lower() == target)
+    }
+
+    /// True when the receiver is a reassigned local variable and a definition
+    /// that actually reaches this use either resolves the method or cannot be
+    /// typed. Sequential inference records the textually-last assignment type,
+    /// so at a use inside a sibling branch the receiver type may be a
+    /// cross-branch artefact; reaching definitions restore the flow facts and
+    /// keep the diagnostic alive when the stale type is the only one that
+    /// reaches (e.g. straight-line reassignment).
+    fn method_resolves_on_alternate_assignment(
+        &self,
+        receiver_expr: ExprId,
+        receiver_ty: TypeId,
+        method_name: &hir_def::Name,
+    ) -> bool {
+        let Expr::Path(name) = self.body.expr(receiver_expr) else {
+            return false;
+        };
+        let key = name.as_str().fold_lower();
+        let Some(info) = self.implicit_locals.get(&key) else {
+            return false;
+        };
+        if info.assignments.len() < 2 {
+            return false;
+        }
+
+        let vouches = |ty: TypeId| {
+            ty != receiver_ty
+                && (self.is_unknown(ty)
+                    || crate::method_lookup::lookup_method(self.db, ty, method_name).is_some())
+        };
+
+        // Without flow facts a non-reaching assignment must not vouch for the
+        // call (it would hide a real error after a straight-line
+        // reassignment), so no reaching definitions — no suppression.
+        let Some(reaching) = self.reaching_assignment_types(receiver_expr, &key) else {
+            return false;
+        };
+        reaching.iter().any(|ty| match ty {
+            Some(ty) => vouches(*ty),
+            // A reaching definition inference could not type (e.g. a loop
+            // back-edge not seen yet) — "method not found" is unprovable.
+            None => true,
+        })
+    }
+
+    /// Types of the assignments reaching `use_expr` for variable `var_key`.
+    /// `None` per entry when the defining statement's value has no recorded
+    /// type; `None` overall when reaching definitions are unavailable for the
+    /// owner.
+    fn reaching_assignment_types(
+        &self,
+        use_expr: ExprId,
+        var_key: &str,
+    ) -> Option<Vec<Option<TypeId>>> {
+        let DefWithBodyId::Method(local_id) = self.owner else {
+            return None;
+        };
+        let stmt_id = self.body.enclosing_stmt(use_expr)?;
+        let module_defs = self.db.module_reaching_definitions(self.context_file_id);
+        let method_defs = module_defs.get(local_id)?;
+        let defs = method_defs.defs_for_var_at_stmt(var_key, stmt_id)?;
+        Some(
+            defs.into_iter()
+                .map(|def| match def.def_site {
+                    dataflow::reaching_defs::DefSite::Assignment(stmt_raw) => {
+                        match self.body.stmt(StmtId::from_raw(stmt_raw)) {
+                            Stmt::Assign { value, .. } => {
+                                self.expr_types.get(&ExprId::from_idx(*value)).copied()
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect(),
+        )
     }
 
     pub fn infer_all(&mut self) {
@@ -843,6 +1156,7 @@ impl<'db> InferenceContext<'db> {
                         self.db,
                         hir_def::MethodIdInput::new(self.db, mid),
                     )
+                    .clone()
                 };
                 let forwarder = crate::structure_param_keys::Forwarder::new(
                     self.db, &resolver, module, &self.body, &summarize,
@@ -978,6 +1292,16 @@ impl<'db> InferenceContext<'db> {
                             self.push_deprecated_platform_member_diagnostic(
                                 target_id, base_ty, field, true,
                             );
+                            if let crate::field_enum::FieldOrigin::PlatformProperty { env } =
+                                info.origin
+                            {
+                                self.check_member_env(
+                                    target_id,
+                                    field,
+                                    env,
+                                    EnvMemberKind::Property,
+                                );
+                            }
                             if info.is_readonly {
                                 self.push_inference_diagnostic(
                                     InferenceDiagnostic::ReadOnlyPropertyAssignment {
@@ -1016,13 +1340,31 @@ impl<'db> InferenceContext<'db> {
             }
 
             Stmt::PreprocIf(preproc) => {
+                // Availability checks inside a branch see only the
+                // environments its condition compiles for; nesting works
+                // because each frame restores its own parent mask.
+                let parent = self.body_env;
+                let mut remaining = parent;
+                self.body_env = preproc.condition.narrow_branch(&mut remaining);
                 self.infer_stmts(&preproc.then_branch);
-                for (_, _, branch) in preproc.elsif_branches.iter() {
+                for (idx, (_, _, branch)) in preproc.elsif_branches.iter().enumerate() {
+                    self.body_env = match preproc.elsif_conditions.get(idx) {
+                        Some(cond) => cond.narrow_branch(&mut remaining),
+                        // A branch without a lowered condition (broken
+                        // alignment) poisons the rest of the chain,
+                        // including #Иначе.
+                        None => {
+                            remaining = hir_def::execution_env::EnvFlags::EMPTY;
+                            remaining
+                        }
+                    };
                     self.infer_stmts(branch);
                 }
                 if let Some(else_branch) = &preproc.else_branch {
+                    self.body_env = remaining;
                     self.infer_stmts(else_branch);
                 }
+                self.body_env = parent;
             }
 
             Stmt::While { condition, body } => {
@@ -1152,9 +1494,13 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(ExprId::from_idx(arg));
                 }
 
-                crate::method_lookup::lookup_method(self.db, receiver_ty, method)
-                    .map(|info| info.return_ty)
-                    .unwrap_or_else(|| self.db.unknown())
+                match crate::method_lookup::lookup_method(self.db, receiver_ty, method) {
+                    Some(info) => {
+                        self.check_member_env(expr_id, method, info.env, EnvMemberKind::Method);
+                        info.return_ty
+                    }
+                    None => self.db.unknown(),
+                }
             }
 
             Expr::Index { base, index } => {
@@ -1189,6 +1535,9 @@ impl<'db> InferenceContext<'db> {
                     crate::field_lookup::lookup_field(self.db, &obj_resolver, base_ty, field)
                 {
                     self.push_deprecated_platform_member_diagnostic(expr_id, base_ty, field, true);
+                    if let crate::field_enum::FieldOrigin::PlatformProperty { env } = info.origin {
+                        self.check_member_env(expr_id, field, env, EnvMemberKind::Property);
+                    }
                     info.ty
                 } else if let Some(info) = crate::manager_lookup::lookup_manager_field(
                     self.db,
@@ -1216,62 +1565,50 @@ impl<'db> InferenceContext<'db> {
                 }
 
                 if let Some(name) = type_name {
-                    let ctors =
-                        bsl_platform::PlatformDataInner::instance().get_constructors(name.as_str());
+                    let platform = bsl_platform::PlatformDataInner::instance();
+                    let platform_type = platform.get_type(name.as_str());
+                    let environment = platform_type.map_or(
+                        hir_def::execution_env::EnvFlags::ALL,
+                        |platform_type| {
+                            hir_def::execution_env::EnvFlags::from_platform_context(
+                                platform_type.context.as_ref(),
+                            )
+                        },
+                    );
+                    if !platform.is_ambiguous_type_name(name.as_str()) && platform_type.is_some() {
+                        self.check_member_env(expr_id, name, environment, EnvMemberKind::Type);
+                    }
+                    let ctors = platform.get_constructors(name.as_str());
                     if !ctors.is_empty() {
-                        let arg_count = args.len();
-                        let sigs: Vec<builtin::BuiltinSignature> = ctors
-                            .iter()
-                            .map(|ctor| {
-                                builtin::descriptor_from_params(
-                                    &ctor.parameters,
-                                    builtin::ReturnTypeSpec::Unknown,
-                                )
-                            })
-                            .collect();
-
-                        let mut arity_match: Option<usize> = None;
-                        let mut best_idx = 0usize;
-                        let mut best_distance = usize::MAX;
-                        for (idx, sig) in sigs.iter().enumerate() {
-                            let required = sig
-                                .defaults()
+                        if let Ok(candidates) = builtin::candidates::constructor_candidates(
+                            self.db,
+                            &ctors,
+                            environment,
+                        ) {
+                            let arg_ids: Vec<ExprId> =
+                                args.iter().copied().map(ExprId::from_idx).collect();
+                            let argument_types = arg_ids
                                 .iter()
-                                .rposition(|has_default| !*has_default)
-                                .map_or(0, |i| i + 1);
-                            let too_few = arg_count < required;
-                            let too_many = sig.max_args().is_some_and(|m| arg_count > m as usize);
-                            if !too_few && !too_many {
-                                arity_match = Some(idx);
-                                break;
-                            }
-                            let upper = sig.max_args().map_or(arg_count, |m| m as usize);
-                            let distance = if too_few {
-                                required - arg_count
-                            } else {
-                                arg_count.saturating_sub(upper)
-                            };
-                            if distance < best_distance {
-                                best_distance = distance;
-                                best_idx = idx;
-                            }
-                        }
-
-                        if arity_match.is_none() {
-                            let sig = &sigs[best_idx];
-                            let required = sig
-                                .defaults()
-                                .iter()
-                                .rposition(|has_default| !*has_default)
-                                .map_or(0, |i| i + 1);
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::MismatchedArgCount {
-                                    call_expr: expr_id,
-                                    required_count: required,
-                                    total_count: sig.param_count(),
-                                    found: arg_count,
-                                },
+                                .map(|arg| {
+                                    self.expr_types
+                                        .get(arg)
+                                        .copied()
+                                        .unwrap_or_else(|| self.db.unknown())
+                                })
+                                .collect::<Vec<_>>();
+                            let projection = crate::call_binding::resolve_binding(
+                                self.db,
+                                candidates,
+                                &argument_types,
                             );
+                            if !self.body.is_recovered(expr_id) {
+                                self.call_arg_bindings.push(CallArgBinding {
+                                    owner: self.owner,
+                                    call_expr: expr_id,
+                                    args: arg_ids,
+                                    candidate: projection.semantic,
+                                });
+                            }
                         }
                     }
                 }
@@ -1463,10 +1800,11 @@ impl<'db> InferenceContext<'db> {
         }
 
         if !user_shadows && !workspace_owns_common_module {
-            if let Some(id) =
-                crate::platform_global_lookup::resolve_platform_global_property_type(self.db, name)
+            if let Some((id, env)) =
+                crate::platform_global_lookup::resolve_platform_global_property(self.db, name)
             {
                 trace!("resolved {} as platform global → {:?}", name, id);
+                self.check_member_env(expr_id, name, env, EnvMemberKind::GlobalProperty);
                 return id;
             }
         }
@@ -1609,11 +1947,13 @@ impl<'db> InferenceContext<'db> {
                 // self-qualified-access and missed-parameter diagnostics that the name dispatch
                 // emits — the handlers filter further (TwoLevel only fires when the called module
                 // is the current one). A variable is in `assigned_var_names`, so it is excluded.
+                let mut static_receiver = false;
                 if let Expr::Path(recv) = self.body.expr(base_id) {
                     let recv = recv.clone();
                     if !self.assigned_var_names.contains(&recv.as_str().fold_lower())
                         && !self.body_declares_binding(&recv)
                     {
+                        static_receiver = true;
                         let arg_presence: Vec<bool> = args
                             .iter()
                             .map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing))
@@ -1634,7 +1974,8 @@ impl<'db> InferenceContext<'db> {
                         );
                     }
                 }
-                let return_ty = self.infer_qualified_call(&module, &method_name, args, callee);
+                let return_ty =
+                    self.infer_qualified_call(&module, &method_name, args, callee, static_receiver);
                 self.expr_types.insert(callee, self.db.unknown());
                 return return_ty;
             }
@@ -1662,29 +2003,18 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        let total = resolution.signature.params.len();
-                        let required = resolution.signature.required_count();
-                        if args.len() < required || args.len() > total {
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::MismatchedArgCount {
-                                    call_expr: callee,
-                                    required_count: required,
-                                    total_count: total,
-                                    found: args.len(),
-                                },
-                            );
-                        }
-                        self.record_call_arg_binding(
-                            callee,
-                            args,
-                            ParamsShape::Single(
-                                resolution.signature.params.iter().copied().collect(),
-                            ),
-                            resolution.signature.from_doc_comment,
-                        );
                         self.expr_types.insert(callee, self.db.unknown());
-                        return self
+                        let return_ty = self
                             .effective_local_return(resolution.method_id, resolution.return_type);
+                        let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                            self.db,
+                            &method_name,
+                            resolution.method_id,
+                            return_ty,
+                        ) else {
+                            return self.db.unknown();
+                        };
+                        return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
                     Err(
@@ -1725,29 +2055,18 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        let total = resolution.signature.params.len();
-                        let required = resolution.signature.required_count();
-                        if args.len() < required || args.len() > total {
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::MismatchedArgCount {
-                                    call_expr: callee,
-                                    required_count: required,
-                                    total_count: total,
-                                    found: args.len(),
-                                },
-                            );
-                        }
-                        self.record_call_arg_binding(
-                            callee,
-                            args,
-                            ParamsShape::Single(
-                                resolution.signature.params.iter().copied().collect(),
-                            ),
-                            resolution.signature.from_doc_comment,
-                        );
                         self.expr_types.insert(callee, self.db.unknown());
-                        return self
+                        let return_ty = self
                             .effective_local_return(resolution.method_id, resolution.return_type);
+                        let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                            self.db,
+                            &method_name,
+                            resolution.method_id,
+                            return_ty,
+                        ) else {
+                            return self.db.unknown();
+                        };
+                        return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
                     Err(
@@ -1791,29 +2110,18 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        let total = resolution.signature.params.len();
-                        let required = resolution.signature.required_count();
-                        if args.len() < required || args.len() > total {
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::MismatchedArgCount {
-                                    call_expr: callee,
-                                    required_count: required,
-                                    total_count: total,
-                                    found: args.len(),
-                                },
-                            );
-                        }
-                        self.record_call_arg_binding(
-                            callee,
-                            args,
-                            ParamsShape::Single(
-                                resolution.signature.params.iter().copied().collect(),
-                            ),
-                            resolution.signature.from_doc_comment,
-                        );
                         self.expr_types.insert(callee, self.db.unknown());
-                        return self
+                        let return_ty = self
                             .effective_local_return(resolution.method_id, resolution.return_type);
+                        let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                            self.db,
+                            &method_name,
+                            resolution.method_id,
+                            return_ty,
+                        ) else {
+                            return self.db.unknown();
+                        };
+                        return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
                     Err(
@@ -1851,35 +2159,36 @@ impl<'db> InferenceContext<'db> {
                         &method_name,
                         false,
                     );
-                    let mut return_ty = info.return_ty;
-                    let mut params: Vec<TypeId> = info.params.to_vec();
-                    let overloads: Vec<Arc<[TypeId]>> =
-                        info.overloads.iter().cloned().map(Arc::from).collect();
+                    self.check_member_env(callee, &method_name, info.env, EnvMemberKind::Method);
+                    let mut candidates = info.candidates;
                     let manager_receiver_kind = self.db.lookup_type(manager_receiver_ty);
                     if let TypeKind::ObjectManager(facet) = manager_receiver_kind {
                         if facet.mdo == bsl_metadata::MdoType::Constant {
                             let mdo_name = hir_def::Name::new(&facet.name);
-                            self.refine_constant_method(
+                            self.refine_constant_candidates(
                                 &mdo_name,
                                 &method_name,
-                                &mut return_ty,
-                                &mut params,
+                                &mut candidates,
                             );
                         }
                     }
-                    self.record_call_arg_binding(
-                        callee,
-                        args,
-                        ParamsShape::Overloaded {
-                            flat: params.into(),
-                            overloads: overloads.into(),
-                        },
-                        false,
-                    );
-                    return_ty
+                    self.record_candidate_call_arg_binding(callee, args, candidates)
                 }
                 None => {
-                    if let Some(receiver_name) = receiver_display_name(self.db, receiver_ty) {
+                    if self.method_resolves_on_alternate_assignment(
+                        base_id,
+                        receiver_ty,
+                        &method_name,
+                    ) {
+                        // Inference is sequential, so at this use the variable
+                        // carries the type of its textually-last assignment even
+                        // when that assignment lives in a sibling branch that
+                        // cannot reach this use. If any other recorded assignment
+                        // type resolves the method, the receiver type is a
+                        // cross-branch artefact — stay silent instead of
+                        // reporting a false unresolved call.
+                    } else if let Some(receiver_name) = receiver_display_name(self.db, receiver_ty)
+                    {
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                             expr: callee,
                             receiver_name,
@@ -1946,84 +2255,30 @@ impl<'db> InferenceContext<'db> {
                     "BuiltinFunctions::get must never return an empty overload set"
                 );
 
-                let sigs: Vec<FunctionSignature> = sigs.iter().map(|s| s.lower(self.db)).collect();
+                if let Some(first) = sigs.first() {
+                    self.check_member_env(
+                        callee,
+                        &name,
+                        first.env(),
+                        EnvMemberKind::GlobalFunction,
+                    );
+                }
 
                 for arg in args {
                     self.infer_expr(*arg);
                 }
-
-                let arg_count = args.len();
-                let inferred: Vec<TypeId> = args
-                    .iter()
-                    .map(|a| self.expr_types.get(a).copied().unwrap_or_else(|| self.db.unknown()))
-                    .collect();
-
-                let mut full_match: Option<usize> = None;
-                let mut arity_match: Option<usize> = None;
-                let mut best_idx = 0usize;
-                let mut best_distance = usize::MAX;
-                for (idx, sig) in sigs.iter().enumerate() {
-                    let required = sig.required_count();
-                    let too_few = arg_count < required;
-                    let too_many = sig.max_args.is_some_and(|m| arg_count > m as usize);
-                    if !too_few && !too_many {
-                        if arity_match.is_none() {
-                            arity_match = Some(idx);
-                        }
-                        let types_ok =
-                            inferred.iter().zip(sig.params.iter()).all(|(actual, expected)| {
-                                crate::subtype::is_assignable(self.db, *actual, *expected)
-                            });
-                        if types_ok && full_match.is_none() {
-                            full_match = Some(idx);
-                            break;
-                        }
-                    }
-                    let upper = sig.max_args.map_or(arg_count, |m| m as usize);
-                    let distance = if too_few {
-                        required - arg_count
-                    } else {
-                        arg_count.saturating_sub(upper)
-                    };
-                    if distance < best_distance {
-                        best_distance = distance;
-                        best_idx = idx;
-                    }
-                }
-
-                let chosen = match full_match.or(arity_match) {
-                    Some(idx) => &sigs[idx],
-                    None => {
-                        let sig = &sigs[best_idx];
-                        let required = sig.required_count();
-                        self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                            call_expr: callee,
-                            required_count: required,
-                            total_count: sig.params.len(),
-                            found: arg_count,
-                        });
-                        sig
-                    }
+                let Some(callable) = builtin::builtin_functions().callable_id(name.as_str()) else {
+                    return self.db.unknown();
                 };
-
-                let overloads_arc: Arc<[Arc<[TypeId]>]> = sigs
-                    .iter()
-                    .map(|s| s.params.iter().copied().collect())
-                    .collect::<Vec<_>>()
-                    .into();
-                self.record_call_arg_binding(
-                    callee,
-                    args,
-                    ParamsShape::Overloaded {
-                        flat: chosen.params.iter().copied().collect(),
-                        overloads: overloads_arc,
-                    },
-                    chosen.from_doc_comment,
-                );
-                let mut ret = if sigs.len() == 1 {
-                    chosen.ret
-                } else {
-                    self.db.union(sigs.iter().map(|s| s.ret).collect())
+                let Ok(mut candidates) = crate::call_resolution::CallCandidateSet::try_from(
+                    sigs.iter()
+                        .enumerate()
+                        .map(|(ordinal, signature)| {
+                            signature.to_call_signature(self.db, callable, ordinal)
+                        })
+                        .collect::<Vec<_>>(),
+                ) else {
+                    return self.db.unknown();
                 };
                 // Weaving `&Вместо`: a bare `ПродолжитьВызов(...)` invokes the original base
                 // method, so (a) its result is that method's return type, not the platform
@@ -2033,8 +2288,13 @@ impl<'db> InferenceContext<'db> {
                 // `&Вместо` interceptor (`proceed_*` are `None` everywhere else → no change).
                 if is_proceed_with_call_name(&name) {
                     if let Some(proceed_ty) = self.proceed_return {
-                        ret = proceed_ty;
+                        for candidate in candidates.signatures_mut() {
+                            candidate.return_ty = proceed_ty;
+                        }
                     }
+                }
+                let ret = self.record_candidate_call_arg_binding(callee, args, candidates);
+                if is_proceed_with_call_name(&name) {
                     if let Some((required, total)) = self.proceed_arity {
                         if args.len() < required || args.len() > total {
                             self.push_inference_diagnostic(
@@ -2062,30 +2322,9 @@ impl<'db> InferenceContext<'db> {
         let callee_kind = self.db.lookup_type(callee_ty);
         match callee_kind {
             TypeKind::Function(facet) => {
-                let total = facet.params.len();
-                let required = facet.min_args as usize;
-                let too_few = args.len() < required;
-                let too_many = match facet.max_args {
-                    ArgArity::Fixed(n) => args.len() > n as usize,
-                    ArgArity::Variadic => false,
-                    _ => false,
-                };
-                if too_few || too_many {
-                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                        call_expr: callee,
-                        required_count: required,
-                        total_count: total,
-                        found: args.len(),
-                    });
-                }
-
-                self.record_call_arg_binding(
-                    callee,
-                    args,
-                    ParamsShape::Single(facet.params.iter().map(|p| p.ty).collect()),
-                    false,
-                );
-
+                let candidates =
+                    crate::call_resolution::CallCandidateSet::from_function_facet(facet);
+                self.record_candidate_call_arg_binding(callee, args, candidates);
                 facet.returns
             }
             TypeKind::Unknown => {
@@ -2104,30 +2343,38 @@ impl<'db> InferenceContext<'db> {
                         // sibling that the extension does not define falls back to the paired
                         // base module's symbols (the extension shadows the base). The base tree
                         // is bound here so the borrowed method outlives the lookup.
-                        let base_tree = self.weaving_base.map(|base| self.db.symbol_tree(base));
+                        let base_tree = self.weaving_base.map(|base| self.db.symbol_tree_ref(base));
                         let resolved_method = symbol_tree.find_method(name).or_else(|| {
                             base_tree.as_ref().and_then(|base_tree| base_tree.find_method(name))
                         });
                         if let Some(method) = resolved_method {
+                            // Weaving-base fallbacks resolve into another file whose
+                            // item tree does not match `context_file_id` — the local
+                            // directive check only makes sense for true siblings.
+                            if method.id.module.file_id == self.context_file_id {
+                                let method_name = method.name.clone();
+                                let local_id = method.id.local_id;
+                                self.check_local_callee_env(callee, &method_name, local_id);
+                            }
                             // In effective (`&ИзменениеИКонтроль`) inference, prefer the
                             // CHANGED body's return over the base-keyed query, so inserted
                             // code that consumes a changed sibling's result types correctly.
-                            if let Some(ret) = self
+                            let effective_ret = self
                                 .local_effective_returns
                                 .as_ref()
                                 .and_then(|m| m.get(&method.id.local_id).copied())
-                            {
-                                if !self.is_unknown(ret) {
-                                    return ret;
-                                }
-                            }
+                                .filter(|ret| !self.is_unknown(*ret));
                             let sig = crate::method_resolution::materialise_signature_enriched(
                                 self.db, method.id, method,
                             );
-                            let ret = sig.ret;
-                            if !self.is_unknown(ret) {
-                                return ret;
-                            }
+                            let return_ty = effective_ret.unwrap_or(sig.ret);
+                            let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                                self.db, name, method.id, return_ty,
+                            ) else {
+                                return self.db.unknown();
+                            };
+                            return self
+                                .record_candidate_call_arg_binding(callee, args, candidates);
                         }
                     }
                 }
@@ -2137,12 +2384,19 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
+    /// `static_receiver` — the call names the module directly
+    /// (`Модуль.Метод()`), as opposed to a variable holding a module value
+    /// (`М = ОбщегоНазначения.ОбщийМодуль(...); М.Метод()`). Flow-insensitive
+    /// typing keeps only the LAST module assigned to such a variable, so
+    /// accessibility verdicts against it would misfire on the common
+    /// per-`#Если`-branch module selection idiom.
     fn infer_qualified_call(
         &mut self,
         module_name: &Name,
         method_name: &Name,
         args: &[ExprId],
         call_expr: ExprId,
+        static_receiver: bool,
     ) -> TypeId {
         for arg in args {
             self.infer_expr(*arg);
@@ -2166,23 +2420,13 @@ impl<'db> InferenceContext<'db> {
                     });
                 }
 
-                let total = resolution.signature.params.len();
-                let required = resolution.signature.required_count();
-                if args.len() < required || args.len() > total {
-                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
+                if static_receiver && resolution.is_export {
+                    self.check_common_module_callee_env(
                         call_expr,
-                        required_count: required,
-                        total_count: total,
-                        found: args.len(),
-                    });
+                        Some(module_name),
+                        resolution.method_id.module,
+                    );
                 }
-
-                self.record_call_arg_binding(
-                    call_expr,
-                    args,
-                    ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
-                    resolution.signature.from_doc_comment,
-                );
 
                 // `ОбщегоНазначения.ОбщийМодуль("Имя")` returns the named common module as a
                 // value. Its own inferred return is uninformative — `Unknown` from `Вычислить`,
@@ -2190,16 +2434,23 @@ impl<'db> InferenceContext<'db> {
                 // arm that wins under flow-insensitive typing. Narrowing on either gives the
                 // receiver a `CommonModule` type for member resolution / hover / completion,
                 // without overriding a method that declares a genuinely useful return type.
-                if (self.is_unknown(resolution.return_type)
-                    || self.is_undefined(resolution.return_type))
+                let mut return_ty = resolution.return_type;
+                if (self.is_unknown(return_ty) || self.is_undefined(resolution.return_type))
                     && method_name.as_str().fold_lower() == "общиймодуль"
                 {
                     if let Some(ty) = self.common_module_type_from_args(args) {
-                        return ty;
+                        return_ty = ty;
                     }
                 }
-
-                resolution.return_type
+                let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                    self.db,
+                    method_name,
+                    resolution.method_id,
+                    return_ty,
+                ) else {
+                    return self.db.unknown();
+                };
+                self.record_candidate_call_arg_binding(call_expr, args, candidates)
             }
             Err(kind) => {
                 if matches!(kind, UnresolvedMethodKind::MethodNotFound) {
@@ -2214,13 +2465,20 @@ impl<'db> InferenceContext<'db> {
                         .is_some();
 
                     if !module_in_workspace {
-                        if let crate::platform_global_lookup::PlatformGlobalLookup::Resolved(
-                            return_ty,
-                        ) = crate::platform_global_lookup::try_resolve_platform_global_member(
+                        if let crate::platform_global_lookup::PlatformGlobalLookup::Resolved {
+                            ty: return_ty,
+                            env,
+                        } = crate::platform_global_lookup::try_resolve_platform_global_member(
                             self.db,
                             module_name,
                             method_name,
                         ) {
+                            self.check_member_env(
+                                call_expr,
+                                method_name,
+                                env,
+                                EnvMemberKind::Method,
+                            );
                             self.expr_types.insert(call_expr, self.db.unknown());
                             return return_ty;
                         }
@@ -2323,7 +2581,13 @@ impl<'db> InferenceContext<'db> {
                 },
             );
 
-            return Some(self.infer_qualified_call(module_name, method_name, args, call_expr));
+            return Some(self.infer_qualified_call(
+                module_name,
+                method_name,
+                args,
+                call_expr,
+                true,
+            ));
         }
 
         // A manager module that calls one of its own methods through the object's
@@ -2366,10 +2630,14 @@ impl<'db> InferenceContext<'db> {
             module_name,
             method_name,
         ) {
-            crate::platform_global_lookup::PlatformGlobalLookup::Resolved(return_ty) => {
+            crate::platform_global_lookup::PlatformGlobalLookup::Resolved {
+                ty: return_ty,
+                env,
+            } => {
                 for arg in args {
                     self.infer_expr(*arg);
                 }
+                self.check_member_env(call_expr, method_name, env, EnvMemberKind::Method);
                 self.expr_types.insert(call_expr, self.db.unknown());
                 return Some(return_ty);
             }
@@ -2433,25 +2701,15 @@ impl<'db> InferenceContext<'db> {
                     });
                 }
 
-                let total = resolution.signature.params.len();
-                let required = resolution.signature.required_count();
-                if args.len() < required || args.len() > total {
-                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                        call_expr,
-                        required_count: required,
-                        total_count: total,
-                        found: args.len(),
-                    });
-                }
-
-                self.record_call_arg_binding(
-                    call_expr,
-                    args,
-                    ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
-                    resolution.signature.from_doc_comment,
-                );
-
-                resolution.return_type
+                let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                    self.db,
+                    method_name,
+                    resolution.method_id,
+                    resolution.return_type,
+                ) else {
+                    return self.db.unknown();
+                };
+                self.record_candidate_call_arg_binding(call_expr, args, candidates)
             }
             Err(UnresolvedMethodKind::MethodNotFound) => {
                 let mdo_type_opt = bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str());
@@ -2460,36 +2718,12 @@ impl<'db> InferenceContext<'db> {
                     .and_then(|mdo_type| {
                         resolve_platform_manager_method(self.db, mdo_type, mdo_name, method_name)
                     });
-                if let Some(mut res) = plat_res {
+                if let Some(res) = plat_res {
+                    let mut candidates = res.candidates;
                     if mdo_type_opt == Some(bsl_metadata::MdoType::Constant) {
-                        let mut return_ty = res.return_ty;
-                        let mut params: Vec<TypeId> = res.signature.params.to_vec();
-                        self.refine_constant_method(
-                            mdo_name,
-                            method_name,
-                            &mut return_ty,
-                            &mut params,
-                        );
-                        res.return_ty = return_ty;
-                        res.signature.params = params.into_boxed_slice();
+                        self.refine_constant_candidates(mdo_name, method_name, &mut candidates);
                     }
-                    let total = res.signature.params.len();
-                    let required = res.signature.required_count();
-                    if args.len() < required || args.len() > total {
-                        self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
-                            call_expr,
-                            required_count: required,
-                            total_count: total,
-                            found: args.len(),
-                        });
-                    }
-                    self.record_call_arg_binding(
-                        call_expr,
-                        args,
-                        ParamsShape::Single(res.signature.params.to_vec().into()),
-                        res.signature.from_doc_comment,
-                    );
-                    return res.return_ty;
+                    return self.record_candidate_call_arg_binding(call_expr, args, candidates);
                 }
 
                 self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
@@ -2559,6 +2793,26 @@ impl<'db> InferenceContext<'db> {
             *return_ty = value_ty;
         } else if is_set {
             params[0] = value_ty;
+        }
+    }
+
+    fn refine_constant_candidates(
+        &self,
+        mdo_name: &Name,
+        method_name: &Name,
+        candidates: &mut crate::call_resolution::CallCandidateSet,
+    ) {
+        for candidate in candidates.signatures_mut() {
+            let mut params = candidate.params.iter().map(|param| param.ty).collect::<Vec<_>>();
+            self.refine_constant_method(
+                mdo_name,
+                method_name,
+                &mut candidate.return_ty,
+                &mut params,
+            );
+            for (param, ty) in candidate.params.iter_mut().zip(params) {
+                param.ty = ty;
+            }
         }
     }
 }
@@ -2668,7 +2922,7 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
     mdo_type_to_plural(mdo)
 }
 
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap, returns(clone))]
 pub fn infer_query<'db>(
     db: &'db dyn HirDatabase,
     file_id_input: FileIdInput<'db>,
@@ -2677,7 +2931,7 @@ pub fn infer_query<'db>(
     let _p = tracing::info_span!("infer_query", ?file_id).entered();
 
     let module_id = hir_def::ModuleId { file_id };
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
     let mut result = InferenceResult::default();
 
@@ -2704,16 +2958,16 @@ pub fn infer_query<'db>(
 
     {
         let _bspan = tracing::info_span!("infer_query.body", kind = "module_code").entered();
-        let module_code = db.infer_module_code(file_id);
-        fold_module_code(&mut result, &module_code);
+        let module_code = db.infer_module_code_ref(file_id);
+        fold_module_code(&mut result, module_code);
     }
 
     for (local_id, _body) in module_bodies.iter_bodies() {
         let _bspan = tracing::info_span!("infer_query.body", kind = "method").entered();
         let method_id = hir_def::MethodId { module: module_id, local_id };
         let method_input = MethodIdInput::new(db, method_id);
-        let body_result = db.infer_method(method_input);
-        fold_body(&mut result, &body_result);
+        let body_result = db.infer_method_ref(method_input);
+        fold_body(&mut result, body_result);
     }
 
     info!(
@@ -2733,7 +2987,7 @@ pub fn infer_query<'db>(
 /// metadata / cross-module context stays the base file. It deliberately does NOT
 /// reuse `infer_method` / `infer_module_code`: those key on `ModuleId{base_file}` and
 /// would collide with the base module's own cached inference.
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap, returns(clone))]
 pub fn infer_effective<'db>(
     db: &'db dyn HirDatabase,
     eid: EffectiveModuleId<'db>,
@@ -2859,7 +3113,7 @@ fn is_proceed_with_call_name(name: &Name) -> bool {
 /// method resolves via the base fallback (no spurious `UnresolvedMethodCall`) while
 /// configuration / metadata context stays the extension file. Single pass — the
 /// changed-return threading of effective inference is a later increment.
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap, returns(clone))]
 pub fn infer_weaving<'db>(
     db: &'db dyn HirDatabase,
     wid: hir_def::weaving::WeavingModuleId<'db>,
@@ -2870,7 +3124,7 @@ pub fn infer_weaving<'db>(
 
     let base_module = hir_def::ModuleId::new(base_file);
     let ext_module = hir_def::ModuleId::new(ext_file);
-    let module_bodies = db.module_bodies(ext_module);
+    let module_bodies = db.module_bodies_ref(ext_module);
 
     // A `&Вместо("M")` interceptor's body may call `ПродолжитьВызов(...)` to re-enter the
     // original base method `M`. Pre-compute, per ext method `local_id`: (a) `M`'s return type so
@@ -2879,8 +3133,8 @@ pub fn infer_weaving<'db>(
     // skipped. The return is dropped when uninformative (Unknown/Undefined) to preserve the
     // platform default, but the arity is kept whenever `M` resolves — a procedure base has no
     // informative return yet its arguments still need checking.
-    let ext_symbols = db.symbol_tree(ext_module);
-    let base_symbols = db.symbol_tree(base_module);
+    let ext_symbols = db.symbol_tree_ref(ext_module);
+    let base_symbols = db.symbol_tree_ref(base_module);
     let ext_parse = db.parse(ext_file);
     let mut proceed_returns: FxHashMap<u32, TypeId> = FxHashMap::default();
     let mut proceed_arities: FxHashMap<u32, (usize, usize)> = FxHashMap::default();
@@ -2973,7 +3227,7 @@ fn body_return_type(db: &dyn HirDatabase, body_result: &BodyInferenceResult) -> 
     }
 }
 
-#[salsa::tracked(lru = 1024, heap_size = heap_estimate::module_code_inference_result_heap)]
+#[salsa::tracked(lru = 1024, heap_size = heap_estimate::module_code_inference_result_heap, returns(ref))]
 pub fn infer_module_code_query<'db>(
     db: &'db dyn HirDatabase,
     file_id_input: FileIdInput<'db>,
@@ -2982,7 +3236,7 @@ pub fn infer_module_code_query<'db>(
     let _p = tracing::info_span!("infer_module_code_query", ?file_id).entered();
 
     let module_id = hir_def::ModuleId { file_id };
-    let module_bodies = db.module_bodies(module_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
     let Some(body) = module_bodies.module_code() else {
         return Arc::new(ModuleCodeInferenceResult::default());
@@ -3010,31 +3264,33 @@ mod tests {
     use bsl_types::testing::InMemoryDb;
 
     #[test]
-    fn params_shape_typeids_round_trip_via_ty() {
+    fn t12_function_facet_synthesizes_candidate_with_argument_diagnostics() {
+        use bsl_types::facet::{ArgArity, FunctionFacet, FunctionOrigin, ParamPassing, ParamSpec};
+
         let db = InMemoryDb::new();
         let number = db.number(None, None);
         let string = db.string(None, false);
+        let facet = FunctionFacet::new(
+            Arc::from([ParamSpec::new("value".to_string(), number, ParamPassing::ByVal, false)]),
+            Arc::from([None]),
+            1,
+            ArgArity::Fixed(1),
+            number,
+            FunctionOrigin::Unknown,
+        );
 
-        let single = ParamsShape::Single(Arc::from([number, string]));
-        match single {
-            ParamsShape::Single(ids) => {
-                assert_eq!(ids.as_ref(), &[number, string]);
-            }
-            _ => panic!("expected Single"),
-        }
+        let candidates = crate::call_resolution::CallCandidateSet::from_function_facet(&facet);
+        let resolution = crate::call_resolution::resolve_candidates(&db, &candidates, &[string]);
 
-        let overloaded = ParamsShape::Overloaded {
-            flat: Arc::from([number]),
-            overloads: Arc::from([Arc::from([number]) as Arc<[TypeId]>]),
-        };
-        match overloaded {
-            ParamsShape::Overloaded { flat, overloads } => {
-                assert_eq!(flat.as_ref(), &[number]);
-                assert_eq!(overloads.len(), 1);
-                assert_eq!(overloads[0].as_ref(), &[number]);
-            }
-            _ => panic!("expected Overloaded"),
-        }
+        assert!(matches!(
+            resolution.selection,
+            crate::call_resolution::CallSelection::Rejected(
+                crate::call_resolution::CallRejection::Type
+            )
+        ));
+        assert_eq!(resolution.return_ty, db.unknown());
+        assert_eq!(facet.returns, number);
+        assert_eq!(candidates.as_slice()[0].params[0].ty, number);
     }
 
     #[test]
@@ -3175,7 +3431,7 @@ mod tests {
         db: &dyn bsl_types::intern::TypeKernelDb,
         builtins: &builtin::BuiltinFunctions,
         name: &str,
-    ) -> FunctionSignature {
+    ) -> hir_def::ty::FunctionSignature {
         let sigs = builtins.get(name).unwrap_or_else(|| panic!("{name} should exist"));
         sigs[0].lower(db)
     }

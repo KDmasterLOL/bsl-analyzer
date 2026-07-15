@@ -41,6 +41,12 @@ pub struct PlatformDataInner {
     manager_properties_by_prefix: FxHashMap<SmolStr, Vec<usize>>,
     property_docs_by_id: FxHashMap<u32, usize>,
     global_properties_by_name: FxHashMap<SmolStr, usize>,
+    /// Type names (folded, RU or EN) shared by more than one platform type —
+    /// e.g. `ЭлементыФормы` is both managed-form `FormItems` and legacy
+    /// `Controls`. A by-name lookup resolves to an arbitrary one of them, so
+    /// per-entry facts that differ between the homonyms (availability,
+    /// deprecation) are unreliable for these names.
+    ambiguous_type_names: rustc_hash::FxHashSet<SmolStr>,
 }
 
 impl PlatformDataInner {
@@ -49,8 +55,11 @@ impl PlatformDataInner {
     }
 
     fn new() -> Self {
-        let types: Vec<PlatformType> =
+        let mut types: Vec<PlatformType> =
             crate::generated::PLATFORM_TYPES.iter().map(PlatformType::from).collect();
+
+        apply_docs_gap_iter_types_overlay(&mut types);
+        apply_docs_gap_type_context_overlay(&mut types);
 
         let mut types_by_name = FxHashMap::default();
 
@@ -65,12 +74,21 @@ impl PlatformDataInner {
         }
 
         let mut type_en_folded: Vec<SmolStr> = Vec::with_capacity(types.len());
+        let mut ambiguous_type_names = rustc_hash::FxHashSet::default();
         for (idx, ty) in types.iter().enumerate() {
             let ru_key: SmolStr = ty.name.fold_lower().into();
             let en_key: SmolStr = ty.english_name.fold_lower().into();
             type_en_folded.push(en_key.clone());
-            types_by_name.insert(ru_key, idx);
-            types_by_name.insert(en_key, idx);
+            if let Some(prev) = types_by_name.insert(ru_key.clone(), idx) {
+                if prev != idx {
+                    ambiguous_type_names.insert(ru_key);
+                }
+            }
+            if let Some(prev) = types_by_name.insert(en_key.clone(), idx) {
+                if prev != idx {
+                    ambiguous_type_names.insert(en_key);
+                }
+            }
             // The XDTO name is an additional, non-overriding alias: index it only
             // when unambiguous, and never let it shadow a type's own key.
             if let Some(xdto) = &ty.xdto_name {
@@ -81,8 +99,14 @@ impl PlatformDataInner {
             }
         }
 
-        let methods: Vec<PlatformMethod> =
+        let mut global_functions: Vec<GlobalFunction> =
+            crate::generated::PLATFORM_GLOBAL_FUNCTIONS.iter().map(GlobalFunction::from).collect();
+
+        let mut methods: Vec<PlatformMethod> =
             crate::generated::PLATFORM_METHODS.iter().map(PlatformMethod::from).collect();
+
+        apply_docs_gap_method_overlay(&mut methods, &global_functions);
+        apply_docs_gap_member_context_overlay(&mut methods, &mut global_functions, &types);
 
         let mut methods_by_name = FxHashMap::default();
         let mut methods_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
@@ -109,9 +133,6 @@ impl PlatformDataInner {
             }
         }
 
-        let global_functions: Vec<GlobalFunction> =
-            crate::generated::PLATFORM_GLOBAL_FUNCTIONS.iter().map(GlobalFunction::from).collect();
-
         let mut global_functions_by_name = FxHashMap::default();
 
         for (idx, function) in global_functions.iter().enumerate() {
@@ -120,6 +141,14 @@ impl PlatformDataInner {
 
             global_functions_by_name.insert(ru_key, idx);
             global_functions_by_name.insert(en_key, idx);
+        }
+
+        for (ru, legacy_en) in LEGACY_GLOBAL_FUNCTION_EN_ALIASES {
+            let ru_key: SmolStr = ru.fold_lower().into();
+            if let Some(&idx) = global_functions_by_name.get(&ru_key) {
+                let alias_key: SmolStr = legacy_en.fold_lower().into();
+                global_functions_by_name.entry(alias_key).or_insert(idx);
+            }
         }
 
         let mut method_docs_by_id = FxHashMap::default();
@@ -211,7 +240,15 @@ impl PlatformDataInner {
             manager_properties_by_prefix,
             property_docs_by_id,
             global_properties_by_name,
+            ambiguous_type_names,
         }
+    }
+
+    /// Whether `name` (any case, RU or EN) names more than one platform type,
+    /// making per-entry facts resolved through it unreliable.
+    pub fn is_ambiguous_type_name(&self, name: &str) -> bool {
+        let key: SmolStr = name.fold_lower().into();
+        self.ambiguous_type_names.contains(&key)
     }
 
     pub fn get_type(&self, name: &str) -> Option<&PlatformType> {
@@ -371,6 +408,179 @@ impl PlatformDataInner {
     }
 }
 
+/// English synonyms the help archive renamed while the runtime keeps accepting
+/// the old spelling. Each `(russian_name, legacy_english)` pair is indexed as
+/// an extra lookup key of the canonical entry, so legacy English code still
+/// resolves; the canonical (renamed) English name stays the display name.
+pub const LEGACY_GLOBAL_FUNCTION_EN_ALIASES: &[(&str, &str)] = &[
+    // The 8.3.27 help renamed КопироватьФайл's English synonym to CopyFile
+    // (aligning with CopyFileAsync); FileCopy remains callable.
+    ("КопироватьФайл", "FileCopy"),
+];
+
+/// Since the 8.3.27 help archives, the `СписокЭлементовDOM` page lists only
+/// HTML element classes as collection elements, while the same collection is
+/// returned by XML DOM traversal too and its own `Элемент` method is still
+/// documented as returning `ЭлементDOM`. Keep the generic DOM node union
+/// alongside the HTML classes so `Для каждого` over XML DOM lists does not
+/// degrade to HTML-only inference.
+fn apply_docs_gap_iter_types_overlay(types: &mut [PlatformType]) {
+    const DOM_NODE_UNION: &[&str] = &[
+        "ЭлементDOM",
+        "АтрибутDOM",
+        "ДокументDOM",
+        "ОпределениеТипаДокументаDOM",
+        "НотацияDOM",
+        "СущностьDOM",
+        "ФрагментДокументаDOM",
+        "ТекстDOM",
+        "КомментарийDOM",
+        "СекцияCDATADOM",
+        "ИнструкцияОбработкиDOM",
+        "СсылкаНаСущностьDOM",
+        "ПространствоИменXPath",
+    ];
+
+    let Some(ty) = types.iter_mut().find(|t| t.english_name == "DOMElementList") else {
+        return;
+    };
+    let mut merged: Vec<SmolStr> = DOM_NODE_UNION.iter().map(|s| SmolStr::new(*s)).collect();
+    for elem in ty.iter_element_types.drain(..) {
+        if !merged.contains(&elem) {
+            merged.push(elem);
+        }
+    }
+    ty.iter_element_types = merged;
+}
+
+/// Type pages in the help archive occasionally omit environments where the
+/// platform demonstrably supports the type: the standard library constructs
+/// these types there unconditionally (shortcuts are assigned to form items in
+/// `&НаСервере` code, choice parameters and the color chooser are created in
+/// `&НаКлиенте` code that also runs in the web client), and 1C:EDT's own
+/// availability model agrees. Union the missing environments in so the
+/// availability check follows observed platform behavior, not the help text.
+fn apply_docs_gap_type_context_overlay(types: &mut [PlatformType]) {
+    for ty in types {
+        let Some(context) = &mut ty.context else { continue };
+        match ty.english_name.as_str() {
+            "Shortcut" => context.server = true,
+            "ChoiceParameter" | "ColorChooseDialog" => context.web_client = true,
+            _ => {}
+        }
+    }
+}
+
+/// Member pages in the help archive systematically understate the web client.
+/// Promise-style `*Асинх` members exist precisely so web-client code can drop
+/// modal and blocking calls, yet many of their pages omit the web client —
+/// 1C:EDT shipped the same corrupted metadata once (1c-edt-issues#783) and
+/// corrected its own model; the help itself was never fixed and is not
+/// expected to be. The standard library also formats errors through
+/// `ОбработкаОшибок` in universal client code that runs in the web client.
+/// Union the missing environment in.
+fn apply_docs_gap_member_context_overlay(
+    methods: &mut [PlatformMethod],
+    global_functions: &mut [GlobalFunction],
+    types: &[PlatformType],
+) {
+    const WEB_CAPABLE_ERROR_PROCESSING: &[&str] =
+        &["DetailErrorDescription", "ErrorDescriptionForUser"];
+
+    let is_async = |ru: &SmolStr, en: &SmolStr| ru.ends_with("Асинх") || en.ends_with("Async");
+
+    // Thin-client capability marks a genuinely client-side async API: the
+    // mobile-only entries (`КаталогБиблиотекиМобильногоУстройстваАсинх`) stay
+    // untouched.
+    for func in global_functions.iter_mut() {
+        if let Some(context) = &mut func.context {
+            if is_async(&func.name, &func.english_name) && context.thin_client {
+                context.web_client = true;
+            }
+        }
+    }
+
+    // For type methods, follow the (already overlaid) type: an async method of
+    // a web-capable type runs in the web client; a type absent from the web
+    // client altogether (`HTTPСоединение`) keeps its consistent markup.
+    let web_capable_types: rustc_hash::FxHashSet<&str> = types
+        .iter()
+        .filter(|ty| ty.context.as_ref().is_some_and(|c| c.web_client))
+        .map(|ty| ty.english_name.as_str())
+        .collect();
+    for method in methods.iter_mut() {
+        let Some(context) = &mut method.context else { continue };
+        if is_async(&method.name, &method.english_name)
+            && context.thin_client
+            && web_capable_types.contains(method.type_name.as_str())
+        {
+            context.web_client = true;
+        }
+        if method.type_name == "ErrorProcessingManager"
+            && WEB_CAPABLE_ERROR_PROCESSING.contains(&method.english_name.as_str())
+        {
+            context.web_client = true;
+        }
+    }
+}
+
+/// The platform ships manager methods whose pages are missing from the help
+/// archive, so HBK extraction cannot see them. Each entry pairs the manager's
+/// English type name with the method's Russian name; the synthesized method
+/// takes its whole signature from the same-named global-context function, so
+/// a regenerated corpus keeps the overlay in sync automatically, and the
+/// overlay retires itself once the archive gains the real page.
+const DOCS_GAP_MANAGER_METHODS: &[(&str, &str)] = &[
+    // The `МенеджерОбработкиСтрокиXML` page says the manager both finds and
+    // removes disallowed XML characters, and the "see also" of its only
+    // documented method links `УдалитьНедопустимыеСимволыXML` as a manager
+    // method — but the archive has no page for it; the runtime (and EDT)
+    // accept the call.
+    ("XMLStringProcessingManager", "УдалитьНедопустимыеСимволыXML"),
+];
+
+fn apply_docs_gap_method_overlay(
+    methods: &mut Vec<PlatformMethod>,
+    global_functions: &[GlobalFunction],
+) {
+    use crate::types::MethodVariant;
+
+    for (type_name, method_name) in DOCS_GAP_MANAGER_METHODS {
+        let exists = methods
+            .iter()
+            .any(|m| m.type_name == *type_name && m.name.fold_lower() == method_name.fold_lower());
+        if exists {
+            continue;
+        }
+
+        let Some(source) =
+            global_functions.iter().find(|f| f.name.fold_lower() == method_name.fold_lower())
+        else {
+            continue;
+        };
+
+        let next_id = methods.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+        methods.push(PlatformMethod {
+            id: next_id,
+            type_name: SmolStr::new(*type_name),
+            name: source.name.clone(),
+            english_name: source.english_name.clone(),
+            return_type: source.return_type.clone(),
+            parameters: source.parameters.clone(),
+            variants: source
+                .variants
+                .iter()
+                .map(|v| MethodVariant {
+                    variant_name: v.variant_name.clone(),
+                    parameters: v.parameters.clone(),
+                })
+                .collect(),
+            min_version: source.min_version.clone(),
+            context: source.context,
+        });
+    }
+}
+
 fn apply_docs_only_variadic_overlay(constructors: &mut [PlatformConstructor]) {
     const OVERLAY: &[(&str, &str)] = &[
         ("Structure", "По ключам и значениям"),
@@ -480,7 +690,7 @@ pub fn platform_type_query<'db>(
 ) -> Option<PlatformType> {
     let name = input.name(db);
     let data = PlatformDataInner::instance();
-    data.get_type(&name).cloned()
+    data.get_type(name).cloned()
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -491,27 +701,27 @@ pub fn platform_method_query<'db>(
     let type_name = input.type_name(db);
     let method_name = input.method_name(db);
     let data = PlatformDataInner::instance();
-    data.get_method(&type_name, &method_name).cloned()
+    data.get_method(type_name, method_name).cloned()
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, returns(ref))]
 pub fn type_methods_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
 ) -> Arc<Vec<PlatformMethod>> {
     let type_name = input.name(db);
     let data = PlatformDataInner::instance();
-    Arc::new(data.get_type_methods(&type_name).into_iter().cloned().collect())
+    Arc::new(data.get_type_methods(type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, returns(ref))]
 pub fn manager_methods_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
 ) -> Arc<Vec<PlatformMethod>> {
     let prefix = input.name(db);
     let data = PlatformDataInner::instance();
-    Arc::new(data.get_manager_methods(&prefix).into_iter().cloned().collect())
+    Arc::new(data.get_manager_methods(prefix).into_iter().cloned().collect())
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -521,16 +731,21 @@ pub fn prefixed_method_query<'db>(
 ) -> Option<PlatformMethod> {
     let prefix = input.prefix(db);
     let method_name = input.method_name(db);
-    find_prefixed_method(&prefix, &method_name)
+    find_prefixed_method(prefix, method_name)
 }
 
 pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformMethod> {
+    find_prefixed_methods(prefix, method_name).into_iter().next()
+}
+
+pub fn find_prefixed_methods(prefix: &str, method_name: &str) -> Vec<PlatformMethod> {
     let method_lower = method_name.fold_lower();
     let data = PlatformDataInner::instance();
-    data.get_manager_methods(prefix)
+    let methods = data
+        .get_manager_methods(prefix)
         .into_iter()
-        .find(|m| {
-            let docs = data.get_method_docs(m.id);
+        .filter(|method| {
+            let docs = data.get_method_docs(method.id);
             let ru_match = docs
                 .as_ref()
                 .and_then(|d| d.syntax.split('(').next())
@@ -538,11 +753,22 @@ pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformM
             if ru_match {
                 return true;
             }
-            let en_name =
-                m.english_name.rsplit_once('.').map(|(_, n)| n).unwrap_or(&m.english_name);
+            let en_name = method
+                .english_name
+                .rsplit_once('.')
+                .map(|(_, n)| n)
+                .unwrap_or(&method.english_name);
             en_name.fold_lower() == method_lower
         })
         .cloned()
+        .collect();
+    sort_and_deduplicate_methods(methods)
+}
+
+fn sort_and_deduplicate_methods(mut methods: Vec<PlatformMethod>) -> Vec<PlatformMethod> {
+    methods.sort_by_key(|method| method.id);
+    methods.dedup_by_key(|method| method.id);
+    methods
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -552,17 +778,17 @@ pub fn global_function_query<'db>(
 ) -> Option<GlobalFunction> {
     let name = input.name(db);
     let data = PlatformDataInner::instance();
-    data.get_global_function(&name).cloned()
+    data.get_global_function(name).cloned()
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, returns(ref))]
 pub fn platform_constructors_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
 ) -> Arc<Vec<PlatformConstructor>> {
     let type_name = input.name(db);
     let data = PlatformDataInner::instance();
-    Arc::new(data.get_constructors(&type_name).into_iter().cloned().collect())
+    Arc::new(data.get_constructors(type_name).into_iter().cloned().collect())
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -573,17 +799,17 @@ pub fn platform_property_query<'db>(
     let type_name = input.type_name(db);
     let prop_name = input.method_name(db);
     let data = PlatformDataInner::instance();
-    data.get_property(&type_name, &prop_name).cloned()
+    data.get_property(type_name, prop_name).cloned()
 }
 
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 128, returns(ref))]
 pub fn type_properties_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
 ) -> Arc<Vec<PlatformProperty>> {
     let type_name = input.name(db);
     let data = PlatformDataInner::instance();
-    Arc::new(data.get_type_properties(&type_name).into_iter().cloned().collect())
+    Arc::new(data.get_type_properties(type_name).into_iter().cloned().collect())
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -593,7 +819,7 @@ pub fn global_property_query<'db>(
 ) -> Option<PlatformProperty> {
     let name = input.name(db);
     let data = PlatformDataInner::instance();
-    data.get_global_property(&name).cloned()
+    data.get_global_property(name).cloned()
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -604,7 +830,7 @@ pub fn global_member_method_query<'db>(
     let global_name = input.type_name(db);
     let member_name = input.method_name(db);
     let data = PlatformDataInner::instance();
-    data.resolve_global_member(&global_name, &member_name).cloned()
+    data.resolve_global_member(global_name, member_name).cloned()
 }
 
 #[cfg(test)]
@@ -662,6 +888,185 @@ mod tests {
         // `ParameterValue` is the XDTO name of several data-composition types and
         // is not itself a class name, so it must not resolve to an arbitrary one.
         assert!(data.get_type("ParameterValue").is_none());
+    }
+
+    #[test]
+    fn docs_gap_overlay_widens_type_contexts() {
+        let data = PlatformDataInner::instance();
+        if data.all_types().is_empty() {
+            return;
+        }
+
+        let shortcut = data.get_type("СочетаниеКлавиш").expect("Shortcut must exist");
+        let ctx = shortcut.context.as_ref().expect("Shortcut must carry availability");
+        assert!(ctx.server, "overlay must add the server context to Shortcut");
+        assert!(ctx.thin_client, "archive contexts must survive the overlay");
+
+        for name in ["ПараметрВыбора", "ДиалогВыбораЦвета"] {
+            let ty = data.get_type(name).expect("type must exist");
+            let ctx = ty.context.as_ref().expect("type must carry availability");
+            assert!(ctx.web_client, "overlay must add the web-client context to {name}");
+        }
+    }
+
+    #[test]
+    fn docs_gap_overlay_widens_member_contexts() {
+        let data = PlatformDataInner::instance();
+        if data.all_methods().is_empty() {
+            return;
+        }
+
+        for name in ["ПредупреждениеАсинх", "ВвестиЧислоАсинх", "ОткрытьЗначениеАсинх"]
+        {
+            let func = data.get_global_function(name).expect("async global must exist");
+            let ctx = func.context.as_ref().expect("async global must carry availability");
+            assert!(ctx.web_client, "overlay must add the web client to {name}");
+            assert!(!ctx.server, "async dialogs stay client-side: {name}");
+        }
+        let mobile_only = data
+            .get_global_function("КаталогБиблиотекиМобильногоУстройстваАсинх")
+            .expect("mobile async global must exist");
+        assert!(
+            !mobile_only.context.as_ref().unwrap().web_client,
+            "a mobile-only async API must stay out of the web client"
+        );
+
+        // Async methods follow their type: web-capable types gain the method
+        // in the web client, a web-absent type keeps its consistent markup.
+        for (ty, method) in [
+            ("МенеджерФайловыхПотоков", "ОткрытьАсинх"),
+            ("СписокЗначений", "ВыбратьЭлементАсинх"),
+            ("ЧтениеДанных", "ПрочитатьАсинх"),
+        ] {
+            let m = data.get_method(ty, method).expect("async method must exist");
+            assert!(
+                m.context.as_ref().unwrap().web_client,
+                "overlay must add the web client to {ty}.{method}"
+            );
+        }
+        let http = data
+            .get_method("HTTPСоединение", "ПолучитьАсинх")
+            .expect("HTTP async method must exist");
+        assert!(
+            !http.context.as_ref().unwrap().web_client,
+            "HTTPСоединение is not web-capable — its async methods must not become so"
+        );
+
+        let method = data
+            .get_method("МенеджерОбработкиОшибок", "ПодробноеПредставлениеОшибки")
+            .expect("error-processing method must exist");
+        let ctx = method.context.as_ref().expect("method must carry availability");
+        assert!(ctx.web_client, "overlay must add the web client to ПодробноеПредставлениеОшибки");
+    }
+
+    #[test]
+    fn docs_gap_overlay_exposes_xml_string_processing_delete() {
+        let data = PlatformDataInner::instance();
+        if data.all_methods().is_empty() {
+            return;
+        }
+
+        let method = data
+            .get_method("МенеджерОбработкиСтрокиXML", "УдалитьНедопустимыеСимволыXML")
+            .expect("docs-gap overlay must expose the manager method");
+
+        // The signature is derived from the same-named global function at
+        // load time; a mismatch means the overlay picked the wrong source.
+        let source = data
+            .get_global_function("УдалитьНедопустимыеСимволыXML")
+            .expect("the source global function must exist");
+        assert_eq!(method.english_name, source.english_name);
+        assert_eq!(method.parameters, source.parameters);
+        assert!(!method.parameters.is_empty(), "derived signature must carry parameters");
+
+        let via_en = data.get_method("XMLStringProcessingManager", "DeleteDisallowedXMLCharacters");
+        assert!(via_en.is_some(), "overlay method must resolve by English names too");
+
+        let via_global =
+            data.resolve_global_member("ОбработкаСтрокиXML", "УдалитьНедопустимыеСимволыXML");
+        assert!(via_global.is_some(), "manager method must resolve through the global property");
+    }
+
+    #[test]
+    fn legacy_english_global_function_aliases_resolve() {
+        let data = PlatformDataInner::instance();
+        if data.all_global_functions().is_empty() {
+            return;
+        }
+
+        for (ru, legacy_en) in LEGACY_GLOBAL_FUNCTION_EN_ALIASES {
+            let canonical = data
+                .get_global_function(ru)
+                .unwrap_or_else(|| panic!("{ru} must exist in the corpus"));
+            let via_alias = data
+                .get_global_function(legacy_en)
+                .unwrap_or_else(|| panic!("legacy alias {legacy_en} must resolve"));
+            assert_eq!(via_alias.id, canonical.id, "{legacy_en} must alias {ru}");
+            assert_ne!(
+                canonical.english_name.fold_lower(),
+                legacy_en.fold_lower(),
+                "{legacy_en} duplicates the canonical English name — drop the stale alias"
+            );
+        }
+    }
+
+    #[test]
+    fn dom_element_list_iterates_dom_nodes_and_html_elements() {
+        let data = PlatformDataInner::instance();
+        if data.all_types().is_empty() {
+            return;
+        }
+
+        let ty = data.get_type("СписокЭлементовDOM").expect("type must exist");
+        for expected in ["ЭлементDOM", "ТекстDOM", "ЭлементHTML"] {
+            assert!(
+                ty.iter_element_types.iter().any(|e| e == expected),
+                "СписокЭлементовDOM must iterate {expected}, got {:?}",
+                ty.iter_element_types
+            );
+        }
+    }
+
+    #[test]
+    fn curated_overlay_corrects_dom_append_child_in_both_languages() {
+        let data = PlatformDataInner::instance();
+        let via_ru = data
+            .get_method("ДокументDOM", "ДобавитьДочерний")
+            .expect("DOM append-child method must exist by Russian names");
+        let via_en = data
+            .get_method("DOMDocument", "AppendChild")
+            .expect("DOM append-child method must exist by English names");
+        let expected = "АтрибутDOM, ДокументDOM, ЭлементDOM, ОпределениеТипаДокументаDOM, НотацияDOM, АтрибутHTML, ЭлементHTML, ЭлементКнопкаHTML, ЭлементВводаHTML, ЭлементЗаголовокHTML";
+
+        assert_eq!(via_ru.id, 2231, "overlay must preserve the extracted method ID");
+        assert_eq!(via_ru.id, via_en.id, "RU and EN names must resolve to one method");
+        assert_eq!(via_ru.parameters.len(), 1, "overlay must preserve parameter order");
+        assert_eq!(via_ru.parameters[0].param_type.as_deref(), Some(expected));
+        assert_eq!(via_en.parameters[0].param_type.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn user_password_policies_global_property_is_typed() {
+        let data = PlatformDataInner::instance();
+        if data.all_types().is_empty() {
+            return;
+        }
+
+        let prop = data
+            .get_global_property("ПолитикиПаролейПользователей")
+            .expect("global property must exist");
+        assert_eq!(
+            prop.property_types.first().map(|t| t.as_str()),
+            Some("МенеджерПолитикПаролейПользователей")
+        );
+
+        for method in ["НайтиПоИмени", "СоздатьПолитику", "ПроверитьСоответствиеПароляПолитике"]
+        {
+            assert!(
+                data.resolve_global_member("ПолитикиПаролейПользователей", method).is_some(),
+                "{method} must resolve through the global property"
+            );
+        }
     }
 
     #[test]
@@ -824,23 +1229,34 @@ mod tests {
         let mut seen_global_hits = 0usize;
 
         for func in funcs {
-            let expected = expected_global_ru.contains(&func.name.as_str());
-            let last_idx = func.parameters.len().saturating_sub(1);
-            for (idx, param) in func.parameters.iter().enumerate() {
-                if expected && idx == last_idx {
-                    assert!(
-                        param.is_variadic,
-                        "{} must mark its last param ({}) as variadic",
-                        func.name, param.name
-                    );
-                    seen_global_hits += 1;
-                } else {
-                    assert!(
-                        !param.is_variadic,
-                        "{} param {} unexpectedly carries is_variadic=true",
-                        func.name, param.name
-                    );
-                }
+            // Since the 8.3.27 help archives the unbounded tail of these
+            // functions is folded into the parameter name
+            // (`Значение1,...,ЗначениеN`); hir-ty's name idiom consumes that
+            // shape, so no global function carries an is_variadic flag.
+            if expected_global_ru.contains(&func.name.as_str()) {
+                let last = func
+                    .parameters
+                    .last()
+                    .unwrap_or_else(|| panic!("{} must declare parameters", func.name));
+                // The exact folded shape matters: hir-ty's
+                // `name_implies_unbounded_variadic` requires `<word><digits>`
+                // before the ellipsis and the same word with a letter suffix
+                // after it, so a looser substring check could pass names the
+                // idiom rejects.
+                assert_eq!(
+                    last.name.as_str(),
+                    "Значение1,...,ЗначениеN",
+                    "{} last param must carry the unbounded name idiom",
+                    func.name
+                );
+                seen_global_hits += 1;
+            }
+            for param in &func.parameters {
+                assert!(
+                    !param.is_variadic,
+                    "{} param {} unexpectedly carries is_variadic=true",
+                    func.name, param.name
+                );
             }
             for variant in &func.variants {
                 for param in &variant.parameters {
@@ -1120,6 +1536,56 @@ mod tests {
         let m_en = find_prefixed_method("InformationRegisterRecordSet", "Read")
             .expect("Read must resolve bilingually");
         assert_eq!(m.id, m_en.id);
+    }
+
+    #[test]
+    fn prefixed_methods_resolve_bilingual_case_insensitively_in_stable_id_order() {
+        let ru = find_prefixed_methods("InformationRegisterManager", "Выбрать");
+        let en = find_prefixed_methods("InformationRegisterManager", "Select");
+        let mixed = find_prefixed_methods("InformationRegisterManager", "sElEcT");
+
+        let ru_ids: Vec<u32> = ru.iter().map(|method| method.id).collect();
+        let en_ids: Vec<u32> = en.iter().map(|method| method.id).collect();
+        let mixed_ids: Vec<u32> = mixed.iter().map(|method| method.id).collect();
+
+        assert_eq!(ru_ids, vec![174]);
+        assert_eq!(ru_ids, en_ids);
+        assert_eq!(ru_ids, mixed_ids);
+        assert!(ru_ids.windows(2).all(|ids| ids[0] < ids[1]));
+    }
+
+    #[test]
+    fn prefixed_methods_deduplicate_ids_and_sort_stably() {
+        let information = find_prefixed_methods("InformationRegisterManager", "Select");
+        let accumulation = find_prefixed_methods("AccumulationRegisterManager", "Select");
+
+        let deduplicated = sort_and_deduplicate_methods(vec![
+            accumulation[0].clone(),
+            information[0].clone(),
+            information[0].clone(),
+        ]);
+        let ids: Vec<u32> = deduplicated.iter().map(|method| method.id).collect();
+
+        assert_eq!(ids, vec![174, 525]);
+    }
+
+    #[test]
+    fn prefixed_methods_unknown_name_is_empty() {
+        assert!(
+            find_prefixed_methods("InformationRegisterManager", "NotAPlatformMethod").is_empty()
+        );
+    }
+
+    #[test]
+    fn prefixed_methods_do_not_cross_manager_families() {
+        assert_eq!(
+            find_prefixed_methods("InformationRegisterManager", "Select")
+                .iter()
+                .map(|method| method.id)
+                .collect::<Vec<_>>(),
+            vec![174]
+        );
+        assert!(find_prefixed_methods("InformationRegisterRecordSet", "Select").is_empty());
     }
 
     #[test]

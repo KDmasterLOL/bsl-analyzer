@@ -54,6 +54,7 @@ impl GlobalState {
     pub fn set_workspace_root(&mut self, root: PathBuf) {
         let start = Instant::now();
         tracing::info!(?root, "setting workspace root");
+        self.supersede_call_hierarchy_index(base_db::SourceRootId(0));
 
         let project = project_model::Project::new(&root);
 
@@ -170,6 +171,8 @@ impl GlobalState {
         let mut file_set_modified = false;
         let mut config_file_changed = false;
         let mut bsl_source_changed = false;
+        let mut call_hierarchy_body_edits = Vec::new();
+        let mut call_hierarchy_structural_change = false;
         let mut changed_metadata_paths: Vec<std::path::PathBuf> = Vec::new();
         // Substrate-listed module bodies (common modules and HTTP/Web/Integration
         // services) that were added or removed (not merely edited): their per-MDO
@@ -200,16 +203,26 @@ impl GlobalState {
                 ) {
                     tracing::info!(path = %path_path.display(), "config file changed");
                     config_file_changed = true;
+                    call_hierarchy_structural_change = true;
                 }
                 if project_model::is_metadata_path(path_path) {
                     tracing::info!(path = %path_path.display(), "metadata XML file changed");
                     changed_metadata_paths.push(path_path.to_path_buf());
+                    call_hierarchy_structural_change = true;
                 }
                 if change_is_structural && project_model::is_substrate_listed_body_path(path_path) {
                     changed_listed_bodies.push(path_path.to_path_buf());
                 }
                 project_model::is_bsl_source_path(path_path)
             };
+
+            if is_bsl_path {
+                if change_is_structural {
+                    call_hierarchy_structural_change = true;
+                } else if text.is_some() {
+                    call_hierarchy_body_edits.push(file.file_id);
+                }
+            }
 
             if is_bsl_path && text.is_none() {
                 if file_set.path_for_file(&file.file_id).is_some() {
@@ -303,6 +316,29 @@ impl GlobalState {
             self.refresh_metadata_substrate(&changed_listed_bodies);
         }
 
+        if !suppress_metadata_bump {
+            if call_hierarchy_structural_change {
+                self.supersede_call_hierarchy_index(source_root_id);
+            } else if !call_hierarchy_body_edits.is_empty() {
+                let generation = self.call_hierarchy_index.generation(source_root_id);
+                let mut body_edit_applied = false;
+                if let Some(generation) = generation {
+                    for file_id in call_hierarchy_body_edits {
+                        body_edit_applied |=
+                            self.call_hierarchy_index.record_body_edit_or_supersede_ready(
+                                source_root_id,
+                                generation,
+                                file_id,
+                            );
+                    }
+                }
+                if body_edit_applied && !self.call_hierarchy_index.has_active_build(source_root_id)
+                {
+                    self.schedule_call_hierarchy_index_build(source_root_id);
+                }
+            }
+        }
+
         tracing::info!(
             file_count,
             vfs_take_elapsed_ms,
@@ -360,6 +396,7 @@ impl GlobalState {
         self.analysis_host
             .raw_database_mut()
             .bump_config_for_paths(removed.iter().map(|p| p.as_ref()));
+        self.supersede_call_hierarchy_index(SourceRootId(0));
 
         // Apply the tombstones. We always invalidated a config root above, which
         // `ChangeOutcome` does not reflect, so a refresh is warranted regardless.
@@ -494,17 +531,20 @@ impl GlobalState {
             );
         }
 
-        let db = self.analysis_host.raw_database_mut();
+        {
+            let db = self.analysis_host.raw_database_mut();
 
-        // Publish the fresh set unconditionally — even empty — so a reload that
-        // removed the last `.bsl` file clears the previous root(0) instead of
-        // leaving stale entries alive.
-        db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(bsl_file_set));
+            // Publish the fresh set unconditionally — even empty — so a reload that
+            // removed the last `.bsl` file clears the previous root(0) instead of
+            // leaving stale entries alive.
+            db.set_source_root(BSL_SOURCE_ROOT, SourceRoot::new_local(bsl_file_set));
 
-        let bsl_ids: Vec<_> = db.source_root_input(BSL_SOURCE_ROOT).root(db).iter().collect();
-        for file_id in bsl_ids {
-            db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+            let bsl_ids: Vec<_> = db.source_root_input(BSL_SOURCE_ROOT).root(db).iter().collect();
+            for file_id in bsl_ids {
+                db.set_file_source_root(file_id, BSL_SOURCE_ROOT);
+            }
         }
+        self.supersede_call_hierarchy_index(BSL_SOURCE_ROOT);
 
         tracing::info!(
             bsl_files,

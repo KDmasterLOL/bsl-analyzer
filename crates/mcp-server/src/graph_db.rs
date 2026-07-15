@@ -20,12 +20,15 @@ use std::time::Duration;
 
 use anyhow::Context;
 use ide::graph_index::{EdgeRow, NodeRow};
-use ide::{GraphBuildSummary, GraphBuildTicker, ModuleId, RootDatabaseImpl};
+use ide::{GraphBuildSummary, GraphBuildTicker, MethodCallDigest, ModuleId, RootDatabaseImpl};
 use rusqlite::{params, Connection, OptionalExtension};
 use rustc_hash::FxHashMap;
 use vfs::FileId;
 
-use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
+use crate::graph::input::{
+    build_source_root, config_metadata_paths, db_for_files, enumerate_bsl_files,
+};
+use crate::graph::scan::scan_file_stats;
 
 /// Bumped whenever the table layout OR the persisted edge/node content changes so a
 /// stale on-disk cache from an older binary is rejected (via the `meta` row) and
@@ -41,8 +44,9 @@ use crate::graph::{config_metadata_paths, db_for_files, enumerate_bsl_files};
 /// declares it posts, from the document's `RegisterRecords` metadata). Version 12 adds
 /// `register_record_set` edges (code → register reached through a literal record-set creator
 /// `РегистрыНакопления.<X>.СоздатьНаборЗаписей()`) and resolves locally-literal dynamic
-/// `Движения[…]` indices to `register_movement` edges.
-pub(crate) const SCHEMA_VERSION: u32 = 12;
+/// `Движения[…]` indices to `register_movement` edges. Version 13 persists resolved
+/// constant-manager method calls as method-to-method `call` edges.
+pub(crate) const SCHEMA_VERSION: u32 = 13;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a
@@ -70,6 +74,81 @@ pub struct GraphMeta {
     pub files: usize,
     /// RFC 3339 build timestamp.
     pub built_at: String,
+}
+
+/// Read the canonical method-call digest from an existing bounded-build SQLite graph.
+///
+/// `SetAction` registrations are intentionally excluded: the call hierarchy only
+/// represents direct, notification, and idle-handler method calls.
+pub fn read_sqlite_method_call_digest(path: &Path) -> anyhow::Result<MethodCallDigest> {
+    let conn = Connection::open(path)
+        .with_context(|| format!("opening graph database at {}", path.display()))?;
+    let mut statement = conn.prepare(
+        "SELECT edge.to_id, edge.from_id \
+         FROM edges AS edge \
+         JOIN nodes AS target ON target.id = edge.to_id \
+         JOIN nodes AS caller ON caller.id = edge.from_id \
+         WHERE target.kind = 'method' \
+           AND caller.kind = 'method' \
+           AND edge.kind IN ('call', 'notify_ref', 'idle_handler') \
+         ORDER BY edge.to_id, edge.from_id",
+    )?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<(String, String)>>>()
+        .context("reading method-to-method call edges from graph database")?;
+    Ok(MethodCallDigest::from_rows(rows))
+}
+
+/// Read the method-call digest whose caller and target both belong to one source root.
+///
+/// Callers obtain `source_root_files` by resolving the anchor file's `SourceRootId` and
+/// enumerating that root's file set. Requiring both endpoints matches the compact index,
+/// which retains only modules from that same source root.
+pub fn read_source_root_scoped_sqlite_method_call_digest<I, P>(
+    path: &Path,
+    source_root_files: I,
+) -> anyhow::Result<MethodCallDigest>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let mut conn = Connection::open(path)
+        .with_context(|| format!("opening graph database at {}", path.display()))?;
+    let tx = conn.transaction().context("starting source-root scope transaction")?;
+    tx.execute_batch(
+        "CREATE TEMP TABLE source_root_files (
+             path TEXT PRIMARY KEY
+         ) WITHOUT ROWID;",
+    )
+    .context("creating source-root file scope")?;
+    {
+        let mut insert = tx
+            .prepare("INSERT OR IGNORE INTO source_root_files (path) VALUES (?1)")
+            .context("preparing source-root file scope insert")?;
+        for file in source_root_files {
+            let path = file.as_ref().to_string_lossy().replace('\\', "/");
+            insert.execute(params![path]).context("adding file to source-root scope")?;
+        }
+    }
+
+    let mut statement = tx.prepare(
+        "SELECT edge.to_id, edge.from_id \
+         FROM edges AS edge \
+         JOIN nodes AS target ON target.id = edge.to_id \
+         JOIN nodes AS caller ON caller.id = edge.from_id \
+         JOIN source_root_files AS target_file ON target_file.path = target.file \
+         JOIN source_root_files AS caller_file ON caller_file.path = caller.file \
+         WHERE target.kind = 'method' \
+           AND caller.kind = 'method' \
+           AND edge.kind IN ('call', 'notify_ref', 'idle_handler') \
+         ORDER BY edge.to_id, edge.from_id",
+    )?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<(String, String)>>>()
+        .context("reading source-root-scoped method-to-method call edges from graph database")?;
+    Ok(MethodCallDigest::from_rows(rows))
 }
 
 /// Streams graph rows into a fresh SQLite file. Created once per build; nodes and
@@ -547,7 +626,7 @@ fn build_graph_database_inner(
     // The whole-workspace source root, built once and shared (cheap `Arc` clone)
     // into every per-batch database, so the 25k-path file set is assembled a single
     // time for the build rather than re-cloned per batch.
-    let source_root = crate::graph::build_source_root(&files);
+    let source_root = build_source_root(&files);
 
     let mut writer = GraphDbWriter::create(out_path)?;
 
@@ -608,7 +687,7 @@ fn build_graph_database_inner(
             file_paths.get(&m.file_id).map(|p| (p.to_string_lossy().into_owned(), h))
         })
         .collect();
-    let file_rows: Vec<FileFingerprint> = crate::graph::scan_file_stats(workspace_root)
+    let file_rows: Vec<FileFingerprint> = scan_file_stats(workspace_root)
         .iter()
         .map(|s| FileFingerprint {
             fingerprint: s.fingerprint(),
@@ -867,7 +946,7 @@ pub fn update_graph_database_bodies(
         );
     }
 
-    let source_root = crate::graph::build_source_root(&files);
+    let source_root = build_source_root(&files);
     let config_cache = std::sync::Arc::new(ide::GraphConfigCache::default());
     let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
         let batch_files: Vec<(FileId, PathBuf)> =
@@ -911,10 +990,8 @@ pub fn update_graph_database_bodies(
         format!("copying graph db {} → {}", src_path.display(), out_path.display())
     })?;
 
-    let stat_fp: FxHashMap<String, u64> = crate::graph::scan_file_stats(workspace_root)
-        .iter()
-        .map(|s| (s.path.clone(), s.fingerprint()))
-        .collect();
+    let stat_fp: FxHashMap<String, u64> =
+        scan_file_stats(workspace_root).iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
 
     let mut conn = Connection::open(out_path)?;
     {
@@ -1505,6 +1582,366 @@ mod tests {
         assert!(
             plan.is_none(),
             "a signature change to a subscription handler module must force a full rebuild"
+        );
+    }
+
+    #[test]
+    fn variable_insertion_preserves_durable_body_only_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let module_path = root.join("CommonModules/Модуль/Ext/Module.bsl");
+        std::fs::create_dir_all(module_path.parent().expect("module path has a parent")).unwrap();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            root.join("CommonModules/Модуль.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000001">
+        <Properties>
+            <Name>Модуль</Name>
+            <Global>false</Global>
+            <ClientManagedApplication>false</ClientManagedApplication>
+            <Server>true</Server>
+            <ExternalConnection>false</ExternalConnection>
+            <ClientOrdinaryApplication>false</ClientOrdinaryApplication>
+            <ServerCall>false</ServerCall>
+            <Privileged>false</Privileged>
+            <ReturnValuesReuse>DontUse</ReturnValuesReuse>
+        </Properties>
+    </CommonModule>
+</MetaDataObject>"#,
+        )
+        .unwrap();
+        std::fs::write(&module_path, "&НаСервере\nПроцедура Выполнить() Экспорт\nКонецПроцедуры")
+            .unwrap();
+
+        let meta =
+            || GraphMeta { revision: 1, fingerprint: 0, files: 0, built_at: "t".to_string() };
+        let db_pre = root.join(".build/pre.db");
+        std::fs::create_dir_all(db_pre.parent().expect("database path has a parent")).unwrap();
+        build_graph_database(root, &db_pre, 1, &meta()).expect("initial build succeeds");
+
+        let changed = vec![module_path.canonicalize().expect("module file exists")];
+        let path_key = changed[0].to_string_lossy().into_owned();
+        let stored_sig: i64 = Connection::open(&db_pre)
+            .unwrap()
+            .query_row("SELECT sig_hash FROM files WHERE path = ?1", [&path_key], |row| row.get(0))
+            .unwrap();
+
+        // When: a top-level variable shifts method local ids but preserves its signature.
+        std::fs::write(
+            &module_path,
+            "Перем Состояние;\n&НаСервере\nПроцедура Выполнить() Экспорт\nКонецПроцедуры",
+        )
+        .unwrap();
+        let profiles =
+            recompute_module_profiles(root, &changed).expect("profile recomputation succeeds");
+        let profile = profiles.get(&path_key).expect("changed module has a profile");
+        assert_eq!(
+            profile.sig_hash,
+            u64::from_ne_bytes(stored_sig.to_ne_bytes()),
+            "the durable signature gate must retain the body-only path"
+        );
+
+        let db_incremental = root.join(".build/incremental.db");
+        update_graph_database_bodies(root, &db_pre, &db_incremental, &changed, 1, &meta())
+            .expect("body-only incremental update succeeds");
+        let db_full = root.join(".build/full.db");
+        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild succeeds");
+
+        let dump = |path: &Path| {
+            let conn = Connection::open(path).unwrap();
+            let mut output = Vec::new();
+            for (label, query, columns) in [
+                (
+                    "nodes",
+                    "SELECT id, kind, name, qualified, module, file, name_offset, sig_end, src_start, \
+                     src_end, dispatch, is_export, addressable FROM nodes ORDER BY id",
+                    13,
+                ),
+                (
+                    "edges",
+                    "SELECT from_id, to_id, kind, provenance, crosses FROM edges \
+                     ORDER BY from_id, to_id, kind, provenance, crosses",
+                    5,
+                ),
+                ("in_degree", "SELECT id, degree FROM in_degree ORDER BY id", 2),
+                (
+                    "unresolved_calls",
+                    "SELECT target_scope, method_lower, caller_file FROM unresolved_calls \
+                     ORDER BY target_scope, method_lower, caller_file",
+                    3,
+                ),
+                ("files", "SELECT path, fingerprint, sig_hash FROM files ORDER BY path", 3),
+            ] {
+                let mut statement = conn.prepare(query).unwrap();
+                let rows = statement
+                    .query_map([], |row| {
+                        let mut values = Vec::with_capacity(columns);
+                        for column in 0..columns {
+                            values.push(
+                                row.get::<_, rusqlite::types::Value>(column)
+                                    .map(|value| format!("{value:?}"))?,
+                            );
+                        }
+                        Ok(values.join("|"))
+                    })
+                    .unwrap();
+                output.extend(rows.map(|row| format!("{label}:{}", row.unwrap())));
+            }
+            output
+        };
+
+        // Then: the durable body-only update exactly matches a full rebuild.
+        assert_eq!(dump(&db_incremental), dump(&db_full));
+    }
+
+    #[test]
+    fn constant_manager_call_persists_method_to_method_call_edge() {
+        // Given: a constant manager exporting `Цель` and a common-module caller.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let manager_module = root.join("Constants/Тест/Ext/ManagerModule.bsl");
+        let caller_module = root.join("CommonModules/Тест/Ext/Module.bsl");
+        std::fs::create_dir_all(manager_module.parent().expect("manager module has a parent"))
+            .unwrap();
+        std::fs::create_dir_all(caller_module.parent().expect("caller module has a parent"))
+            .unwrap();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            root.join("Constants/Тест.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+    <Constant uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>Тест</Name></Properties>
+    </Constant>
+</MetaDataObject>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("CommonModules/Тест.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000002">
+        <Properties>
+            <Name>Тест</Name>
+            <Global>false</Global>
+            <ClientManagedApplication>false</ClientManagedApplication>
+            <Server>true</Server>
+            <ExternalConnection>false</ExternalConnection>
+            <ClientOrdinaryApplication>false</ClientOrdinaryApplication>
+            <ServerCall>false</ServerCall>
+            <Privileged>false</Privileged>
+            <ReturnValuesReuse>DontUse</ReturnValuesReuse>
+        </Properties>
+    </CommonModule>
+</MetaDataObject>"#,
+        )
+        .unwrap();
+        std::fs::write(&manager_module, "Процедура Цель() Экспорт\nКонецПроцедуры").unwrap();
+        std::fs::write(
+            &caller_module,
+            "Процедура Источник() Экспорт\nКонстанты.Тест.Цель();\nКонецПроцедуры",
+        )
+        .unwrap();
+        let path = root.join(".build/bsl-graph.db");
+        std::fs::create_dir_all(path.parent().expect("graph database has a parent")).unwrap();
+
+        // When: the workspace graph is persisted through the production builder.
+        build_graph_database(
+            root,
+            &path,
+            1,
+            &GraphMeta { revision: 1, fingerprint: 0, files: 0, built_at: "t".to_string() },
+        )
+        .unwrap();
+
+        // Then: the resolved manager target is a durable method-to-method call, not only MDO access.
+        let conn = open(&path);
+        let call_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE from_id = ?1 AND to_id = ?2 AND kind = 'call'",
+                params!["method/common/Тест/Источник", "method/manager/Constant/Тест/Цель",],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(call_count, 1, "constant-manager method call must persist as a call edge");
+    }
+    #[test]
+    fn call_hierarchy_sqlite_method_digest() {
+        // Given: persisted method calls alongside metadata and SetAction rows.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bsl-graph.db");
+        let mut subscription = method_node("mdo/EventSubscription/ПриЗаписи", "ПриЗаписи");
+        subscription.kind = "mdo";
+        subscription.module = None;
+        subscription.file = None;
+        subscription.is_export = None;
+
+        let mut writer = GraphDbWriter::create(&path).unwrap();
+        writer
+            .write_nodes(&[
+                method_node("method/common/Caller/Прямой", "Прямой"),
+                method_node("method/common/Caller/Оповещение", "Оповещение"),
+                method_node("method/common/Caller/Ожидание", "Ожидание"),
+                method_node("method/common/Target/Цель", "Цель"),
+                subscription,
+            ])
+            .unwrap();
+        writer
+            .write_edges(&[
+                edge("method/common/Caller/Прямой", "method/common/Target/Цель"),
+                EdgeRow {
+                    from_id: "method/common/Caller/Оповещение".to_string(),
+                    to_id: "method/common/Target/Цель".to_string(),
+                    kind: "notify_ref",
+                    provenance: "string_resolved",
+                    crosses: false,
+                },
+                EdgeRow {
+                    from_id: "method/common/Caller/Ожидание".to_string(),
+                    to_id: "method/common/Target/Цель".to_string(),
+                    kind: "idle_handler",
+                    provenance: "string_resolved",
+                    crosses: false,
+                },
+                EdgeRow {
+                    from_id: "mdo/EventSubscription/ПриЗаписи".to_string(),
+                    to_id: "method/common/Target/Цель".to_string(),
+                    kind: "event_subscription",
+                    provenance: "string_resolved",
+                    crosses: false,
+                },
+                EdgeRow {
+                    from_id: "method/common/Caller/Прямой".to_string(),
+                    to_id: "method/common/Target/Цель".to_string(),
+                    kind: "set_action",
+                    provenance: "string_resolved",
+                    crosses: false,
+                },
+            ])
+            .unwrap();
+        writer
+            .finalize(&GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files: 0,
+                built_at: "t".to_string(),
+            })
+            .unwrap();
+
+        // When: the read-only SQLite oracle projects method-to-method calls.
+        let digest = read_sqlite_method_call_digest(&path).unwrap();
+
+        // Then: direct, notify, and idle handlers remain; metadata and SetAction do not.
+        assert_eq!(
+            digest.rows(),
+            &[
+                (
+                    "method/common/Target/Цель".to_string(),
+                    "method/common/Caller/Ожидание".to_string(),
+                ),
+                (
+                    "method/common/Target/Цель".to_string(),
+                    "method/common/Caller/Оповещение".to_string(),
+                ),
+                (
+                    "method/common/Target/Цель".to_string(),
+                    "method/common/Caller/Прямой".to_string(),
+                ),
+            ]
+        );
+        assert_eq!(digest.len(), 3);
+    }
+
+    #[test]
+    fn source_root_scoped_method_digest_keeps_only_internal_pairs() {
+        // Given: direct method calls within two distinct source roots and across their boundary.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bsl-graph.db");
+        let root_a = dir.path().join("root-a");
+        let root_b = dir.path().join("root-b");
+        let path_a = root_a.join("Caller.bsl");
+        let path_b = root_b.join("Caller.bsl");
+        let mut a_caller = method_node("method/a/Caller", "Caller");
+        a_caller.file = Some(path_a.to_string_lossy().into_owned());
+        let mut a_target = method_node("method/a/Target", "Target");
+        a_target.file = Some(root_a.join("Target.bsl").to_string_lossy().into_owned());
+        let mut b_caller = method_node("method/b/Caller", "Caller");
+        b_caller.file = Some(path_b.to_string_lossy().into_owned());
+        let mut b_target = method_node("method/b/Target", "Target");
+        b_target.file = Some(root_b.join("Target.bsl").to_string_lossy().into_owned());
+
+        let mut writer = GraphDbWriter::create(&path).unwrap();
+        writer.write_nodes(&[a_caller, a_target, b_caller, b_target]).unwrap();
+        writer
+            .write_edges(&[
+                edge("method/a/Caller", "method/a/Target"),
+                edge("method/a/Caller", "method/b/Target"),
+                edge("method/b/Caller", "method/a/Target"),
+                edge("method/b/Caller", "method/b/Target"),
+            ])
+            .unwrap();
+        writer
+            .finalize(&GraphMeta {
+                revision: 1,
+                fingerprint: 0,
+                files: 0,
+                built_at: "t".to_string(),
+            })
+            .unwrap();
+
+        // When: source-root membership is derived from the anchor root's two module files.
+        let digest = read_source_root_scoped_sqlite_method_call_digest(
+            &path,
+            [path_a, root_a.join("Target.bsl"), root_a.join("Target.bsl")],
+        )
+        .unwrap();
+
+        // Then: only the pair with both method endpoints in the anchor root remains.
+        assert_eq!(
+            digest.rows(),
+            &[("method/a/Target".to_string(), "method/a/Caller".to_string())]
+        );
+        assert_eq!(digest.len(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires BSL_GRAPH_DB and BSL_SOURCE_ROOT"]
+    fn source_root_scoped_method_digest_from_environment() {
+        let graph_db = std::env::var_os("BSL_GRAPH_DB").expect("BSL_GRAPH_DB is required");
+        let source_root = std::env::var_os("BSL_SOURCE_ROOT").expect("BSL_SOURCE_ROOT is required");
+        let graph_db = PathBuf::from(graph_db);
+        let source_root = PathBuf::from(source_root);
+        let files = enumerate_bsl_files(&source_root);
+
+        // Given: the persisted graph and the exact BSL files in the anchor's source root.
+        let digest = read_source_root_scoped_sqlite_method_call_digest(
+            &graph_db,
+            files.iter().map(|(_, path)| path),
+        )
+        .unwrap();
+
+        // When: durable target/caller rows are hashed using the parity-oracle byte contract.
+        let mut hasher = blake3::Hasher::new();
+        for (index, (target, caller)) in digest.rows().iter().enumerate() {
+            if index > 0 {
+                hasher.update(b"\n");
+            }
+            hasher.update(target.as_bytes());
+            hasher.update(b"\t");
+            hasher.update(caller.as_bytes());
+        }
+
+        // Then: the report is machine-readable and can be captured with --nocapture.
+        println!(
+            "{}",
+            serde_json::json!({
+                "source_root": source_root,
+                "source_root_bsl_files": files.len(),
+                "row_count": digest.len(),
+                "digest": hasher.finalize().to_hex().to_string(),
+            })
         );
     }
 }

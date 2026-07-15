@@ -36,7 +36,7 @@ pub fn goto_definition<DB: RootDatabase>(
     goto_extension_annotation_target(db, file_id, offset)
 }
 
-fn metadata_reference_to_navigation_target<DB: RootDatabase>(
+pub(crate) fn metadata_reference_to_navigation_target<DB: RootDatabase>(
     db: &DB,
     from_file_id: FileId,
     ty: hir::TypeId,
@@ -149,7 +149,7 @@ fn subsystem_xml_relative_path<'a>(
     Some(path)
 }
 
-fn metadata_reference_name_range<DB: RootDatabase>(
+pub(crate) fn metadata_reference_name_range<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
     name: &str,
@@ -249,7 +249,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
     match definition {
         Definition::Method(method_id) => {
             let file_id = method_id.module.file_id;
-            let tree = db.item_tree(file_id);
+            let tree = db.item_tree_ref(file_id);
 
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == method_id.local_id as usize {
@@ -284,7 +284,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
         }
         Definition::Variable(var_id) => {
             let file_id = var_id.module.file_id;
-            let tree = db.item_tree(file_id);
+            let tree = db.item_tree_ref(file_id);
 
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == var_id.local_id as usize {
@@ -305,7 +305,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
         }
         Definition::Parameter { method_id, param_name, .. } => {
             let file_id = method_id.module.file_id;
-            let tree = db.item_tree(file_id);
+            let tree = db.item_tree_ref(file_id);
 
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == method_id.local_id as usize {
@@ -327,7 +327,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
         }
         Definition::Local { method_id, var_name } => {
             let file_id = method_id.module.file_id;
-            let tree = db.item_tree(file_id);
+            let tree = db.item_tree_ref(file_id);
 
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == method_id.local_id as usize {

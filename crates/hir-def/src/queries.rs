@@ -109,7 +109,7 @@ mod heap_estimate {
 // cross-module resolution path. High cap keeps it across chunk-boundary LRU trims
 // so a later chunk doesn't re-derive it. (`module_bodies` below stays low — it is
 // the heavy lowered HIR, needed only while a module's own file is analyzed.)
-#[salsa::tracked(lru = 2048, heap_size = heap_estimate::module_data_heap)]
+#[salsa::tracked(lru = 2048, heap_size = heap_estimate::module_data_heap, returns(ref))]
 pub fn module_data_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -121,7 +121,7 @@ pub fn module_data_query<'db>(
     Arc::new(ModuleData::from_item_tree(module_id, tree))
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_bodies_heap)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_bodies_heap, returns(ref))]
 pub fn module_bodies_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -150,7 +150,7 @@ pub fn set_module_bodies_lru_sweep_mode(db: &mut dyn DefDatabase, sweep: bool) {
     module_bodies_query::set_lru_capacity(db, if sweep { SWEEP } else { INTERACTIVE });
 }
 
-#[salsa::tracked(lru = 16)]
+#[salsa::tracked(lru = 16, returns(clone))]
 pub fn workspace_symbols_query(
     db: &dyn DefDatabase,
     source_root_input: base_db::SourceRootInput,
@@ -165,7 +165,7 @@ pub fn workspace_symbols_query(
     Arc::new(crate::workspace::workspace_symbols(db, &files))
 }
 
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::module_call_summary_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::module_call_summary_heap, returns(clone))]
 pub fn module_call_summary_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -174,17 +174,17 @@ pub fn module_call_summary_query<'db>(
     let file_id = file_id_input.file_id(db);
     let module_id = ModuleId::new(file_id);
 
-    let item_tree = db.item_tree(file_id);
-    let module_bodies = db.module_bodies(module_id);
+    let item_tree = db.item_tree_ref(file_id);
+    let module_bodies = db.module_bodies_ref(module_id);
     let module_metadata = db.module_metadata(module_id);
 
     let form_handlers: &[bsl_metadata::FormEventHandler] =
         module_metadata.form.as_ref().map(|f| f.event_handlers.as_slice()).unwrap_or(&[]);
 
-    Arc::new(crate::call_graph::extract_call_summary(&item_tree, &module_bodies, form_handlers))
+    Arc::new(crate::call_graph::extract_call_summary(item_tree, module_bodies, form_handlers))
 }
 
-#[salsa::tracked(lru = 256)]
+#[salsa::tracked(lru = 256, returns(clone))]
 pub fn resolved_module_summary_query<'db>(
     db: &'db dyn crate::configs::ConfigsDatabase,
     file_id_input: FileIdInput<'db>,
@@ -796,7 +796,7 @@ pub fn method_outbound_facts(
     MethodOutboundFacts { dispatch, callees, manager_refs, query_reads, query_attr_reads }
 }
 
-#[salsa::tracked(lru = 16)]
+#[salsa::tracked(lru = 16, returns(clone))]
 pub fn workspace_call_graph_query(
     db: &dyn crate::configs::ConfigsDatabase,
     source_root_input: base_db::SourceRootInput,
@@ -867,7 +867,7 @@ pub fn workspace_call_graph_query(
     Arc::new(graph)
 }
 
-#[salsa::tracked(lru = 512, heap_size = heap_estimate::file_external_refs_heap)]
+#[salsa::tracked(lru = 512, heap_size = heap_estimate::file_external_refs_heap, returns(clone))]
 pub fn file_external_refs_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
@@ -912,7 +912,7 @@ pub fn file_external_refs_query<'db>(
     Arc::new(refs)
 }
 
-#[salsa::tracked(lru = 16)]
+#[salsa::tracked(lru = 16, returns(clone))]
 pub fn module_index_query(
     _db: &dyn DefDatabase,
     source_root_input: base_db::SourceRootInput,
@@ -937,7 +937,7 @@ pub fn module_index_query(
     Arc::new(index)
 }
 
-#[salsa::tracked(lru = 512)]
+#[salsa::tracked(lru = 512, returns(clone))]
 pub fn file_dependencies_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,

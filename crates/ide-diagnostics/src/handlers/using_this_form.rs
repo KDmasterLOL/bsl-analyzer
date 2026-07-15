@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -18,20 +18,77 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    crate::simple_hir_diagnostic(
+    let mut diagnostic = crate::simple_hir_diagnostic(
         DiagnosticCode::UsingThisForm,
         "Вместо устаревшего свойства \"ЭтаФорма\" следует использовать \"ЭтотОбъект\"",
         range,
         ctx,
-    )
+    )?;
+
+    // Keep the replacement in the same language as the source: `ЭтаФорма`/`ThisForm`
+    // is written either in Russian or English, and the canonical replacement must
+    // match so it does not inject Cyrillic into an English-styled module.
+    let text = ctx.file_text();
+    if let Some(slice) = text.get(range.start().into()..range.end().into()) {
+        let replacement = if slice.is_ascii() { "ThisObject" } else { "ЭтотОбъект" };
+        diagnostic.fixes = vec![Fix::safe(
+            format!("Заменить на \"{}\"", replacement),
+            vec![TextEdit { range, new_text: replacement.to_string() }],
+        )];
+    }
+
+    Some(diagnostic)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{check_diagnostics_snapshot_for, check_hir_diagnostic};
+    use crate::test_utils::{
+        check_diagnostics_snapshot_for, check_fix_snapshot_for, check_hir_diagnostic,
+    };
     use crate::Severity;
     use expect_test::expect;
+
+    #[test]
+    fn test_fix_russian() {
+        let code = r#"
+Процедура Тест()
+    ЭтаФорма.Закрыть();
+КонецПроцедуры
+"#;
+        check_fix_snapshot_for(
+            code,
+            DiagnosticCode::UsingThisForm,
+            expect![[r#"
+                UsingThisForm @ 3:5..3:13 — Заменить на "ЭтотОбъект" [fix_all=true]
+
+                Процедура Тест()
+                    ЭтотОбъект.Закрыть();
+                КонецПроцедуры
+            "#]],
+        );
+    }
+
+    #[test]
+    fn test_fix_english_stays_english() {
+        let code = r#"
+Procedure Test()
+    ThisForm.Close();
+EndProcedure
+"#;
+        check_fix_snapshot_for(
+            code,
+            DiagnosticCode::UsingThisForm,
+            expect![[r#"
+                UsingThisForm @ 3:5..3:13 — Заменить на "ThisObject" [fix_all=true]
+
+                Procedure Test()
+                    ThisObject.Close();
+                EndProcedure
+            "#]],
+        );
+    }
+
     #[test]
     fn test_basic_this_form_usage() {
         let code = r#"

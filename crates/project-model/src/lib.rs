@@ -491,11 +491,24 @@ pub struct FeaturesConfig {
 
     #[serde(default, alias = "workspace_diagnostics")]
     pub workspace_diagnostics: WorkspaceDiagnosticsScope,
+
+    /// Execution environments the availability diagnostics
+    /// (`UnavailableInEnvironment`, `ModuleAccessibility`) report violations
+    /// for, named like preprocessor symbols (`ВебКлиент`/`WebClient`,
+    /// `ТонкийКлиент`, `Сервер`, …). A configuration that never runs in the
+    /// web client lists everything except `ВебКлиент`. `None` keeps the
+    /// default set (thin client, web client, managed thick client, server).
+    #[serde(default, alias = "checked_environments")]
+    pub checked_environments: Option<Vec<String>>,
 }
 
 impl Default for FeaturesConfig {
     fn default() -> Self {
-        Self { type_narrowing: true, workspace_diagnostics: WorkspaceDiagnosticsScope::default() }
+        Self {
+            type_narrowing: true,
+            workspace_diagnostics: WorkspaceDiagnosticsScope::default(),
+            checked_environments: None,
+        }
     }
 }
 

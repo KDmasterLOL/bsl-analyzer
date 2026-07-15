@@ -9,20 +9,29 @@ use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{Projection, TypeId, TypeKind};
 use bsl_types::testing::RootConfigCtx;
 use hir_def::body::Body;
+use hir_def::execution_env::EnvFlags;
 use hir_def::hir::Expr;
 use hir_def::ty::MetadataKind;
 use hir_def::{DefWithBodyId, ExprId, Name};
 use vfs::FileId;
 
+use crate::call_resolution::CallCandidateSet;
 use crate::db::HirDatabase;
 use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
-use crate::platform_type_name::is_tabular_row_name;
+use crate::platform_type_name::{
+    is_form_data_collection_item_type_name, is_row_like_platform_type_name,
+};
+
+mod union;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodInfo {
     pub return_ty: TypeId,
-    pub params: Vec<TypeId>,
-    pub overloads: Vec<Vec<TypeId>>,
+    pub candidates: CallCandidateSet,
+    /// Execution environments the method is available in; [`EnvFlags::ALL`]
+    /// when the source carries no availability markup (user methods,
+    /// undocumented platform entries).
+    pub env: EnvFlags,
 }
 
 pub fn lookup_method(
@@ -51,7 +60,7 @@ fn lookup_method_inner(
     let eff_id = crate::this_object::coerce_to_metadata_ref_id(db, receiver).unwrap_or(receiver);
 
     let info = match db.lookup_type(eff_id) {
-        TypeKind::Union(arms) => return union_lookup(db, arms, method_name, refine_ctx),
+        TypeKind::Union(arms) => return union::lookup(db, arms, method_name, refine_ctx),
         TypeKind::ObjectManager(facet) => {
             lookup_on_object_manager(db, facet.mdo, &Name::new(&facet.name), method_name)
         }
@@ -98,25 +107,31 @@ fn narrow_unload_return(
     info: MethodInfo,
     refine_ctx: Option<&RefineCtx<'_>>,
 ) -> MethodInfo {
+    use crate::query_unload_refinement::{classify_unload_arg, UnloadIteration};
+
     if !is_query_result_receiver_id(db, receiver) {
         return info;
     }
     let projection = projection_of_query_result_receiver_id(db, receiver).flatten();
-    let return_ty = if let Some(ctx) = refine_ctx {
-        use crate::query_unload_refinement::{classify_unload_arg, UnloadIteration};
-        let decision = classify_unload_arg(ctx.body, ctx.call_args);
-        let narrowed = match decision {
-            UnloadIteration::Dynamic => info.return_ty,
-            UnloadIteration::Linear => drop_union_arm_id(db, info.return_ty, is_value_tree_arm_id),
-            UnloadIteration::Hierarchical => {
-                drop_union_arm_id(db, info.return_ty, is_value_table_arm_id)
-            }
-        };
-        attach_projection_to_value_table_id(db, narrowed, projection)
-    } else {
-        attach_projection_to_value_table_id(db, info.return_ty, projection)
+    let iteration = refine_ctx
+        .map(|ctx| classify_unload_arg(ctx.body, ctx.call_args))
+        .unwrap_or(UnloadIteration::Dynamic);
+    let narrow = |return_ty| match iteration {
+        UnloadIteration::Dynamic => return_ty,
+        UnloadIteration::Linear => drop_union_arm_id(db, return_ty, is_value_tree_arm_id),
+        UnloadIteration::Hierarchical => drop_union_arm_id(db, return_ty, is_value_table_arm_id),
     };
-    MethodInfo { return_ty, params: info.params, overloads: info.overloads }
+    let return_ty =
+        attach_projection_to_value_table_id(db, narrow(info.return_ty), projection.clone());
+    let mut candidates = info.candidates;
+    for candidate in candidates.signatures_mut() {
+        candidate.return_ty = attach_projection_to_value_table_id(
+            db,
+            narrow(candidate.return_ty),
+            projection.clone(),
+        );
+    }
+    MethodInfo { return_ty, candidates, env: info.env }
 }
 
 fn apply_sdbl_chain_rewrite(
@@ -141,16 +156,22 @@ fn apply_sdbl_chain_rewrite(
     else {
         return info;
     };
-    MethodInfo {
-        return_ty: rewrite_chain_arm_in_return_id(
+    let return_ty = rewrite_chain_arm_in_return_id(
+        db,
+        info.return_ty,
+        target_platform_name.clone(),
+        replacement,
+    );
+    let mut candidates = info.candidates;
+    for candidate in candidates.signatures_mut() {
+        candidate.return_ty = rewrite_chain_arm_in_return_id(
             db,
-            info.return_ty,
-            target_platform_name,
+            candidate.return_ty,
+            target_platform_name.clone(),
             replacement,
-        ),
-        params: info.params,
-        overloads: info.overloads,
+        );
     }
+    MethodInfo { return_ty, candidates, env: info.env }
 }
 
 fn try_refine_receiver(
@@ -376,9 +397,22 @@ fn lookup_scalar_receiver(
     let type_key = platform_type_key_id(db, receiver)?;
     let method = PlatformData::instance().get_method(&type_key, method_name.as_str())?;
     let mut info = to_method_info(db, method);
+    // A homonymous type name resolves to an arbitrary namesake, so its
+    // availability markup may belong to the wrong type — don't judge it.
+    if PlatformData::instance().is_ambiguous_type_name(&type_key) {
+        info.env = EnvFlags::ALL;
+    }
     if let Some(row) = form_data_collection_row_ty(db, receiver) {
         info.return_ty =
             rewrite_form_data_collection_item_return(db, info.return_ty, row, method.name.as_str());
+        for candidate in info.candidates.signatures_mut() {
+            candidate.return_ty = rewrite_form_data_collection_item_return(
+                db,
+                candidate.return_ty,
+                row,
+                method.name.as_str(),
+            );
+        }
     }
     Some(info)
 }
@@ -395,11 +429,7 @@ fn lookup_on_object_manager(
         name,
         method_name,
     )?;
-    Some(MethodInfo {
-        return_ty: res.return_ty,
-        params: res.signature.params.to_vec(),
-        overloads: res.overloads,
-    })
+    Some(MethodInfo { return_ty: res.return_ty, candidates: res.candidates, env: res.env })
 }
 
 fn lookup_on_metadata_ref(
@@ -408,9 +438,25 @@ fn lookup_on_metadata_ref(
     name: &Name,
     method_name: &Name,
 ) -> Option<MethodInfo> {
+    // The tabular-section facets are context-ambiguous by design: the same
+    // `TabularSection` / `TabularSectionRow` value stands for the object's real
+    // tabular section AND for its form representation (ДанныеФормыКоллекция /
+    // ДанныеФормыЭлементКоллекции), because the form-data rewrites collapse
+    // both onto one facet to keep the row schema. Method lookup must therefore
+    // unite both contexts' method tables — accepting that a form-only method
+    // (НайтиПоИдентификатору, ПолучитьИдентификатор) called on a real object
+    // tabular section is no longer flagged — otherwise the form side drowns in
+    // false unresolved-method reports.
     if let MetadataKind::TabularSection { parent } = kind {
+        let data = PlatformData::instance();
+        let method = data
+            .get_method("Tabular section", method_name.as_str())
+            .or_else(|| data.get_method("FormDataCollection", method_name.as_str()))?;
+        return Some(build_tabular_section_method_info(db, method, parent, name));
+    }
+    if let MetadataKind::TabularSectionRow { parent } = kind {
         let method =
-            PlatformData::instance().get_method("Tabular section", method_name.as_str())?;
+            PlatformData::instance().get_method("FormDataCollectionItem", method_name.as_str())?;
         return Some(build_tabular_section_method_info(db, method, parent, name));
     }
     if let Some(res) = crate::platform_manager_lookup::resolve_platform_metadata_ref_method(
@@ -421,8 +467,8 @@ fn lookup_on_metadata_ref(
     ) {
         return Some(MethodInfo {
             return_ty: res.return_ty,
-            params: res.signature.params.to_vec(),
-            overloads: res.overloads,
+            candidates: res.candidates,
+            env: res.env,
         });
     }
     if let Some(scalar_key) = kind.scalar_platform_key() {
@@ -444,11 +490,7 @@ fn lookup_on_any_metadata_ref(
         mdo_type,
         method_name,
     )?;
-    Some(MethodInfo {
-        return_ty: res.return_ty,
-        params: res.signature.params.to_vec(),
-        overloads: res.overloads,
-    })
+    Some(MethodInfo { return_ty: res.return_ty, candidates: res.candidates, env: res.env })
 }
 
 fn lookup_on_form_control(
@@ -460,58 +502,6 @@ fn lookup_on_form_control(
         PlatformData::instance()
             .get_method(type_name, method_name.as_str())
             .map(|method| to_method_info(db, method))
-    })
-}
-
-fn push_unique_sig(sigs: &mut Vec<Vec<TypeId>>, sig: Vec<TypeId>) {
-    if !sigs.contains(&sig) {
-        sigs.push(sig);
-    }
-}
-
-fn union_lookup(
-    db: &dyn TypeKernelDb,
-    members: &[TypeId],
-    method_name: &Name,
-    refine_ctx: Option<&RefineCtx<'_>>,
-) -> Option<MethodInfo> {
-    let live: Vec<TypeId> = members
-        .iter()
-        .copied()
-        .filter(|id| !matches!(db.lookup_type(*id), TypeKind::Undefined | TypeKind::Null))
-        .collect();
-    let mut returns: Vec<TypeId> = Vec::with_capacity(live.len());
-    // A union receiver is an over-approximation: at runtime the value is exactly
-    // one arm. Gather every arm's signature(s); an argument accepted by ANY arm
-    // must not be a mismatch (e.g. a String key on `Структура | Массив` is valid
-    // via `Структура.Вставить`, even though `Массив.Вставить` wants a numeric
-    // index). Taking only the first arm's signature emits a false positive
-    // whenever the arms disagree.
-    let mut sigs: Vec<Vec<TypeId>> = Vec::new();
-    let mut hit_any = false;
-    for m in live {
-        if let Some(info) = lookup_method_inner(db, m, method_name, refine_ctx) {
-            hit_any = true;
-            returns.push(info.return_ty);
-            if info.overloads.is_empty() {
-                push_unique_sig(&mut sigs, info.params);
-            } else {
-                for ov in info.overloads {
-                    push_unique_sig(&mut sigs, ov);
-                }
-            }
-        }
-    }
-    hit_any.then(|| {
-        // When every arm shares one signature, present it as a plain signature
-        // (no overloads) so single-shape unions behave exactly as a single
-        // receiver; emit overloads only when the arms genuinely diverge.
-        let (params, overloads) = if sigs.len() <= 1 {
-            (sigs.into_iter().next().unwrap_or_default(), Vec::new())
-        } else {
-            (sigs[0].clone(), sigs)
-        };
-        MethodInfo { return_ty: db.union(returns), params, overloads }
     })
 }
 
@@ -609,11 +599,6 @@ fn rewrite_form_data_collection_item_return(
     }
 }
 
-fn is_form_data_collection_item_type_name(name: &str) -> bool {
-    stdx::case::eq_ignore_case(name, "ДанныеФормыЭлементКоллекции")
-        || stdx::case::eq_ignore_case(name, "FormDataCollectionItem")
-}
-
 pub(crate) fn to_method_info(db: &dyn TypeKernelDb, method: &PlatformMethod) -> MethodInfo {
     let return_ty = method
         .return_type
@@ -621,20 +606,12 @@ pub(crate) fn to_method_info(db: &dyn TypeKernelDb, method: &PlatformMethod) -> 
         .map(|ret| lower_return_type_string_typeid(db, ret))
         .unwrap_or_else(|| db.undefined());
 
-    let params: Vec<TypeId> = method
-        .parameters
-        .iter()
-        .map(|p| {
-            p.param_type
-                .as_ref()
-                .map(|t| lower_param_type_string_typeid(db, t))
-                .unwrap_or_else(|| db.unknown())
-        })
-        .collect();
-
-    let overloads = lower_overloads_typeid(db, method);
-
-    MethodInfo { return_ty, params, overloads }
+    let candidates = CallCandidateSet::from_platform_method(db, method, return_ty);
+    MethodInfo {
+        return_ty,
+        candidates,
+        env: EnvFlags::from_platform_context(method.context.as_ref()),
+    }
 }
 
 pub(crate) fn lower_overloads_typeid(
@@ -678,34 +655,15 @@ pub(crate) fn build_tabular_section_method_info(
         })
         .unwrap_or_else(|| db.undefined());
 
-    let params: Vec<TypeId> = method
-        .parameters
-        .iter()
-        .map(|p| {
-            p.param_type
-                .as_ref()
-                .map(|t| lower_param_type_string_typeid(db, t.as_str()))
-                .unwrap_or_else(|| db.unknown())
-        })
-        .collect();
-
-    let overloads: Vec<Vec<TypeId>> = method
-        .variants
-        .iter()
-        .map(|v| {
-            v.parameters
-                .iter()
-                .map(|p| {
-                    p.param_type
-                        .as_ref()
-                        .map(|t| lower_param_type_string_typeid(db, t.as_str()))
-                        .unwrap_or_else(|| db.unknown())
-                })
-                .collect()
-        })
-        .collect();
-
-    MethodInfo { return_ty, params, overloads }
+    let mut candidates = CallCandidateSet::from_platform_method(db, method, return_ty);
+    for candidate in candidates.signatures_mut() {
+        candidate.return_ty = return_ty;
+    }
+    MethodInfo {
+        return_ty,
+        candidates,
+        env: EnvFlags::from_platform_context(method.context.as_ref()),
+    }
 }
 
 fn rewrite_row_generic(
@@ -715,7 +673,7 @@ fn rewrite_row_generic(
     section_name: &Name,
 ) -> TypeId {
     match db.lookup_type(id) {
-        TypeKind::PlatformObject(f) if is_tabular_row_name(&f.name) => db.metadata_ref(
+        TypeKind::PlatformObject(f) if is_row_like_platform_type_name(&f.name) => db.metadata_ref(
             MetadataKind::TabularSectionRow { parent },
             section_name.as_str().to_string(),
             &RootConfigCtx,
@@ -761,6 +719,8 @@ mod tests {
     use bsl_types::kind::{ProjectionField, ProjectionFieldSource, ProjectionOrigin, TypeKind};
     use bsl_types::testing::{InMemoryDb, RootConfigCtx};
     use hir_def::ty::MetadataKind;
+
+    mod union;
 
     fn lookup(db: &dyn TypeKernelDb, recv: TypeId, method: &Name) -> Option<MethodInfo> {
         super::lookup_method(db, recv, method)
@@ -895,6 +855,14 @@ mod tests {
 
     fn to_type_method_info(db: &dyn TypeKernelDb, method: &PlatformMethod) -> MethodInfo {
         to_method_info(db, method)
+    }
+
+    fn candidate_param_types(info: &MethodInfo) -> Vec<Vec<TypeId>> {
+        info.candidates
+            .as_slice()
+            .iter()
+            .map(|candidate| candidate.params.iter().map(|param| param.ty).collect())
+            .collect()
     }
 
     #[test]
@@ -1206,67 +1174,11 @@ mod tests {
     }
 
     #[test]
-    fn union_lookup_merges_all_arm_signatures() {
-        let db = InMemoryDb::new();
-        let recv = db.union(vec![db.array(None), db.structure(None)]);
-        let info = lookup(&db, recv, &Name::new("Вставить"))
-            .expect("Вставить must resolve on a Массив | Структура union");
-
-        // Every arm's signature must be present so an argument accepted by EITHER
-        // arm is not reported as a mismatch (a union receiver is an
-        // over-approximation). Массив.Вставить wants a numeric index;
-        // Структура.Вставить wants a string key.
-        let first_accepts = |arg: TypeId| {
-            info.overloads
-                .iter()
-                .any(|ov| ov.first().is_some_and(|&p| crate::subtype::is_coercible_to(&db, arg, p)))
-        };
-        assert!(
-            first_accepts(db.string(None, false)),
-            "Структура.Вставить arm must accept a String key, got overloads {:?}",
-            info.overloads
-        );
-        assert!(
-            first_accepts(db.number(None, None)),
-            "Массив.Вставить arm must accept a numeric index, got overloads {:?}",
-            info.overloads
-        );
-    }
-
-    #[test]
     fn method_lookup_returns_none_for_unknown_receiver() {
         let db = InMemoryDb::new();
         assert!(lookup(&db, db.unknown(), &Name::new("Любой")).is_none());
         assert!(lookup(&db, db.undefined(), &Name::new("Любой")).is_none());
         assert!(lookup(&db, db.null(), &Name::new("Любой")).is_none());
-    }
-
-    #[test]
-    fn method_lookup_returns_none_for_union_without_live_method() {
-        let db = InMemoryDb::new();
-        let u = db.union(vec![db.number(None, None), db.string(None, false)]);
-        assert!(lookup(&db, u, &Name::new("Любой")).is_none());
-    }
-
-    #[test]
-    fn method_lookup_union_narrows_past_undefined_sentinel() {
-        let db = InMemoryDb::new();
-        let u = db.union(vec![platform_id(&db, "РезультатЗапроса"), db.undefined()]);
-        let info = lookup(&db, u, &Name::new("Выгрузить")).expect(
-            "Union([QueryResult, Undefined]).Выгрузить must resolve through the live branch",
-        );
-        let contains_value_table = match db.lookup_type(info.return_ty) {
-            TypeKind::ValueTable(_) => true,
-            TypeKind::Union(members) => {
-                members.iter().any(|id| matches!(db.lookup_type(*id), TypeKind::ValueTable(_)))
-            }
-            _ => false,
-        };
-        assert!(
-            contains_value_table,
-            "return type must include ValueTable, got {:?}",
-            db.lookup_type(info.return_ty),
-        );
     }
 
     #[test]
@@ -1307,7 +1219,7 @@ mod tests {
         );
         assert_eq!(info.return_ty, db.union(vec![db.number(None, None), db.undefined()]));
         assert_eq!(
-            info.params,
+            candidate_param_types(&info)[0],
             vec![db.unknown()],
             "garbage param strings stay Unknown for gradual typing",
         );
@@ -1317,14 +1229,14 @@ mod tests {
     fn to_method_info_prose_comma_param_stays_unknown() {
         let db = InMemoryDb::new();
         let info = to_type_method_info(&db, &test_method(None, Some("Ссылка на объект, либо")));
-        assert_eq!(info.params, vec![db.unknown()]);
+        assert_eq!(candidate_param_types(&info)[0], vec![db.unknown()]);
     }
 
     #[test]
     fn to_method_info_single_unknown_param_stays_unknown() {
         let db = InMemoryDb::new();
         let info = to_type_method_info(&db, &test_method(None, Some("Строка табличной части")));
-        assert_eq!(info.params, vec![db.unknown()]);
+        assert_eq!(candidate_param_types(&info)[0], vec![db.unknown()]);
     }
 
     #[test]
@@ -1334,7 +1246,7 @@ mod tests {
             &db,
             &test_method(None, Some("Число, Строка, КолонкаТаблицыЗначений")),
         );
-        match &info.params[..] {
+        match &candidate_param_types(&info)[0][..] {
             [param] => match db.lookup_type(*param) {
                 TypeKind::Union(members) => {
                     assert!(members.contains(&db.number(None, None)));
@@ -1421,11 +1333,10 @@ mod tests {
             return;
         };
         assert!(
-            !info.overloads.is_empty(),
-            "InformationRegisterManager.Получить must surface multi-overload variants \
-             through lookup_method (the inference path); got params={:?}, overloads={:?}",
-            info.params,
-            info.overloads,
+            info.candidates.as_slice().len() > 1,
+            "InformationRegisterManager.Получить must surface multi-overload candidates \
+             through lookup_method (the inference path); got candidates={:?}",
+            info.candidates,
         );
     }
 
@@ -1591,7 +1502,7 @@ mod tests {
         let r = ts_receiver(&db, MdoType::Catalog, "X.Y");
         let info = lookup(&db, r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
         assert_eq!(
-            info.params,
+            candidate_param_types(&info)[0],
             vec![db.any(), db.string(None, false)],
             "Произвольный lowers to the sticky Any; only the row generic is rebound",
         );
@@ -1604,7 +1515,7 @@ mod tests {
         let info =
             lookup(&db, r, &Name::new("Индекс")).expect("TabularSection.Индекс must resolve");
         assert_eq!(
-            info.params,
+            candidate_param_types(&info)[0],
             vec![db.unknown()],
             "Индекс param must stay Unknown — rebinding would false-reject valid args",
         );
@@ -1655,24 +1566,6 @@ mod tests {
         let db = InMemoryDb::new();
         let receiver = form_control_id(&db, FormElementKind::Other);
         assert!(lookup(&db, receiver, &Name::new("Скрыть")).is_none());
-    }
-
-    #[test]
-    fn method_lookup_union_two_live_branches_first_branch_signature_wins() {
-        let db = InMemoryDb::new();
-        let u = db.union(vec![db.array(None), value_table_id(&db, None)]);
-        let info = lookup(&db, u, &Name::new("Количество"))
-            .expect("Union(Array, ValueTable).Количество must resolve through both branches");
-        assert_eq!(
-            info.return_ty,
-            db.number(None, None),
-            "Количество returns Число on both branches"
-        );
-        assert!(
-            info.overloads.is_empty(),
-            "cohesion: overloads must NOT be merged across union branches, got {:?}",
-            info.overloads,
-        );
     }
 
     #[test]

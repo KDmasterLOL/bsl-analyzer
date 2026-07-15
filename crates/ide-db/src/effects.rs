@@ -141,6 +141,7 @@ mod heap_estimate {
     cycle_fn = module_effect_summaries_cycle,
     cycle_initial = module_effect_summaries_initial,
     heap_size = heap_estimate::module_effect_summaries_heap,
+    returns(clone),
 )]
 pub fn module_effect_summaries_query<'db>(
     db: &'db dyn RootDatabase,
@@ -235,7 +236,7 @@ pub fn module_effect_summaries_cycle<'db>(
     Arc::new(last_provisional.as_ref().join(value.as_ref()))
 }
 
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_effect_summary_heap)]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_effect_summary_heap, returns(clone))]
 pub fn method_effect_summary_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -248,7 +249,7 @@ pub fn method_effect_summary_query<'db>(
     summaries.get(method_id.local_id).unwrap_or_else(|| Arc::new(EffectSummary::EMPTY))
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_security_state_heap)]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_security_state_heap, returns(clone))]
 pub fn module_security_state_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,

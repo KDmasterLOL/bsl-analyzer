@@ -37,6 +37,7 @@ criterion.workspace = true
 hir-ty.workspace = true
 tempfile.workspace = true
 rayon.workspace = true
+test-fixture.workspace = true
 
 [[bench]]
 name = "salsa_incremental"

@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -75,11 +75,71 @@ fn check_ternary(node: &SyntaxNode, ctx: &DiagnosticsContext) -> Option<Diagnost
             severity: ctx.severity(code),
             range: node.text_range(),
             tags: ctx.tags(code),
-            fixes: vec![],
+            fixes: canonical_fix(node, condition, condition_bool, true_bool, false_bool, ctx),
         });
     }
 
     None
+}
+
+/// Offer a fix only for the unambiguous canonical form `?(условие, Истина, Ложь)`,
+/// where the condition is a real expression (not a boolean literal) and the branches
+/// are exactly `Истина`/`Ложь`. The whole ternary is replaced with the verbatim source
+/// of the condition. The inverted form (`Ложь`/`Истина`) and boolean-literal conditions
+/// need negation or branch selection and are left as report-only.
+fn canonical_fix(
+    node: &SyntaxNode,
+    condition: &SyntaxNode,
+    condition_bool: Option<BooleanValue>,
+    true_bool: Option<BooleanValue>,
+    false_bool: Option<BooleanValue>,
+    ctx: &DiagnosticsContext,
+) -> Vec<Fix> {
+    if condition_bool.is_some()
+        || true_bool != Some(BooleanValue::True)
+        || false_bool != Some(BooleanValue::False)
+    {
+        return vec![];
+    }
+
+    let cond_range = condition.text_range();
+    let text = ctx.file_text();
+    let Some(cond_src) = text.get(cond_range.start().into()..cond_range.end().into()) else {
+        return vec![];
+    };
+
+    // A compound condition (`Б = 1`, `НЕ Х`) substituted verbatim would change
+    // precedence in an operand slot (`Х + ?(Б=1,…)` → `Х + Б = 1` reparses as
+    // `(Х + Б) = 1`), so parenthesise it. The parentheses are also clearer for the
+    // common `А = (Б = 1)` case where the second `=` is a comparison, and are always
+    // valid, so they are added unconditionally for compound conditions.
+    let new_text = if is_compound_condition(condition) {
+        format!("({})", cond_src)
+    } else {
+        cond_src.to_string()
+    };
+
+    vec![Fix::safe("Заменить на условие", vec![TextEdit { range: node.text_range(), new_text }])]
+}
+
+/// Whether the condition is a binary/unary expression (whose bare substitution could
+/// bind differently against surrounding operators). The grammar wraps operands in nested
+/// `EXPR` nodes, so peel them first to reach the real operator node.
+fn is_compound_condition(condition: &SyntaxNode) -> bool {
+    matches!(peel_expr(condition).kind(), SyntaxKind::BINARY_EXPR | SyntaxKind::UNARY_EXPR)
+}
+
+/// Descend through the nested `EXPR` wrapper nodes the grammar emits to the first
+/// meaningful expression node.
+fn peel_expr(node: &SyntaxNode) -> SyntaxNode {
+    let mut current = node.clone();
+    while current.kind() == SyntaxKind::EXPR {
+        match current.children().next() {
+            Some(child) => current = child,
+            None => break,
+        }
+    }
+    current
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,9 +177,56 @@ fn get_boolean_literal(expr: &SyntaxNode) -> Option<BooleanValue> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_fix_snapshot_for};
     use crate::DiagnosticCode;
     use expect_test::expect;
+
+    #[test]
+    fn test_fix_canonical_only() {
+        // Canonical `?(cond, Истина, Ложь)` gets a fix; the inverted form and a
+        // boolean-literal condition are report-only (no fix offered).
+        let code = r#"А = ?(Б = 1, Истина, Ложь);
+В = ?(Б = 0, False, True);
+Г = ?(истина, 1, 0);"#;
+        check_fix_snapshot_for(
+            code,
+            DiagnosticCode::UselessTernaryOperator,
+            expect![[r#"
+                UselessTernaryOperator @ 1:5..1:27 — Заменить на условие [fix_all=true]
+                А = (Б = 1);
+                В = ?(Б = 0, False, True);
+                Г = ?(истина, 1, 0);"#]],
+        );
+    }
+
+    #[test]
+    fn test_fix_wraps_compound_condition() {
+        // A compound condition is parenthesised so it binds correctly in any operand
+        // slot (`Х + (Б = 1)`) and reads unambiguously as an assignment RHS.
+        let code = r#"А = ?(Б = 1, Истина, Ложь);
+В = Х + ?(Б = 1, Истина, Ложь);
+Г = ?(НЕ Флаг, Истина, Ложь);"#;
+        check_fix_snapshot_for(
+            code,
+            DiagnosticCode::UselessTernaryOperator,
+            expect![[r#"
+                UselessTernaryOperator @ 1:5..1:27 — Заменить на условие [fix_all=true]
+                А = (Б = 1);
+                В = Х + ?(Б = 1, Истина, Ложь);
+                Г = ?(НЕ Флаг, Истина, Ложь);
+
+                UselessTernaryOperator @ 2:9..2:31 — Заменить на условие [fix_all=true]
+                А = ?(Б = 1, Истина, Ложь);
+                В = Х + (Б = 1);
+                Г = ?(НЕ Флаг, Истина, Ложь);
+
+                UselessTernaryOperator @ 3:5..3:29 — Заменить на условие [fix_all=true]
+                А = ?(Б = 1, Истина, Ложь);
+                В = Х + ?(Б = 1, Истина, Ложь);
+                Г = (НЕ Флаг);"#]],
+        );
+    }
+
     #[test]
     fn test_direct_ternary() {
         let code = "А = ?(Б = 1, Истина, Ложь);";

@@ -62,6 +62,9 @@ impl Ctx {
                         self.lower_variable(&var);
                     }
                 }
+                SyntaxKind::PRE_IF_DIR if !is_inside_method(&node) => {
+                    self.tree.has_module_preproc = true;
+                }
                 _ => {}
             }
         }
@@ -130,28 +133,25 @@ impl Ctx {
     }
 
     fn lower_variable(&mut self, var: &ast::VarDef) {
-        let name_token = var.name();
-        let name = name_token.as_ref().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
-        let name_range = name_token
-            .as_ref()
-            .map(|t| t.text_range())
-            .unwrap_or_else(|| var.syntax().text_range());
-
         let is_export = var.export_keyword().is_some();
         let annotations = self.lower_annotations(var.annotations());
         let source_range = var.syntax().text_range();
+        for name_token in var.names() {
+            let name = Name::new(name_token.text());
+            let name_range = name_token.text_range();
 
-        trace!(name = %name, is_export, "lowering variable");
+            trace!(name = %name, is_export, "lowering variable");
 
-        let idx = self.tree.variables.alloc(Variable {
-            name,
-            is_export,
-            annotations,
-            source_range,
-            name_range,
-        });
+            let idx = self.tree.variables.alloc(Variable {
+                name,
+                is_export,
+                annotations: annotations.clone(),
+                source_range,
+                name_range,
+            });
 
-        self.tree.top_level.push(ModItem::Variable(idx));
+            self.tree.top_level.push(ModItem::Variable(idx));
+        }
     }
 
     fn lower_params(&mut self, param_list: Option<ast::ParamList>) -> Box<[Param]> {
@@ -318,6 +318,10 @@ mod tests {
         }
 
         fn file_text(&self, file_id: FileId) -> std::sync::Arc<str> {
+            self.file_text_ref(file_id).clone()
+        }
+
+        fn file_text_ref(&self, file_id: FileId) -> &std::sync::Arc<str> {
             let input = base_db::FileIdInput::new(self, file_id);
             base_db::file_text_query(self, input)
         }
@@ -401,6 +405,27 @@ mod tests {
         db.set_file_text(file_id, input);
 
         Ctx::lower_file(&db, file_id)
+    }
+
+    fn parse_var_def(input: &str) -> ast::VarDef {
+        let mut db = TestDb::default();
+        let file_id = FileId(0);
+
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = base_db::SourceRoot::new_local(file_set);
+        db.set_source_root(base_db::SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, base_db::SourceRootId(0));
+
+        db.set_file_text(file_id, input);
+
+        let parse = db.parse_ref(file_id);
+        let file = ast::SourceFile::cast(parse.syntax_node()).expect("expected source file");
+
+        file.syntax()
+            .descendants()
+            .find_map(ast::VarDef::cast)
+            .expect("expected variable declaration")
     }
 
     #[test]
@@ -685,6 +710,125 @@ EndFunction
         });
         assert_eq!(var3.name.as_str(), "Третья");
         assert!(!var3.is_export);
+    }
+
+    #[test]
+    fn module_comma_var_decl_lowers_each_name() {
+        let input = "Перем Первая, Вторая Экспорт;";
+        let tree = lower(input);
+        let var_def = parse_var_def(input);
+        let expected_name_ranges: Vec<_> = var_def.names().map(|name| name.text_range()).collect();
+        let expected_source_range = var_def.syntax().text_range();
+
+        assert_eq!(tree.top_level_items().len(), 2);
+
+        let var1 = tree.variable(match tree.top_level_items()[0] {
+            ModItem::Variable(idx) => idx,
+            _ => panic!("expected variable"),
+        });
+        let var2 = tree.variable(match tree.top_level_items()[1] {
+            ModItem::Variable(idx) => idx,
+            _ => panic!("expected variable"),
+        });
+
+        assert_eq!(var1.name.as_str(), "Первая");
+        assert_eq!(var2.name.as_str(), "Вторая");
+        assert!(var1.is_export);
+        assert!(var2.is_export);
+        assert!(var1.annotations.is_empty());
+        assert_eq!(var1.annotations, var2.annotations);
+        assert_eq!(var1.source_range, expected_source_range);
+        assert_eq!(var2.source_range, expected_source_range);
+        assert_eq!(var1.name_range, expected_name_ranges[0]);
+        assert_eq!(var2.name_range, expected_name_ranges[1]);
+        assert_ne!(var1.name_range, var2.name_range);
+    }
+
+    #[test]
+    fn module_comma_var_decl_under_pre_if_lowers_each_name() {
+        let input = r#"
+#Если Сервер Тогда
+    Перем Внутри, ЕщеВнутри;
+#КонецЕсли
+        "#;
+        let tree = lower(input);
+        let var_def = parse_var_def(input);
+        let expected_name_ranges: Vec<_> = var_def.names().map(|name| name.text_range()).collect();
+        let expected_source_range = var_def.syntax().text_range();
+
+        assert!(tree.has_module_preproc());
+        assert_eq!(tree.top_level_items().len(), 2);
+
+        let var1 = tree.variable(match tree.top_level_items()[0] {
+            ModItem::Variable(idx) => idx,
+            _ => panic!("expected variable"),
+        });
+        let var2 = tree.variable(match tree.top_level_items()[1] {
+            ModItem::Variable(idx) => idx,
+            _ => panic!("expected variable"),
+        });
+
+        assert_eq!(var1.name.as_str(), "Внутри");
+        assert_eq!(var2.name.as_str(), "ЕщеВнутри");
+        assert!(!var1.is_export);
+        assert!(!var2.is_export);
+        assert!(var1.annotations.is_empty());
+        assert_eq!(var1.annotations, var2.annotations);
+        assert_eq!(var1.source_range, expected_source_range);
+        assert_eq!(var2.source_range, expected_source_range);
+        assert_eq!(var1.name_range, expected_name_ranges[0]);
+        assert_eq!(var2.name_range, expected_name_ranges[1]);
+        assert_ne!(var1.name_range, var2.name_range);
+    }
+
+    #[test]
+    fn module_comma_var_decl_english_export_lowers_each_name() {
+        let input = r#"
+&AtServer
+Var Alpha, Beta Export;
+        "#;
+        let tree = lower(input);
+        let var_def = parse_var_def(input);
+        let expected_name_ranges: Vec<_> = var_def.names().map(|name| name.text_range()).collect();
+        let expected_source_range = var_def.syntax().text_range();
+        let expected_annotations = var_def
+            .annotations()
+            .map(|annotation| Annotation {
+                kind: AnnotationKind::AtServer,
+                range: annotation.syntax().text_range(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tree.top_level_items().len(), 2);
+
+        let var1 = tree.variable(match tree.top_level_items()[0] {
+            ModItem::Variable(idx) => idx,
+            _ => panic!("expected variable"),
+        });
+        let var2 = tree.variable(match tree.top_level_items()[1] {
+            ModItem::Variable(idx) => idx,
+            _ => panic!("expected variable"),
+        });
+
+        assert_eq!(var1.name.as_str(), "Alpha");
+        assert_eq!(var2.name.as_str(), "Beta");
+        assert!(var1.is_export);
+        assert!(var2.is_export);
+        assert_eq!(var1.annotations.as_ref(), expected_annotations.as_slice());
+        assert_eq!(var2.annotations.as_ref(), expected_annotations.as_slice());
+        assert_eq!(var1.source_range, expected_source_range);
+        assert_eq!(var2.source_range, expected_source_range);
+        assert_eq!(var1.name_range, expected_name_ranges[0]);
+        assert_eq!(var2.name_range, expected_name_ranges[1]);
+        assert_ne!(var1.name_range, var2.name_range);
+    }
+
+    #[test]
+    fn test_malformed_variable_decl_emits_nothing() {
+        let tree = lower("Перем;");
+
+        assert_eq!(tree.top_level_items().len(), 0);
+        assert_eq!(tree.variables().count(), 0);
     }
 
     #[test]

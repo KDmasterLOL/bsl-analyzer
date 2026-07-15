@@ -26,7 +26,18 @@ impl ModuleIndex {
         Self::default()
     }
 
+    /// Build the path-derived index. The input is sorted by path here, and
+    /// same-name collisions (a module adopted by a configuration extension
+    /// shares its base module's name) are FIRST-wins — together that makes the
+    /// winner independent of the caller's iteration order, and the ascending
+    /// order lets the base-config file beat its extension sibling. This index
+    /// is the visibility-blind fallback: consumers with a caller file resolve
+    /// through the config-scoped
+    /// `ConfigsDatabase::resolve_common_module_file_candidates` instead.
     pub fn build_from_paths<'a>(paths: impl Iterator<Item = (FileId, &'a str)>) -> Self {
+        let mut paths: Vec<(FileId, &str)> = paths.collect();
+        paths.sort_unstable_by_key(|&(_, path)| path);
+
         let mut index = Self::new();
 
         for (file_id, path) in paths {
@@ -36,7 +47,10 @@ impl ModuleIndex {
                 let owner = form_key
                     .owner
                     .map(|(mdo_type, object)| (mdo_type, object.as_str().fold_lower()));
-                index.forms.insert((owner, form_key.form_name.as_str().fold_lower()), file_id);
+                index
+                    .forms
+                    .entry((owner, form_key.form_name.as_str().fold_lower()))
+                    .or_insert(file_id);
                 continue;
             }
 
@@ -47,22 +61,25 @@ impl ModuleIndex {
 
             match file_kind {
                 ModuleFileKind::Common => {
-                    index.common_modules_display.insert(lower.clone(), name.to_string());
-                    index.common_modules.insert(lower, file_id);
+                    index
+                        .common_modules_display
+                        .entry(lower.clone())
+                        .or_insert_with(|| name.to_string());
+                    index.common_modules.entry(lower).or_insert(file_id);
                 }
                 ModuleFileKind::Manager => {
                     if let Some(manager_type) = module_type.to_manager_type() {
-                        index.managers.insert((manager_type, lower), file_id);
+                        index.managers.entry((manager_type, lower)).or_insert(file_id);
                     }
                 }
                 ModuleFileKind::Object => {
                     if let Some(mdo_type) = module_type.to_mdo_type() {
-                        index.object_modules.insert((mdo_type, lower), file_id);
+                        index.object_modules.entry((mdo_type, lower)).or_insert(file_id);
                     }
                 }
                 ModuleFileKind::RecordSet => {
                     if let Some(mdo_type) = module_type.to_mdo_type() {
-                        index.record_set_modules.insert((mdo_type, lower), file_id);
+                        index.record_set_modules.entry((mdo_type, lower)).or_insert(file_id);
                     }
                 }
             }
@@ -367,6 +384,8 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
     }
 
     let path_lower = path.fold_lower();
+    let is_manager_module =
+        parts.last().is_some_and(|file_name| file_name.eq_ignore_ascii_case("ManagerModule.bsl"));
 
     for (i, part) in parts.iter().enumerate().rev() {
         let module_type = module_path_type_from_segment(part);
@@ -383,7 +402,7 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
                     {
                         return Some((mod_type, name, ModuleFileKind::Common));
                     }
-                } else if path_lower.ends_with("managermodule.bsl") {
+                } else if is_manager_module {
                     return Some((mod_type, name, ModuleFileKind::Manager));
                 } else if path_lower.ends_with("objectmodule.bsl") {
                     return Some((mod_type, name, ModuleFileKind::Object));
@@ -436,6 +455,30 @@ mod tests {
                 "ПриходнаяНакладная".to_string(),
                 ModuleFileKind::Object,
             )),
+        );
+    }
+
+    #[test]
+    fn value_manager_module_does_not_replace_constant_manager_module() {
+        let manager = FileId::from_raw(1);
+        let value_manager = FileId::from_raw(2);
+        let index = ModuleIndex::build_from_paths(
+            [
+                (manager, "Constants/ИспользоватьОсобыеУсловияТруда/Ext/ManagerModule.bsl"),
+                (
+                    value_manager,
+                    "Constants/ИспользоватьОсобыеУсловияТруда/Ext/ValueManagerModule.bsl",
+                ),
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(
+            index.resolve_manager(
+                ManagerType::Constants,
+                &Name::new("ИспользоватьОсобыеУсловияТруда")
+            ),
+            Some(manager),
         );
     }
 
@@ -683,6 +726,23 @@ mod tests {
             ),
             None,
         );
+    }
+
+    #[test]
+    fn adopted_extension_module_never_shadows_base_regardless_of_input_order() {
+        let base = FileId::from_raw(1);
+        let ext = FileId::from_raw(2);
+        let base_path = "src/cf/CommonModules/Модуль/Ext/Module.bsl";
+        let ext_path = "src/cfe/X/CommonModules/Модуль/Ext/Module.bsl";
+
+        for pair in [[(base, base_path), (ext, ext_path)], [(ext, ext_path), (base, base_path)]] {
+            let index = ModuleIndex::build_from_paths(pair.into_iter());
+            assert_eq!(
+                index.resolve_common_module(&Name::new("Модуль")),
+                Some(base),
+                "the base-config file must win the name collision in any input order",
+            );
+        }
     }
 
     #[test]

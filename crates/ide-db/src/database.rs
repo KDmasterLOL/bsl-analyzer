@@ -150,8 +150,12 @@ impl RootDatabaseImpl {
             .new(&db);
         let _ = GlobalConfigRevisionInput::builder(0).durability(Durability::MEDIUM).new(&db);
         let defaults = project_model::FeaturesConfig::default();
-        let _ =
-            FeaturesInput::builder(defaults.type_narrowing).durability(Durability::MEDIUM).new(&db);
+        let _ = FeaturesInput::builder(
+            defaults.type_narrowing,
+            hir::execution_env::EnvOptions::default(),
+        )
+        .durability(Durability::MEDIUM)
+        .new(&db);
         db
     }
 
@@ -276,6 +280,47 @@ impl RootDatabaseImpl {
         }))
     }
 
+    /// Zero the salsa event counters, opening a fresh observation window.
+    /// Returns `false` when events are disabled (no `BSL_SALSA_EVENTS=1`).
+    /// See [`crate::salsa_events::SalsaEventStats::reset`] for the quiescence
+    /// contract.
+    pub fn salsa_events_reset(&self) -> bool {
+        match self.salsa_events.as_ref() {
+            Some(stats) => {
+                stats.reset();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The *complete* per-key churn of the current observation window — exact
+    /// distinct-key count and every key resolved to a readable name — unlike
+    /// the hottest-N sample of [`Self::salsa_key_event_report`].
+    ///
+    /// Same revision constraint as the top-K report, restated as a windowed
+    /// protocol: open the window with [`Self::salsa_events_reset`], apply at
+    /// most one revision-bumping change, run the queries under observation,
+    /// and call this *before any further revision bump* — every recorded key
+    /// then decodes in the revision that produced it. `None` unless events
+    /// are enabled.
+    pub fn salsa_key_event_window(&self) -> Option<crate::salsa_events::KeyEventWindow> {
+        let stats = self.salsa_events.as_ref()?;
+        let counts = stats.all_keys();
+        let distinct_keys = counts.len();
+        let rows = salsa::attach(self, || {
+            counts
+                .into_iter()
+                .map(|c| crate::salsa_events::KeyEventRow {
+                    name: self.resolve_hot_key_name(c.key),
+                    execute: c.execute,
+                    discard_stale: c.discard_stale,
+                })
+                .collect()
+        });
+        Some(crate::salsa_events::KeyEventWindow { distinct_keys, rows })
+    }
+
     /// Name one hot salsa key: `query(<module path>[#m<local>])` for the curated
     /// per-file / per-method query families, else the attach-rendered
     /// `query(Id(..))` fallback. Must run inside a [`salsa::attach`] scope (for the
@@ -357,7 +402,7 @@ impl RootDatabaseImpl {
 
         let module_id = ModuleId { file_id };
         let method_ids: Vec<hir::MethodId> = self
-            .module_bodies(module_id)
+            .module_bodies_ref(module_id)
             .iter_bodies()
             .map(|(local_id, _)| hir::MethodId { module: module_id, local_id })
             .collect();
@@ -367,7 +412,7 @@ impl RootDatabaseImpl {
         let n = method_ids.len();
         method_ids.par_iter().for_each_with(self.clone(), |db, &method_id| {
             let method_input = hir::MethodIdInput::new(&*db, method_id);
-            let _ = db.infer_method(method_input);
+            let _ = db.infer_method_ref(method_input);
         });
         n
     }
@@ -1684,6 +1729,16 @@ impl RootDatabaseImpl {
         input.set_type_narrowing(self).to(enabled);
     }
 
+    pub fn env_options(&self) -> hir::execution_env::EnvOptions {
+        self.features().env_options(self)
+    }
+
+    pub fn set_env_options(&mut self, options: hir::execution_env::EnvOptions) {
+        use salsa::Setter;
+        let input = self.features();
+        input.set_env_options(self).to(options);
+    }
+
     pub(crate) fn get_file_path(&self, file_id: FileId) -> Option<PathBuf> {
         let source_root_input = self.file_source_root_input(file_id);
         let source_root_id = source_root_input.source_root_id(self);
@@ -1740,6 +1795,10 @@ impl SourceDatabase for RootDatabaseImpl {
     }
 
     fn file_text(&self, file_id: FileId) -> std::sync::Arc<str> {
+        self.file_text_ref(file_id).clone()
+    }
+
+    fn file_text_ref(&self, file_id: FileId) -> &std::sync::Arc<str> {
         let input = base_db::FileIdInput::new(self, file_id);
         base_db::file_text_query(self, input)
     }
@@ -1806,36 +1865,56 @@ impl RootQueryDb for RootDatabaseImpl {
 #[salsa::db]
 impl DefDatabase for RootDatabaseImpl {
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
+        self.item_tree_ref(file_id).clone()
+    }
+
+    fn item_tree_ref(&self, file_id: FileId) -> &Arc<ItemTree> {
         let file_id_input = base_db::FileIdInput::new(self, file_id);
         hir::item_tree_query(self, file_id_input)
     }
 
     fn region_tree(&self, file_id: FileId) -> Arc<RegionTree> {
         let file_id_input = base_db::FileIdInput::new(self, file_id);
-        hir::region_tree_query(self, file_id_input)
+        hir::region_tree_query(self, file_id_input).clone()
     }
 
     fn conditional_tree(&self, file_id: FileId) -> Arc<ConditionalTree> {
+        self.conditional_tree_ref(file_id).clone()
+    }
+
+    fn conditional_tree_ref(&self, file_id: FileId) -> &Arc<ConditionalTree> {
         let file_id_input = base_db::FileIdInput::new(self, file_id);
         hir::conditional_tree_query(self, file_id_input)
     }
 
     fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-        hir::module_data_query(self, file_id_input)
+        hir::module_data_query(self, file_id_input).clone()
     }
 
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
+        self.symbol_tree_ref(module_id).clone()
+    }
+
+    fn symbol_tree_ref(&self, module_id: ModuleId) -> &Arc<SymbolTree> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         hir::symbol_tree_query(self, file_id_input)
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
+        self.module_bodies_ref(module_id).clone()
+    }
+
+    fn module_bodies_ref(&self, module_id: ModuleId) -> &Arc<ModuleBodies> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         hir::module_bodies_query(self, file_id_input)
     }
 
     fn method_body(&self, method: hir::MethodIdInput<'_>) -> Arc<hir::Body> {
+        self.method_body_ref(method).clone()
+    }
+
+    fn method_body_ref<'db>(&'db self, method: hir::MethodIdInput<'db>) -> &'db Arc<hir::Body> {
         hir::method_body_query(self, method)
     }
 
@@ -1857,13 +1936,13 @@ impl DefDatabase for RootDatabaseImpl {
     }
 
     fn method_docs(&self, method: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
-        let symbol_tree = self.symbol_tree(method.module);
+        let symbol_tree = self.symbol_tree_ref(method.module);
         let method_symbol = symbol_tree.find_method_by_id(method)?;
         method_symbol.docs.clone()
     }
 
     fn variable_docs(&self, variable: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
-        let symbol_tree = self.symbol_tree(variable.module);
+        let symbol_tree = self.symbol_tree_ref(variable.module);
         let variable_symbol = symbol_tree.find_variable_by_id(variable)?;
         variable_symbol.docs.clone()
     }
@@ -1887,6 +1966,15 @@ impl DefDatabase for RootDatabaseImpl {
     ) -> Arc<hir::SourceRootNameUsage> {
         let source_root_input = self.source_root_input(source_root_id);
         hir::source_root_name_usage_query(self, source_root_input)
+    }
+
+    fn file_name_offsets(&self, file_id: FileId) -> Arc<hir::FileNameOffsets> {
+        self.file_name_offsets_ref(file_id).clone()
+    }
+
+    fn file_name_offsets_ref(&self, file_id: FileId) -> &Arc<hir::FileNameOffsets> {
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        hir::file_name_offsets_query(self, file_id_input)
     }
 
     fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<hir::ExternalRef>> {
@@ -1954,6 +2042,18 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         name: &str,
     ) -> Option<Arc<bsl_metadata::CommonModule>> {
         RootDatabaseImpl::resolve_common_module_for_file(self, file_id, name)
+    }
+
+    fn resolve_common_module_file_candidates(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> Option<Vec<FileId>> {
+        // The helper orders extension-first for merged-surface validation;
+        // qualified resolution wants the base declaration to win, so reverse.
+        let mut files = self.resolve_common_module_files_for_file(file_id, name);
+        files.reverse();
+        Some(files)
     }
 
     fn resolve_event_subscription(
@@ -2185,18 +2285,33 @@ impl hir::HirDatabase for RootDatabaseImpl {
         RootDatabaseImpl::type_narrowing_enabled(self)
     }
 
+    fn env_options(&self) -> hir::execution_env::EnvOptions {
+        RootDatabaseImpl::env_options(self)
+    }
+
     fn proc_signature(
         &self,
         method_input: hir::MethodIdInput<'_>,
     ) -> Arc<hir::proc_signature::ProcSignature> {
-        hir::proc_signature::proc_signature_query(self, method_input)
+        hir::proc_signature::proc_signature_query(self, method_input).clone()
     }
 
     fn infer_method(&self, method: hir::MethodIdInput<'_>) -> Arc<hir::BodyInferenceResult> {
+        self.infer_method_ref(method).clone()
+    }
+
+    fn infer_method_ref<'db>(
+        &'db self,
+        method: hir::MethodIdInput<'db>,
+    ) -> &'db Arc<hir::BodyInferenceResult> {
         hir::infer_method_query(self, method)
     }
 
     fn infer_module_code(&self, file_id: FileId) -> Arc<hir::ModuleCodeInferenceResult> {
+        self.infer_module_code_ref(file_id).clone()
+    }
+
+    fn infer_module_code_ref(&self, file_id: FileId) -> &Arc<hir::ModuleCodeInferenceResult> {
         let file_id_input = FileIdInput::new(self, file_id);
         hir::infer_module_code_query(self, file_id_input)
     }

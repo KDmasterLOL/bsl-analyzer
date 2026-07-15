@@ -4,13 +4,17 @@ use bsl_platform::{
     TypeNameInput,
 };
 use hir::{
-    classify_token, kernel_type_label, platform_type_key_id, Builders, Field, NameClass, Semantics,
+    classify_token, kernel_type_label, platform_type_key_id, Builders, CallResolution,
+    CallSelection, CandidateId, Field, NameClass, PlatformSignatureSlot, Semantics,
     Type as HirType, TypeId, TypeKind,
 };
 use ide_db::base_db::Locale;
 use ide_db::RootDatabase;
 use stdx::case::CaseExt;
-use symbol_info::{from_global_function, from_platform_method, render_hover_markdown, Lang};
+use symbol_info::{
+    build_signature_from_resolution, from_global_function, from_platform_method,
+    render_hover_markdown, Lang, SymbolSignature,
+};
 use syntax::{SyntaxNode, SyntaxToken, TextRange, TextSize};
 use vfs::FileId;
 
@@ -169,7 +173,14 @@ fn hover_free_name<DB: RootDatabase>(
         }
     }
 
-    if let Some(r) = hover_for_global_function(db, token.text(), token.text_range()) {
+    if let Some(r) = hover_for_global_function(
+        db,
+        &sema,
+        file_id,
+        token.text_range().end() + TextSize::from(1),
+        token.text(),
+        token.text_range(),
+    ) {
         return Some(r);
     }
 
@@ -259,7 +270,14 @@ fn hover_platform_method_on_token<DB: RootDatabase>(
     let hir::Definition::BuiltinMethodHandle { handle, .. } = definition else {
         return None;
     };
-    hover_for_platform_method(db, &handle, token.text_range())
+    hover_for_platform_method(
+        db,
+        sema,
+        file_id,
+        token.text_range().end() + TextSize::from(1),
+        &handle,
+        token.text_range(),
+    )
 }
 
 fn type_of_token<DB: RootDatabase>(
@@ -612,14 +630,22 @@ fn query_variant_platform_key(kind: &TypeKind) -> Option<&'static str> {
 
 fn hover_for_platform_method<DB: RootDatabase>(
     db: &DB,
+    sema: &Semantics<'_, DB>,
+    file_id: FileId,
+    offset: TextSize,
     handle: &hir::PlatformMethodHandle,
     range: TextRange,
 ) -> Option<HoverResult> {
     let method = handle.lookup(db)?;
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
 
-    let sig = from_platform_method(&method, docs.as_ref());
-    let mut markup = render_hover_markdown(&sig, Lang::Russian);
+    let fallback_sigs = from_platform_method(&method, docs.as_ref());
+    let resolution = sema.call_resolution_at(file_id, offset);
+    let stored_sigs = sema
+        .call_binding_at(file_id, offset)
+        .and_then(|binding| build_signature_from_resolution(db, &binding));
+    let sigs = stored_sigs.as_deref().unwrap_or(&fallback_sigs);
+    let mut markup = render_call_hover_markdown(sigs, resolution.as_ref())?;
     append_availability(&mut markup, method.context.as_ref());
 
     Some(HoverResult { markup, range: Some(range) })
@@ -627,6 +653,9 @@ fn hover_for_platform_method<DB: RootDatabase>(
 
 fn hover_for_global_function<DB: RootDatabase>(
     db: &DB,
+    sema: &Semantics<'_, DB>,
+    file_id: FileId,
+    offset: TextSize,
     function_name: &str,
     range: TextRange,
 ) -> Option<HoverResult> {
@@ -634,11 +663,63 @@ fn hover_for_global_function<DB: RootDatabase>(
     let function = global_function_query(db, input)?;
     let docs = PlatformDataInner::instance().get_global_function_docs(function.id);
 
-    let sig = from_global_function(function, docs.as_ref());
-    let mut markup = render_hover_markdown(&sig, Lang::Russian);
+    let fallback_sigs = from_global_function(function, docs.as_ref());
+    let resolution = sema.call_resolution_at(file_id, offset);
+    let stored_sigs = sema
+        .call_binding_at(file_id, offset)
+        .and_then(|binding| build_signature_from_resolution(db, &binding));
+    let sigs = stored_sigs.as_deref().unwrap_or(&fallback_sigs);
+    let mut markup = render_call_hover_markdown(sigs, resolution.as_ref())?;
     append_availability(&mut markup, function.context.as_ref());
 
     Some(HoverResult { markup, range: Some(range) })
+}
+
+fn render_call_hover_markdown(
+    signatures: &[SymbolSignature],
+    resolution: Option<&CallResolution>,
+) -> Option<String> {
+    let Some(resolution) = resolution else {
+        return signatures.first().map(|signature| render_hover_markdown(signature, Lang::Russian));
+    };
+    let selected = match resolution.selection {
+        CallSelection::Unique { candidate } => signature_index(signatures, candidate),
+        CallSelection::Ambiguous { .. } | CallSelection::Rejected(_) => None,
+    };
+    match selected {
+        Some(index) => {
+            signatures.get(index).map(|signature| render_hover_markdown(signature, Lang::Russian))
+        }
+        None => (!signatures.is_empty()).then(|| {
+            signatures
+                .iter()
+                .map(|signature| render_hover_markdown(signature, Lang::Russian))
+                .collect::<Vec<_>>()
+                .join("\n\n---\n\n")
+        }),
+    }
+}
+
+fn signature_index(signatures: &[SymbolSignature], candidate: CandidateId) -> Option<usize> {
+    match candidate {
+        CandidateId::Platform { method_id, signature: PlatformSignatureSlot::Base } => {
+            signatures.iter().position(|signature| {
+                signature.platform_id == Some(method_id) && signature.candidate_ordinal.is_none()
+            })
+        }
+        CandidateId::Platform {
+            method_id,
+            signature: PlatformSignatureSlot::Variant(candidate_ordinal),
+        } => signatures.iter().position(|signature| {
+            signature.platform_id == Some(method_id)
+                && signature.candidate_ordinal == Some(candidate_ordinal)
+        }),
+        CandidateId::User { signature_ordinal: candidate_ordinal, .. }
+        | CandidateId::Builtin { signature_ordinal: candidate_ordinal, .. } => signatures
+            .iter()
+            .position(|signature| signature.candidate_ordinal == Some(candidate_ordinal)),
+        CandidateId::FunctionValue => None,
+    }
 }
 
 fn append_availability(markup: &mut String, ctx: Option<&ContextAvailability>) {

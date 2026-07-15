@@ -206,13 +206,10 @@ fn check_left_space(
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),
-        fixes: vec![Fix {
-            label: format!("Добавить пробел слева от '{}'", token.text()),
-            edits: vec![TextEdit {
-                range: TextRange::new(insert, insert),
-                new_text: " ".to_string(),
-            }],
-        }],
+        fixes: vec![Fix::safe(
+            format!("Добавить пробел слева от '{}'", token.text()),
+            vec![TextEdit { range: TextRange::new(insert, insert), new_text: " ".to_string() }],
+        )],
     })
 }
 
@@ -267,13 +264,10 @@ fn check_right_space(
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),
-        fixes: vec![Fix {
-            label: format!("Добавить пробел справа от '{}'", token.text()),
-            edits: vec![TextEdit {
-                range: TextRange::new(insert, insert),
-                new_text: " ".to_string(),
-            }],
-        }],
+        fixes: vec![Fix::safe(
+            format!("Добавить пробел справа от '{}'", token.text()),
+            vec![TextEdit { range: TextRange::new(insert, insert), new_text: " ".to_string() }],
+        )],
     })
 }
 
@@ -325,7 +319,7 @@ fn check_left_right_space(
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),
-        fixes: vec![Fix { label, edits }],
+        fixes: vec![Fix::safe(label, edits)],
     })
 }
 

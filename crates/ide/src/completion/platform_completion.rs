@@ -15,6 +15,7 @@ use symbol_info::{
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use vfs::FileId;
 
+use super::env_filter::EnvFilter;
 use super::fuzzy::{MatchTier, PrefixMatcher};
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
@@ -32,11 +33,22 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     tracing::debug!(token_kind = ?token.kind(), token_text = ?token.text(), "Completion token");
 
     let (dot_token, prefix) = resolve_dot_anchor(&token, position.offset)?;
+    let env_filter = EnvFilter::at(db, position.file_id, position.offset);
 
     let receiver_expr = find_receiver_expr(&dot_token)?;
 
     if let Some(receiver_name) = extract_receiver_ident(&receiver_expr) {
         tracing::debug!(receiver_name = %receiver_name, "Trying CommonModule fast path");
+        // A statically named module the caller's environments cannot reach
+        // offers no members — the diagnostic would underline any such call
+        // (typed variables holding a module stay permissive, mirroring the
+        // diagnostic skipping flow-insensitive receivers).
+        if hir::Resolver::with_workspace_scope(hir::ModuleId::new(position.file_id))
+            .user_common_module_exists(db, &Name::new(&receiver_name))
+            && !env_filter.admits_common_module(db, position.file_id, &receiver_name)
+        {
+            return Some(Vec::new());
+        }
         if let Some(items) = complete_common_module_methods(db, &position, &receiver_name) {
             return Some(apply_prefix_filter(items, &prefix, db));
         }
@@ -53,7 +65,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
                     .user_common_module_exists(db, &name_node);
             let same_file_shadows = {
                 let module_id = hir::ModuleId::new(position.file_id);
-                let tree = db.symbol_tree(module_id);
+                let tree = db.symbol_tree_ref(module_id);
                 tree.find_method(&name_node).is_some() || tree.find_variable(&name_node).is_some()
             };
             if workspace_module_shadows || same_file_shadows {
@@ -80,15 +92,19 @@ pub(super) fn platform_completions<DB: RootDatabase>(
         }
     }
 
-    if let Some(items) =
-        complete_prefix_methods_for_receiver(db, receiver_id, position.file_id, position.locale)
-    {
+    if let Some(items) = complete_prefix_methods_for_receiver(
+        db,
+        receiver_id,
+        position.file_id,
+        position.locale,
+        &env_filter,
+    ) {
         return Some(apply_prefix_filter(items, &prefix, db));
     }
 
     if hir::is_form_items_collection_ty(db, receiver_id) {
         if let Some(items) =
-            complete_form_elements_collection(db, position.file_id, position.locale)
+            complete_form_elements_collection(db, position.file_id, position.locale, &env_filter)
         {
             return Some(apply_prefix_filter(items, &prefix, db));
         }
@@ -100,7 +116,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
             let mut items: Vec<CompletionItem> = Vec::new();
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             for type_name in chain.iter().rev() {
-                for item in complete_platform_methods(db, type_name, position.locale) {
+                for item in complete_platform_methods(db, type_name, position.locale, &env_filter) {
                     if seen.insert(item.label.fold_lower()) {
                         items.push(item);
                     }
@@ -113,7 +129,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     if let Some(type_name) = platform_type_key_id(db, receiver_id) {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
         let mut items = projection_column_items(db, receiver_id, position.locale);
-        items.extend(complete_platform_methods(db, &type_name, position.locale));
+        items.extend(complete_platform_methods(db, &type_name, position.locale, &env_filter));
         return Some(apply_prefix_filter(items, &prefix, db));
     }
 
@@ -121,6 +137,10 @@ pub(super) fn platform_completions<DB: RootDatabase>(
         let members = members.to_vec();
         let mut items: Vec<CompletionItem> = Vec::new();
         let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // The diagnostics judge a union member against the UNION of the arm
+        // masks; filtering each arm alone would hide a label that is legal
+        // through another arm, so unions are not judged here.
+        let union_filter = EnvFilter::permissive();
         for m in members
             .into_iter()
             .filter(|m| !matches!(db.lookup_type(*m), TypeKind::Undefined | TypeKind::Null))
@@ -131,7 +151,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
                 }
             }
             let Some(type_name) = platform_type_key_id(db, m) else { continue };
-            for item in complete_platform_methods(db, &type_name, position.locale) {
+            for item in complete_platform_methods(db, &type_name, position.locale, &union_filter) {
                 if seen_labels.insert(item.label.clone()) {
                     items.push(item);
                 }
@@ -150,6 +170,7 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     receiver: TypeId,
     file_id: FileId,
     locale: ide_db::base_db::Locale,
+    env: &EnvFilter,
 ) -> Option<Vec<CompletionItem>> {
     let effective = coerce_to_metadata_ref_id(db, receiver).unwrap_or(receiver);
 
@@ -183,7 +204,7 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     };
 
     if is_manager {
-        return collect_platform_items_or_none(db, effective, locale);
+        return collect_platform_items_or_none(db, effective, locale, env);
     }
 
     if !is_metadata_ref
@@ -195,7 +216,7 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     }
 
     let mdo_fields = HirType::from_id(db, file_id, effective).fields();
-    let platform_items = collect_platform_items_for_effective(db, effective, locale);
+    let platform_items = collect_platform_items_for_effective(db, effective, locale, env);
 
     if mdo_fields.is_empty() && platform_items.is_empty() {
         return None;
@@ -222,18 +243,22 @@ fn collect_platform_items_for_effective<DB: RootDatabase>(
     db: &DB,
     effective: TypeId,
     locale: ide_db::base_db::Locale,
+    env: &EnvFilter,
 ) -> Vec<CompletionItem> {
     let TypeKind::Union(arms) = db.lookup_type(effective) else {
-        return collect_platform_items(db, effective, locale);
+        return collect_platform_items(db, effective, locale, env);
     };
     let arms = arms.to_vec();
     let mut out: Vec<CompletionItem> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // See the union handling in `platform_completions`: arm masks merge, so
+    // per-arm judgement over-hides.
+    let env = &EnvFilter::permissive();
     for arm in arms
         .into_iter()
         .filter(|t| !matches!(db.lookup_type(*t), TypeKind::Undefined | TypeKind::Null))
     {
-        for item in collect_platform_items(db, arm, locale) {
+        for item in collect_platform_items(db, arm, locale, env) {
             if seen.insert(item.label.fold_lower()) {
                 out.push(item);
             }
@@ -246,6 +271,7 @@ fn collect_platform_items<DB: RootDatabase>(
     db: &DB,
     receiver: TypeId,
     locale: ide_db::base_db::Locale,
+    env: &EnvFilter,
 ) -> Vec<CompletionItem> {
     enum Shape {
         MetaKind(hir::MetadataKind),
@@ -269,17 +295,17 @@ fn collect_platform_items<DB: RootDatabase>(
         Shape::MetaKind(kind) => {
             if let Some(scalar_key) = tabular_section_scalar_key(kind) {
                 tracing::debug!(scalar_key, "Tabular section scalar completion");
-                return complete_platform_methods(db, scalar_key, locale);
+                return complete_platform_methods(db, scalar_key, locale, env);
             }
             if let Some(scalar_key) = kind.scalar_platform_key() {
                 tracing::debug!(scalar_key, "Synthetic-kind scalar completion");
-                return complete_platform_methods(db, scalar_key, locale);
+                return complete_platform_methods(db, scalar_key, locale, env);
             }
             kind.platform_prefix()
         }
         Shape::FormData => {
             let Some(type_key) = platform_type_key_id(db, receiver) else { return Vec::new() };
-            return complete_platform_methods(db, &type_key, locale);
+            return complete_platform_methods(db, &type_key, locale, env);
         }
         Shape::Manager(mdo) => mdo.manager_type_prefix(),
         Shape::Other => None,
@@ -288,15 +314,21 @@ fn collect_platform_items<DB: RootDatabase>(
     tracing::debug!(prefix, "Prefix-based completion for manager / metadata-ref receiver");
     let input = TypeNameInput::new(db, prefix.to_string());
     let methods = manager_methods_query(db, input);
-    methods.iter().map(render_manager_method).collect()
+    let judge_env = !PlatformDataInner::instance().is_ambiguous_type_name(prefix);
+    methods
+        .iter()
+        .filter(|m| !judge_env || env.admits_context(m.context.as_ref()))
+        .map(render_manager_method)
+        .collect()
 }
 
 fn collect_platform_items_or_none<DB: RootDatabase>(
     db: &DB,
     receiver: TypeId,
     locale: ide_db::base_db::Locale,
+    env: &EnvFilter,
 ) -> Option<Vec<CompletionItem>> {
-    let items = collect_platform_items(db, receiver, locale);
+    let items = collect_platform_items(db, receiver, locale, env);
     if items.is_empty() {
         None
     } else {
@@ -440,7 +472,7 @@ fn complete_common_module_methods(
     );
 
     let module_id = hir::ModuleId::new(module_file_id);
-    let symbol_tree = db.symbol_tree(module_id);
+    let symbol_tree = db.symbol_tree_ref(module_id);
 
     let items: Vec<CompletionItem> = symbol_tree
         .methods()
@@ -466,7 +498,9 @@ pub(super) fn render_common_module_method(
     let callee =
         CalleeKind::CommonModuleMethod { module: module_name.clone(), method: method.name.clone() };
     match build_signature(db, file_id, &callee) {
-        Some(sig) => item_from_signature(&sig),
+        Some(sigs) => {
+            sigs.first().map(item_from_signature).unwrap_or_else(|| fallback_item(method))
+        }
         None => fallback_item(method),
     }
 }
@@ -523,6 +557,7 @@ fn complete_platform_methods(
     db: &dyn RootDatabase,
     receiver_type: &str,
     locale: ide_db::base_db::Locale,
+    env: &EnvFilter,
 ) -> Vec<CompletionItem> {
     let methods_input = TypeNameInput::new(db, receiver_type.to_string());
     let methods = type_methods_query(db, methods_input);
@@ -535,22 +570,40 @@ fn complete_platform_methods(
         "Found platform members"
     );
 
-    let mut items: Vec<CompletionItem> = methods.iter().map(render_platform_method).collect();
-    items.extend(properties.iter().map(|p| render_platform_property(p, locale)));
+    // Homonym type names resolve to an arbitrary entry, so their per-member
+    // availability is unreliable — offer everything (mirrors the diagnostics'
+    // `is_ambiguous_type_name` gate).
+    let judge_env = !PlatformDataInner::instance().is_ambiguous_type_name(receiver_type);
+
+    let mut items: Vec<CompletionItem> = methods
+        .iter()
+        .filter(|m| !judge_env || env.admits_context(m.context.as_ref()))
+        .map(render_platform_method)
+        .collect();
+    items.extend(
+        properties
+            .iter()
+            .filter(|p| !judge_env || env.admits_context(p.context.as_ref()))
+            .map(|p| render_platform_property(p, locale)),
+    );
     items
 }
 
 pub(super) fn render_manager_method(method: &PlatformMethod) -> CompletionItem {
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
-    let mut sig = from_platform_method(method, docs.as_ref());
-    sig.source = SignatureSource::PlatformManager;
-    item_from_signature(&sig)
+    let mut sigs = from_platform_method(method, docs.as_ref());
+    if let Some(sig) = sigs.first_mut() {
+        sig.source = SignatureSource::PlatformManager;
+    }
+    let sig = sigs.first().expect("from_platform_method returns at least one signature");
+    item_from_signature(sig)
 }
 
 pub(super) fn render_platform_method(method: &PlatformMethod) -> CompletionItem {
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
-    let sig = from_platform_method(method, docs.as_ref());
-    item_from_signature(&sig)
+    let sigs = from_platform_method(method, docs.as_ref());
+    let sig = sigs.first().expect("from_platform_method returns at least one signature");
+    item_from_signature(sig)
 }
 
 pub(super) fn render_platform_property(
@@ -638,6 +691,7 @@ fn complete_form_elements_collection<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
     locale: ide_db::base_db::Locale,
+    env: &EnvFilter,
 ) -> Option<Vec<CompletionItem>> {
     let sema = Semantics::new(db);
     let form = sema.form(file_id)?;
@@ -647,7 +701,7 @@ fn complete_form_elements_collection<DB: RootDatabase>(
 
     let mut seen: std::collections::HashSet<String> =
         items.iter().map(|i| i.label.fold_lower()).collect();
-    for p in complete_platform_methods(db, hir::FORM_ITEMS_TYPE_RU, locale) {
+    for p in complete_platform_methods(db, hir::FORM_ITEMS_TYPE_RU, locale, env) {
         if seen.insert(p.label.fold_lower()) {
             items.push(p);
         }
@@ -810,13 +864,15 @@ mod tests {
 
         let any_catalog = db.any_metadata_ref(bsl_metadata::MdoType::Catalog);
         assert!(
-            !collect_platform_items(&db, any_catalog, Locale::Ru).is_empty(),
+            !collect_platform_items(&db, any_catalog, Locale::Ru, &EnvFilter::permissive())
+                .is_empty(),
             "AnyMetadataRef<Catalog> must offer the CatalogRef method surface"
         );
 
         let any_register = db.any_metadata_ref(bsl_metadata::MdoType::InformationRegister);
         assert!(
-            collect_platform_items(&db, any_register, Locale::Ru).is_empty(),
+            collect_platform_items(&db, any_register, Locale::Ru, &EnvFilter::permissive())
+                .is_empty(),
             "register-flavour any-ref has no ref method surface"
         );
     }
@@ -978,8 +1034,13 @@ mod tests {
         let (db, file_id) = make_db_with_file();
         let ty = db.mk_form_control(hir::FormElementKind::Table, Some(form_table_binding()));
 
-        let result =
-            complete_prefix_methods_for_receiver(&db, ty, file_id, ide_db::base_db::Locale::Ru);
+        let result = complete_prefix_methods_for_receiver(
+            &db,
+            ty,
+            file_id,
+            ide_db::base_db::Locale::Ru,
+            &EnvFilter::permissive(),
+        );
         assert!(
             result.is_none(),
             "FormControl{{Table, Some(_)}} must not trigger MDO-field completion; got {:?}",
@@ -992,8 +1053,13 @@ mod tests {
         let (db, file_id) = make_db_with_file();
         let ty = db.mk_form_control(hir::FormElementKind::Table, None);
 
-        let result =
-            complete_prefix_methods_for_receiver(&db, ty, file_id, ide_db::base_db::Locale::Ru);
+        let result = complete_prefix_methods_for_receiver(
+            &db,
+            ty,
+            file_id,
+            ide_db::base_db::Locale::Ru,
+            &EnvFilter::permissive(),
+        );
         assert!(
             result.is_none(),
             "FormControl{{Table, None}} must not trigger MDO-field completion"
@@ -1006,8 +1072,13 @@ mod tests {
         let element = db.platform_object("СтрокаТаблицыФормы".to_string());
         let ty = db.array(Some(element));
 
-        let result =
-            complete_prefix_methods_for_receiver(&db, ty, file_id, ide_db::base_db::Locale::Ru);
+        let result = complete_prefix_methods_for_receiver(
+            &db,
+            ty,
+            file_id,
+            ide_db::base_db::Locale::Ru,
+            &EnvFilter::permissive(),
+        );
         assert!(result.is_none(), "TypedArray(_) must not trigger MDO-field completion");
     }
 
@@ -1021,7 +1092,12 @@ mod tests {
         }
 
         let (db, _) = make_db_with_file();
-        let items = complete_platform_methods(&db, "ТаблицаФормы", ide_db::base_db::Locale::Ru);
+        let items = complete_platform_methods(
+            &db,
+            "ТаблицаФормы",
+            ide_db::base_db::Locale::Ru,
+            &EnvFilter::permissive(),
+        );
         assert!(
             !items.is_empty(),
             "ТаблицаФормы platform members must not be empty; bilingual lookup misroute?"
@@ -1049,7 +1125,12 @@ mod tests {
         }
 
         let (db, _) = make_db_with_file();
-        let items = complete_platform_methods(&db, "Массив", ide_db::base_db::Locale::Ru);
+        let items = complete_platform_methods(
+            &db,
+            "Массив",
+            ide_db::base_db::Locale::Ru,
+            &EnvFilter::permissive(),
+        );
         assert!(!items.is_empty(), "Массив platform members must not be empty");
         let labels: std::collections::HashSet<&str> =
             items.iter().map(|i| i.label.as_str()).collect();

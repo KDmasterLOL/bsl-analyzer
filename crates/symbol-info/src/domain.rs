@@ -62,6 +62,7 @@ pub struct CodeExample {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolSignature {
+    pub candidate_ordinal: Option<usize>,
     pub kind: MethodKind,
     pub name_russian: SmolStr,
     pub name_english: Option<SmolStr>,
@@ -77,4 +78,5 @@ pub struct SymbolSignature {
     pub is_export: bool,
     pub source: SignatureSource,
     pub method_id: Option<MethodId>,
+    pub platform_id: Option<u32>,
 }

@@ -66,7 +66,30 @@ pub fn lookup_field(
     lookup_field_inner(db, resolver, receiver, field_name)
 }
 
+/// All lookups — including per-arm union recursion — funnel through here, so
+/// the form-data neutralization below applies to a `FormData` union arm too,
+/// before the arms' environments merge.
 fn lookup_field_inner(
+    db: &dyn TypeKernelDb,
+    resolver: &dyn MetadataResolution,
+    receiver: TypeId,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let mut info = lookup_field_raw(db, resolver, receiver, field_name)?;
+    // A form-data structure proxies its backing object: a member reached
+    // through the projection is exposed by the form wherever the form itself
+    // runs, so the backing object page's availability must not be judged
+    // against the call site (`Отчет.КомпоновщикНастроек` in client form code
+    // is legal even though the raw report object is server-side).
+    if let crate::field_enum::FieldOrigin::PlatformProperty { env } = &mut info.origin {
+        if project_form_data_for_fields_id(db, receiver).is_some() {
+            *env = hir_def::execution_env::EnvFlags::ALL;
+        }
+    }
+    Some(info)
+}
+
+fn lookup_field_raw(
     db: &dyn TypeKernelDb,
     resolver: &dyn MetadataResolution,
     receiver: TypeId,
@@ -207,13 +230,35 @@ fn lookup_field_in_union_intersection(
     let first = &per_arm[0];
     let merged_ty = db.union(per_arm.iter().map(|f| f.ty).collect());
     let merged_readonly = per_arm.iter().any(|f| f.is_readonly);
+    // The member is available wherever ANY arm provides it, so platform
+    // availability unites across arms; one non-platform arm (a user
+    // attribute) makes it unrestricted — taking the first arm's origin
+    // verbatim would make the verdict depend on arm order.
+    let merged_origin = if per_arm
+        .iter()
+        .all(|f| matches!(f.origin, crate::field_enum::FieldOrigin::PlatformProperty { .. }))
+    {
+        let mut env = hir_def::execution_env::EnvFlags::EMPTY;
+        for f in &per_arm {
+            if let crate::field_enum::FieldOrigin::PlatformProperty { env: arm_env } = f.origin {
+                env = env | arm_env;
+            }
+        }
+        crate::field_enum::FieldOrigin::PlatformProperty { env }
+    } else {
+        per_arm
+            .iter()
+            .map(|f| f.origin)
+            .find(|o| !matches!(o, crate::field_enum::FieldOrigin::PlatformProperty { .. }))
+            .unwrap_or(first.origin)
+    };
     Some(FieldInfo {
         name: first.name.clone(),
         name_en: first.name_en.clone(),
         ty: merged_ty,
         value_ty: None,
         is_readonly: merged_readonly,
-        origin: first.origin,
+        origin: merged_origin,
     })
 }
 
@@ -265,7 +310,7 @@ fn lookup_field_via_platform_property(
         ty: res.return_ty,
         value_ty: None,
         is_readonly: res.is_readonly,
-        origin: crate::field_enum::FieldOrigin::PlatformProperty,
+        origin: crate::field_enum::FieldOrigin::PlatformProperty { env: res.env },
     })
 }
 
@@ -434,6 +479,73 @@ mod tests {
             mdo.add_attribute(a);
         }
         mdo
+    }
+
+    #[test]
+    fn form_data_projection_neutralizes_platform_property_env() {
+        let config = {
+            let mut c = Configuration::new("Test");
+            c.add_metadata_object(mdo_of(MdoType::Report, "Продажи", vec![]));
+            c
+        };
+        let configs = wrap(config);
+
+        let receiver = TypeFixture::new("form_data(Отчет)", |db| {
+            db.mk_form_data(
+                FormDataFacet::Structure,
+                Some(bsl_types::facet::MdoRefFacet::new(MdoType::Report, "Продажи".to_string())),
+            )
+        });
+
+        let db = Rc::new(InMemoryDb::new());
+        let receiver_id = receiver.intern(&db);
+        let info = super::lookup_field(
+            db.as_ref(),
+            &ConfigsObjectResolver(&configs),
+            receiver_id,
+            &Name::new("КомпоновщикНастроек"),
+        )
+        .expect("projected report property must resolve");
+        match info.origin {
+            crate::field_enum::FieldOrigin::PlatformProperty { env } => assert_eq!(
+                env,
+                hir_def::execution_env::EnvFlags::ALL,
+                "the form-data proxy is available wherever the form runs"
+            ),
+            ref other => panic!("expected a platform property origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn form_data_union_arm_also_neutralizes_platform_property_env() {
+        let config = {
+            let mut c = Configuration::new("Test");
+            c.add_metadata_object(mdo_of(MdoType::Report, "Продажи", vec![]));
+            c
+        };
+        let configs = wrap(config);
+
+        let db = Rc::new(InMemoryDb::new());
+        let form_data = db.mk_form_data(
+            FormDataFacet::Structure,
+            Some(bsl_types::facet::MdoRefFacet::new(MdoType::Report, "Продажи".to_string())),
+        );
+        let receiver = db.union(vec![form_data, db.undefined()]);
+        let info = super::lookup_field(
+            db.as_ref(),
+            &ConfigsObjectResolver(&configs),
+            receiver,
+            &Name::new("КомпоновщикНастроек"),
+        )
+        .expect("union with a projected form-data arm must resolve");
+        match info.origin {
+            crate::field_enum::FieldOrigin::PlatformProperty { env } => assert_eq!(
+                env,
+                hir_def::execution_env::EnvFlags::ALL,
+                "the union arm must be neutralized before the merge"
+            ),
+            ref other => panic!("expected a platform property origin, got {other:?}"),
+        }
     }
 
     #[test]

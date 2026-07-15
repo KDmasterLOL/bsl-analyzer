@@ -14,7 +14,11 @@ pub fn render_completion_detail(sig: &SymbolSignature) -> CompletionDetail {
     let label = sig.name_russian.to_string();
     let mut sig_for_inline = sig.clone();
     sig_for_inline.qualifier = None;
-    let detail = render_signature_help(&sig_for_inline, 0).signature;
+    let detail = render_signature_help(&[sig_for_inline], 0, None)
+        .signatures
+        .first()
+        .map(|s| s.signature.clone())
+        .unwrap_or_default();
 
     let mut documentation = String::new();
     if let Some(en) = &sig.name_english {

@@ -156,7 +156,7 @@ impl WorkspaceIndex {
     }
 }
 
-#[salsa::tracked(lru = 4)]
+#[salsa::tracked(lru = 4, returns(clone))]
 pub fn workspace_index_query(
     db: &dyn DefDatabase,
     source_root_input: base_db::SourceRootInput,

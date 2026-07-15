@@ -22,7 +22,9 @@ use crate::symbol_tree::MethodSymbol;
 /// the base fallback.
 #[salsa::interned(debug)]
 pub struct WeavingModuleId<'db> {
+    #[returns(copy)]
     pub ext_file: vfs::FileId,
+    #[returns(copy)]
     pub base_file: vfs::FileId,
 }
 

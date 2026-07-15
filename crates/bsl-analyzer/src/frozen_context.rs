@@ -10,7 +10,8 @@ use project_model::Project;
 use rustc_hash::FxHashMap;
 use vfs::{FileId, Vfs};
 
-use crate::global_state::Task;
+use crate::call_hierarchy_index_state::CallHierarchyIndexState;
+use crate::global_state::{CallHierarchyWaitPolicy, Task};
 use crate::lsp::PositionEncoding;
 use crate::mem_docs::FrozenMemDocs;
 
@@ -82,7 +83,12 @@ pub struct LatencyRequestContext {
     /// so the completion handler may ask it to indent snippet continuation lines
     /// to the cursor column.
     pub supports_insert_text_mode_adjust_indentation: bool,
+    /// Whether the client honors versioned `WorkspaceEdit.documentChanges`, so the
+    /// rename handler can attach open-document versions to its edits.
+    pub supports_workspace_edit_document_changes: bool,
     pub task_sender: Sender<Task>,
+    pub call_hierarchy_index: CallHierarchyIndexState,
+    pub call_hierarchy_wait_policy: CallHierarchyWaitPolicy,
     /// Direct channel to the client, so a long-running handler (the `workspace/diagnostic`
     /// sweep) can stream `$/progress` notifications — partial results and work-done progress —
     /// while it runs, instead of only returning one final response.

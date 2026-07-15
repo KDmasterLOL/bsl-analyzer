@@ -99,7 +99,7 @@ mod tests {
     fn fixes_do_not_affect_id() {
         let mut with_fix = diag(some_code(), "x", 0, 4);
         let baseline = diagnostics_result_id(std::slice::from_ref(&with_fix));
-        with_fix.fixes.push(ide::Fix { label: "quick fix".to_string(), edits: Vec::new() });
+        with_fix.fixes.push(ide::Fix::safe("quick fix", Vec::new()));
         assert_eq!(baseline, diagnostics_result_id(&[with_fix]));
     }
 }

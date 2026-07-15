@@ -1,24 +1,39 @@
 use anyhow::Result;
+use base_db::SourceDatabase as _;
 use ide::{
     DocumentHighlightKind as IdeDocumentHighlightKind, FoldingRangeKind as IdeFoldingRangeKind,
-    Location as IdeLocation,
+    InlayHintKind as IdeInlayHintKind, Location as IdeLocation, RenameError,
 };
 use line_index::{LineIndex, TextSize};
 use lsp_types::{
-    CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem, CompletionItemKind,
-    CompletionParams, CompletionResponse, DocumentHighlight as LspDocumentHighlight,
-    DocumentHighlightKind as LspDocumentHighlightKind, DocumentHighlightParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange as LspFoldingRange,
-    FoldingRangeKind as LspFoldingRangeKind, FoldingRangeParams, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, MarkupContent, MarkupKind,
-    ReferenceParams, SemanticTokens, SemanticTokensParams, SemanticTokensResult,
-    SignatureHelpParams,
+    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
+    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
+    CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem,
+    CompletionItemKind, CompletionParams, CompletionResponse, DocumentChanges,
+    DocumentHighlight as LspDocumentHighlight, DocumentHighlightKind as LspDocumentHighlightKind,
+    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
+    FoldingRange as LspFoldingRange, FoldingRangeKind as LspFoldingRangeKind, FoldingRangeParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    InlayHint as LspInlayHint, InlayHintKind as LspInlayHintKind, InlayHintLabel, InlayHintParams,
+    Location, MarkupContent, MarkupKind, OneOf, OptionalVersionedTextDocumentIdentifier,
+    PrepareRenameResponse, Range, ReferenceParams, RenameParams, SelectionRange,
+    SelectionRangeParams, SemanticTokens, SemanticTokensParams, SemanticTokensResult,
+    SignatureHelpParams, SymbolKind, TextDocumentEdit, TextDocumentPositionParams, TextEdit,
+    WorkspaceEdit, WorkspaceSymbol as LspWorkspaceSymbol, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use rustc_hash::FxHashMap;
+use salsa::Database as _;
 use vfs::FileId;
 
+use crate::call_hierarchy_index_state::{
+    CallHierarchyIndexCompletion, CallHierarchyIndexPrepareAction,
+};
 use crate::frozen_context::LatencyRequestContext;
-use crate::global_state::GlobalStateSnapshot;
+use crate::global_state::{GlobalStateSnapshot, Task};
+
+const CALL_HIERARCHY_CANCELLATION_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(10);
 
 pub fn handle_goto_definition(
     ctx: LatencyRequestContext,
@@ -89,6 +104,55 @@ pub fn handle_goto_definition(
     }
 }
 
+pub fn handle_type_definition(
+    ctx: LatencyRequestContext,
+    params: GotoDefinitionParams,
+) -> Result<Option<GotoDefinitionResponse>> {
+    let _p = tracing::info_span!(
+        "handle_type_definition",
+        uri = %params.text_document_position_params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let source_doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = source_doc.text();
+    let line_index = source_doc.line_index();
+
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+
+    let Some(nav_target) = ctx.analysis.type_definition(file_id, offset.into()) else {
+        return Ok(None);
+    };
+
+    let target_url = ctx.url_for_file_id(nav_target.file_id)?;
+    let target_text: String = if nav_target.file_id == file_id {
+        text.to_string()
+    } else if let Some(doc) = ctx.mem_docs.get(&target_url) {
+        doc.text().to_string()
+    } else {
+        ctx.analysis.file_text(nav_target.file_id)
+    };
+    let target_line_index = LineIndex::new(&target_text);
+    let target_range = crate::lsp::range_with_encoding(
+        &target_line_index,
+        &target_text,
+        nav_target.range,
+        ctx.position_encoding,
+    )
+    .ok_or_else(|| anyhow::anyhow!("Failed to convert range"))?;
+
+    Ok(Some(GotoDefinitionResponse::Scalar(Location { uri: target_url, range: target_range })))
+}
+
 pub fn handle_find_references(
     ctx: LatencyRequestContext,
     params: ReferenceParams,
@@ -129,6 +193,543 @@ pub fn handle_find_references(
     } else {
         Ok(Some(lsp_locations))
     }
+}
+
+pub fn handle_prepare_rename(
+    ctx: LatencyRequestContext,
+    params: TextDocumentPositionParams,
+) -> Result<Option<PrepareRenameResponse>> {
+    let _p =
+        tracing::info_span!("handle_prepare_rename", uri = %params.text_document.uri).entered();
+
+    let uri = params.text_document.uri;
+    let position = params.position;
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+
+    let Some(target) = ctx.analysis.prepare_rename(file_id, offset.into()) else {
+        return Ok(None);
+    };
+
+    let range =
+        crate::lsp::range_with_encoding(line_index, text, target.range, ctx.position_encoding)
+            .ok_or_else(|| anyhow::anyhow!("Failed to convert rename range"))?;
+
+    Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+        range,
+        placeholder: target.current_name,
+    }))
+}
+
+pub fn handle_rename(
+    ctx: LatencyRequestContext,
+    params: RenameParams,
+) -> Result<Option<WorkspaceEdit>> {
+    let _p = tracing::info_span!(
+        "handle_rename",
+        uri = %params.text_document_position.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position.text_document.uri;
+    let position = params.text_document_position.position;
+    let new_name = params.new_name;
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+
+    let locations = match ctx.analysis.rename(file_id, offset.into(), &new_name) {
+        Ok(locations) => locations,
+        Err(RenameError::NotRenameable) => {
+            anyhow::bail!("This symbol cannot be renamed")
+        }
+        Err(RenameError::InvalidIdentifier(name)) => {
+            anyhow::bail!("'{name}' is not a valid identifier")
+        }
+    };
+
+    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, text);
+    let mut grouped: FxHashMap<lsp_types::Url, Vec<TextEdit>> = FxHashMap::default();
+    for location in locations {
+        let lsp_location = converter.convert(location)?;
+        grouped
+            .entry(lsp_location.uri)
+            .or_default()
+            .push(TextEdit { range: lsp_location.range, new_text: new_name.clone() });
+    }
+
+    let edit = if ctx.supports_workspace_edit_document_changes {
+        // Versioned edits let the client discard a rename computed against a buffer it
+        // has since changed. An unopened file carries `None` — its on-disk content is
+        // authoritative, so there is no editor version to match.
+        let document_changes = grouped
+            .into_iter()
+            .map(|(uri, edits)| {
+                let version = ctx.mem_docs.get(&uri).map(|doc| doc.version());
+                TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier { uri, version },
+                    edits: edits.into_iter().map(OneOf::Left).collect(),
+                }
+            })
+            .collect();
+        WorkspaceEdit {
+            changes: None,
+            document_changes: Some(DocumentChanges::Edits(document_changes)),
+            change_annotations: None,
+        }
+    } else {
+        WorkspaceEdit {
+            changes: Some(grouped.into_iter().collect()),
+            document_changes: None,
+            change_annotations: None,
+        }
+    };
+
+    Ok(Some(edit))
+}
+
+pub fn handle_prepare_call_hierarchy(
+    ctx: LatencyRequestContext,
+    params: CallHierarchyPrepareParams,
+) -> Result<Option<Vec<CallHierarchyItem>>> {
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+
+    let Some(ide_item) = ctx.analysis.prepare_call_hierarchy(file_id, offset.into()) else {
+        return Ok(None);
+    };
+
+    let db = ctx.analysis.database();
+    let source_root = db.file_source_root_input(file_id).source_root_id(db);
+    let authorization = ctx.call_hierarchy_index.prepare_authorization(source_root);
+    let _span = tracing::info_span!(
+        "handle_prepare_call_hierarchy",
+        uri = %uri,
+        ?source_root,
+        generation = authorization.map(|(generation, _)| generation),
+        implementation = "compact_reverse_index",
+        workspace_call_graph = false,
+    )
+    .entered();
+    match authorization {
+        Some((generation, CallHierarchyIndexPrepareAction::StartBuild)) => {
+            tracing::debug!(
+                ?source_root,
+                generation,
+                phase = "prepare",
+                authorization = "accepted",
+                "call hierarchy prepare authorized compact index generation"
+            );
+            if let Err(error) = ctx
+                .task_sender
+                .send(Task::CallHierarchyIndexBuildRequested { source_root, generation })
+            {
+                tracing::warn!(
+                    ?source_root,
+                    generation,
+                    ?error,
+                    "call hierarchy prepare could not enqueue index build"
+                );
+            }
+        }
+        Some((generation, CallHierarchyIndexPrepareAction::UseReady)) => tracing::debug!(
+            ?source_root,
+            generation,
+            phase = "prepare",
+            authorization = "ready",
+            "call hierarchy prepare reused compact index generation"
+        ),
+        Some((generation, CallHierarchyIndexPrepareAction::UseExisting)) => tracing::debug!(
+            ?source_root,
+            generation,
+            phase = "prepare",
+            authorization = "already_authorized",
+            "call hierarchy prepare reused compact index generation"
+        ),
+        None => tracing::warn!(
+            ?source_root,
+            phase = "prepare",
+            failure_reason = "generation_overflow",
+            "call hierarchy index generation overflow"
+        ),
+    }
+
+    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, text);
+    let item = to_lsp_call_hierarchy_item(&mut converter, ide_item)?;
+    Ok(Some(vec![item]))
+}
+
+pub fn handle_call_hierarchy_incoming(
+    ctx: LatencyRequestContext,
+    params: CallHierarchyIncomingCallsParams,
+) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+    let item = params.item;
+    let file_id = ctx.file_id_for_url(&item.uri)?;
+    let text = call_hierarchy_anchor_text(&ctx, &item.uri, file_id);
+    let line_index = LineIndex::new(&text);
+
+    let offset = crate::lsp::offset_with_encoding(
+        &line_index,
+        &text,
+        item.selection_range.start,
+        ctx.position_encoding,
+    )?;
+
+    let db = ctx.analysis.database();
+    let source_root = db.file_source_root_input(file_id).source_root_id(db);
+    let generation = ctx.call_hierarchy_index.generation(source_root);
+    let _span = tracing::info_span!(
+        "handle_call_hierarchy_incoming",
+        uri = %item.uri,
+        ?source_root,
+        ?generation,
+        wait_timeout_ms = ctx.call_hierarchy_wait_policy.timeout.as_millis() as u64,
+        implementation = "compact_reverse_index",
+        workspace_call_graph = false,
+    )
+    .entered();
+    let Some(generation) = generation else {
+        tracing::debug!(
+            ?source_root,
+            phase = "incoming",
+            wait_result = "unprepared",
+            null_reason = "unprepared",
+            "call hierarchy incoming returned null"
+        );
+        return Ok(None);
+    };
+    if !ctx.call_hierarchy_index.is_prepared(source_root, generation) {
+        tracing::debug!(
+            ?source_root,
+            generation,
+            phase = "incoming",
+            wait_result = "stale_prepare",
+            null_reason = "stale_prepare",
+            "call hierarchy incoming returned null"
+        );
+        return Ok(None);
+    }
+    let index = match ctx.call_hierarchy_index.wait_or_ready(source_root, generation) {
+        Some(crate::call_hierarchy_index_state::CallHierarchyIndexWaitOrReady::Ready(index)) => {
+            tracing::debug!(
+                ?source_root,
+                generation,
+                phase = "incoming",
+                wait_result = "ready",
+                "call hierarchy incoming read compact index"
+            );
+            index
+        }
+        Some(crate::call_hierarchy_index_state::CallHierarchyIndexWaitOrReady::Waiting(waiter)) => {
+            let started = std::time::Instant::now();
+            let deadline = started + ctx.call_hierarchy_wait_policy.timeout;
+            tracing::debug!(
+                ?source_root,
+                generation,
+                timeout_ms = ctx.call_hierarchy_wait_policy.timeout.as_millis() as u64,
+                phase = "incoming",
+                "call hierarchy incoming waiting for compact index"
+            );
+            loop {
+                ctx.analysis.database().unwind_if_revision_cancelled();
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    tracing::debug!(
+                        ?source_root,
+                        generation,
+                        waited_ms = started.elapsed().as_millis() as u64,
+                        phase = "incoming",
+                        wait_result = "timeout",
+                        null_reason = "timeout",
+                        "call hierarchy incoming returned null"
+                    );
+                    return Ok(None);
+                }
+
+                match waiter.recv_timeout(remaining.min(CALL_HIERARCHY_CANCELLATION_POLL_INTERVAL))
+                {
+                    Ok(CallHierarchyIndexCompletion::Ready(index)) => {
+                        tracing::debug!(
+                            ?source_root,
+                            generation,
+                            waited_ms = started.elapsed().as_millis() as u64,
+                            phase = "incoming",
+                            wait_result = "ready",
+                            "call hierarchy incoming compact index became ready"
+                        );
+                        break index;
+                    }
+                    Ok(CallHierarchyIndexCompletion::Failed(reason)) => {
+                        tracing::debug!(
+                            ?source_root,
+                            generation,
+                            %reason,
+                            phase = "incoming",
+                            wait_result = "failed",
+                            null_reason = "failed",
+                            "call hierarchy incoming returned null"
+                        );
+                        return Ok(None);
+                    }
+                    Ok(CallHierarchyIndexCompletion::Superseded) => {
+                        tracing::debug!(
+                            ?source_root,
+                            generation,
+                            phase = "incoming",
+                            wait_result = "superseded",
+                            null_reason = "superseded",
+                            "call hierarchy incoming returned null"
+                        );
+                        return Ok(None);
+                    }
+                    Ok(CallHierarchyIndexCompletion::Shutdown) => {
+                        tracing::debug!(
+                            ?source_root,
+                            generation,
+                            phase = "incoming",
+                            wait_result = "shutdown",
+                            null_reason = "shutdown",
+                            "call hierarchy incoming returned null"
+                        );
+                        return Ok(None);
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        tracing::debug!(
+                            ?source_root,
+                            generation,
+                            phase = "incoming",
+                            wait_result = "disconnected",
+                            null_reason = "disconnected",
+                            "call hierarchy incoming returned null"
+                        );
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        None => {
+            tracing::debug!(
+                ?source_root,
+                generation,
+                phase = "incoming",
+                wait_result = "waiter_unavailable",
+                null_reason = "waiter_unavailable",
+                "call hierarchy incoming returned null"
+            );
+            return Ok(None);
+        }
+    };
+    let Some(calls) =
+        ctx.analysis.call_hierarchy_incoming_from_index(file_id, offset.into(), index)
+    else {
+        tracing::debug!(
+            ?source_root,
+            generation,
+            phase = "incoming",
+            wait_result = "ready",
+            null_reason = "unresolved_or_no_indexed_callers",
+            "call hierarchy incoming returned null"
+        );
+        return Ok(None);
+    };
+
+    let _served_span = tracing::info_span!(
+        "call_hierarchy_incoming_served_from_index",
+        ?source_root,
+        generation,
+        caller_count = calls.len(),
+        implementation = "compact_reverse_index",
+        workspace_call_graph = false,
+    )
+    .entered();
+    tracing::debug!(
+        ?source_root,
+        generation,
+        phase = "incoming",
+        wait_result = "ready",
+        caller_count = calls.len(),
+        "call hierarchy incoming served from compact index"
+    );
+    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, &text);
+    let mut result = Vec::with_capacity(calls.len());
+    for call in calls {
+        // Incoming call sites live in the caller's own file.
+        let caller_file = call.item.file_id;
+        let from = to_lsp_call_hierarchy_item(&mut converter, call.item)?;
+        let from_ranges = convert_call_ranges(&mut converter, caller_file, call.ranges)?;
+        result.push(CallHierarchyIncomingCall { from, from_ranges });
+    }
+    Ok(Some(result))
+}
+
+pub fn handle_call_hierarchy_outgoing(
+    ctx: LatencyRequestContext,
+    params: CallHierarchyOutgoingCallsParams,
+) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+    let _p =
+        tracing::info_span!("handle_call_hierarchy_outgoing", uri = %params.item.uri).entered();
+
+    let item = params.item;
+    let file_id = ctx.file_id_for_url(&item.uri)?;
+    let text = call_hierarchy_anchor_text(&ctx, &item.uri, file_id);
+    let line_index = LineIndex::new(&text);
+
+    let offset = crate::lsp::offset_with_encoding(
+        &line_index,
+        &text,
+        item.selection_range.start,
+        ctx.position_encoding,
+    )?;
+
+    let calls = ctx.analysis.call_hierarchy_outgoing(file_id, offset.into());
+    if calls.is_empty() {
+        return Ok(None);
+    }
+
+    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, &text);
+    let mut result = Vec::with_capacity(calls.len());
+    for call in calls {
+        let to = to_lsp_call_hierarchy_item(&mut converter, call.item)?;
+        // Outgoing call sites live in the anchor method's file, not the callee's.
+        let from_ranges = convert_call_ranges(&mut converter, file_id, call.ranges)?;
+        result.push(CallHierarchyOutgoingCall { to, from_ranges });
+    }
+    Ok(Some(result))
+}
+
+fn call_hierarchy_anchor_text(
+    ctx: &LatencyRequestContext,
+    uri: &lsp_types::Url,
+    file_id: FileId,
+) -> String {
+    match ctx.mem_docs.get(uri) {
+        Some(doc) => doc.text().to_string(),
+        None => ctx.analysis.file_text(file_id),
+    }
+}
+
+fn to_lsp_call_hierarchy_item(
+    converter: &mut ReferenceLocationConverter,
+    item: ide::CallHierarchyItem,
+) -> Result<CallHierarchyItem> {
+    let range = converter.convert(IdeLocation { file_id: item.file_id, range: item.range })?;
+    let selection =
+        converter.convert(IdeLocation { file_id: item.file_id, range: item.selection_range })?;
+    Ok(CallHierarchyItem {
+        name: item.name,
+        kind: if item.is_function { SymbolKind::FUNCTION } else { SymbolKind::METHOD },
+        tags: None,
+        detail: item.detail,
+        uri: range.uri,
+        range: range.range,
+        selection_range: selection.range,
+        data: None,
+    })
+}
+
+fn convert_call_ranges(
+    converter: &mut ReferenceLocationConverter,
+    file_id: FileId,
+    ranges: Vec<ide::TextRange>,
+) -> Result<Vec<Range>> {
+    ranges
+        .into_iter()
+        .map(|range| Ok(converter.convert(IdeLocation { file_id, range })?.range))
+        .collect()
+}
+
+pub fn handle_inlay_hint(
+    ctx: LatencyRequestContext,
+    params: InlayHintParams,
+) -> Result<Option<Vec<LspInlayHint>>> {
+    let _p = tracing::info_span!("handle_inlay_hint", uri = %params.text_document.uri).entered();
+
+    let uri = params.text_document.uri;
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    // A visible range from a since-shrunk buffer can fall out of bounds; treat it
+    // as "nothing to hint" rather than a request failure, matching signature help.
+    let (Ok(start), Ok(end)) = (
+        crate::lsp::offset_with_encoding(
+            line_index,
+            text,
+            params.range.start,
+            ctx.position_encoding,
+        ),
+        crate::lsp::offset_with_encoding(line_index, text, params.range.end, ctx.position_encoding),
+    ) else {
+        return Ok(None);
+    };
+    let range = ide::TextRange::new(start, end);
+
+    let hints = ctx.analysis.inlay_hints(file_id, range);
+    if hints.is_empty() {
+        return Ok(None);
+    }
+
+    let mut result = Vec::with_capacity(hints.len());
+    for hint in hints {
+        let converted = crate::lsp::range_with_encoding(
+            line_index,
+            text,
+            ide::TextRange::empty(hint.position),
+            ctx.position_encoding,
+        )
+        .ok_or_else(|| anyhow::anyhow!("Failed to convert inlay hint position"))?;
+        result.push(LspInlayHint {
+            position: converted.start,
+            label: InlayHintLabel::String(hint.label),
+            kind: Some(match hint.kind {
+                IdeInlayHintKind::Parameter => LspInlayHintKind::PARAMETER,
+                IdeInlayHintKind::Type => LspInlayHintKind::TYPE,
+            }),
+            text_edits: None,
+            tooltip: None,
+            padding_left: Some(hint.padding_left),
+            padding_right: Some(hint.padding_right),
+            data: None,
+        });
+    }
+    Ok(Some(result))
 }
 
 pub fn handle_document_highlight(
@@ -439,6 +1040,101 @@ pub fn handle_document_symbol(
     Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
 }
 
+pub fn handle_selection_range(
+    ctx: LatencyRequestContext,
+    params: SelectionRangeParams,
+) -> Result<Option<Vec<SelectionRange>>> {
+    let _p =
+        tracing::info_span!("handle_selection_range", uri = %params.text_document.uri).entered();
+
+    let uri = params.text_document.uri;
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    let mut offsets = Vec::with_capacity(params.positions.len());
+    for position in &params.positions {
+        // The result must be one range per position; a stale position (buffer
+        // shrank under the request) can't be answered, so bail cleanly.
+        let Ok(offset) =
+            crate::lsp::offset_with_encoding(line_index, text, *position, ctx.position_encoding)
+        else {
+            return Ok(None);
+        };
+        offsets.push(offset);
+    }
+
+    let chains = ctx.analysis.selection_ranges(file_id, &offsets);
+
+    let mut result = Vec::with_capacity(chains.len());
+    for chain in chains {
+        // Nest outermost → innermost so each `parent` points at the wider span.
+        let mut current: Option<Box<SelectionRange>> = None;
+        for range in chain.iter().rev() {
+            let lsp_range =
+                crate::lsp::range_with_encoding(line_index, text, *range, ctx.position_encoding)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to convert selection range"))?;
+            current = Some(Box::new(SelectionRange { range: lsp_range, parent: current }));
+        }
+        let Some(innermost) = current else {
+            return Ok(None);
+        };
+        result.push(*innermost);
+    }
+    Ok(Some(result))
+}
+
+pub fn handle_workspace_symbol(
+    ctx: LatencyRequestContext,
+    params: WorkspaceSymbolParams,
+) -> Result<Option<WorkspaceSymbolResponse>> {
+    let _p = tracing::info_span!("handle_workspace_symbol", query = %params.query).entered();
+
+    let symbols = ctx.analysis.workspace_symbols(&params.query);
+    if symbols.is_empty() {
+        return Ok(None);
+    }
+
+    // Reuse the per-file text/line-index cache; the "source" file is just the
+    // first result's file, fetched the same overlay-or-disk way the converter
+    // itself uses for the rest.
+    let source_file = symbols[0].file_id;
+    let source_uri = ctx.url_for_file_id(source_file)?;
+    let source_text = match ctx.mem_docs.get(&source_uri) {
+        Some(doc) => doc.text().to_string(),
+        None => ctx.analysis.file_text(source_file),
+    };
+    let mut converter = ReferenceLocationConverter::new(&ctx, source_file, &source_text);
+
+    let mut result = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let location =
+            converter.convert(IdeLocation { file_id: symbol.file_id, range: symbol.range })?;
+        result.push(LspWorkspaceSymbol {
+            name: symbol.name,
+            kind: workspace_symbol_kind(symbol.kind),
+            tags: None,
+            container_name: None,
+            location: OneOf::Left(location),
+            data: None,
+        });
+    }
+    Ok(Some(WorkspaceSymbolResponse::Nested(result)))
+}
+
+fn workspace_symbol_kind(kind: ide::SymbolKind) -> SymbolKind {
+    match kind {
+        ide::SymbolKind::Procedure | ide::SymbolKind::Function => SymbolKind::FUNCTION,
+        ide::SymbolKind::Variable => SymbolKind::VARIABLE,
+        ide::SymbolKind::Region => SymbolKind::NAMESPACE,
+    }
+}
+
 pub fn handle_signature_help(
     ctx: LatencyRequestContext,
     params: SignatureHelpParams,
@@ -478,33 +1174,41 @@ pub fn handle_signature_help(
 }
 
 fn to_lsp_signature_help(sh: ide::SignatureHelp) -> lsp_types::SignatureHelp {
-    let parameters: Vec<_> = sh
-        .parameters
+    let signatures: Vec<_> = sh
+        .signatures
         .iter()
-        .map(|p| lsp_types::ParameterInformation {
-            label: lsp_types::ParameterLabel::Simple(p.label.clone()),
-            documentation: p.documentation.as_ref().map(|d| {
-                lsp_types::Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: d.clone(),
+        .map(|sig| {
+            let parameters: Vec<_> = sig
+                .parameters
+                .iter()
+                .map(|p| lsp_types::ParameterInformation {
+                    label: lsp_types::ParameterLabel::Simple(p.label.clone()),
+                    documentation: p.documentation.as_ref().map(|d| {
+                        lsp_types::Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: d.clone(),
+                        })
+                    }),
                 })
-            }),
+                .collect();
+
+            lsp_types::SignatureInformation {
+                label: sig.signature.clone(),
+                documentation: sig.doc.as_ref().map(|d| {
+                    lsp_types::Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: d.clone(),
+                    })
+                }),
+                parameters: Some(parameters),
+                active_parameter: None,
+            }
         })
         .collect();
 
     lsp_types::SignatureHelp {
-        signatures: vec![lsp_types::SignatureInformation {
-            label: sh.signature,
-            documentation: sh.doc.map(|d| {
-                lsp_types::Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: d,
-                })
-            }),
-            parameters: Some(parameters),
-            active_parameter: sh.active_parameter.map(|i| i as u32),
-        }],
-        active_signature: Some(0),
+        signatures,
+        active_signature: sh.active_signature.map(|i| i as u32),
         active_parameter: sh.active_parameter.map(|i| i as u32),
     }
 }
@@ -535,26 +1239,71 @@ pub fn handle_code_action(
     )?;
 
     let diagnostics = ctx.analysis.file_diagnostics_cached(file_id, ctx.diagnostics_config.clone());
+    let only = &params.context.only;
 
     let mut actions = Vec::new();
-    for diag in diagnostics.iter() {
-        if diag.fixes.is_empty() {
-            continue;
+
+    // Individual quick fixes for the diagnostics touching the requested range, plus a
+    // "fix all occurrences of code X" batch (once per code) for codes with ≥2 safe fixes.
+    if kind_requested(CodeActionKind::QUICKFIX.as_str(), only) {
+        for diag in diagnostics.iter() {
+            if diag.fixes.is_empty() || diag.range.intersect(range).is_none() {
+                continue;
+            }
+            for fix in &diag.fixes {
+                if let Some(action) = crate::lsp::to_proto::code_action_with_encoding(
+                    line_index,
+                    text,
+                    &uri,
+                    diag,
+                    fix,
+                    ctx.position_encoding,
+                ) {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+            }
         }
-        if diag.range.intersect(range).is_none() {
-            continue;
-        }
-        for fix in &diag.fixes {
-            if let Some(action) = crate::lsp::to_proto::code_action_with_encoding(
+
+        // "Fix all occurrences of code X" — offered only for a code visible in the
+        // requested range (like a normal quick fix), but merging every occurrence
+        // of it in the file.
+        let mut seen_codes = rustc_hash::FxHashSet::default();
+        for diag in diagnostics.iter() {
+            if diag.range.intersect(range).is_none() || !seen_codes.insert(diag.code) {
+                continue;
+            }
+            if let Some(action) = fix_all_occurrences_action(
                 line_index,
                 text,
                 &uri,
-                diag,
-                fix,
+                &diagnostics,
+                diag.code,
                 ctx.position_encoding,
             ) {
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
+        }
+    }
+
+    // Whole-file `source.fixAll`: every safe fix in the file, merged without overlaps.
+    // Scoped to the whole file (not the request range) as the action title promises.
+    if kind_requested(crate::lsp::to_proto::FIX_ALL_BSL, only) {
+        let merged = ide::batch_fixes::merge_fixes(
+            diagnostics
+                .iter()
+                .flat_map(|diag| diag.fixes.iter())
+                .filter(|fix| fix.safe_for_fix_all),
+        );
+        if let Some(action) = crate::lsp::to_proto::aggregate_code_action(
+            line_index,
+            text,
+            &uri,
+            "Исправить все безопасные замечания в файле".to_string(),
+            CodeActionKind::new(crate::lsp::to_proto::FIX_ALL_BSL),
+            &merged,
+            ctx.position_encoding,
+        ) {
+            actions.push(CodeActionOrCommand::CodeAction(action));
         }
     }
 
@@ -563,6 +1312,52 @@ pub fn handle_code_action(
     } else {
         Ok(Some(actions))
     }
+}
+
+/// An action kind is requested when the client sends no `only` filter, or lists a kind
+/// equal to or a super-kind (dotted prefix) of it — so `source.fixAll` matches the
+/// server's `source.fixAll.bsl-analyzer`.
+fn kind_requested(action_kind: &str, only: &Option<Vec<CodeActionKind>>) -> bool {
+    match only {
+        None => true,
+        Some(list) => list.iter().any(|requested| {
+            let requested = requested.as_str();
+            action_kind == requested || action_kind.starts_with(&format!("{requested}."))
+        }),
+    }
+}
+
+/// A batched quick fix that applies every safe fix of one diagnostic code in the file.
+/// Emitted only when at least two such fixes exist.
+fn fix_all_occurrences_action(
+    line_index: &LineIndex,
+    text: &str,
+    uri: &lsp_types::Url,
+    diagnostics: &[ide::Diagnostic],
+    code: ide::DiagnosticCode,
+    encoding: crate::lsp::PositionEncoding,
+) -> Option<lsp_types::CodeAction> {
+    let safe_fixes = || {
+        diagnostics
+            .iter()
+            .filter(|diag| diag.code == code)
+            .flat_map(|diag| diag.fixes.iter())
+            .filter(|fix| fix.safe_for_fix_all && !fix.edits.is_empty())
+    };
+    if safe_fixes().count() < 2 {
+        return None;
+    }
+
+    let merged = ide::batch_fixes::merge_fixes(safe_fixes());
+    crate::lsp::to_proto::aggregate_code_action(
+        line_index,
+        text,
+        uri,
+        format!("Исправить все «{}» в файле", code.as_str()),
+        CodeActionKind::QUICKFIX,
+        &merged,
+        encoding,
+    )
 }
 
 /// Pull-model single-document diagnostics (`textDocument/diagnostic`).
@@ -1271,12 +2066,19 @@ fn formatting_config_from_options(options: &lsp_types::FormattingOptions) -> ide
 mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
+    use hir::{CallHierarchyReverseIndex, Definition, MethodCallPair, Semantics};
+    use lsp_types::request::{CallHierarchyIncomingCalls, Request as _};
     use lsp_types::{Position, TextDocumentIdentifier, TextDocumentPositionParams};
     use std::sync::Arc;
     use vfs::VfsPath;
 
     use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
     use crate::global_state::GlobalState;
+    use crate::handlers::RequestDispatcher;
+    use crate::task_pool::TaskPool;
+
+    mod call_hierarchy_trace_tests;
+    mod inlay_hint_tests;
 
     #[test]
     fn workspace_scope_filters_by_extension_root() {
@@ -1351,11 +2153,42 @@ mod tests {
             position_encoding: state.position_encoding,
             supports_insert_text_mode_adjust_indentation: state
                 .supports_insert_text_mode_adjust_indentation,
+            supports_workspace_edit_document_changes: state
+                .supports_workspace_edit_document_changes,
             task_sender: state.task_pool.pool.sender.clone(),
+            call_hierarchy_index: state.call_hierarchy_index.ensure(),
+            call_hierarchy_wait_policy: state.call_hierarchy_wait_policy,
             client_sender: state.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&state.vfs.read()),
         }
+    }
+
+    fn latency_ctx_with_token(
+        state: &GlobalState,
+    ) -> (LatencyRequestContext, salsa::CancellationToken) {
+        use salsa::Database as _;
+
+        let db = state.analysis_host.raw_database().clone();
+        let token = db.cancellation_token();
+        let ctx = LatencyRequestContext {
+            analysis: ide::Analysis::from_database(db),
+            workspace_root: state.workspace_root.clone(),
+            project: state.project.clone(),
+            diagnostics_config: state.diagnostics_config.clone(),
+            position_encoding: state.position_encoding,
+            supports_insert_text_mode_adjust_indentation: state
+                .supports_insert_text_mode_adjust_indentation,
+            supports_workspace_edit_document_changes: state
+                .supports_workspace_edit_document_changes,
+            task_sender: state.task_pool.pool.sender.clone(),
+            call_hierarchy_index: state.call_hierarchy_index.ensure(),
+            call_hierarchy_wait_policy: state.call_hierarchy_wait_policy,
+            client_sender: state.sender.clone(),
+            mem_docs: state.mem_docs.freeze(),
+            file_paths: FrozenFilePaths::freeze(&state.vfs.read()),
+        };
+        (ctx, token)
     }
 
     #[test]
@@ -1428,6 +2261,830 @@ mod tests {
 
         let result = handle_find_references(ctx, params);
         assert!(result.is_err() || result.unwrap().is_none());
+    }
+
+    fn open_source(state: &mut GlobalState, uri: &lsp_types::Url, source: &str) {
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        let open_file_id = state.vfs_file_for_url(uri).unwrap();
+        state.open_files.insert(open_file_id);
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+    }
+
+    struct CallHierarchyFixture<'a> {
+        uri: &'a lsp_types::Url,
+        source: &'a str,
+    }
+
+    fn method_id_at(
+        state: &mut GlobalState,
+        fixture: &CallHierarchyFixture<'_>,
+        name: &str,
+    ) -> hir::MethodId {
+        let file_id = state.vfs_file_for_url(fixture.uri).expect("source file is registered");
+        let offset =
+            TextSize::from(fixture.source.find(name).expect("method name is present") as u32);
+        let db = state.analysis_host.raw_database();
+        let definition = Semantics::new(db)
+            .symbol_at(file_id, offset)
+            .and_then(|symbol| symbol.definition)
+            .expect("method name resolves");
+        match definition {
+            Definition::Method(id) => id,
+            _ => panic!("method name must resolve to a method"),
+        }
+    }
+
+    fn build_call_hierarchy_index(
+        state: &mut GlobalState,
+        fixture: &CallHierarchyFixture<'_>,
+        caller_names: &[&str],
+    ) -> (base_db::SourceRootId, Arc<CallHierarchyReverseIndex>) {
+        let target = method_id_at(state, fixture, "Помощник");
+        let mut index = CallHierarchyReverseIndex::new();
+        index.replace_module(
+            target.module,
+            caller_names
+                .iter()
+                .map(|name| MethodCallPair::new(method_id_at(state, fixture, name), target)),
+            0,
+        );
+
+        let file_id = state.vfs_file_for_url(fixture.uri).expect("source file is registered");
+        let db = state.analysis_host.raw_database();
+        let source_root = db.file_source_root_input(file_id).source_root_id(db);
+        (source_root, Arc::new(index))
+    }
+
+    fn publish_call_hierarchy_index(
+        state: &mut GlobalState,
+        fixture: &CallHierarchyFixture<'_>,
+        caller_names: &[&str],
+    ) -> base_db::SourceRootId {
+        let (source_root, index) = build_call_hierarchy_index(state, fixture, caller_names);
+        let generation = state
+            .call_hierarchy_index
+            .next_generation(source_root)
+            .expect("generation counter does not overflow");
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            generation,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(generation),
+        ));
+        assert!(state.call_hierarchy_index.publish(source_root, generation, index));
+        source_root
+    }
+
+    #[test]
+    fn prepare_rename_reports_placeholder_for_local_variable() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///rename.bsl").unwrap();
+        let source =
+            "Процедура Тест()\n    Перем МояПеременная;\n    МояПеременная = 10;\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position { line: 1, character: 10 },
+        };
+
+        let result = handle_prepare_rename(ctx, params).unwrap().unwrap();
+        match result {
+            PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. } => {
+                assert_eq!(placeholder, "МояПеременная");
+            }
+            other => panic!("expected RangeWithPlaceholder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_local_variable_edits_every_occurrence() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///rename.bsl").unwrap();
+        let source = "Процедура Тест()\n    Перем МояПеременная;\n    МояПеременная = 10;\n    Результат = МояПеременная;\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position { line: 1, character: 10 },
+            },
+            new_name: "Итог".to_string(),
+            work_done_progress_params: Default::default(),
+        };
+
+        let edit = handle_rename(ctx, params).unwrap().unwrap();
+        let changes = edit.changes.expect("workspace edit must carry changes");
+        let edits = changes.get(&uri).expect("edits for the renamed file");
+        assert_eq!(edits.len(), 3, "declaration + 2 usages");
+        assert!(edits.iter().all(|e| e.new_text == "Итог"));
+    }
+
+    #[test]
+    fn rename_uses_versioned_document_changes_when_supported() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+        state.supports_workspace_edit_document_changes = true;
+
+        let uri = lsp_types::Url::parse("file:///rename.bsl").unwrap();
+        let source =
+            "Процедура Тест()\n    Перем МояПеременная;\n    МояПеременная = 10;\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position { line: 1, character: 10 },
+            },
+            new_name: "Итог".to_string(),
+            work_done_progress_params: Default::default(),
+        };
+
+        let edit = handle_rename(ctx, params).unwrap().unwrap();
+        assert!(edit.changes.is_none(), "versioned path must not populate changes");
+        match edit.document_changes.expect("document_changes must be present") {
+            DocumentChanges::Edits(edits) => {
+                assert_eq!(edits.len(), 1);
+                assert_eq!(edits[0].text_document.uri, uri);
+                assert_eq!(edits[0].text_document.version, Some(1));
+                assert_eq!(edits[0].edits.len(), 2, "declaration + 1 usage");
+            }
+            other => panic!("expected edits, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_rejects_invalid_identifier() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///rename.bsl").unwrap();
+        let source =
+            "Процедура Тест()\n    Перем МояПеременная;\n    МояПеременная = 10;\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line: 1, character: 10 },
+            },
+            new_name: "Если".to_string(),
+            work_done_progress_params: Default::default(),
+        };
+
+        assert!(handle_rename(ctx, params).is_err());
+    }
+
+    fn call_hierarchy_item_at(
+        state: &GlobalState,
+        uri: &lsp_types::Url,
+        position: Position,
+    ) -> CallHierarchyItem {
+        let ctx = latency_ctx(state);
+        let params = CallHierarchyPrepareParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let mut items = handle_prepare_call_hierarchy(ctx, params).unwrap().unwrap();
+        assert_eq!(items.len(), 1);
+        items.pop().unwrap()
+    }
+
+    fn incoming_params(item: CallHierarchyItem) -> CallHierarchyIncomingCallsParams {
+        CallHierarchyIncomingCallsParams {
+            item,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }
+    }
+
+    #[test]
+    fn prepare_call_hierarchy_reports_method_item() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///ch.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        assert_eq!(item.name, "Помощник");
+        assert_eq!(item.kind, SymbolKind::METHOD);
+        assert_eq!(item.selection_range.start, Position { line: 0, character: 10 });
+    }
+
+    #[test]
+    fn prepare_call_hierarchy_enqueues_one_build_start_per_generation() {
+        // Given: a call-hierarchy anchor in a loaded source root.
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+        let uri = lsp_types::Url::parse("file:///ch-prepare.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let receiver = state.task_pool.receiver.clone();
+
+        // When: its initial prepare starts a generation and a later prepare sees it building.
+        let _ = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        let task = receiver.try_recv().expect("prepare must enqueue a build start");
+        let crate::global_state::Task::CallHierarchyIndexBuildRequested { source_root, generation } =
+            task
+        else {
+            panic!("prepare must enqueue a call-hierarchy build start");
+        };
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            generation,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(generation),
+        ));
+        assert!(state.call_hierarchy_index.has_active_build(source_root));
+        assert!(!state.call_hierarchy_index.record_prepare(source_root, generation));
+        let _ = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+
+        // Then: one idempotent start signal is queued for the source root.
+        match receiver.try_recv() {
+            Err(_) => {}
+            Ok(task) => panic!("duplicate prepare unexpectedly queued {task:?}"),
+        }
+    }
+
+    #[test]
+    fn call_hierarchy_outgoing_reports_callee_and_ranges() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///ch.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        // Anchor on Первый (line 3), which calls Помощник once.
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 3, character: 10 });
+
+        let ctx = latency_ctx(&state);
+        let params = CallHierarchyOutgoingCallsParams {
+            item,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let calls = handle_call_hierarchy_outgoing(ctx, params).unwrap().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].to.name, "Помощник");
+        assert_eq!(calls[0].from_ranges.len(), 1);
+        // The call site sits on line 4 inside Первый's body.
+        assert_eq!(calls[0].from_ranges[0].start.line, 4);
+    }
+
+    #[test]
+    fn call_hierarchy_incoming_reports_callers() {
+        // Given: a published compact index naming two callers of one method.
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///ch.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n\nПроцедура Второй()\n    Помощник();\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let fixture = CallHierarchyFixture { uri: &uri, source };
+        publish_call_hierarchy_index(&mut state, &fixture, &["Первый", "Второй"]);
+
+        // When: the LSP request resolves incoming calls from that index.
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+
+        let ctx = latency_ctx(&state);
+        let calls = handle_call_hierarchy_incoming(ctx, incoming_params(item)).unwrap().unwrap();
+        // Then: every caller and its live call-site ranges are returned.
+        assert_eq!(calls.len(), 2);
+        let first = calls.iter().find(|call| call.from.name == "Первый").unwrap();
+        assert_eq!(first.from_ranges.len(), 1);
+        let second = calls.iter().find(|call| call.from.name == "Второй").unwrap();
+        assert_eq!(second.from_ranges.len(), 2);
+    }
+
+    #[test]
+    fn call_hierarchy_index_warm_prepare_reuses_ready() {
+        // Given: a resident compact index for one target and its caller.
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+        let uri = lsp_types::Url::parse("file:///ch-warm.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let fixture = CallHierarchyFixture { uri: &uri, source };
+        let source_root = publish_call_hierarchy_index(&mut state, &fixture, &["Первый"]);
+        let receiver = state.task_pool.receiver.clone();
+
+        // When: the client prepares and expands the same Ready index twice.
+        let first = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        let first_calls =
+            handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(first))
+                .unwrap()
+                .unwrap();
+        let second = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        let second_calls =
+            handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(second))
+                .unwrap()
+                .unwrap();
+
+        // Then: both expansions use generation one without requesting a rebuild.
+        assert_eq!(first_calls.len(), 1);
+        assert_eq!(second_calls.len(), 1);
+        assert_eq!(state.call_hierarchy_index.generation(source_root), Some(1));
+        assert!(
+            receiver.try_recv().is_err(),
+            "prepare against Ready must not schedule a replacement build"
+        );
+    }
+
+    #[test]
+    fn call_hierarchy_index_single_worker_no_deadlock() {
+        // Given: a prepared build and exactly one shared latency-pool worker.
+        let mut state = create_test_state();
+        state.task_pool = TaskPool::new_with_workers(1);
+        state.init_empty_source_root();
+        // The dispatcher rejects requests until VFS loading has completed in production.
+        state.vfs_done = true;
+        let uri = lsp_types::Url::parse("file:///ch-single-worker.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let fixture = CallHierarchyFixture { uri: &uri, source };
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        let Task::CallHierarchyIndexBuildRequested { source_root, generation } =
+            state.task_pool.receiver.try_recv().expect("prepare must request a build")
+        else {
+            panic!("prepare must request a call-hierarchy build");
+        };
+        let (_, index) = build_call_hierarchy_index(&mut state, &fixture, &["Первый"]);
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            generation,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(generation),
+        ));
+        let lifecycle = state.call_hierarchy_index.ensure();
+        let task_receiver = state.task_pool.receiver.clone();
+
+        // When: incoming waits while the build completion is queued on the shared pool.
+        let request = lsp_server::Request::new(
+            lsp_server::RequestId::from(81),
+            CallHierarchyIncomingCalls::METHOD.to_owned(),
+            serde_json::to_value(incoming_params(item)).expect("incoming params serialize"),
+        );
+        RequestDispatcher { req: Some(request), global_state: &mut state }
+            .on_waiting_latency::<CallHierarchyIncomingCalls>(handle_call_hierarchy_incoming)
+            .finish();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !lifecycle.has_waiter(source_root, generation) {
+            assert!(std::time::Instant::now() < deadline, "incoming request did not park");
+            std::thread::yield_now();
+        }
+        state
+            .task_pool
+            .pool
+            .try_spawn(move || {
+                assert!(lifecycle.publish(source_root, generation, index));
+                Task::AnalysisProgressTick { epoch: 0 }
+            })
+            .expect("build completion fits in the shared pool queue");
+
+        // Then: the queued completion runs and the incoming request returns callers.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let response = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let task = task_receiver
+                .recv_timeout(remaining)
+                .expect("single-worker incoming request must complete");
+            if let Task::RequestResult { response } = task {
+                break response;
+            }
+        };
+        assert!(response.error.is_none(), "incoming response must succeed");
+        let calls: Option<Vec<CallHierarchyIncomingCall>> =
+            serde_json::from_value(response.result.expect("incoming result")).expect("call list");
+        assert_eq!(calls.expect("indexed callers").len(), 1);
+    }
+
+    #[test]
+    fn call_hierarchy_index_lsp_waits_for_a_prepared_build() {
+        // Given: a prepared target whose compact index is still building.
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+        let uri = lsp_types::Url::parse("file:///ch-wait.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let fixture = CallHierarchyFixture { uri: &uri, source };
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        let (source_root, index) = build_call_hierarchy_index(&mut state, &fixture, &["Первый"]);
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            1,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(1),
+        ));
+        let lifecycle = state.call_hierarchy_index.clone();
+        let publisher = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+            while !lifecycle.has_waiter(source_root, 1) {
+                assert!(std::time::Instant::now() < deadline, "incoming request did not park");
+                std::thread::yield_now();
+            }
+            assert!(lifecycle.publish(source_root, 1, index));
+        });
+        let mut ctx = latency_ctx(&state);
+        ctx.call_hierarchy_wait_policy.timeout = std::time::Duration::from_millis(100);
+
+        // When: incoming calls arrive before the build publishes.
+        let result = handle_call_hierarchy_incoming(
+            ctx,
+            CallHierarchyIncomingCallsParams {
+                item,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            },
+        );
+        publisher.join().expect("publisher must complete");
+        let calls = result.unwrap().unwrap();
+
+        // Then: the bounded waiter serves the newly published caller list.
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].from.name, "Первый");
+    }
+
+    #[test]
+    fn call_hierarchy_index_lsp_incoming_without_prepare_returns_none_without_starting() {
+        // Given: an otherwise valid call-hierarchy item without retained prepare state.
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+        let uri = lsp_types::Url::parse("file:///ch-unprepared.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        state.call_hierarchy_index = Default::default();
+
+        // When: incoming calls arrive without a successful prepare for this lifecycle.
+        let result = handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(item));
+
+        // Then: the request returns null and does not create a lifecycle generation.
+        assert!(result.unwrap().is_none());
+        let file_id = state.vfs_file_for_url(&uri).expect("fixture file is registered");
+        let db = state.analysis_host.raw_database();
+        let source_root = db.file_source_root_input(file_id).source_root_id(db);
+        assert_eq!(state.call_hierarchy_index.generation(source_root), None);
+    }
+
+    #[test]
+    fn call_hierarchy_index_lsp_timeout_returns_none_then_serves_published_index() {
+        // Given: a prepared build that will outlive a short incoming-call deadline.
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+        let uri = lsp_types::Url::parse("file:///ch-timeout.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let fixture = CallHierarchyFixture { uri: &uri, source };
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        let (source_root, index) = build_call_hierarchy_index(&mut state, &fixture, &["Первый"]);
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            1,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(1),
+        ));
+        let mut ctx = latency_ctx(&state);
+        ctx.call_hierarchy_wait_policy.timeout = std::time::Duration::from_millis(20);
+
+        // When: the single waiter reaches its deadline before publication.
+        let started = std::time::Instant::now();
+        let timed_out = handle_call_hierarchy_incoming(ctx, incoming_params(item.clone()));
+
+        // Then: it returns promptly, releases the permit, and a later Ready request succeeds.
+        assert!(timed_out.unwrap().is_none());
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert!(!state.call_hierarchy_index.has_waiter(source_root, 1));
+        assert!(state.call_hierarchy_index.publish(source_root, 1, index));
+        let calls = handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(item))
+            .unwrap()
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].from.name, "Первый");
+    }
+
+    #[test]
+    fn call_hierarchy_index_lsp_cancelled_wait_releases_permit_without_cancelling_build() {
+        // Given: an incoming request parked on a prepared build.
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+        let uri = lsp_types::Url::parse("file:///ch-cancel.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let fixture = CallHierarchyFixture { uri: &uri, source };
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        let (source_root, index) = build_call_hierarchy_index(&mut state, &fixture, &["Первый"]);
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            1,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(1),
+        ));
+        let (ctx, token) = latency_ctx_with_token(&state);
+        let waiter = std::thread::spawn(move || {
+            salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                handle_call_hierarchy_incoming(ctx, incoming_params(item))
+            }))
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        while !state.call_hierarchy_index.has_waiter(source_root, 1) {
+            assert!(std::time::Instant::now() < deadline, "incoming request did not park");
+            std::thread::yield_now();
+        }
+
+        // When: the client cancels the waiting request.
+        token.cancel();
+        let cancelled = waiter.join().expect("waiting request must finish");
+
+        // Then: cancellation detaches the request but preserves the shared build for later callers.
+        assert!(cancelled.is_err());
+        assert!(!state.call_hierarchy_index.has_waiter(source_root, 1));
+        assert!(state.call_hierarchy_index.is_building(source_root, 1));
+        assert!(state.call_hierarchy_index.publish(source_root, 1, index));
+        let calls = handle_call_hierarchy_incoming(
+            latency_ctx(&state),
+            incoming_params(call_hierarchy_item_at(
+                &state,
+                &uri,
+                Position { line: 0, character: 10 },
+            )),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn call_hierarchy_index_lsp_allows_one_waiter_while_followers_and_hover_complete() {
+        // Given: a prepared index build that has not yet published.
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+        let uri = lsp_types::Url::parse("file:///ch-followers.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let fixture = CallHierarchyFixture { uri: &uri, source };
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+        let (source_root, index) = build_call_hierarchy_index(&mut state, &fixture, &["Первый"]);
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            1,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(1),
+        ));
+        let mut waiting_ctx = latency_ctx(&state);
+        waiting_ctx.call_hierarchy_wait_policy.timeout = std::time::Duration::from_millis(200);
+        let follower_contexts: Vec<_> = (0..4)
+            .map(|_| {
+                let mut ctx = latency_ctx(&state);
+                ctx.call_hierarchy_wait_policy.timeout = std::time::Duration::from_millis(200);
+                ctx
+            })
+            .collect();
+        let hover_ctx = latency_ctx(&state);
+
+        std::thread::scope(|scope| {
+            let waiting_item = item.clone();
+            let waiting_request = scope.spawn(move || {
+                handle_call_hierarchy_incoming(waiting_ctx, incoming_params(waiting_item))
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+            while !state.call_hierarchy_index.has_waiter(source_root, 1) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "first incoming request did not park"
+                );
+                std::thread::yield_now();
+            }
+
+            // When: concurrent incoming requests and an unrelated hover arrive.
+            let followers_started = std::time::Instant::now();
+            let followers: Vec<_> = follower_contexts
+                .into_iter()
+                .map(|ctx| {
+                    let item = item.clone();
+                    scope.spawn(move || handle_call_hierarchy_incoming(ctx, incoming_params(item)))
+                })
+                .collect();
+            let hover_uri = uri.clone();
+            let hover = scope.spawn(move || {
+                handle_hover(
+                    hover_ctx,
+                    HoverParams {
+                        text_document_position_params: TextDocumentPositionParams {
+                            text_document: TextDocumentIdentifier { uri: hover_uri },
+                            position: Position { line: 0, character: 10 },
+                        },
+                        work_done_progress_params: Default::default(),
+                    },
+                )
+            });
+            for follower in followers {
+                assert!(
+                    follower.join().expect("follower request must finish").unwrap().is_none(),
+                    "only the first Building request may wait"
+                );
+            }
+            assert!(followers_started.elapsed() < std::time::Duration::from_millis(100));
+            assert!(hover.join().expect("hover request must finish").unwrap().is_some());
+            assert!(state.call_hierarchy_index.publish(source_root, 1, index));
+
+            // Then: the sole waiter receives callers after publication.
+            let calls =
+                waiting_request.join().expect("waiting request must finish").unwrap().unwrap();
+            assert_eq!(calls.len(), 1);
+        });
+    }
+
+    #[test]
+    fn call_hierarchy_incoming_returns_none_after_index_supersession() {
+        // Given: a request target with a ready compact index.
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///ch-superseded.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let fixture = CallHierarchyFixture { uri: &uri, source };
+        let source_root = publish_call_hierarchy_index(&mut state, &fixture, &["Первый"]);
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+
+        // When: a layout change supersedes the resident index.
+        assert!(state.call_hierarchy_index.supersede(source_root));
+        let ctx = latency_ctx(&state);
+        let params = CallHierarchyIncomingCallsParams {
+            item,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        // Then: the stale index cannot serve the request.
+        assert!(handle_call_hierarchy_incoming(ctx, params).unwrap().is_none());
+    }
+
+    #[test]
+    fn call_hierarchy_index_ready_invalidation() {
+        // Given: a prepared target whose compact index is ready.
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///ch-ready-edit.bsl").unwrap();
+        let source = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    Помощник();\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+        let fixture = CallHierarchyFixture { uri: &uri, source };
+        let source_root = publish_call_hierarchy_index(&mut state, &fixture, &["Первый"]);
+        let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
+
+        // When: a body-only edit is processed before the event loop can rebuild the index.
+        let edited = "Процедура Помощник()\nКонецПроцедуры\n\nПроцедура Первый()\n    // body edit\n    Помощник();\nКонецПроцедуры\n";
+        state.mem_docs.insert(uri.clone(), edited.to_owned(), 2);
+        state
+            .vfs
+            .write()
+            .set_file_contents(VfsPath::new(uri.to_file_path().unwrap()), Some(Arc::from(edited)));
+        state.process_changes(false);
+
+        // Then: the ready index is no longer eligible to serve its stale callers.
+        assert!(!state.call_hierarchy_index.is_ready_generation(source_root, 1));
+        assert!(handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(item))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn workspace_symbol_finds_exported_method() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///ws.bsl").unwrap();
+        let source =
+            "Функция ОбщийРасчёт() Экспорт\nКонецФункции\n\nФункция Приватный()\nКонецФункции\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = WorkspaceSymbolParams {
+            partial_result_params: Default::default(),
+            work_done_progress_params: Default::default(),
+            query: "Общий".to_string(),
+        };
+
+        let response = handle_workspace_symbol(ctx, params).unwrap().unwrap();
+        let symbols = match response {
+            WorkspaceSymbolResponse::Nested(s) => s,
+            other => panic!("expected nested workspace symbols, got {other:?}"),
+        };
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "ОбщийРасчёт");
+        assert_eq!(symbols[0].kind, SymbolKind::FUNCTION);
+        match &symbols[0].location {
+            OneOf::Left(loc) => assert_eq!(loc.uri, uri),
+            OneOf::Right(_) => panic!("expected a full location with range"),
+        }
+    }
+
+    #[test]
+    fn type_definition_returns_none_for_platform_typed_value() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///td.bsl").unwrap();
+        let source = "Процедура Тест()\n    Счётчик = 1;\n    Сообщить(Счётчик);\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line: 1, character: 4 }, // on the number-typed "Счётчик"
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        // A platform primitive (Число) has no navigable type definition; the
+        // handler must decline cleanly rather than error or panic.
+        let result = handle_type_definition(ctx, params);
+        assert!(result.is_err() || result.unwrap().is_none());
+    }
+
+    #[test]
+    fn selection_range_nests_from_cursor_outward() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///sel.bsl").unwrap();
+        let source = "Процедура Тест()\n    Итог = Первое + Второе;\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = SelectionRangeParams {
+            text_document: TextDocumentIdentifier { uri },
+            positions: vec![Position { line: 1, character: 11 }], // inside "Первое"
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let ranges = handle_selection_range(ctx, params).unwrap().unwrap();
+        assert_eq!(ranges.len(), 1);
+
+        // Walk the parent chain; each parent must strictly contain its child.
+        let mut node = &ranges[0];
+        let mut depth = 1;
+        while let Some(parent) = &node.parent {
+            let child = &node.range;
+            let wider = &parent.range;
+            let contains = (wider.start.line, wider.start.character)
+                <= (child.start.line, child.start.character)
+                && (child.end.line, child.end.character) <= (wider.end.line, wider.end.character);
+            assert!(contains, "parent {wider:?} must contain child {child:?}");
+            node = parent;
+            depth += 1;
+        }
+        assert!(depth >= 2, "expected a nested chain, got depth {depth}");
+    }
+
+    #[test]
+    fn inlay_hint_labels_call_arguments() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///hints.bsl").unwrap();
+        let source = "Функция Сложить(Первое, Второе)\n    Возврат Первое;\nКонецФункции\n\nПроцедура Тест()\n    Сложить(10, 20);\nКонецПроцедуры\n";
+        open_source(&mut state, &uri, source);
+
+        let ctx = latency_ctx(&state);
+        let params = InlayHintParams {
+            work_done_progress_params: Default::default(),
+            text_document: TextDocumentIdentifier { uri },
+            range: lsp_types::Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 7, character: 0 },
+            },
+        };
+
+        let hints = handle_inlay_hint(ctx, params).unwrap().unwrap();
+        assert!(hints.iter().all(|h| h.kind == Some(LspInlayHintKind::PARAMETER)));
+        let labels: Vec<String> = hints
+            .iter()
+            .map(|h| match &h.label {
+                InlayHintLabel::String(s) => s.clone(),
+                _ => panic!("expected string label"),
+            })
+            .collect();
+        assert!(labels.contains(&"Первое:".to_string()), "{labels:?}");
+        assert!(labels.contains(&"Второе:".to_string()), "{labels:?}");
     }
 
     #[test]
@@ -1519,6 +3176,129 @@ mod tests {
         assert_eq!(result[2].kind, None);
     }
 
+    fn setup_code_action_doc(source: &str) -> (GlobalState, lsp_types::Url) {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///fixall.bsl").unwrap();
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        let open_file_id = state.vfs_file_for_url(&uri).unwrap();
+        state.open_files.insert(open_file_id);
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+        (state, uri)
+    }
+
+    fn code_action_params(
+        uri: lsp_types::Url,
+        only: Option<Vec<CodeActionKind>>,
+    ) -> CodeActionParams {
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri },
+            range: lsp_types::Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 4, character: 0 },
+            },
+            context: lsp_types::CodeActionContext { diagnostics: vec![], only, trigger_kind: None },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }
+    }
+
+    fn actions_of_kind<'a>(
+        actions: &'a [CodeActionOrCommand],
+        kind: &str,
+    ) -> Vec<&'a lsp_types::CodeAction> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                CodeActionOrCommand::CodeAction(ca)
+                    if ca.kind.as_ref().is_some_and(|k| k.as_str() == kind) =>
+                {
+                    Some(ca)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn code_action_offers_source_fix_all_over_the_whole_file() {
+        let source =
+            "Процедура Тест()\n    ЭтаФорма.Закрыть();\n    ЭтаФорма.Открыть();\nКонецПроцедуры\n";
+        let (state, uri) = setup_code_action_doc(source);
+        let ctx = latency_ctx(&state);
+
+        let result = handle_code_action(ctx, code_action_params(uri, None)).unwrap().unwrap();
+
+        // Two individual quick fixes (one per `ЭтаФорма`).
+        let quickfixes = actions_of_kind(&result, "quickfix");
+        assert!(
+            quickfixes.iter().filter(|ca| ca.diagnostics.is_some()).count() >= 2,
+            "expected a quick fix per occurrence, got {result:#?}"
+        );
+
+        // One aggregate `source.fixAll` action covering both occurrences.
+        let fix_all = actions_of_kind(&result, crate::lsp::to_proto::FIX_ALL_BSL);
+        assert_eq!(fix_all.len(), 1, "expected exactly one source.fixAll action");
+        let edits = fix_all[0]
+            .edit
+            .as_ref()
+            .and_then(|we| we.changes.as_ref())
+            .and_then(|c| c.values().next())
+            .expect("fixAll must carry edits");
+        assert_eq!(edits.len(), 2, "fixAll must merge both occurrences");
+        assert!(edits.iter().all(|e| e.new_text == "ЭтотОбъект"));
+
+        // One "fix all occurrences of this code" batched quick fix (kind quickfix, no diag).
+        let batched = quickfixes.iter().filter(|ca| ca.diagnostics.is_none()).count();
+        assert_eq!(batched, 1, "expected one 'fix all occurrences' batch");
+    }
+
+    #[test]
+    fn code_action_only_source_fix_all_suppresses_quick_fixes() {
+        let source =
+            "Процедура Тест()\n    ЭтаФорма.Закрыть();\n    ЭтаФорма.Открыть();\nКонецПроцедуры\n";
+        let (state, uri) = setup_code_action_doc(source);
+        let ctx = latency_ctx(&state);
+
+        let only = Some(vec![CodeActionKind::SOURCE_FIX_ALL]);
+        let result = handle_code_action(ctx, code_action_params(uri, only)).unwrap().unwrap();
+
+        assert!(
+            actions_of_kind(&result, "quickfix").is_empty(),
+            "quick fixes must be filtered out"
+        );
+        assert_eq!(
+            actions_of_kind(&result, crate::lsp::to_proto::FIX_ALL_BSL).len(),
+            1,
+            "requesting source.fixAll must still match the bsl-analyzer subkind"
+        );
+    }
+
+    #[test]
+    fn code_action_only_quickfix_suppresses_source_fix_all() {
+        let source =
+            "Процедура Тест()\n    ЭтаФорма.Закрыть();\n    ЭтаФорма.Открыть();\nКонецПроцедуры\n";
+        let (state, uri) = setup_code_action_doc(source);
+        let ctx = latency_ctx(&state);
+
+        let only = Some(vec![CodeActionKind::QUICKFIX]);
+        let result = handle_code_action(ctx, code_action_params(uri, only)).unwrap().unwrap();
+
+        assert!(
+            actions_of_kind(&result, crate::lsp::to_proto::FIX_ALL_BSL).is_empty(),
+            "source.fixAll must be filtered out when only quickfix is requested"
+        );
+        assert!(!actions_of_kind(&result, "quickfix").is_empty(), "quick fixes must remain");
+    }
+
     #[test]
     fn reference_location_converter_uses_target_file_uri_and_text() {
         let mut state = create_test_state();
@@ -1600,5 +3380,45 @@ mod tests {
 
         let result = handle_completion(ctx, params);
         assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn signature_help_maps_all_overloads_to_lsp() {
+        let help = ide::SignatureHelp {
+            signatures: vec![
+                ide::SignatureInformation {
+                    signature: "Добавить(Значение)".to_string(),
+                    doc: None,
+                    parameters: vec![ide::ParameterInfo {
+                        label: "Значение".to_string(),
+                        documentation: None,
+                    }],
+                },
+                ide::SignatureInformation {
+                    signature: "Добавить(Значение, ТипОбхода)".to_string(),
+                    doc: None,
+                    parameters: vec![
+                        ide::ParameterInfo {
+                            label: "Значение".to_string(), documentation: None
+                        },
+                        ide::ParameterInfo {
+                            label: "ТипОбхода".to_string(), documentation: None
+                        },
+                    ],
+                },
+            ],
+            active_signature: Some(1),
+            active_parameter: Some(0),
+        };
+
+        let lsp = to_lsp_signature_help(help);
+        assert_eq!(lsp.signatures.len(), 2, "both overloads must be mapped");
+        assert_eq!(lsp.signatures[0].label, "Добавить(Значение)", "first signature label mismatch");
+        assert_eq!(
+            lsp.signatures[1].label, "Добавить(Значение, ТипОбхода)",
+            "second signature label mismatch"
+        );
+        assert_eq!(lsp.active_signature, Some(1), "active signature must be preserved");
+        assert_eq!(lsp.active_parameter, Some(0), "active parameter must be preserved");
     }
 }

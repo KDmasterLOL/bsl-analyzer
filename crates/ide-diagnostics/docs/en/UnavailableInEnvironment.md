@@ -1,0 +1,65 @@
+# Access to API unavailable in the execution environment (UnavailableInEnvironment)
+
+## Description
+
+The 1C:Enterprise platform API is not uniformly available across execution environments: some types, methods, properties, and global functions exist only on the server, others only in specific client kinds (the platform syntax helper documents this under "Availability"). This diagnostic reports access to a platform member from code that runs in an environment where the member does not exist: for example, calling server-side API from a method behind the `&AtClient` directive, or constructing `New TextReader` in code compiled for the web client.
+
+The call site's environment set is the intersection of the module's environments (module kind, common-module flags: Server, ClientManagedApplication, ServerCall, ExternalConnection) and the method's compilation directive (`&AtClient`, `&AtServer`, `&AtClientAtServer`, …). The message qualifier lists only the environments where the member is missing — mirroring 1C:EDT verdicts like "… is not defined [Web client]".
+
+Preprocessor conditions are understood: inside `#If … #EndIf` only the intersection of the method's environments with the environments the branch compiles for is checked (`#If Not WebClient Then` removes the web client; the `#Else` branch receives the complement). Environments for which the condition stays undecidable (e.g. it involves an OS name and is not resolved by И/ИЛИ absorption) are skipped throughout the branch chain. This also covers preprocessor regions around whole methods: a method declared inside `#If Not WebClient Then` is not checked against the web client.
+
+Current limitations (deliberately conservative):
+
+- extension modules (interceptors `&Instead`/`&Before`/`&After`, `&ChangeAndValidate`) are not checked;
+- the mobile client, the external connection, and the legacy thick client (ordinary application) are excluded from the checked environment set by default (`checked_environments`);
+- when a platform type name is ambiguous (e.g. `ЭлементыФормы` names both the managed-form items collection and the legacy form controls), availability of its members is not judged.
+
+## Configuration
+
+The checked environment set comes from `bsl-analyzer.toml`, named like preprocessor symbols (case-insensitive, Russian and English names are equivalent). A configuration that never runs in the web client drops it from the list:
+
+```toml
+[features]
+checked_environments = ["ThinClient", "ThickClientManagedApplication", "Server"]
+```
+
+The default set is the thin client, the web client, the managed thick client, and the server. Listing `MobileClient` or `ThickClientOrdinaryApplication` also opts those environments into the execution model (the mobile client joins the client environments; the ordinary application enables ordinary-app support). A list of only unrecognized names keeps the default set (with a logged warning); an explicit empty list `[]` turns both checks off. The setting is shared by `UnavailableInEnvironment` and `ModuleAccessibility`.
+
+## Examples
+
+Incorrect:
+
+```bsl
+&AtClient
+Procedure ReadFile()
+    // TextReader is unavailable in the web client
+    Reader = New TextReader;
+    Line = Reader.ReadLine();
+EndProcedure
+```
+
+Correct:
+
+```bsl
+&AtServer
+Procedure ReadFileAtServer()
+    Reader = New TextReader;
+    Line = Reader.ReadLine();
+EndProcedure
+```
+
+or with an explicit preprocessor guard (the diagnostic understands such conditions and stays silent):
+
+```bsl
+&AtClient
+Procedure ReadFile()
+    #If Not WebClient Then
+    Reader = New TextReader;
+    Line = Reader.ReadLine();
+    #EndIf
+EndProcedure
+```
+
+## Sources
+
+- [1C:Enterprise syntax helper, the "Availability" section of each method/property](https://its.1c.ru/db/v8std)

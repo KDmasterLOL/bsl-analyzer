@@ -1,15 +1,23 @@
+use hir::{CallSelection, CandidateId, PlatformSignatureSlot, Semantics};
 use ide_db::RootDatabase;
 use symbol_info::{
-    build_signature, render_signature_help, resolve_callee_at, ParameterInfoView, SignatureHelpView,
+    build_signature_from_resolution, render_signature_help, resolve_callee_at, ParameterInfoView,
+    SignatureHelpView,
 };
 use syntax::TextSize;
 use vfs::FileId;
 
 #[derive(Debug, Clone)]
 pub struct SignatureHelp {
+    pub signatures: Vec<SignatureInformation>,
+    pub active_signature: Option<usize>,
+    pub active_parameter: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignatureInformation {
     pub signature: String,
     pub doc: Option<String>,
-    pub active_parameter: Option<usize>,
     pub parameters: Vec<ParameterInfo>,
 }
 
@@ -26,17 +34,48 @@ pub fn signature_help<DB: RootDatabase>(
 ) -> Option<SignatureHelp> {
     let _span = tracing::info_span!("signature_help", ?file_id, ?offset).entered();
 
-    let (callee, active) = resolve_callee_at(db, file_id, offset)?;
-    let sig = build_signature(db, file_id, &callee)?;
-    Some(from_view(render_signature_help(&sig, active.index)))
+    let active_parameter = resolve_callee_at(db, file_id, offset)?.1;
+    let binding = Semantics::new(db).call_binding_at(file_id, offset)?;
+    let sigs = build_signature_from_resolution(db, &binding)?;
+    let active_signature = match binding.resolution.selection {
+        CallSelection::Unique { candidate } => match candidate {
+            CandidateId::Platform { method_id, signature: PlatformSignatureSlot::Base } => {
+                sigs.iter().position(|signature| {
+                    signature.platform_id == Some(method_id)
+                        && signature.candidate_ordinal.is_none()
+                })
+            }
+            CandidateId::Platform {
+                method_id,
+                signature: PlatformSignatureSlot::Variant(candidate_ordinal),
+            } => sigs.iter().position(|signature| {
+                signature.platform_id == Some(method_id)
+                    && signature.candidate_ordinal == Some(candidate_ordinal)
+            }),
+            CandidateId::User { signature_ordinal: candidate_ordinal, .. }
+            | CandidateId::Builtin { signature_ordinal: candidate_ordinal, .. } => sigs
+                .iter()
+                .position(|signature| signature.candidate_ordinal == Some(candidate_ordinal)),
+            CandidateId::FunctionValue => None,
+        },
+        CallSelection::Ambiguous { .. } | CallSelection::Rejected(_) => None,
+    };
+    Some(from_view(render_signature_help(&sigs, active_parameter.index, active_signature)))
 }
 
 fn from_view(view: SignatureHelpView) -> SignatureHelp {
     SignatureHelp {
-        signature: view.signature,
-        doc: view.doc,
+        signatures: view.signatures.into_iter().map(from_signature_info).collect(),
+        active_signature: view.active_signature,
         active_parameter: view.active_parameter,
-        parameters: view.parameters.into_iter().map(from_param_view).collect(),
+    }
+}
+
+fn from_signature_info(sig: symbol_info::presenters::SignatureInformation) -> SignatureInformation {
+    SignatureInformation {
+        signature: sig.signature,
+        doc: sig.doc,
+        parameters: sig.parameters.into_iter().map(from_param_view).collect(),
     }
 }
 
@@ -80,7 +119,8 @@ mod tests {
         let result = signature_help(&db, file_id, offset);
 
         if let Some(sig) = result {
-            assert!(sig.signature.contains("НачатьТранзакцию"));
+            let first = sig.signatures.first().expect("at least one signature");
+            assert!(first.signature.contains("НачатьТранзакцию"));
         }
     }
 
@@ -95,7 +135,8 @@ mod tests {
         let result = signature_help(&db, file_id, offset);
 
         if let Some(sig) = result {
-            assert!(sig.signature.contains("Строка"));
+            let first = sig.signatures.first().expect("at least one signature");
+            assert!(first.signature.contains("Строка"));
             assert_eq!(sig.active_parameter, Some(0));
         }
     }
@@ -115,13 +156,28 @@ mod tests {
         let result = signature_help(&db, file_id, offset);
 
         if let Some(sig) = result {
-            assert!(sig.signature.contains("МояФункция"));
-            assert!(sig.signature.contains("Параметр1"));
-            assert!(sig.signature.contains("Параметр2"));
+            assert!(sig
+                .signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("МояФункция"));
+            assert!(sig
+                .signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("Параметр1"));
+            assert!(sig
+                .signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("Параметр2"));
             assert!(
-                !sig.signature.contains("Знач"),
+                !sig.signatures.first().expect("at least one signature").signature.contains("Знач"),
                 "Signature help must not surface the `Знач` modifier, got: {}",
-                sig.signature
+                sig.signatures.first().expect("at least one signature").signature
             );
             assert_eq!(sig.active_parameter, Some(0));
         }
@@ -177,7 +233,12 @@ mod tests {
         let result = signature_help(&db, file_id, offset);
 
         if let Some(sig) = result {
-            assert!(sig.signature.contains("Внутренняя"));
+            assert!(sig
+                .signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("Внутренняя"));
         }
     }
 
@@ -225,28 +286,40 @@ mod tests {
         assert!(result.is_some(), "Expected signature help for CommonModule method");
         let sig = result.unwrap();
         assert!(
-            sig.signature.contains("ЭтоРазделительСлов"),
+            sig.signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("ЭтоРазделительСлов"),
             "Signature should contain method name, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("КодСимвола"),
+            sig.signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("КодСимвола"),
             "Signature should contain first param, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("КодСимвола: Число"),
+            sig.signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("КодСимвола: Число"),
             "Param should be enriched with its type from docs, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("Булево"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Булево"),
             "Function signature should include return type from docs, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert_eq!(sig.active_parameter, Some(0));
 
-        let first = &sig.parameters[0];
+        let first = &sig.signatures.first().expect("at least one signature").parameters[0];
         let doc = first.documentation.as_deref().unwrap_or("");
         assert!(
             doc.contains("код проверяемого символа"),
@@ -299,46 +372,64 @@ mod tests {
 
         let sig = result.expect("Expected signature help for the common-module method");
         assert!(
-            sig.signature.contains("Ссылка: ЛюбаяСсылка | Строка"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Ссылка: ЛюбаяСсылка | Строка"),
             "Both alternative types must appear next to the parameter name, joined with ' | ', got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("ИмяРеквизита: Строка"),
+            sig.signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("ИмяРеквизита: Строка"),
             "Single-typed parameter should still get its type, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("Произвольный"),
+            sig.signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("Произвольный"),
             "Function return type from docs should appear, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
-        assert_eq!(sig.parameters.len(), 2, "Expected exactly 2 declared parameters");
+        assert_eq!(
+            sig.signatures.first().expect("at least one signature").parameters.len(),
+            2,
+            "Expected exactly 2 declared parameters"
+        );
 
-        let ssylka_doc = sig.parameters[0].documentation.as_deref().unwrap_or("");
+        let ssylka_doc = sig.signatures.first().expect("at least one signature").parameters[0]
+            .documentation
+            .as_deref()
+            .unwrap_or("");
         assert!(
             !ssylka_doc.contains("**"),
             "Union-typed parameter doc must not duplicate types in bold, got: {:?}",
-            sig.parameters[0].documentation
+            sig.signatures.first().expect("at least one signature").parameters[0].documentation
         );
         let pos_any = ssylka_doc.find("объект, значения").expect("ЛюбаяСсылка description");
         let pos_str = ssylka_doc.find("полное имя").expect("Строка description");
         assert!(
             pos_any < pos_str,
             "Union descriptions must keep declaration order, got: {:?}",
-            sig.parameters[0].documentation
+            sig.signatures.first().expect("at least one signature").parameters[0].documentation
         );
 
-        let name_doc = sig.parameters[1].documentation.as_deref().unwrap_or("");
+        let name_doc = sig.signatures.first().expect("at least one signature").parameters[1]
+            .documentation
+            .as_deref()
+            .unwrap_or("");
         assert!(
             !name_doc.contains("**"),
             "Single-typed parameter doc must not duplicate the type, got: {:?}",
-            sig.parameters[1].documentation
+            sig.signatures.first().expect("at least one signature").parameters[1].documentation
         );
         assert!(
             name_doc.contains("имя получаемого реквизита"),
             "Single-typed parameter doc should still carry the description, got: {:?}",
-            sig.parameters[1].documentation
+            sig.signatures.first().expect("at least one signature").parameters[1].documentation
         );
     }
 
@@ -380,19 +471,27 @@ mod tests {
         let sig = signature_help(&db, caller_file_id, offset)
             .expect("Manager-module method should resolve via module_index.resolve_manager");
         assert!(
-            sig.signature.contains("ВариантыВыбораГруппыСкладов"),
+            sig.signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("ВариантыВыбораГруппыСкладов"),
             "Signature must include the method name, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("Параметры: Структура"),
+            sig.signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("Параметры: Структура"),
             "Parameter must be enriched with its declared type, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("Массив"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Массив"),
             "Function return type from docs should appear, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
     }
 
@@ -408,14 +507,14 @@ mod tests {
         let sig = signature_help(&db, file_id, offset)
             .expect("signature help must resolve through inferred Ty, not literal name");
         assert!(
-            sig.signature.contains("Добавить"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Добавить"),
             "signature must include the method name, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("Представление"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Представление"),
             "signature must come from СписокЗначений, not Массив (missing `Представление` parameter), got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
     }
 
@@ -431,14 +530,14 @@ mod tests {
         let sig = signature_help(&db, file_id, offset)
             .expect("signature help must resolve Запрос.Выполнить despite KW_EXECUTE token kind");
         assert!(
-            sig.signature.contains("Выполнить"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Выполнить"),
             "signature must include the method name, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("РезультатЗапроса"),
+            sig.signatures.first().expect("at least one signature").signature.contains("РезультатЗапроса"),
             "signature must surface Query.Execute's return type — proves the platform-method overload was selected. got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
     }
 
@@ -455,9 +554,9 @@ mod tests {
             "signature help must resolve platform methods through the receiver's inferred Ty",
         );
         assert!(
-            sig.signature.contains("Добавить"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Добавить"),
             "signature must include the platform method name, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert_eq!(sig.active_parameter, Some(0));
     }
@@ -476,25 +575,25 @@ mod tests {
             "signature help must resolve РезультатЗапроса.Выгрузить through the chained call's inferred return type",
         );
         assert!(
-            sig.signature.contains("Выгрузить"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Выгрузить"),
             "signature must include the method name, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("ТипОбхода"),
+            sig.signatures.first().expect("at least one signature").signature.contains("ТипОбхода"),
             "signature must include the optional parameter `ТипОбхода`, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("ОбходРезультатаЗапроса"),
+            sig.signatures.first().expect("at least one signature").signature.contains("ОбходРезультатаЗапроса"),
             "signature must surface the parameter's platform type `ОбходРезультатаЗапроса`, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert_eq!(
-            sig.parameters.len(),
+            sig.signatures.first().expect("at least one signature").parameters.len(),
             1,
             "QueryResult.Выгрузить has exactly one declared parameter, got: {:?}",
-            sig.parameters
+            sig.signatures.first().expect("at least one signature").parameters
         );
         assert_eq!(sig.active_parameter, Some(0));
     }
@@ -512,19 +611,23 @@ mod tests {
             "signature help must dispatch through a multi-arm Union (no sentinels) and pick the first arm",
         );
         assert!(
-            sig.signature.contains("Скопировать"),
+            sig.signatures
+                .first()
+                .expect("at least one signature")
+                .signature
+                .contains("Скопировать"),
             "signature must include the method name, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("Строки") || sig.signature.contains("Колонки"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Строки") || sig.signatures.first().expect("at least one signature").signature.contains("Колонки"),
             "signature must come from ТаблицаЗначений::Скопировать (not the zero-param ДеревоЗначений overload), got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            !sig.parameters.is_empty(),
+            !sig.signatures.first().expect("at least one signature").parameters.is_empty(),
             "ТаблицаЗначений::Скопировать has parameters; an empty list would mean ДеревоЗначений won — got: {:?}",
-            sig.parameters
+            sig.signatures.first().expect("at least one signature").parameters
         );
     }
 
@@ -539,14 +642,14 @@ mod tests {
         let sig =
             signature_help(&db, file_id, offset).expect("constructor signature help must fire");
         assert!(
-            sig.signature.contains("Новый"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Новый"),
             "signature must carry the `Новый ` prefix, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert!(
-            sig.signature.contains("Массив"),
+            sig.signatures.first().expect("at least one signature").signature.contains("Массив"),
             "signature must carry the type name, got: {}",
-            sig.signature
+            sig.signatures.first().expect("at least one signature").signature
         );
         assert_eq!(sig.active_parameter, Some(0));
     }
@@ -571,13 +674,160 @@ mod tests {
 
         if let Some(sig) = signature_help(&db, file_id, offset) {
             assert!(
-                sig.signature.contains("Структура"),
+                sig.signatures
+                    .first()
+                    .expect("at least one signature")
+                    .signature
+                    .contains("Структура"),
                 "expected `Структура` in signature, got: {}",
-                sig.signature
+                sig.signatures.first().expect("at least one signature").signature
             );
             if let Some(idx) = sig.active_parameter {
                 assert!(idx <= 1, "cursor past first comma must be 0 or 1, got: {idx}");
             }
+        }
+    }
+
+    #[test]
+    fn platform_overloads_unique_selection() {
+        let code = "Процедура Тест()
+    Дата(2024, 1, 1$0)
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        let sig = signature_help(&db, file_id, offset).expect("signature help must resolve Дата");
+        assert!(!sig.signatures.is_empty(), "must return at least one signature");
+        let component_overload = sig
+            .signatures
+            .iter()
+            .position(|signature| {
+                signature
+                    .parameters
+                    .first()
+                    .is_some_and(|parameter| parameter.label.starts_with("Год"))
+            })
+            .expect("component overload must be rendered");
+        assert_eq!(sig.active_signature, Some(component_overload));
+        assert_eq!(
+            sig.active_parameter,
+            Some(2),
+            "cursor after third argument should select parameter 2 of the chosen overload"
+        );
+    }
+
+    #[test]
+    fn platform_overloads_ambiguous_selection() {
+        let code = "Процедура Тест()
+    ДокументЗащищенПаролем(Неизвестно$0)
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        let sig = signature_help(&db, file_id, offset)
+            .expect("signature help must resolve ДокументЗащищенПаролем");
+        assert!(!sig.signatures.is_empty(), "must return at least one signature");
+        assert!(
+            sig.active_signature.is_none(),
+            "active_signature must be None for ambiguous selection"
+        );
+    }
+
+    #[test]
+    fn constructor_signature_help_selects_unique_candidate() {
+        let code = "Процедура Тест()
+    Массив = Новый Массив($0)
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        let binding = hir::Semantics::new(&db).call_binding_at(file_id, offset);
+        assert!(binding.is_some(), "call_binding_at must resolve constructor call");
+
+        let sig =
+            signature_help(&db, file_id, offset).expect("signature help must resolve constructor");
+        assert!(!sig.signatures.is_empty(), "must return at least one constructor signature");
+        assert_eq!(
+            sig.active_signature,
+            Some(0),
+            "constructor with one candidate must select index 0"
+        );
+        assert_eq!(
+            sig.active_parameter,
+            Some(0),
+            "cursor in first argument slot must be parameter 0"
+        );
+    }
+
+    #[test]
+    fn signature_help_does_not_rank_candidates() {
+        let code = "Процедура Тест()
+    Результат = ДокументЗащищенПаролем($0)
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        let sig = signature_help(&db, file_id, offset)
+            .expect("signature help must resolve ДокументЗащищенПаролем");
+        assert_eq!(
+            sig.signatures.len(),
+            2,
+            "expected the two stored candidate variants in semantic order, got {:?}",
+            sig.signatures
+        );
+        let first_label = &sig.signatures[0].signature;
+        assert!(
+            first_label.contains("ДокументЗащищенПаролем"),
+            "first signature must contain method name"
+        );
+        assert!(
+            first_label.contains("ИмяФайла") && !first_label.contains("Поток"),
+            "first signature must be the file candidate, got: {}",
+            first_label
+        );
+        assert!(
+            sig.signatures[1].signature.contains("Поток")
+                && !sig.signatures[1].signature.contains("ИмяФайла"),
+            "second signature must be the stream candidate, got: {}",
+            sig.signatures[1].signature
+        );
+    }
+
+    #[test]
+    fn signature_help_maps_all_overloads() {
+        let code = "Процедура Тест()
+    Результат = ДокументЗащищенПаролем($0)
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        let sig = signature_help(&db, file_id, offset)
+            .expect("signature help must resolve ДокументЗащищенПаролем");
+        assert_eq!(
+            sig.signatures.len(),
+            2,
+            "expected the two stored candidate variants, got {:?}",
+            sig.signatures
+        );
+        assert!(
+            sig.signatures[0].parameters.iter().any(|p| p.label.contains("ИмяФайла"))
+                && !sig.signatures[0].parameters.iter().any(|p| p.label.contains("Поток")),
+            "first stored candidate must contain only the file parameter, got: {:?}",
+            sig.signatures[0]
+        );
+        assert!(
+            sig.signatures[1].parameters.iter().any(|p| p.label.contains("Поток"))
+                && !sig.signatures[1].parameters.iter().any(|p| p.label.contains("ИмяФайла")),
+            "second stored candidate must contain only the stream parameter, got: {:?}",
+            sig.signatures[1]
+        );
+        for (i, signature_info) in sig.signatures.iter().enumerate() {
+            assert!(
+                signature_info.signature.contains("ДокументЗащищенПаролем"),
+                "signature {} must contain method name, got: {}",
+                i,
+                signature_info.signature
+            );
         }
     }
 }

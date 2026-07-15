@@ -42,6 +42,8 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     let position_encoding = PositionEncoding::negotiate(&initialize_params.capabilities);
     let supports_insert_text_mode_adjust_indentation =
         client_supports_insert_text_mode_adjust_indentation(&initialize_params.capabilities);
+    let supports_workspace_edit_document_changes =
+        client_supports_workspace_edit_document_changes(&initialize_params.capabilities);
 
     // The pull diagnostic provider is opt-in per configuration, so the scope must be
     // known before capabilities are advertised — before the VFS loader (and its own
@@ -82,6 +84,7 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     state.position_encoding = position_encoding;
     state.supports_insert_text_mode_adjust_indentation =
         supports_insert_text_mode_adjust_indentation;
+    state.supports_workspace_edit_document_changes = supports_workspace_edit_document_changes;
     // Suppress push publishing only when the client will actually pull, so a
     // pull-capable client does not render open-buffer diagnostics twice; a client
     // that cannot pull keeps push even with the feature enabled.
@@ -127,6 +130,18 @@ fn client_supports_insert_text_mode_adjust_indentation(
         .and_then(|c| c.completion_item.as_ref())
         .and_then(|ci| ci.insert_text_mode_support.as_ref())
         .is_some_and(|s| s.value_set.contains(&lsp_types::InsertTextMode::ADJUST_INDENTATION))
+}
+
+/// Whether the client honors versioned `WorkspaceEdit.documentChanges`. When it does,
+/// the rename handler returns `TextDocumentEdit`s carrying each open document's version
+/// so the client can reject edits computed against a since-superseded buffer; otherwise
+/// the server must fall back to the unversioned `changes` map.
+fn client_supports_workspace_edit_document_changes(caps: &lsp_types::ClientCapabilities) -> bool {
+    caps.workspace
+        .as_ref()
+        .and_then(|w| w.workspace_edit.as_ref())
+        .and_then(|we| we.document_changes)
+        .unwrap_or(false)
 }
 
 /// Whether the client advertised pull-diagnostics support (`textDocument/diagnostic`).
@@ -182,6 +197,7 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
         }
 
         if state.shutdown_requested {
+            state.call_hierarchy_index.shutdown();
             break;
         }
 
@@ -200,6 +216,7 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
         // the batch never contends ahead of the file the user is editing; its own
         // guards make this a no-op unless a run is pending and the pool has capacity.
         crate::handlers::spawn_workspace_batch(state);
+        state.spawn_pending_call_hierarchy_index_builds();
     }
 
     Ok(())
@@ -379,6 +396,7 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     .analysis_host
                     .raw_database_mut()
                     .bump_config_for_paths(files.iter().map(|p| p.as_ref()));
+                state.supersede_call_hierarchy_index(base_db::BSL_SOURCE_ROOT);
                 for uri in state.opened_document_uris() {
                     crate::handlers::notification::schedule_diagnostics(state, &uri);
                 }
@@ -515,6 +533,43 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
         }
         Task::WorkspaceBatchChunk { generation, outcome } => {
             apply_workspace_batch_completion(state, generation, outcome)?;
+        }
+        Task::CallHierarchyIndexBuilt { source_root, generation, index } => {
+            if !state.call_hierarchy_index.is_ready_generation(source_root, generation)
+                && !state.call_hierarchy_index.publish(source_root, generation, index)
+            {
+                tracing::debug!(?source_root, generation, "discarding stale call hierarchy index");
+            }
+        }
+        Task::CallHierarchyIndexFailed { source_root, generation, reason } => {
+            if !state.call_hierarchy_index.fail(source_root, generation, reason) {
+                tracing::debug!(
+                    ?source_root,
+                    generation,
+                    "discarding stale call hierarchy failure"
+                );
+            }
+        }
+        Task::CallHierarchyIndexSuperseded { source_root, generation } => {
+            if state.call_hierarchy_index.finish_superseded(source_root, generation) {
+                state.schedule_call_hierarchy_index_build(source_root);
+            }
+        }
+        Task::CallHierarchyIndexBuildRequested { source_root, generation } => {
+            if state.call_hierarchy_index.is_prepared(source_root, generation) {
+                tracing::debug!(
+                    ?source_root,
+                    generation,
+                    "scheduling prepared call hierarchy index"
+                );
+                state.schedule_call_hierarchy_index_build(source_root);
+            } else {
+                tracing::debug!(
+                    ?source_root,
+                    generation,
+                    "discarding stale call hierarchy prepare"
+                );
+            }
         }
     }
     Ok(())
@@ -870,10 +925,12 @@ fn handle_vfs_msg(
 
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
+        CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
         CodeActionRequest, Completion, DocumentDiagnosticRequest, DocumentHighlightRequest,
-        DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
-        OnTypeFormatting, RangeFormatting, References, Request as _, SemanticTokensFullRequest,
-        SignatureHelpRequest, WorkspaceDiagnosticRequest,
+        DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, GotoTypeDefinition,
+        HoverRequest, InlayHintRequest, OnTypeFormatting, PrepareRenameRequest, RangeFormatting,
+        References, Rename, Request as _, SelectionRangeRequest, SemanticTokensFullRequest,
+        SignatureHelpRequest, WorkspaceDiagnosticRequest, WorkspaceSymbolRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -892,13 +949,28 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         }
     }
 
+    if state.vfs_done && req.method == CallHierarchyPrepare::METHOD {
+        state.call_hierarchy_index.ensure();
+    }
+
     RequestDispatcher { req: Some(req), global_state: state }
         .on_sync_mut::<Shutdown>(|state, ()| {
             state.shutdown_requested = true;
             Ok(())
         })
         .on_latency::<GotoDefinition>(crate::handlers::handle_goto_definition)
+        .on_latency::<GotoTypeDefinition>(crate::handlers::handle_type_definition)
         .on_latency::<References>(crate::handlers::handle_find_references)
+        .on_latency::<PrepareRenameRequest>(crate::handlers::handle_prepare_rename)
+        .on_latency::<Rename>(crate::handlers::handle_rename)
+        .on_latency::<CallHierarchyPrepare>(crate::handlers::handle_prepare_call_hierarchy)
+        .on_waiting_latency::<CallHierarchyIncomingCalls>(
+            crate::handlers::handle_call_hierarchy_incoming,
+        )
+        .on_latency::<CallHierarchyOutgoingCalls>(crate::handlers::handle_call_hierarchy_outgoing)
+        .on_latency::<InlayHintRequest>(crate::handlers::handle_inlay_hint)
+        .on_latency::<WorkspaceSymbolRequest>(crate::handlers::handle_workspace_symbol)
+        .on_latency::<SelectionRangeRequest>(crate::handlers::handle_selection_range)
         .on_latency::<DocumentHighlightRequest>(crate::handlers::handle_document_highlight)
         .on_latency::<FoldingRangeRequest>(crate::handlers::handle_folding_range)
         .on_latency::<HoverRequest>(crate::handlers::handle_hover)
@@ -1009,7 +1081,16 @@ fn server_capabilities(
 
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
 
-        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Options(
+            lsp_types::CodeActionOptions {
+                code_action_kinds: Some(vec![
+                    lsp_types::CodeActionKind::QUICKFIX,
+                    lsp_types::CodeActionKind::new(crate::lsp::to_proto::FIX_ALL_BSL),
+                ]),
+                work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
+                resolve_provider: None,
+            },
+        )),
 
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
@@ -1026,6 +1107,21 @@ fn server_capabilities(
             more_trigger_character: Some(vec!["\n".to_string()]),
         }),
 
+        rename_provider: Some(lsp_types::OneOf::Right(lsp_types::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
+        })),
+
+        call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
+
+        inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
+
+        workspace_symbol_provider: Some(lsp_types::OneOf::Left(true)),
+
+        selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(true)),
+
+        type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
+
         ..Default::default()
     }
 }
@@ -1034,6 +1130,7 @@ fn server_capabilities(
 mod tests {
     use super::*;
     use crate::global_state::Task;
+    use std::sync::Arc;
 
     #[test]
     fn test_server_capabilities() {
@@ -1053,6 +1150,32 @@ mod tests {
 
         assert_eq!(caps.document_highlight_provider, Some(lsp_types::OneOf::Left(true)));
         assert_eq!(caps.folding_range_provider, Some(FoldingRangeProviderCapability::Simple(true)));
+
+        match caps.rename_provider {
+            Some(lsp_types::OneOf::Right(options)) => {
+                assert_eq!(options.prepare_provider, Some(true));
+            }
+            _ => panic!("Expected rename provider with prepare support"),
+        }
+
+        assert_eq!(
+            caps.call_hierarchy_provider,
+            Some(lsp_types::CallHierarchyServerCapability::Simple(true))
+        );
+
+        assert_eq!(caps.inlay_hint_provider, Some(lsp_types::OneOf::Left(true)));
+
+        assert_eq!(caps.workspace_symbol_provider, Some(lsp_types::OneOf::Left(true)));
+
+        assert_eq!(
+            caps.selection_range_provider,
+            Some(lsp_types::SelectionRangeProviderCapability::Simple(true))
+        );
+
+        assert_eq!(
+            caps.type_definition_provider,
+            Some(lsp_types::TypeDefinitionProviderCapability::Simple(true))
+        );
     }
 
     #[test]
@@ -1171,6 +1294,83 @@ mod tests {
             receiver.try_recv().is_err(),
             "diagnostics for a closed document must not be published"
         );
+    }
+
+    #[test]
+    fn call_hierarchy_index_state_task_messages_are_generation_checked() {
+        // Given: a GlobalState build for one source root.
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        let source_root = base_db::SourceRootId(3);
+        let first = Arc::new(hir::CallHierarchyReverseIndex::new());
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            1,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(1),
+        ));
+
+        // When: a worker succeeds, then an older worker reports after generation two starts.
+        handle_task(
+            &mut state,
+            Task::CallHierarchyIndexBuilt { source_root, generation: 1, index: Arc::clone(&first) },
+        )
+        .expect("completion task must be handled");
+        assert!(state.call_hierarchy_index.start_build(
+            source_root,
+            2,
+            crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(2),
+        ));
+        handle_task(
+            &mut state,
+            Task::CallHierarchyIndexBuilt {
+                source_root,
+                generation: 1,
+                index: Arc::new(hir::CallHierarchyReverseIndex::new()),
+            },
+        )
+        .expect("stale completion task must be handled");
+
+        // Then: the old complete value remains available and the stale task cannot replace it.
+        assert!(Arc::ptr_eq(
+            &state.call_hierarchy_index.current(source_root).expect("previous ready value remains"),
+            &first,
+        ));
+        handle_task(
+            &mut state,
+            Task::CallHierarchyIndexFailed {
+                source_root,
+                generation: 2,
+                reason: "replacement failed".to_owned(),
+            },
+        )
+        .expect("failure task must be handled");
+        assert_eq!(
+            state.call_hierarchy_index.failure_reason(source_root, 2).as_deref(),
+            Some("replacement failed")
+        );
+    }
+
+    #[test]
+    fn prepared_call_hierarchy_signal_schedules_one_source_root() {
+        // Given: a prepared source-root generation after the VFS boot gate opens.
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        state.vfs_done = true;
+        let source_root = base_db::SourceRootId(5);
+        assert!(state.call_hierarchy_index.record_prepare(source_root, 1));
+
+        // When: duplicate prepare signals reach the event loop.
+        for _ in 0..2 {
+            handle_task(
+                &mut state,
+                Task::CallHierarchyIndexBuildRequested { source_root, generation: 1 },
+            )
+            .expect("prepare signal must be handled");
+        }
+
+        // Then: scheduling coalesces to one pending root build.
+        assert_eq!(state.call_hierarchy_index_rebuilds.len(), 1);
+        assert!(state.call_hierarchy_index_rebuilds.contains(&source_root));
     }
 
     /// Decode the URI + diagnostic count of a `textDocument/publishDiagnostics`

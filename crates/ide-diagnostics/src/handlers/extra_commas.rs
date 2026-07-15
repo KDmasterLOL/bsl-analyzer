@@ -1,7 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
+use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -18,12 +19,46 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    crate::simple_hir_diagnostic(
+    let mut diagnostic = crate::simple_hir_diagnostic(
         DiagnosticCode::ExtraCommas,
         "Не используйте запятые для параметры по умолчанию в конце вызова метода",
         range,
         ctx,
-    )
+    )?;
+
+    // The diagnostic flags only the last trailing comma, but a batch fix must remove the
+    // whole run at once or `,,,)` would still be reported after one pass.
+    if let Some(run) = trailing_comma_run(ctx, range) {
+        diagnostic.fixes = vec![Fix::safe(
+            "Убрать лишние запятые",
+            vec![TextEdit { range: run, new_text: String::new() }],
+        )];
+    }
+
+    Some(diagnostic)
+}
+
+/// Extend the flagged (last) trailing comma backwards over every consecutive comma and
+/// whitespace up to the last real argument, yielding the full run to delete.
+fn trailing_comma_run(ctx: &DiagnosticsContext, range: TextRange) -> Option<TextRange> {
+    let parse = ctx.parse();
+    let comma = parse.syntax_node().token_at_offset(range.start()).right_biased()?;
+    if comma.kind() != SyntaxKind::COMMA {
+        return None;
+    }
+
+    let mut run_start = comma.text_range().start();
+    let mut prev = comma.prev_token();
+    while let Some(token) = prev {
+        match token.kind() {
+            SyntaxKind::COMMA => run_start = token.text_range().start(),
+            SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE => {}
+            _ => break,
+        }
+        prev = token.prev_token();
+    }
+
+    Some(TextRange::new(run_start, comma.text_range().end()))
 }
 
 #[cfg(test)]
@@ -31,6 +66,20 @@ mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
     use expect_test::expect;
+
+    #[test]
+    fn test_fix_removes_whole_trailing_run() {
+        // A single fix must strip every trailing comma so one pass converges.
+        let code = "Результат = Метод(А, Б,,,);";
+        check_fix_snapshot_for(
+            code,
+            DiagnosticCode::ExtraCommas,
+            expect![[r#"
+            ExtraCommas @ 1:25..1:26 — Убрать лишние запятые [fix_all=true]
+            Результат = Метод(А, Б);"#]],
+        );
+    }
+
     #[test]
     fn test_trailing_comma_single_arg() {
         let code = "Результат = Метод1(Парам1, , Парам2,);";

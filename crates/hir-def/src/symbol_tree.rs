@@ -463,18 +463,18 @@ pub(crate) fn symbol_tree_heap(v: &Arc<SymbolTree>) -> usize {
 // Condensed per-module symbol list (no green-tree pin): on the cross-module call
 // resolution path. High cap keeps it across chunk-boundary LRU trims so a later
 // chunk resolving a call into this module doesn't re-derive it (re-parse + lower).
-#[salsa::tracked(lru = 2048, heap_size = crate::symbol_tree::symbol_tree_heap)]
+#[salsa::tracked(lru = 2048, heap_size = crate::symbol_tree::symbol_tree_heap, returns(ref))]
 pub fn symbol_tree_query<'db>(
     db: &'db dyn crate::DefDatabase,
     file_id_input: base_db::FileIdInput<'db>,
 ) -> std::sync::Arc<SymbolTree> {
     let _span = tracing::info_span!("symbol_tree", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
-    let item_tree = db.item_tree(file_id);
+    let item_tree = db.item_tree_ref(file_id);
     let parse = db.parse_ref(file_id);
-    let source_text = db.file_text(file_id);
+    let source_text = db.file_text_ref(file_id);
     let module_id = crate::ModuleId::new(file_id);
-    std::sync::Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, parse, &source_text))
+    std::sync::Arc::new(SymbolTree::from_item_tree(item_tree, module_id, parse, source_text))
 }
 
 #[cfg(test)]
@@ -482,11 +482,16 @@ mod tests {
     use super::*;
     use crate::item_tree::{Function, Procedure, Variable};
     use crate::ModuleId;
+    use syntax::{Parse, SyntaxNode};
     use text_size::TextSize;
     use vfs::FileId;
 
     fn make_text_range(start: u32, end: u32) -> TextRange {
         TextRange::new(TextSize::from(start), TextSize::from(end))
+    }
+
+    fn parse(code: &str) -> Parse<SyntaxNode> {
+        parser::parse_with_shared_cache(code)
     }
 
     #[test]
@@ -737,6 +742,37 @@ mod tests {
         assert!(symbol_tree.find_variable(&Name::new("МояПеременная")).is_some());
         assert!(symbol_tree.find_variable(&Name::new("мояпеременная")).is_some());
         assert!(symbol_tree.find_variable(&Name::new("МОЯПЕРЕМЕННАЯ")).is_some());
+    }
+
+    #[test]
+    fn test_variable_comma_decl_lookup() {
+        let fixture = r#"
+Перем A, B;
+Перем b;
+        "#;
+        let item_tree = ItemTree::from_parse(&parse(fixture));
+        let file_id = FileId(0);
+        let module_id = ModuleId::new(file_id);
+
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
+
+        let variables: Vec<_> = symbol_tree.variables().collect();
+        assert_eq!(
+            variables.iter().map(|var| var.name.as_str()).collect::<Vec<_>>(),
+            ["A", "B", "b"]
+        );
+
+        let first_a = symbol_tree.find_variable(&Name::new("a")).unwrap();
+        let first_b = symbol_tree.find_variable(&Name::new("b")).unwrap();
+        let upper_b = symbol_tree.find_variable(&Name::new("B")).unwrap();
+        let redeclared_b = variables.iter().find(|var| var.name.as_str() == "b").unwrap();
+
+        assert_eq!(first_a.name.as_str(), "A");
+        assert_eq!(first_b.name.as_str(), "B");
+        assert_eq!(upper_b.name.as_str(), "B");
+        // The redeclared `b` must not replace the first entry in the case-insensitive index.
+        assert_ne!(first_b.source_range, redeclared_b.source_range);
+        assert_eq!(first_b.source_range, upper_b.source_range);
     }
 
     #[test]

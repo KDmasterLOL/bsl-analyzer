@@ -4,6 +4,7 @@ use rustc_hash::FxHashSet;
 use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxToken};
 
+use super::env_filter::EnvFilter;
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
 pub(super) fn new_expr_completions<DB: RootDatabase>(
@@ -25,6 +26,7 @@ pub(super) fn new_expr_completions<DB: RootDatabase>(
     }
 
     let data = PlatformDataInner::instance();
+    let env_filter = EnvFilter::at(db, position.file_id, position.offset);
     let prefix_lower = prefix.fold_lower();
     let mut seen = FxHashSet::default();
     let mut items = Vec::new();
@@ -40,6 +42,12 @@ pub(super) fn new_expr_completions<DB: RootDatabase>(
         else {
             continue;
         };
+        // Same gates as the `Новый X` diagnostic: homonym names carry an
+        // arbitrary entry's availability, so they are not judged.
+        if !data.is_ambiguous_type_name(&ty.name) && !env_filter.admits_context(ty.context.as_ref())
+        {
+            continue;
+        }
         let russian = ty.name.to_string();
         let english = ty.english_name.to_string();
 

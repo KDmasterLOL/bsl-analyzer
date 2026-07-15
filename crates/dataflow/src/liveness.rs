@@ -129,11 +129,6 @@ impl VariableIndex {
     pub fn size(&self) -> usize {
         self.idx_to_name.len()
     }
-
-    #[allow(dead_code)]
-    pub fn get_name(&self, idx: usize) -> Option<&SmolStr> {
-        self.idx_to_name.get(idx)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

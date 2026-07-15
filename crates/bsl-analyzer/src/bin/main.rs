@@ -43,6 +43,7 @@ use std::{env, error::Error, fs, path::PathBuf};
 use clap::{Parser, Subcommand};
 use cli::{
     analyze::{analyze, OutputFormat},
+    bench::{run_bench, BenchCommands},
     check_config::check_config,
     dap::run_dap_server,
     deps::{run_deps, DepsOutputFormat},
@@ -223,6 +224,11 @@ enum Commands {
         #[arg(long = "json")]
         json: bool,
     },
+
+    Bench {
+        #[command(subcommand)]
+        command: BenchCommands,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -351,6 +357,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Smoke { source_dir, scenarios, budgets, json }) => {
             run_smoke(source_dir, scenarios, budgets, json)
         }
+        Some(Commands::Bench { command }) => run_bench(command),
         Some(Commands::Lsp) | None => run_lsp_server(),
     }
 }

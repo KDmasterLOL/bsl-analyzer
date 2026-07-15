@@ -22,6 +22,11 @@ pub struct ItemTree {
     pub(crate) functions: Arena<Function>,
 
     pub(crate) variables: Arena<Variable>,
+
+    /// The file has a `#Если` region outside any method — only then can an
+    /// item-level preprocessor condition narrow a method's environments, so
+    /// consumers may skip the conditional tree entirely when this is false.
+    pub(crate) has_module_preproc: bool,
 }
 
 impl Default for ItemTree {
@@ -31,6 +36,7 @@ impl Default for ItemTree {
             procedures: Arena::new(),
             functions: Arena::new(),
             variables: Arena::new(),
+            has_module_preproc: false,
         }
     }
 }
@@ -51,6 +57,10 @@ impl ItemTree {
 
     pub fn top_level_items(&self) -> &[ModItem] {
         &self.top_level
+    }
+
+    pub fn has_module_preproc(&self) -> bool {
+        self.has_module_preproc
     }
 
     pub fn procedure(&self, idx: Idx<Procedure>) -> &Procedure {
@@ -200,7 +210,7 @@ pub(crate) fn item_tree_heap(v: &Arc<ItemTree>) -> usize {
 // Condensed module item index (no green-tree pin): feeds symbol/name resolution
 // across modules. High cap keeps it across chunk-boundary LRU trims so a later
 // chunk doesn't re-lower it from a re-parse.
-#[salsa::tracked(lru = 2048, heap_size = crate::item_tree::item_tree_heap)]
+#[salsa::tracked(lru = 2048, heap_size = crate::item_tree::item_tree_heap, returns(ref))]
 pub fn item_tree_query<'db>(
     db: &'db dyn base_db::RootQueryDb,
     file_id_input: base_db::FileIdInput<'db>,
