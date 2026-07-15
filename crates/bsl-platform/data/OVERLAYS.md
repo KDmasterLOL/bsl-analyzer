@@ -33,5 +33,17 @@ out-of-range parameter indices, invalid bounds, and duplicate type-list
 members. Applying an override changes only the selected parameter type list;
 method IDs and method ordering remain those of the extracted data.
 
-The DOM append-child correction is deliberately method-local. It does not
-declare a global subtype relation between HTML and DOM element types.
+## Method-local scope
+
+Overlays are deliberately method-local. For example, a DOM `appendChild` correction
+that widens an argument to accept an HTML element applies only to that method's
+parameter and does not declare a global subtype relation between HTML and DOM
+element types.
+
+## Evidence requirements
+
+Every override must include:
+- `evidence_source`: A link to official documentation (ITS, syntax assistant), a minimal reproduction script proving the platform behavior, or a specific extracted platform record (for example, a syntax-assistant snippet or a JSON field reference) that demonstrates the contract.
+- `rationale`: A clear explanation of why the current extracted data is insufficient and how the override improves type safety without introducing false positives.
+
+Overrides must be justifiable by verifiable, specific evidence that supports the narrow correction without introducing false positives.
