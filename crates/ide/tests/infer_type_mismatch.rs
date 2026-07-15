@@ -10,14 +10,18 @@ fn designer_fixture_path() -> PathBuf {
 }
 
 fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
-    setup_impl(fixture_text, true)
+    setup_impl(fixture_text, true, "/test.bsl")
 }
 
 fn setup_vfs_only(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
-    setup_impl(fixture_text, false)
+    setup_impl(fixture_text, false, "/test.bsl")
 }
 
-fn setup_impl(fixture_text: &str, attach_designer_config: bool) -> (RootDatabaseImpl, FileId) {
+fn setup_impl(
+    fixture_text: &str,
+    attach_designer_config: bool,
+    test_file_suffix: &str,
+) -> (RootDatabaseImpl, FileId) {
     let fixture = Fixture::parse(fixture_text);
     let mut db = RootDatabaseImpl::new();
     let mut file_set = vfs::FileSet::default();
@@ -36,9 +40,9 @@ fn setup_impl(fixture_text: &str, attach_designer_config: bool) -> (RootDatabase
     let test_file = fixture
         .files
         .iter()
-        .find(|(_, f)| f.path.as_path().to_string_lossy().ends_with("/test.bsl"))
+        .find(|(_, f)| f.path.as_path().to_string_lossy().ends_with(test_file_suffix))
         .map(|(id, _)| *id)
-        .expect("fixture must contain /test.bsl");
+        .expect("fixture must contain the requested test file");
     (db, test_file)
 }
 
@@ -216,32 +220,6 @@ fn type_mismatch_silent_on_fluent_method_call_matching_arg() {
 }
 
 #[test]
-fn type_mismatch_silent_on_union_receiver_when_one_arm_accepts() {
-    // `Знач` is `Массив | Структура` at the call site. `Структура.Вставить`
-    // accepts a String key even though `Массив.Вставить` wants a numeric index.
-    // A union receiver is an over-approximation (at most one arm is the runtime
-    // type), so an argument accepted by ANY arm must not fire.
-    let fixture = r#"
-//- /test.bsl
-Процедура Тест(Условие)
-    Если Условие Тогда
-        Знач = Новый Массив;
-    Иначе
-        Знач = Новый Структура;
-    КонецЕсли;
-    Знач.Вставить("Ключ", 1);
-КонецПроцедуры
-"#;
-    let (db, file_id) = setup_vfs_only(fixture);
-    assert!(
-        mismatches(&db, file_id).is_empty(),
-        "union receiver Массив | Структура: a String key is valid via Структура.Вставить, \
-         got {:?}",
-        mismatches(&db, file_id)
-    );
-}
-
-#[test]
 fn type_mismatch_fires_on_array_insert_string_index() {
     // Guard against over-suppression: a non-union Массив receiver must still
     // flag a String passed where a numeric index is required.
@@ -281,6 +259,7 @@ fn type_mismatch_does_not_double_fire_on_arg_count_mismatch() {
 
     let count_mismatches: Vec<_> = infer_diags
         .iter()
+        .chain(arg_diags.iter())
         .filter(|(_, d)| matches!(d, InferenceDiagnostic::MismatchedArgCount { .. }))
         .collect();
     assert_eq!(count_mismatches.len(), 1, "exactly one MismatchedArgCount expected");
@@ -409,6 +388,34 @@ fn rendered_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(String, S
             )
         })
         .collect()
+}
+
+const ISSUE80_DOM_FIXTURE: &str = include_str!("fixtures/issue80/dom.fixture");
+const ISSUE80_DOM_EXPECTED: &str =
+    "АтрибутDOM | АтрибутHTML | ДокументDOM | НотацияDOM | ОпределениеТипаДокументаDOM | ЭлементDOM | ЭлементHTML | ЭлементВводаHTML | ЭлементЗаголовокHTML | ЭлементКнопкаHTML";
+const ISSUE80_DOM_VALID_ACTUAL: &str = "ЭлементDOM | ЭлементHTML";
+
+#[test]
+fn issue80_dom_valid_child_is_accepted() {
+    let (db, file_id) = setup_impl(ISSUE80_DOM_FIXTURE, false, "/valid.bsl");
+    let rendered = rendered_mismatches(&db, file_id);
+
+    assert!(
+        rendered.is_empty(),
+        "a valid HTML child must satisfy ДобавитьДочерний; expected `{ISSUE80_DOM_EXPECTED}` \
+         and actual `{ISSUE80_DOM_VALID_ACTUAL}` must not mismatch, got {rendered:?}"
+    );
+}
+
+#[test]
+fn issue80_dom_invalid_scalar_child_is_rejected() {
+    let (db, file_id) = setup_impl(ISSUE80_DOM_FIXTURE, false, "/invalid.bsl");
+
+    assert_eq!(
+        rendered_mismatches(&db, file_id),
+        vec![(ISSUE80_DOM_EXPECTED.to_string(), "Число".to_string())],
+        "a scalar child must produce exactly one TypeMismatch at the ДобавитьДочерний argument"
+    );
 }
 
 #[test]

@@ -127,6 +127,20 @@ fn unresolved_method_names(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String
         .collect()
 }
 
+fn rendered_arg_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(String, String)> {
+    db.arg_diagnostics(file_id)
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            InferenceDiagnostic::TypeMismatch { expected, actual, .. } => Some((
+                hir::Type::from_id(db, file_id, *expected)
+                    .display_name(ide_db::base_db::Locale::Ru),
+                hir::Type::from_id(db, file_id, *actual).display_name(ide_db::base_db::Locale::Ru),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn catalog_create_item_returns_catalog_object_metadata_ref() {
     let fixture = r#"
@@ -521,6 +535,35 @@ fn aliased_register_manager_workspace_method_resolves() {
         unresolved_field_names(&db, file_id).is_empty(),
         "register manager method-call site must not emit UnresolvedField; got {:?}",
         unresolved_field_names(&db, file_id),
+    );
+}
+
+const ISSUE80_REGISTER_FIXTURE: &str = include_str!("fixtures/issue80/register.fixture");
+
+#[test]
+fn issue80_select_filter_uses_structure_overload() {
+    let (db, file_id) = setup_with_target_path(ISSUE80_REGISTER_FIXTURE, "/valid.bsl");
+    let mismatches = rendered_arg_mismatches(&db, file_id);
+
+    assert!(
+        mismatches.is_empty(),
+        "Структура filter must be accepted by the non-periodic Выбрать overload; got {mismatches:?}",
+    );
+}
+
+#[test]
+fn issue80_select_rejects_argument_incompatible_with_all_overloads() {
+    let (db, file_id) = setup_with_target_path(ISSUE80_REGISTER_FIXTURE, "/invalid.bsl");
+    let mismatches = rendered_arg_mismatches(&db, file_id);
+
+    assert_eq!(
+        mismatches.len(),
+        1,
+        "Число must be rejected by every Выбрать overload with one TypeMismatch; got {mismatches:?}",
+    );
+    assert_eq!(
+        mismatches[0].1, "Число",
+        "the true-positive control must diagnose the supplied scalar; got {mismatches:?}",
     );
 }
 

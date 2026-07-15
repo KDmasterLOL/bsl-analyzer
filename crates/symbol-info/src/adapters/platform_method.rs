@@ -9,7 +9,7 @@ pub(super) fn build(
     db: &dyn RootDatabase,
     type_name: &str,
     method_name: &str,
-) -> Option<SymbolSignature> {
+) -> Option<Vec<SymbolSignature>> {
     let input = MethodLookupInput::new(db, type_name.to_string(), method_name.to_string());
     let method = platform_method_query(db, input)?;
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
@@ -19,6 +19,25 @@ pub(super) fn build(
 pub fn from_platform_method(
     method: &PlatformMethod,
     docs: Option<&bsl_platform::MethodDocs>,
+) -> Vec<SymbolSignature> {
+    let mut signatures = Vec::new();
+    signatures.push(build_signature_from_params(method, &method.parameters, docs, None));
+    for (candidate_ordinal, variant) in method.variants.iter().enumerate() {
+        signatures.push(build_signature_from_params(
+            method,
+            &variant.parameters,
+            docs,
+            Some(candidate_ordinal),
+        ));
+    }
+    signatures
+}
+
+fn build_signature_from_params(
+    method: &PlatformMethod,
+    parameters: &[bsl_platform::MethodParam],
+    docs: Option<&bsl_platform::MethodDocs>,
+    candidate_ordinal: Option<usize>,
 ) -> SymbolSignature {
     let kind =
         if method.return_type.is_some() { MethodKind::Function } else { MethodKind::Procedure };
@@ -54,12 +73,13 @@ pub fn from_platform_method(
         .unwrap_or_else(|| method.type_name.clone());
 
     SymbolSignature {
+        candidate_ordinal,
         kind,
         name_russian: display_name,
         name_english: Some(english_name),
         qualifier: Some(SmolStr::from(format!("{}.", russian_type_name))),
         prefix: None,
-        params: build_platform_params(&method.parameters, docs),
+        params: build_platform_params(parameters, docs),
         returns,
         purpose: docs.map(|d| d.description.clone()).filter(|s| !s.is_empty()),
         description: docs.map(|d| d.description.clone()).filter(|s| !s.is_empty()),
@@ -79,5 +99,6 @@ pub fn from_platform_method(
         is_export: true,
         source: SignatureSource::Platform,
         method_id: None,
+        platform_id: Some(method.id),
     }
 }

@@ -450,8 +450,9 @@ fn complete_manager_module_methods<DB: RootDatabase>(
                 object: object.clone(),
                 method: method.name.clone(),
             };
-            let sig = symbol_info::build_signature(db, file_id, &callee)?;
-            Some(super::platform_completion::item_from_signature(&sig))
+            let sigs = symbol_info::build_signature(db, file_id, &callee)?;
+            let sig = sigs.first()?;
+            Some(super::platform_completion::item_from_signature(sig))
         })
         .collect();
 

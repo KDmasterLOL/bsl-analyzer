@@ -2,9 +2,16 @@ use crate::domain::{MethodKind, SignatureParam, SignatureSource, SymbolSignature
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureHelpView {
+    pub signatures: Vec<SignatureInformation>,
+    pub active_signature: Option<usize>,
+    pub active_parameter: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureInformation {
+    pub candidate_ordinal: Option<usize>,
     pub signature: String,
     pub doc: Option<String>,
-    pub active_parameter: Option<usize>,
     pub parameters: Vec<ParameterInfoView>,
 }
 
@@ -14,7 +21,30 @@ pub struct ParameterInfoView {
     pub documentation: Option<String>,
 }
 
-pub fn render_signature_help(sig: &SymbolSignature, active_param: usize) -> SignatureHelpView {
+pub fn render_signature_help(
+    signatures: &[SymbolSignature],
+    active_param: usize,
+    active_signature: Option<usize>,
+) -> SignatureHelpView {
+    let signature_infos: Vec<SignatureInformation> =
+        signatures.iter().map(render_single_signature).collect();
+
+    let selected_signature = match active_signature {
+        Some(idx) => signature_infos.get(idx),
+        None => signature_infos.first(),
+    };
+    let active_parameter = selected_signature.and_then(|sig| {
+        if active_param < sig.parameters.len() {
+            Some(active_param)
+        } else {
+            None
+        }
+    });
+
+    SignatureHelpView { signatures: signature_infos, active_signature, active_parameter }
+}
+
+fn render_single_signature(sig: &SymbolSignature) -> SignatureInformation {
     let header = make_header(sig);
     let param_strs: Vec<String> = sig.params.iter().map(format_param).collect();
 
@@ -31,9 +61,12 @@ pub fn render_signature_help(sig: &SymbolSignature, active_param: usize) -> Sign
         .map(|(p, label)| ParameterInfoView { label, documentation: p.description.clone() })
         .collect();
 
-    let active_parameter = if active_param < parameters.len() { Some(active_param) } else { None };
-
-    SignatureHelpView { signature, doc: sig.purpose.clone(), active_parameter, parameters }
+    SignatureInformation {
+        candidate_ordinal: sig.candidate_ordinal,
+        signature,
+        doc: sig.purpose.clone(),
+        parameters,
+    }
 }
 
 /// The real BSL declaration line for a user method: `Функция Имя(Знач П = Умолч) Экспорт`.

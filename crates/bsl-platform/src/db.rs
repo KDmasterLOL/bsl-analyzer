@@ -735,12 +735,17 @@ pub fn prefixed_method_query<'db>(
 }
 
 pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformMethod> {
+    find_prefixed_methods(prefix, method_name).into_iter().next()
+}
+
+pub fn find_prefixed_methods(prefix: &str, method_name: &str) -> Vec<PlatformMethod> {
     let method_lower = method_name.fold_lower();
     let data = PlatformDataInner::instance();
-    data.get_manager_methods(prefix)
+    let methods = data
+        .get_manager_methods(prefix)
         .into_iter()
-        .find(|m| {
-            let docs = data.get_method_docs(m.id);
+        .filter(|method| {
+            let docs = data.get_method_docs(method.id);
             let ru_match = docs
                 .as_ref()
                 .and_then(|d| d.syntax.split('(').next())
@@ -748,11 +753,22 @@ pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformM
             if ru_match {
                 return true;
             }
-            let en_name =
-                m.english_name.rsplit_once('.').map(|(_, n)| n).unwrap_or(&m.english_name);
+            let en_name = method
+                .english_name
+                .rsplit_once('.')
+                .map(|(_, n)| n)
+                .unwrap_or(&method.english_name);
             en_name.fold_lower() == method_lower
         })
         .cloned()
+        .collect();
+    sort_and_deduplicate_methods(methods)
+}
+
+fn sort_and_deduplicate_methods(mut methods: Vec<PlatformMethod>) -> Vec<PlatformMethod> {
+    methods.sort_by_key(|method| method.id);
+    methods.dedup_by_key(|method| method.id);
+    methods
 }
 
 #[salsa::tracked(lru = 256, returns(as_ref))]
@@ -1009,6 +1025,24 @@ mod tests {
                 ty.iter_element_types
             );
         }
+    }
+
+    #[test]
+    fn curated_overlay_corrects_dom_append_child_in_both_languages() {
+        let data = PlatformDataInner::instance();
+        let via_ru = data
+            .get_method("ДокументDOM", "ДобавитьДочерний")
+            .expect("DOM append-child method must exist by Russian names");
+        let via_en = data
+            .get_method("DOMDocument", "AppendChild")
+            .expect("DOM append-child method must exist by English names");
+        let expected = "АтрибутDOM, ДокументDOM, ЭлементDOM, ОпределениеТипаДокументаDOM, НотацияDOM, АтрибутHTML, ЭлементHTML, ЭлементКнопкаHTML, ЭлементВводаHTML, ЭлементЗаголовокHTML";
+
+        assert_eq!(via_ru.id, 2231, "overlay must preserve the extracted method ID");
+        assert_eq!(via_ru.id, via_en.id, "RU and EN names must resolve to one method");
+        assert_eq!(via_ru.parameters.len(), 1, "overlay must preserve parameter order");
+        assert_eq!(via_ru.parameters[0].param_type.as_deref(), Some(expected));
+        assert_eq!(via_en.parameters[0].param_type.as_deref(), Some(expected));
     }
 
     #[test]
@@ -1502,6 +1536,56 @@ mod tests {
         let m_en = find_prefixed_method("InformationRegisterRecordSet", "Read")
             .expect("Read must resolve bilingually");
         assert_eq!(m.id, m_en.id);
+    }
+
+    #[test]
+    fn prefixed_methods_resolve_bilingual_case_insensitively_in_stable_id_order() {
+        let ru = find_prefixed_methods("InformationRegisterManager", "Выбрать");
+        let en = find_prefixed_methods("InformationRegisterManager", "Select");
+        let mixed = find_prefixed_methods("InformationRegisterManager", "sElEcT");
+
+        let ru_ids: Vec<u32> = ru.iter().map(|method| method.id).collect();
+        let en_ids: Vec<u32> = en.iter().map(|method| method.id).collect();
+        let mixed_ids: Vec<u32> = mixed.iter().map(|method| method.id).collect();
+
+        assert_eq!(ru_ids, vec![174]);
+        assert_eq!(ru_ids, en_ids);
+        assert_eq!(ru_ids, mixed_ids);
+        assert!(ru_ids.windows(2).all(|ids| ids[0] < ids[1]));
+    }
+
+    #[test]
+    fn prefixed_methods_deduplicate_ids_and_sort_stably() {
+        let information = find_prefixed_methods("InformationRegisterManager", "Select");
+        let accumulation = find_prefixed_methods("AccumulationRegisterManager", "Select");
+
+        let deduplicated = sort_and_deduplicate_methods(vec![
+            accumulation[0].clone(),
+            information[0].clone(),
+            information[0].clone(),
+        ]);
+        let ids: Vec<u32> = deduplicated.iter().map(|method| method.id).collect();
+
+        assert_eq!(ids, vec![174, 525]);
+    }
+
+    #[test]
+    fn prefixed_methods_unknown_name_is_empty() {
+        assert!(
+            find_prefixed_methods("InformationRegisterManager", "NotAPlatformMethod").is_empty()
+        );
+    }
+
+    #[test]
+    fn prefixed_methods_do_not_cross_manager_families() {
+        assert_eq!(
+            find_prefixed_methods("InformationRegisterManager", "Select")
+                .iter()
+                .map(|method| method.id)
+                .collect::<Vec<_>>(),
+            vec![174]
+        );
+        assert!(find_prefixed_methods("InformationRegisterRecordSet", "Select").is_empty());
     }
 
     #[test]

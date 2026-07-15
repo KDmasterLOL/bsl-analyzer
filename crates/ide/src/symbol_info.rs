@@ -197,8 +197,9 @@ fn resolve_single(
 
     // A bare platform global function (`СтрНайти`, `ТекущаяДата`, …).
     let callee = CalleeKind::GlobalFunction { name: name.into() };
-    let sig = build_signature(db, FileId(0), &callee)?;
-    Some(card_from_platform_sig(symbol, &sig, req))
+    let sigs = build_signature(db, FileId(0), &callee)?;
+    let sig = sigs.first()?;
+    Some(card_from_platform_sig(symbol, sig, req))
 }
 
 /// `<A>.<B>`: a common-module method, a whole metadata object, or a platform type method.
@@ -217,13 +218,15 @@ fn resolve_pair(
             module_index.canonical_common_module_name(&Name::new(a)).unwrap_or(a).to_string();
         let callee =
             CalleeKind::CommonModuleMethod { module: Name::new(&display), method: Name::new(b) };
-        if let Some(sig) = build_signature(db, module_file, &callee) {
-            let container = SymbolContainer {
-                kind: "ОбщийМодуль".to_string(),
-                name: display,
-                context: module_context(db, ModuleId::new(module_file)),
-            };
-            return Some(card_from_method_sig(db, symbol, &sig, Some(container), req));
+        if let Some(sigs) = build_signature(db, module_file, &callee) {
+            if let Some(sig) = sigs.first() {
+                let container = SymbolContainer {
+                    kind: "ОбщийМодуль".to_string(),
+                    name: display,
+                    context: module_context(db, ModuleId::new(module_file)),
+                };
+                return Some(card_from_method_sig(db, symbol, sig, Some(container), req));
+            }
         }
     }
 
@@ -237,8 +240,10 @@ fn resolve_pair(
     // A platform type method (`Массив.Добавить`) — brief card; full reference lives in
     // `syntax_help`.
     let callee = CalleeKind::PlatformMethod { type_name: a.into(), method_name: b.into() };
-    if let Some(sig) = build_signature(db, FileId(0), &callee) {
-        return Some(card_from_platform_sig(symbol, &sig, req));
+    if let Some(sigs) = build_signature(db, FileId(0), &callee) {
+        if let Some(sig) = sigs.first() {
+            return Some(card_from_platform_sig(symbol, sig, req));
+        }
     }
 
     None
@@ -274,19 +279,18 @@ fn resolve_triple(
     {
         let module_id = ModuleId::new(module_file);
         let callee = CalleeKind::LocalMethod { module_id, method: method.clone() };
-        if let Some(sig) = build_signature(db, module_file, &callee) {
-            // A qualified `<Object>.<Method>` names an EXTERNALLY addressable method; the object
-            // /record-set adapter (LocalMethod) resolves any method, so gate on `is_export` to
-            // match the visibility contract the common/manager adapters already enforce.
-            if !sig.is_export {
-                return None;
+        if let Some(sigs) = build_signature(db, module_file, &callee) {
+            if let Some(sig) = sigs.first() {
+                if !sig.is_export {
+                    return None;
+                }
+                let container = SymbolContainer {
+                    kind: mdo_type.russian_name().to_string(),
+                    name: b.to_string(),
+                    context: None,
+                };
+                return Some(card_from_method_sig(db, symbol, sig, Some(container), req));
             }
-            let container = SymbolContainer {
-                kind: mdo_type.russian_name().to_string(),
-                name: b.to_string(),
-                context: None,
-            };
-            return Some(card_from_method_sig(db, symbol, &sig, Some(container), req));
         }
     }
 
@@ -299,13 +303,15 @@ fn resolve_triple(
     if let Some(module_file) =
         module_index.resolve_manager(ManagerType::from_mdo_type(mdo_type)?, &object)
     {
-        if let Some(sig) = build_signature(db, module_file, &callee) {
-            let container = SymbolContainer {
-                kind: format!("Менеджер{}", mdo_type.russian_name()),
-                name: b.to_string(),
-                context: None,
-            };
-            return Some(card_from_method_sig(db, symbol, &sig, Some(container), req));
+        if let Some(sigs) = build_signature(db, module_file, &callee) {
+            if let Some(sig) = sigs.first() {
+                let container = SymbolContainer {
+                    kind: format!("Менеджер{}", mdo_type.russian_name()),
+                    name: b.to_string(),
+                    context: None,
+                };
+                return Some(card_from_method_sig(db, symbol, sig, Some(container), req));
+            }
         }
     }
 

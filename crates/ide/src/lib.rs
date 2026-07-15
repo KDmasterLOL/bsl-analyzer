@@ -58,7 +58,7 @@ pub use ide_diagnostics::{
 };
 pub use inlay_hints::{InlayHint, InlayHintKind};
 pub use rename::{prepare_rename, rename, RenameError, RenameTarget};
-pub use signature_help::{ParameterInfo, SignatureHelp};
+pub use signature_help::{ParameterInfo, SignatureHelp, SignatureInformation};
 pub use symbol_info::{
     symbol_info, SymbolContainer, SymbolDefinition, SymbolInfoCard, SymbolInfoRequest,
     SymbolInfoSections, SymbolMember, SymbolPosition,

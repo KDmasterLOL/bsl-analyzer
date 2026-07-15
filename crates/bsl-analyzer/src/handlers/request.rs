@@ -1174,33 +1174,41 @@ pub fn handle_signature_help(
 }
 
 fn to_lsp_signature_help(sh: ide::SignatureHelp) -> lsp_types::SignatureHelp {
-    let parameters: Vec<_> = sh
-        .parameters
+    let signatures: Vec<_> = sh
+        .signatures
         .iter()
-        .map(|p| lsp_types::ParameterInformation {
-            label: lsp_types::ParameterLabel::Simple(p.label.clone()),
-            documentation: p.documentation.as_ref().map(|d| {
-                lsp_types::Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: d.clone(),
+        .map(|sig| {
+            let parameters: Vec<_> = sig
+                .parameters
+                .iter()
+                .map(|p| lsp_types::ParameterInformation {
+                    label: lsp_types::ParameterLabel::Simple(p.label.clone()),
+                    documentation: p.documentation.as_ref().map(|d| {
+                        lsp_types::Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: d.clone(),
+                        })
+                    }),
                 })
-            }),
+                .collect();
+
+            lsp_types::SignatureInformation {
+                label: sig.signature.clone(),
+                documentation: sig.doc.as_ref().map(|d| {
+                    lsp_types::Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: d.clone(),
+                    })
+                }),
+                parameters: Some(parameters),
+                active_parameter: None,
+            }
         })
         .collect();
 
     lsp_types::SignatureHelp {
-        signatures: vec![lsp_types::SignatureInformation {
-            label: sh.signature,
-            documentation: sh.doc.map(|d| {
-                lsp_types::Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: d,
-                })
-            }),
-            parameters: Some(parameters),
-            active_parameter: sh.active_parameter.map(|i| i as u32),
-        }],
-        active_signature: Some(0),
+        signatures,
+        active_signature: sh.active_signature.map(|i| i as u32),
         active_parameter: sh.active_parameter.map(|i| i as u32),
     }
 }
@@ -3372,5 +3380,45 @@ mod tests {
 
         let result = handle_completion(ctx, params);
         assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn signature_help_maps_all_overloads_to_lsp() {
+        let help = ide::SignatureHelp {
+            signatures: vec![
+                ide::SignatureInformation {
+                    signature: "Добавить(Значение)".to_string(),
+                    doc: None,
+                    parameters: vec![ide::ParameterInfo {
+                        label: "Значение".to_string(),
+                        documentation: None,
+                    }],
+                },
+                ide::SignatureInformation {
+                    signature: "Добавить(Значение, ТипОбхода)".to_string(),
+                    doc: None,
+                    parameters: vec![
+                        ide::ParameterInfo {
+                            label: "Значение".to_string(), documentation: None
+                        },
+                        ide::ParameterInfo {
+                            label: "ТипОбхода".to_string(), documentation: None
+                        },
+                    ],
+                },
+            ],
+            active_signature: Some(1),
+            active_parameter: Some(0),
+        };
+
+        let lsp = to_lsp_signature_help(help);
+        assert_eq!(lsp.signatures.len(), 2, "both overloads must be mapped");
+        assert_eq!(lsp.signatures[0].label, "Добавить(Значение)", "first signature label mismatch");
+        assert_eq!(
+            lsp.signatures[1].label, "Добавить(Значение, ТипОбхода)",
+            "second signature label mismatch"
+        );
+        assert_eq!(lsp.active_signature, Some(1), "active signature must be preserved");
+        assert_eq!(lsp.active_parameter, Some(0), "active parameter must be preserved");
     }
 }

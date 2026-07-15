@@ -822,8 +822,9 @@ fn complete_global_functions(matcher: &PrefixMatcher, env: &EnvFilter) -> Vec<Co
 
 fn render_global_function(function: &GlobalFunction) -> CompletionItem {
     let docs = PlatformDataInner::instance().get_global_function_docs(function.id);
-    let sig = symbol_info::from_global_function(function, docs.as_ref());
-    super::platform_completion::item_from_signature(&sig)
+    let sigs = symbol_info::from_global_function(function, docs.as_ref());
+    let sig = sigs.first().expect("from_global_function returns at least one signature");
+    super::platform_completion::item_from_signature(sig)
 }
 
 fn get_keyword_info(keyword: &str) -> (String, String) {

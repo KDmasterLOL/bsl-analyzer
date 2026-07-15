@@ -14,7 +14,7 @@ pub(super) fn build(
     mdo_type: MdoType,
     object: &Name,
     method: &Name,
-) -> Option<SymbolSignature> {
+) -> Option<Vec<SymbolSignature>> {
     let manager_type = ManagerType::from_mdo_type(mdo_type)?;
 
     let source_root_input = db.file_source_root_input(caller_file);
@@ -51,7 +51,8 @@ pub(super) fn build(
 
     let qualifier = format!("{}.{}.", russian_plural(mdo_type), object.as_str());
 
-    Some(SymbolSignature {
+    Some(vec![SymbolSignature {
+        candidate_ordinal: Some(0),
         kind,
         name_russian: SmolStr::new(method.as_str()),
         name_english: None,
@@ -67,5 +68,6 @@ pub(super) fn build(
         is_export: method_symbol.is_export,
         source: SignatureSource::ManagerModule,
         method_id: Some(method_symbol.id),
-    })
+        platform_id: None,
+    }])
 }

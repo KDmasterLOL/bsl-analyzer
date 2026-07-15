@@ -144,9 +144,13 @@ fn signature_help_for_bare_global_export() {
         .signature_help(FileId::from_raw(CALLER_ID), offset)
         .expect("signature help for a bare global export");
     assert!(
-        help.signature.contains("ГлобальнаяСервернаяПроцедура"),
+        help.signatures
+            .first()
+            .expect("at least one signature")
+            .signature
+            .contains("ГлобальнаяСервернаяПроцедура"),
         "signature must name the global export, got {:?}",
-        help.signature
+        help.signatures.first().expect("at least one signature").signature
     );
 }
 
@@ -179,12 +183,13 @@ fn bare_global_call_runs_full_call_contract() {
     let caller = "Процедура Тест()\n    ГлобальнаяСервернаяПроцедура(1);\nКонецПроцедуры\n";
     let db = build_db(caller);
     let result = db.infer(FileId::from_raw(CALLER_ID));
-    let diagnostics = format!("{:?}", result.diagnostics);
+    let arg_diagnostics = db.arg_diagnostics(FileId::from_raw(CALLER_ID));
 
     assert!(
-        diagnostics.contains("MismatchedArgCount"),
-        "bare global export call must be argument-count checked, got {diagnostics}"
+        format!("{arg_diagnostics:?}").contains("MismatchedArgCount"),
+        "bare global export call must be argument-count checked, got {arg_diagnostics:?}"
     );
+    let diagnostics = format!("{:?}", result.diagnostics);
     assert!(
         !diagnostics.contains("UnresolvedMethodCall"),
         "a resolved global export must not be reported unresolved, got {diagnostics}"
