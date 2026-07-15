@@ -36,10 +36,9 @@ fn extract_common_module_name(path: &str) -> Option<String> {
 
     let (prefix, prefix_len) = if let Some(idx) = lower.find("commonmodules/") {
         (idx, "commonmodules/".len())
-    } else if let Some(idx) = lower.find("общиемодули/") {
-        (idx, "общиемодули/".len())
     } else {
-        return None;
+        let idx = lower.find("общиемодули/")?;
+        (idx, "общиемодули/".len())
     };
 
     if !lower.ends_with("/module.bsl") && !lower.ends_with("/ext/module.bsl") {

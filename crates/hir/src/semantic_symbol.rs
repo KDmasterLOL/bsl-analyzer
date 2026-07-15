@@ -441,10 +441,9 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
         }
         let scopes = if let Some(proc_def) = ast::ProcedureDef::cast(method_node.clone()) {
             ExprScopes::from_procedure(&proc_def)
-        } else if let Some(func_def) = ast::FunctionDef::cast(method_node.clone()) {
-            ExprScopes::from_function(&func_def)
         } else {
-            return None;
+            let func_def = ast::FunctionDef::cast(method_node.clone())?;
+            ExprScopes::from_function(&func_def)
         };
         let scopes = Arc::new(scopes);
         self.expr_scopes.borrow_mut().insert(local_id, scopes.clone());
