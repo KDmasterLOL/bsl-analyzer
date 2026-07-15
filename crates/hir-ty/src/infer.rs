@@ -11,7 +11,9 @@ use hir_def::effective_module::EffectiveModuleId;
 use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
 use hir_def::symbol_tree::SymbolTree;
-use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
+use hir_def::{
+    sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId, StmtId,
+};
 use once_cell::sync::Lazy;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -1052,6 +1054,83 @@ impl<'db> InferenceContext<'db> {
     fn body_declares_binding(&self, name: &hir_def::Name) -> bool {
         let target = name.as_str().fold_lower();
         self.body.bindings_iter().any(|(_, b)| b.name.as_str().fold_lower() == target)
+    }
+
+    /// True when the receiver is a reassigned local variable and a definition
+    /// that actually reaches this use either resolves the method or cannot be
+    /// typed. Sequential inference records the textually-last assignment type,
+    /// so at a use inside a sibling branch the receiver type may be a
+    /// cross-branch artefact; reaching definitions restore the flow facts and
+    /// keep the diagnostic alive when the stale type is the only one that
+    /// reaches (e.g. straight-line reassignment).
+    fn method_resolves_on_alternate_assignment(
+        &self,
+        receiver_expr: ExprId,
+        receiver_ty: TypeId,
+        method_name: &hir_def::Name,
+    ) -> bool {
+        let Expr::Path(name) = self.body.expr(receiver_expr) else {
+            return false;
+        };
+        let key = name.as_str().fold_lower();
+        let Some(info) = self.implicit_locals.get(&key) else {
+            return false;
+        };
+        if info.assignments.len() < 2 {
+            return false;
+        }
+
+        let vouches = |ty: TypeId| {
+            ty != receiver_ty
+                && (self.is_unknown(ty)
+                    || crate::method_lookup::lookup_method(self.db, ty, method_name).is_some())
+        };
+
+        // Without flow facts a non-reaching assignment must not vouch for the
+        // call (it would hide a real error after a straight-line
+        // reassignment), so no reaching definitions — no suppression.
+        let Some(reaching) = self.reaching_assignment_types(receiver_expr, &key) else {
+            return false;
+        };
+        reaching.iter().any(|ty| match ty {
+            Some(ty) => vouches(*ty),
+            // A reaching definition inference could not type (e.g. a loop
+            // back-edge not seen yet) — "method not found" is unprovable.
+            None => true,
+        })
+    }
+
+    /// Types of the assignments reaching `use_expr` for variable `var_key`.
+    /// `None` per entry when the defining statement's value has no recorded
+    /// type; `None` overall when reaching definitions are unavailable for the
+    /// owner.
+    fn reaching_assignment_types(
+        &self,
+        use_expr: ExprId,
+        var_key: &str,
+    ) -> Option<Vec<Option<TypeId>>> {
+        let DefWithBodyId::Method(local_id) = self.owner else {
+            return None;
+        };
+        let stmt_id = self.body.enclosing_stmt(use_expr)?;
+        let module_defs = self.db.module_reaching_definitions(self.context_file_id);
+        let method_defs = module_defs.get(local_id)?;
+        let defs = method_defs.defs_for_var_at_stmt(var_key, stmt_id)?;
+        Some(
+            defs.into_iter()
+                .map(|def| match def.def_site {
+                    dataflow::reaching_defs::DefSite::Assignment(stmt_raw) => {
+                        match self.body.stmt(StmtId::from_raw(stmt_raw)) {
+                            Stmt::Assign { value, .. } => {
+                                self.expr_types.get(&ExprId::from_idx(*value)).copied()
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect(),
+        )
     }
 
     pub fn infer_all(&mut self) {
@@ -2096,7 +2175,20 @@ impl<'db> InferenceContext<'db> {
                     self.record_candidate_call_arg_binding(callee, args, candidates)
                 }
                 None => {
-                    if let Some(receiver_name) = receiver_display_name(self.db, receiver_ty) {
+                    if self.method_resolves_on_alternate_assignment(
+                        base_id,
+                        receiver_ty,
+                        &method_name,
+                    ) {
+                        // Inference is sequential, so at this use the variable
+                        // carries the type of its textually-last assignment even
+                        // when that assignment lives in a sibling branch that
+                        // cannot reach this use. If any other recorded assignment
+                        // type resolves the method, the receiver type is a
+                        // cross-branch artefact — stay silent instead of
+                        // reporting a false unresolved call.
+                    } else if let Some(receiver_name) = receiver_display_name(self.db, receiver_ty)
+                    {
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                             expr: callee,
                             receiver_name,

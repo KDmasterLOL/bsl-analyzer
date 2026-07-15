@@ -18,7 +18,9 @@ use vfs::FileId;
 use crate::call_resolution::CallCandidateSet;
 use crate::db::HirDatabase;
 use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
-use crate::platform_type_name::is_tabular_row_name;
+use crate::platform_type_name::{
+    is_form_data_collection_item_type_name, is_row_like_platform_type_name,
+};
 
 mod union;
 
@@ -436,9 +438,25 @@ fn lookup_on_metadata_ref(
     name: &Name,
     method_name: &Name,
 ) -> Option<MethodInfo> {
+    // The tabular-section facets are context-ambiguous by design: the same
+    // `TabularSection` / `TabularSectionRow` value stands for the object's real
+    // tabular section AND for its form representation (ДанныеФормыКоллекция /
+    // ДанныеФормыЭлементКоллекции), because the form-data rewrites collapse
+    // both onto one facet to keep the row schema. Method lookup must therefore
+    // unite both contexts' method tables — accepting that a form-only method
+    // (НайтиПоИдентификатору, ПолучитьИдентификатор) called on a real object
+    // tabular section is no longer flagged — otherwise the form side drowns in
+    // false unresolved-method reports.
     if let MetadataKind::TabularSection { parent } = kind {
+        let data = PlatformData::instance();
+        let method = data
+            .get_method("Tabular section", method_name.as_str())
+            .or_else(|| data.get_method("FormDataCollection", method_name.as_str()))?;
+        return Some(build_tabular_section_method_info(db, method, parent, name));
+    }
+    if let MetadataKind::TabularSectionRow { parent } = kind {
         let method =
-            PlatformData::instance().get_method("Tabular section", method_name.as_str())?;
+            PlatformData::instance().get_method("FormDataCollectionItem", method_name.as_str())?;
         return Some(build_tabular_section_method_info(db, method, parent, name));
     }
     if let Some(res) = crate::platform_manager_lookup::resolve_platform_metadata_ref_method(
@@ -581,11 +599,6 @@ fn rewrite_form_data_collection_item_return(
     }
 }
 
-fn is_form_data_collection_item_type_name(name: &str) -> bool {
-    stdx::case::eq_ignore_case(name, "ДанныеФормыЭлементКоллекции")
-        || stdx::case::eq_ignore_case(name, "FormDataCollectionItem")
-}
-
 pub(crate) fn to_method_info(db: &dyn TypeKernelDb, method: &PlatformMethod) -> MethodInfo {
     let return_ty = method
         .return_type
@@ -660,7 +673,7 @@ fn rewrite_row_generic(
     section_name: &Name,
 ) -> TypeId {
     match db.lookup_type(id) {
-        TypeKind::PlatformObject(f) if is_tabular_row_name(&f.name) => db.metadata_ref(
+        TypeKind::PlatformObject(f) if is_row_like_platform_type_name(&f.name) => db.metadata_ref(
             MetadataKind::TabularSectionRow { parent },
             section_name.as_str().to_string(),
             &RootConfigCtx,

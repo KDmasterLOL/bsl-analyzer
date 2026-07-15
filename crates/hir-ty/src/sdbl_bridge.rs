@@ -3,7 +3,7 @@ use stdx::case::CaseExt;
 
 use bsl_metadata::MdoType;
 use bsl_types::builders::Builders;
-use bsl_types::facet::{DateComponent, SdblTypeShadowFacet, TableSource};
+use bsl_types::facet::{DateComponent, ProjectionSource, SdblTypeShadowFacet, TableSource};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{
     Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin, TypeId,
@@ -35,11 +35,10 @@ pub fn sdbl_type_to_typeid(db: &dyn TypeKernelDb, t: &sdbl_hir::SdblType) -> Typ
         S::Composite { types } => {
             db.union(types.iter().map(|t| sdbl_type_to_typeid(db, t)).collect())
         }
-        S::TabularSectionRef { parent_mdo_type, parent_mdo_name, ts_name } => db.metadata_ref(
-            MetadataKind::TabularSection { parent: *parent_mdo_type },
-            format!("{parent_mdo_name}.{ts_name}"),
-            &RootConfigCtx,
-        ),
+        // A nested-table field of a query result is a РезультатЗапроса at
+        // runtime (it is selected, not the object's tabular section), so it
+        // must answer Выбрать/Выгрузить rather than the tabular-section API.
+        S::TabularSectionRef { .. } => db.query_result(None, ProjectionSource::Sdbl),
         S::Unknown | S::Error => db.unknown(),
     }
 }
@@ -259,11 +258,7 @@ mod tests {
                     parent_mdo_name: "Номенклатура".to_string(),
                     ts_name: "Товары".to_string(),
                 },
-                db.metadata_ref(
-                    MetadataKind::TabularSection { parent: MdoType::Catalog },
-                    "Номенклатура.Товары".to_string(),
-                    &RootConfigCtx,
-                ),
+                db.query_result(None, ProjectionSource::Sdbl),
             ),
         ];
         for (t, expected) in &cases {
@@ -373,21 +368,14 @@ mod tests {
     }
 
     #[test]
-    fn tabular_section_ref_carries_parent_pair() {
+    fn tabular_section_ref_bridges_to_query_result() {
         let db = InMemoryDb::new();
         let t = SdblType::TabularSectionRef {
             parent_mdo_type: MdoType::Document,
             parent_mdo_name: "ПКО".to_string(),
             ts_name: "Товары".to_string(),
         };
-        assert_eq!(
-            sdbl_type_to_typeid(&db, &t),
-            db.metadata_ref(
-                MetadataKind::TabularSection { parent: MdoType::Document },
-                "ПКО.Товары".to_string(),
-                &RootConfigCtx,
-            ),
-        );
+        assert_eq!(sdbl_type_to_typeid(&db, &t), db.query_result(None, ProjectionSource::Sdbl));
     }
 
     #[test]
