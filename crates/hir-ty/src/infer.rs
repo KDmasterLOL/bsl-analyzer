@@ -58,7 +58,7 @@ pub(crate) mod heap_estimate {
     /// Approximate live bytes of an `FxHashMap`/hashbrown table holding `len`
     /// entries of `(K, V)`: one control byte plus the `(K, V)` slot per bucket,
     /// with bucket count grown to the next power of two above `len / (7/8)`.
-    pub(super) fn map_table_bytes<K, V>(len: usize) -> usize {
+    pub(crate) fn map_table_bytes<K, V>(len: usize) -> usize {
         if len == 0 {
             return 0;
         }

@@ -17,9 +17,16 @@ pub struct ProcSignature {
     pub return_ty: TypeId,
 }
 
+/// Approximate live heap of a memoised signature, for salsa's `heap_size` hook
+/// (otherwise only the `Arc` pointer is visible in the memory report): the boxed
+/// struct plus its param vector of interned `Copy` type ids.
+pub(crate) fn proc_signature_heap(v: &Arc<ProcSignature>) -> usize {
+    std::mem::size_of::<ProcSignature>() + v.params.len() * std::mem::size_of::<TypeId>()
+}
+
 // Cross-module call-resolution currency (declared params + return type, cheap):
 // high cap keeps it across chunk-boundary LRU trims so dependent chunks reuse it.
-#[salsa::tracked(lru = 262144, returns(ref))]
+#[salsa::tracked(lru = 262144, heap_size = proc_signature_heap, returns(ref))]
 pub fn proc_signature_query<'db>(
     db: &'db dyn HirDatabase,
     method_input: MethodIdInput<'db>,
