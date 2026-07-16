@@ -47,6 +47,14 @@ pub struct PlatformDataInner {
     /// per-entry facts that differ between the homonyms (availability,
     /// deprecation) are unreliable for these names.
     ambiguous_type_names: rustc_hash::FxHashSet<SmolStr>,
+    /// Folded names (RU and EN) of every standard property contributed by a
+    /// per-MDO form extension (`… form extension …`), e.g. the report form's
+    /// `ВариантМодифицирован`. The base form contract is deliberately excluded
+    /// here — callers pick the managed/ordinary base themselves so an
+    /// ordinary-only property is not skipped in a managed form and vice versa.
+    /// Writing an extension property is a side effect on the form context, never
+    /// a dead local, so the unused-local-variable check skips these.
+    form_extension_property_names: rustc_hash::FxHashSet<SmolStr>,
 }
 
 impl PlatformDataInner {
@@ -220,6 +228,25 @@ impl PlatformDataInner {
             global_properties_by_name.insert(en_key, idx);
         }
 
+        // `ВариантМодифицирован` and the rest of the per-MDO extension surface
+        // live on `… form extension …` types, not on the base form contract.
+        // Union every such extension property name so the unused-local check does
+        // not have to know which extension a given form pulls in; the base
+        // contract stays out so the caller's managed/ordinary base choice is
+        // preserved. `Form extension for a … field` types are field/control
+        // extensions, not form-context ones — their properties (`Документ`,
+        // `Ориентация`, …) are ordinary member names, so excluding them keeps a
+        // dead `Документ = …` local reportable.
+        let mut form_extension_property_names: rustc_hash::FxHashSet<SmolStr> =
+            rustc_hash::FxHashSet::default();
+        for prop in &properties {
+            let type_key = prop.type_name.fold_lower();
+            if type_key.contains("form extension") && !type_key.contains("form extension for a") {
+                form_extension_property_names.insert(prop.name.fold_lower().into());
+                form_extension_property_names.insert(prop.english_name.fold_lower().into());
+            }
+        }
+
         Self {
             types,
             types_by_name,
@@ -241,6 +268,7 @@ impl PlatformDataInner {
             property_docs_by_id,
             global_properties_by_name,
             ambiguous_type_names,
+            form_extension_property_names,
         }
     }
 
@@ -346,6 +374,15 @@ impl PlatformDataInner {
             Some(idxs) => idxs.iter().map(|&i| &self.properties[i]).collect(),
             None => Vec::new(),
         }
+    }
+
+    /// Folded names (RU and EN) of every standard property contributed by a
+    /// per-MDO form extension. The base form contract is not included — resolve
+    /// it via [`get_type_properties`] with the correct managed/ordinary form
+    /// type. Assigning an extension property from a form module writes the form
+    /// context, so the unused-local-variable check treats these as non-locals.
+    pub fn form_extension_property_names(&self) -> &rustc_hash::FxHashSet<SmolStr> {
+        &self.form_extension_property_names
     }
 
     pub fn get_manager_properties(&self, manager_prefix: &str) -> Vec<&PlatformProperty> {
