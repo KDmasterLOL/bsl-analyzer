@@ -47,6 +47,15 @@ pub struct RoleObjectRef {
     pub restrictions: Vec<String>,
 }
 
+impl RoleObjectRef {
+    /// Heap bytes owned by this reference: its name plus the restriction-text vec.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + stdx::heap::vec_bytes::<String>(self.restrictions.len())
+            + self.restrictions.iter().map(String::capacity).sum::<usize>()
+    }
+}
+
 impl Role {
     pub fn new(name: impl Into<String>) -> Self {
         Self { uuid: Uuid::new_v4(), name: name.into(), data: RoleData::default() }
@@ -71,6 +80,13 @@ impl Role {
     /// Metadata objects this role grants rights on (excludes the `Configuration.*` pseudo-object).
     pub fn objects(&self) -> &[RoleObjectRef] {
         &self.data.objects
+    }
+
+    /// Heap bytes owned by this role, memoised by `ide-db`'s `parse_role_query`
+    /// for Salsa's `heap_size` hook: its name plus its data's own owned payload.
+    /// New heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity() + self.data.estimated_heap_size()
     }
 }
 
@@ -107,6 +123,13 @@ impl RoleData {
     pub fn with_objects(mut self, objects: Vec<RoleObjectRef>) -> Self {
         self.objects = objects;
         self
+    }
+
+    /// Heap bytes owned by this data: the object-reference vec and each
+    /// reference's own owned payload (the three bool flags cost nothing).
+    pub fn estimated_heap_size(&self) -> usize {
+        stdx::heap::vec_bytes::<RoleObjectRef>(self.objects.len())
+            + self.objects.iter().map(RoleObjectRef::estimated_heap_size).sum::<usize>()
     }
 }
 

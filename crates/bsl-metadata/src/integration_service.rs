@@ -31,6 +31,20 @@ impl IntegrationService {
             (!h.is_empty()).then_some(h)
         })
     }
+
+    /// Heap bytes owned by this service, memoised by `ide-db`'s
+    /// `parse_integration_service_query` for Salsa's `heap_size` hook: its name
+    /// plus the channel vec and each channel's own owned payload. New
+    /// heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + stdx::heap::vec_bytes::<IntegrationServiceChannel>(self.channels.len())
+            + self
+                .channels
+                .iter()
+                .map(IntegrationServiceChannel::estimated_heap_size)
+                .sum::<usize>()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +64,11 @@ impl IntegrationServiceChannel {
 
     pub fn receive_message_processing(&self) -> &str {
         &self.receive_message_processing
+    }
+
+    /// Heap bytes owned by this channel: its name/handler strings.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity() + self.receive_message_processing.capacity()
     }
 }
 

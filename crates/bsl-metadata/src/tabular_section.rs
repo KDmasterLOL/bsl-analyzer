@@ -80,6 +80,21 @@ impl TabularSection {
     pub fn set_use_mode(&mut self, use_mode: Option<String>) {
         self.use_mode = use_mode;
     }
+
+    /// Heap bytes owned by this tabular section: its name strings plus the
+    /// backing attribute vec and each attribute's own owned payload.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.name_en.as_ref().map_or(0, String::capacity)
+            + self.synonym.as_ref().map_or(0, String::capacity)
+            + self.use_mode.as_ref().map_or(0, String::capacity)
+            + stdx::heap::vec_bytes::<TabularSectionAttribute>(self.attributes.len())
+            + self
+                .attributes
+                .iter()
+                .map(TabularSectionAttribute::estimated_heap_size)
+                .sum::<usize>()
+    }
 }
 
 impl TabularSectionAttribute {
@@ -105,6 +120,14 @@ impl TabularSectionAttribute {
 
     pub fn set_name_en(&mut self, name_en: Option<String>) {
         self.name_en = name_en;
+    }
+
+    /// Heap bytes owned by this attribute: its name strings plus its type's own
+    /// owned payload.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.name_en.as_ref().map_or(0, String::capacity)
+            + self.attr_type.estimated_heap_size()
     }
 }
 

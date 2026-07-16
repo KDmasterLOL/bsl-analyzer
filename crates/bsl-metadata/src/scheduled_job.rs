@@ -25,6 +25,13 @@ pub struct ScheduledJobHandler {
     pub method_name: String,
 }
 
+impl ScheduledJobHandler {
+    /// Heap bytes owned by this parsed handler: its module/method name strings.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.module_name.capacity() + self.method_name.capacity()
+    }
+}
+
 impl ScheduledJob {
     #[cfg(test)]
     pub fn new(name: impl Into<String>, method_name: impl Into<String>) -> Self {
@@ -79,6 +86,13 @@ impl ScheduledJob {
             module_name: parts[1].to_string(),
             method_name: parts.get(2).map(|s| s.to_string()).unwrap_or_default(),
         })
+    }
+
+    /// Heap bytes owned by this scheduled job, memoised by `ide-db`'s
+    /// `parse_scheduled_job_query` for Salsa's `heap_size` hook: its name plus
+    /// its method-name string. New heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity() + self.method_name.capacity()
     }
 }
 

@@ -28,6 +28,18 @@ impl WebService {
     pub fn uri(&self) -> Option<&str> {
         self.uri.as_deref()
     }
+
+    /// Heap bytes owned by this service, memoised by `ide-db`'s
+    /// `parse_web_service_query` for Salsa's `heap_size` hook: its name/
+    /// namespace/URI strings plus the operation vec and each operation's own
+    /// owned payload. New heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.namespace.capacity()
+            + self.uri.as_ref().map_or(0, String::capacity)
+            + stdx::heap::vec_bytes::<WebServiceOperation>(self.operations.len())
+            + self.operations.iter().map(WebServiceOperation::estimated_heap_size).sum::<usize>()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +69,15 @@ impl WebServiceOperation {
     pub fn is_handler_empty(&self) -> bool {
         self.procedure_name.is_empty()
     }
+
+    /// Heap bytes owned by this operation: its name/procedure strings plus the
+    /// parameter vec and each parameter's own owned payload.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.procedure_name.capacity()
+            + stdx::heap::vec_bytes::<WebServiceParameter>(self.parameters.len())
+            + self.parameters.iter().map(WebServiceParameter::estimated_heap_size).sum::<usize>()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +92,11 @@ impl WebServiceParameter {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Heap bytes owned by this parameter: its name string.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
     }
 }
 

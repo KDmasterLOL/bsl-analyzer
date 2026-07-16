@@ -59,4 +59,16 @@ impl Subsystem {
             }
         }
     }
+
+    /// Heap bytes owned by this subsystem, memoised by `ide-db`'s
+    /// `parse_subsystem_query` for Salsa's `heap_size` hook: its name plus the
+    /// content and child-subsystem-name vecs. New heap-owning fields must be
+    /// added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + stdx::heap::vec_bytes::<(MdoType, Name)>(self.content.len())
+            + self.content.iter().map(|(_, name)| name.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<Name>(self.child_subsystems.len())
+            + self.child_subsystems.iter().map(String::capacity).sum::<usize>()
+    }
 }

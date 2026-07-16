@@ -3,6 +3,65 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use stdx::case::CaseExt;
 
+/// Heap-size estimators for Salsa's `memory_usage` introspection, wrapping each
+/// metadata substrate's own `estimated_heap_size` so it reads `None` (a query
+/// that found nothing) as zero.
+pub(crate) mod heap_estimate {
+    use std::sync::Arc;
+
+    pub(crate) fn mdo_heap(v: &Option<Arc<bsl_metadata::MetadataObject>>) -> usize {
+        v.as_ref().map_or(0, |m| m.estimated_heap_size())
+    }
+
+    pub(crate) fn register_heap(v: &Option<Arc<bsl_metadata::Register>>) -> usize {
+        v.as_ref().map_or(0, |r| r.estimated_heap_size())
+    }
+
+    pub(crate) fn defined_type_heap(v: &Option<Arc<bsl_metadata::DefinedType>>) -> usize {
+        v.as_ref().map_or(0, |dt| dt.estimated_heap_size())
+    }
+
+    pub(crate) fn common_module_heap(v: &Option<Arc<bsl_metadata::CommonModule>>) -> usize {
+        v.as_ref().map_or(0, |m| m.estimated_heap_size())
+    }
+
+    pub(crate) fn http_service_heap(v: &Option<Arc<bsl_metadata::HTTPService>>) -> usize {
+        v.as_ref().map_or(0, |s| s.estimated_heap_size())
+    }
+
+    pub(crate) fn web_service_heap(v: &Option<Arc<bsl_metadata::WebService>>) -> usize {
+        v.as_ref().map_or(0, |s| s.estimated_heap_size())
+    }
+
+    pub(crate) fn integration_service_heap(
+        v: &Option<Arc<bsl_metadata::IntegrationService>>,
+    ) -> usize {
+        v.as_ref().map_or(0, |s| s.estimated_heap_size())
+    }
+
+    pub(crate) fn event_subscription_heap(
+        v: &Option<Arc<bsl_metadata::EventSubscription>>,
+    ) -> usize {
+        v.as_ref().map_or(0, |s| s.estimated_heap_size())
+    }
+
+    pub(crate) fn scheduled_job_heap(v: &Option<Arc<bsl_metadata::ScheduledJob>>) -> usize {
+        v.as_ref().map_or(0, |j| j.estimated_heap_size())
+    }
+
+    pub(crate) fn role_heap(v: &Option<Arc<bsl_metadata::Role>>) -> usize {
+        v.as_ref().map_or(0, |r| r.estimated_heap_size())
+    }
+
+    pub(crate) fn subsystem_heap(v: &Option<Arc<bsl_metadata::Subsystem>>) -> usize {
+        v.as_ref().map_or(0, |s| s.estimated_heap_size())
+    }
+
+    pub(crate) fn configuration_heap(v: &Arc<bsl_metadata::Configuration>) -> usize {
+        v.estimated_heap_size()
+    }
+}
+
 #[salsa::interned(debug)]
 pub struct ConfigurationPathInput {
     pub path: String,
@@ -84,7 +143,11 @@ pub struct WorkspaceLoadStateInput {
 // re-enter the metadata loader's `rayon::scope` inside a worker thread), so an eviction
 // under the cap would let that load run in parallel and break the build's concurrency
 // invariant. 1024 is far above any real extension count while still bounded.
-#[salsa::tracked(lru = 1024, returns(clone))]
+#[salsa::tracked(
+    lru = 1024,
+    heap_size = heap_estimate::configuration_heap,
+    returns(clone)
+)]
 pub fn load_configuration<'db>(
     db: &'db dyn salsa::Database,
     path_input: ConfigurationPathInput<'db>,
@@ -117,7 +180,11 @@ pub fn load_configuration<'db>(
 /// heavily-extended project. Keyed on the two path inputs (which carry the config-root
 /// revisions), so the merge runs once per extension and re-runs only when a config
 /// actually changes. The result is identical to the inline merge, just shared.
-#[salsa::tracked(lru = 1024, returns(clone))]
+#[salsa::tracked(
+    lru = 1024,
+    heap_size = heap_estimate::configuration_heap,
+    returns(clone)
+)]
 pub fn merged_configuration<'db>(
     db: &'db dyn MetadataDb,
     main_input: ConfigurationPathInput<'db>,
@@ -177,7 +244,7 @@ fn warn_on_stem_name_divergence(kind: &str, stem_key: &str, xml_name: &str) {
 /// VFS (`file_text`). Memoised per MDO and backdated on an unchanged object, so a
 /// reload re-parses only the files that actually changed and only that object's
 /// consumers are invalidated.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::mdo_heap, returns(clone))]
 pub fn parse_mdo_query<'db>(
     db: &'db dyn base_db::SourceDatabase,
     files: MdoFiles<'db>,
@@ -426,7 +493,7 @@ pub fn resolve_metadata_object(
 /// [`MdoFiles`] (registers have no predefined sidecar) but a separate tracked fn,
 /// so a register and an object never share a memo. Backdates on an unchanged
 /// register.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::register_heap, returns(clone))]
 pub fn parse_register_query(
     db: &dyn base_db::SourceDatabase,
     files: MdoFiles<'_>,
@@ -494,7 +561,7 @@ pub struct DefinedTypeFile<'db> {
 /// so [`resolve_defined_type`] can flag a stem-vs-`<Name>` divergence, then projects
 /// to the underlying type (the resolution unit; an extension overlay replaces it
 /// wholesale). Backdates on an unchanged defined type.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::defined_type_heap, returns(clone))]
 pub fn parse_defined_type_query(
     db: &dyn base_db::SourceDatabase,
     file: DefinedTypeFile<'_>,
@@ -569,7 +636,7 @@ pub struct CommonModuleFile<'db> {
 /// VFS. The common-module counterpart of [`parse_defined_type_query`]; only metadata
 /// (flags + name) is read — the module body is resolved through the symbol tree.
 /// Backdates on unchanged metadata.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::common_module_heap, returns(clone))]
 pub fn parse_common_module_query(
     db: &dyn base_db::SourceDatabase,
     file: CommonModuleFile<'_>,
@@ -684,7 +751,7 @@ pub struct HTTPServiceFile<'db> {
     pub main: vfs::FileId,
 }
 
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::http_service_heap, returns(clone))]
 pub fn parse_http_service_query(
     db: &dyn crate::RootDatabase,
     file: HTTPServiceFile<'_>,
@@ -774,7 +841,7 @@ pub struct WebServiceFile<'db> {
     pub main: vfs::FileId,
 }
 
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::web_service_heap, returns(clone))]
 pub fn parse_web_service_query(
     db: &dyn crate::RootDatabase,
     file: WebServiceFile<'_>,
@@ -864,7 +931,7 @@ pub struct IntegrationServiceFile<'db> {
     pub main: vfs::FileId,
 }
 
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::integration_service_heap, returns(clone))]
 pub fn parse_integration_service_query(
     db: &dyn crate::RootDatabase,
     file: IntegrationServiceFile<'_>,
@@ -959,7 +1026,7 @@ pub struct EventSubscriptionFile<'db> {
 
 /// Parse one event subscription from its main XML, read through the versioned VFS.
 /// Backdates on unchanged metadata.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::event_subscription_heap, returns(clone))]
 pub fn parse_event_subscription_query(
     db: &dyn base_db::SourceDatabase,
     file: EventSubscriptionFile<'_>,
@@ -1032,7 +1099,7 @@ pub struct ScheduledJobFile<'db> {
 /// Parse one scheduled job from its main XML, read through the versioned VFS. The
 /// scheduled-job counterpart of [`parse_event_subscription_query`]; backdates on
 /// unchanged metadata.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::scheduled_job_heap, returns(clone))]
 pub fn parse_scheduled_job_query(
     db: &dyn base_db::SourceDatabase,
     file: ScheduledJobFile<'_>,
@@ -1102,7 +1169,7 @@ pub struct RoleFiles<'db> {
     pub rights: Option<vfs::FileId>,
 }
 
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::role_heap, returns(clone))]
 pub fn parse_role_query(
     db: &dyn base_db::SourceDatabase,
     files: RoleFiles<'_>,
@@ -1178,7 +1245,7 @@ pub struct SubsystemFile<'db> {
 /// Parse one subsystem from its main XML, read through the versioned VFS. The
 /// subsystem counterpart of [`parse_scheduled_job_query`]; backdates on
 /// unchanged metadata.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::subsystem_heap, returns(clone))]
 pub fn parse_subsystem_query(
     db: &dyn base_db::SourceDatabase,
     file: SubsystemFile<'_>,

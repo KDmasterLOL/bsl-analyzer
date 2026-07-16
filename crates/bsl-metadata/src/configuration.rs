@@ -615,6 +615,89 @@ impl Configuration {
         self.name_to_integration_service.insert(integration_service.name().fold_lower(), idx);
         self.integration_services.push(integration_service);
     }
+
+    /// Heap bytes owned by this configuration, memoised by `ide-db`'s
+    /// `load_configuration`/`merged_configuration` for Salsa's `heap_size` hook:
+    /// its name, every owned metadata-family vec (recursing into each entry's own
+    /// owned payload), and every `name -> index` lookup table `build_caches`
+    /// maintains alongside them. New heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        let mut bytes = self.name.capacity();
+
+        bytes += stdx::heap::vec_bytes::<CommonModule>(self.common_modules.len())
+            + self.common_modules.iter().map(CommonModule::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<MetadataObject>(self.metadata_objects.len())
+            + self.metadata_objects.iter().map(MetadataObject::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<Register>(self.registers.len())
+            + self.registers.iter().map(Register::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<EventSubscription>(self.event_subscriptions.len())
+            + self
+                .event_subscriptions
+                .iter()
+                .map(EventSubscription::estimated_heap_size)
+                .sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<DefinedType>(self.defined_types.len())
+            + self.defined_types.iter().map(DefinedType::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<ScheduledJob>(self.scheduled_jobs.len())
+            + self.scheduled_jobs.iter().map(ScheduledJob::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<Role>(self.roles.len())
+            + self.roles.iter().map(Role::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<crate::subsystem::Subsystem>(self.subsystems.len())
+            + self
+                .subsystems
+                .iter()
+                .map(crate::subsystem::Subsystem::estimated_heap_size)
+                .sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<HTTPService>(self.http_services.len())
+            + self.http_services.iter().map(HTTPService::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<WebService>(self.web_services.len())
+            + self.web_services.iter().map(WebService::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<crate::integration_service::IntegrationService>(
+            self.integration_services.len(),
+        ) + self
+            .integration_services
+            .iter()
+            .map(crate::integration_service::IntegrationService::estimated_heap_size)
+            .sum::<usize>();
+
+        bytes += name_index_heap(&self.uri_to_module);
+        bytes += name_index_heap(&self.uri_lower_to_common_module);
+        bytes += name_index_heap(&self.name_to_common_module);
+        bytes += name_index_heap(&self.name_to_register);
+        bytes += name_index_heap(&self.name_to_event_subscription);
+        bytes += name_index_heap(&self.name_to_defined_type);
+        bytes += name_index_heap(&self.name_to_scheduled_job);
+        bytes += name_index_heap(&self.name_to_role);
+        bytes += name_index_heap(&self.name_to_http_service);
+        bytes += name_index_heap(&self.name_to_web_service);
+        bytes += name_index_heap(&self.name_to_integration_service);
+
+        bytes +=
+            stdx::heap::map_table_bytes::<(MdoType, String), usize>(
+                self.metadata_objects_by_key.len(),
+            ) + self.metadata_objects_by_key.keys().map(|(_, name)| name.capacity()).sum::<usize>();
+
+        bytes += stdx::heap::map_table_bytes::<(MdoType, Name), Vec<Name>>(
+            self.recorders_by_register.len(),
+        ) + self
+            .recorders_by_register
+            .iter()
+            .map(|((_, key_name), recorders)| {
+                key_name.capacity()
+                    + stdx::heap::vec_bytes::<Name>(recorders.len())
+                    + recorders.iter().map(String::capacity).sum::<usize>()
+            })
+            .sum::<usize>();
+
+        bytes
+    }
+}
+
+/// Heap of a `name -> index` lookup table (every `Configuration` cache follows this
+/// shape): the table itself plus the owned lowercased-name keys.
+fn name_index_heap(map: &HashMap<String, usize>) -> usize {
+    stdx::heap::map_table_bytes::<String, usize>(map.len())
+        + map.keys().map(String::capacity).sum::<usize>()
 }
 
 fn index_document_recorders(
@@ -968,6 +1051,36 @@ mod tests {
             &[doc_name.to_string()],
         );
         assert!(merged.recorders_for_register(MdoType::InformationRegister, "A").is_empty());
+    }
+
+    #[test]
+    fn configuration_heap_counts_objects_and_name_indexes() {
+        let mut config = Configuration::new("ТестоваяКонфигурация");
+        let name_capacity = config.name.capacity();
+
+        let mut catalog = MetadataObject::new(MdoType::Catalog, "Номенклатура");
+        catalog.add_attribute(crate::metadata_object::Attribute {
+            name: "Артикул".to_string(),
+            name_en: None,
+            attr_type: AttributeType::String { length: Some(25) },
+        });
+        let catalog_name_capacity = catalog.name.capacity();
+        config.add_metadata_object(catalog);
+
+        let module = CommonModule::builder().name("ОбщийМодуль1").global(true).build();
+        // `name` is private, so probe via the public accessor: `.len()` is a safe
+        // lower bound on the real (private) `.capacity()`.
+        let module_name_floor = module.name().len();
+        config.add_common_module(module);
+
+        let owned_floor = name_capacity + catalog_name_capacity + module_name_floor;
+
+        let bytes = config.estimated_heap_size();
+        // At least the owned name strings on the objects themselves (the name
+        // indexes and vec backing stores add further bytes on top); well under
+        // 8 KiB for two small entries plus their lookup-table entries.
+        assert!(bytes > owned_floor);
+        assert!(bytes < 8 * 1024);
     }
 
     #[test]

@@ -54,6 +54,18 @@ impl RegisterResource {
     pub fn set_attr_type(&mut self, attr_type: crate::metadata_object::AttributeType) {
         self.attr_type = Some(attr_type);
     }
+
+    /// Heap bytes owned by this resource: its name/type-text strings plus its
+    /// resolved type's own owned payload.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.name_en.as_ref().map_or(0, String::capacity)
+            + self.type_str.capacity()
+            + self
+                .attr_type
+                .as_ref()
+                .map_or(0, crate::metadata_object::AttributeType::estimated_heap_size)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +115,18 @@ impl RegisterAttribute {
 
     pub fn set_attr_type(&mut self, attr_type: crate::metadata_object::AttributeType) {
         self.attr_type = Some(attr_type);
+    }
+
+    /// Heap bytes owned by this attribute: its name/type-text strings plus its
+    /// resolved type's own owned payload.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.name_en.as_ref().map_or(0, String::capacity)
+            + self.type_str.capacity()
+            + self
+                .attr_type
+                .as_ref()
+                .map_or(0, crate::metadata_object::AttributeType::estimated_heap_size)
     }
 }
 
@@ -276,6 +300,20 @@ impl Register {
             Some(AccumulationRegisterType::BalanceAndTurnovers) => vec!["Остатки", "Обороты"],
             None => vec![],
         }
+    }
+
+    /// Heap bytes owned by this register, memoised by `ide-db`'s
+    /// `parse_register_query` for Salsa's `heap_size` hook: its name plus the
+    /// dimension/resource/attribute vecs and each entry's own owned payload. New
+    /// heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + stdx::heap::vec_bytes::<Dimension>(self.dimensions.len())
+            + self.dimensions.iter().map(Dimension::estimated_heap_size).sum::<usize>()
+            + stdx::heap::vec_bytes::<RegisterResource>(self.resources.len())
+            + self.resources.iter().map(RegisterResource::estimated_heap_size).sum::<usize>()
+            + stdx::heap::vec_bytes::<RegisterAttribute>(self.attributes.len())
+            + self.attributes.iter().map(RegisterAttribute::estimated_heap_size).sum::<usize>()
     }
 }
 
