@@ -178,6 +178,7 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
     loop {
         select! {
             recv(receiver) -> msg => {
+                state.note_loop_activity();
                 handle_lsp_msg(state, msg?)?;
                 while let Ok(msg) = receiver.try_recv() {
                     handle_lsp_msg(state, msg)?;
@@ -185,14 +186,20 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
             }
 
             recv(&state.loader_receiver) -> msg => {
+                state.note_loop_activity();
                 handle_loader_msg(state, msg?)?;
             }
 
             recv(&state.task_pool.receiver) -> task => {
+                state.note_loop_activity();
                 handle_task(state, task?)?;
                 while let Ok(task) = state.task_pool.receiver.try_recv() {
                     handle_task(state, task)?;
                 }
+            }
+
+            default(IDLE_TRIM_TICK) => {
+                handle_idle_tick(state);
             }
         }
 
@@ -220,6 +227,114 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
     }
 
     Ok(())
+}
+
+/// How long the event loop must stay silent before an idle tick fires. Salsa evicts
+/// beyond the LRU caps only at a revision boundary, so a session that loads, navigates
+/// cross-module and then sits without edits retains every touched file's memos — and
+/// jemalloc returns their pages only after they are actually freed. The tick is the
+/// only trim trigger outside edits and workspace-batch chunk boundaries.
+const IDLE_TRIM_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Consecutive idle ticks before the trim escalates from the interactive LRU profile
+/// to the deep sweep profile. The deep trim also evicts the open files' parse trees
+/// and lowered bodies — they re-derive cheaply on the next interaction, but not for
+/// free, so it waits until the session looks abandoned rather than merely paused.
+const IDLE_TRIM_DEEP_TICKS: u32 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleTrimKind {
+    /// `enforce_lru` on the interactive caps: drops the cross-module navigation tail
+    /// beyond each query's cap, keeps the open files' working set.
+    Shallow,
+    /// `enforce_lru_deep`: one eviction pass on the small sweep caps, then the
+    /// interactive caps are restored — the resident set shrinks to a cold floor.
+    Deep,
+}
+
+/// Kill switch: `BSL_IDLE_TRIM=0` (or `off`) disables the idle trim entirely, leaving
+/// eviction to edits and workspace-batch boundaries as before.
+fn idle_trim_disabled() -> bool {
+    std::env::var("BSL_IDLE_TRIM").is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("off"))
+}
+
+/// Memory budget in megabytes under which the idle trim is skipped, overridable via
+/// `BSL_IDLE_TRIM_MEM_BUDGET_MB`. The `0` default always trims: an idle server has
+/// nothing in flight to cancel, eviction beyond the caps is the point, and the cost
+/// is bounded re-derivation on the next interaction.
+fn idle_trim_mem_budget_mb() -> usize {
+    std::env::var("BSL_IDLE_TRIM_MEM_BUDGET_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+/// Decide whether this idle tick trims, and how hard. `None` unless the workspace has
+/// loaded, no workspace-batch sweep is active (its chunks run between loop wakes and
+/// hold a db snapshot the trim would block on; the sweep also has its own trim
+/// schedule), every interactive snapshot has drained, the process is over the idle
+/// budget, and the stage has not already run for this idle period. Pure so the
+/// schedule is testable with an injected budget signal.
+fn idle_trim_kind(state: &GlobalState, over_budget: bool) -> Option<IdleTrimKind> {
+    let batch_active = state.workspace_batch_plan.is_some() || state.workspace_batch_in_flight;
+    if !state.vfs_done
+        || batch_active
+        || !state.interactive_analysis_quiescent()
+        || !over_budget
+        || state.idle_ticks == 0
+    {
+        return None;
+    }
+    if state.idle_ticks >= IDLE_TRIM_DEEP_TICKS && !state.idle_deep_trimmed {
+        return Some(IdleTrimKind::Deep);
+    }
+    if !state.idle_shallow_trimmed {
+        return Some(IdleTrimKind::Shallow);
+    }
+    None
+}
+
+/// Handle one idle tick: advance the idle clock and, when [`idle_trim_kind`] says so,
+/// trim the Salsa LRU, release this thread's shared green-node cache, and purge the
+/// allocator so the freed pages actually leave RSS instead of sitting in jemalloc's
+/// retention. Runs on the event-loop thread, which owns `&mut` to the database; the
+/// quiescence gate guarantees no live snapshot, so the exclusive borrow cannot block.
+fn handle_idle_tick(state: &mut GlobalState) {
+    if idle_trim_disabled() {
+        return;
+    }
+    state.idle_ticks = state.idle_ticks.saturating_add(1);
+
+    let over_budget = crate::handlers::workspace_batch::over_mem_budget(idle_trim_mem_budget_mb());
+    let Some(kind) = idle_trim_kind(state, over_budget) else {
+        return;
+    };
+
+    let db = state.analysis_host.raw_database_mut();
+    match kind {
+        IdleTrimKind::Shallow => db.enforce_lru(),
+        IdleTrimKind::Deep => db.enforce_lru_deep(),
+    }
+    syntax::clear_shared_node_cache();
+
+    if kind == IdleTrimKind::Deep {
+        // The green-node caches are thread-local and never evict, so the parse trees
+        // this thread's clear just released stay pinned by every task-pool worker
+        // that ever parsed — reach them through a pool broadcast. Detached jobs, so
+        // their completion does not read as loop activity and reset the idle clock.
+        // The workers clear asynchronously; pages they free after the purge below
+        // are returned by jemalloc's decay instead.
+        if let Err(err) = state.task_pool.try_broadcast(syntax::clear_shared_node_cache) {
+            tracing::debug!(?err, "idle trim: worker green-node cache clear skipped");
+        }
+    }
+    profile::purge_allocator();
+
+    state.idle_shallow_trimmed = true;
+    if kind == IdleTrimKind::Deep {
+        state.idle_deep_trimmed = true;
+    }
+    tracing::info!(?kind, idle_ticks = state.idle_ticks, "idle Salsa LRU trim");
 }
 
 fn handle_lsp_msg(state: &mut GlobalState, msg: Message) -> Result<()> {
@@ -1765,6 +1880,80 @@ mod tests {
             (true, true),
             "the finish must trim even under budget with interactive analysis in flight"
         );
+    }
+
+    /// A loaded, quiescent, over-budget state one idle tick in — the baseline every
+    /// negative idle-trim case below perturbs.
+    fn idle_state() -> crate::global_state::GlobalState {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        state.vfs_done = true;
+        state.idle_ticks = 1;
+        state
+    }
+
+    #[test]
+    fn idle_trim_first_tick_is_shallow_and_latches() {
+        let mut state = idle_state();
+        assert_eq!(idle_trim_kind(&state, true), Some(IdleTrimKind::Shallow));
+
+        // The shallow stage runs once per idle period; further ticks stay quiet
+        // until the deep threshold.
+        state.idle_shallow_trimmed = true;
+        state.idle_ticks = 2;
+        assert_eq!(idle_trim_kind(&state, true), None);
+    }
+
+    #[test]
+    fn idle_trim_escalates_to_deep_and_latches() {
+        let mut state = idle_state();
+        state.idle_shallow_trimmed = true;
+        state.idle_ticks = IDLE_TRIM_DEEP_TICKS;
+        assert_eq!(idle_trim_kind(&state, true), Some(IdleTrimKind::Deep));
+
+        state.idle_deep_trimmed = true;
+        state.idle_ticks = IDLE_TRIM_DEEP_TICKS + 1;
+        assert_eq!(idle_trim_kind(&state, true), None, "the deep stage runs once per idle period");
+    }
+
+    #[test]
+    fn idle_trim_goes_straight_to_deep_when_shallow_never_ran() {
+        // The server was busy (not quiescent) through the early ticks and only
+        // drained past the deep threshold: deep subsumes shallow.
+        let mut state = idle_state();
+        state.idle_ticks = IDLE_TRIM_DEEP_TICKS;
+        assert_eq!(idle_trim_kind(&state, true), Some(IdleTrimKind::Deep));
+    }
+
+    #[test]
+    fn idle_trim_defers_to_gates() {
+        // Under budget: retention is free performance, keep it.
+        assert_eq!(idle_trim_kind(&idle_state(), false), None);
+
+        // Not idle yet.
+        let mut state = idle_state();
+        state.idle_ticks = 0;
+        assert_eq!(idle_trim_kind(&state, true), None);
+
+        // Workspace not loaded.
+        let mut state = idle_state();
+        state.vfs_done = false;
+        assert_eq!(idle_trim_kind(&state, true), None);
+
+        // A latency request holds a db snapshot the trim would block on.
+        use salsa::Database as _;
+        let mut state = idle_state();
+        let token = state.analysis_host.raw_database().cancellation_token();
+        state.request_tokens.insert(lsp_server::RequestId::from(1), token);
+        assert_eq!(idle_trim_kind(&state, true), None);
+
+        // An active workspace-batch sweep has its own trim schedule, and its
+        // in-flight chunk is discounted by the quiescence gate — the idle trim
+        // must not run under it.
+        let mut state = idle_state();
+        install_test_plan(&mut state, 2);
+        state.idle_ticks = IDLE_TRIM_DEEP_TICKS;
+        assert_eq!(idle_trim_kind(&state, true), None);
     }
 
     #[test]

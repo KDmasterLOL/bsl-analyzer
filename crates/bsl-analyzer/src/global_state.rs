@@ -359,6 +359,20 @@ pub struct GlobalState {
     /// its captured epoch still matches, so a stale timer from an already-ended
     /// burst is ignored.
     analysis_epoch: u64,
+
+    /// Consecutive event-loop idle ticks (the `select!` timeout fired with no
+    /// message in between). Salsa only evicts beyond the LRU caps at a revision
+    /// boundary, so a session that loads, navigates cross-module and then sits
+    /// without edits retains every touched file's memos forever; the idle trim
+    /// keyed off this counter is what closes that gap. Reset on every loop wake.
+    pub(crate) idle_ticks: u32,
+    /// Whether the shallow idle trim already ran for the current idle period, so
+    /// a quiet server is not re-trimmed (each trim is a Salsa write that bumps
+    /// the revision and forces re-validation on the next interaction). Reset on
+    /// every loop wake.
+    pub(crate) idle_shallow_trimmed: bool,
+    /// Same latch for the deep (sweep-profile) idle trim.
+    pub(crate) idle_deep_trimmed: bool,
 }
 
 impl GlobalState {
@@ -422,7 +436,20 @@ impl GlobalState {
             analysis_in_flight: 0,
             analysis_progress_active: false,
             analysis_epoch: 0,
+            idle_ticks: 0,
+            idle_shallow_trimmed: false,
+            idle_deep_trimmed: false,
         }
+    }
+
+    /// Note an event-loop wake (an LSP message, a loader event, or a finished
+    /// task): the session is not idle, and whatever the wake computed may have
+    /// created memos worth trimming later — so the idle-trim clock and its
+    /// once-per-idle-period latches restart.
+    pub(crate) fn note_loop_activity(&mut self) {
+        self.idle_ticks = 0;
+        self.idle_shallow_trimmed = false;
+        self.idle_deep_trimmed = false;
     }
 
     /// Record that a background analysis job was just spawned. On the rising edge
