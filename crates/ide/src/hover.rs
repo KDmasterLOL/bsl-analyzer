@@ -615,8 +615,9 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, id: TypeId, locale: Locale) -> Opti
         return Some(block);
     }
 
-    // A literal-keyed structure renders its keys as a typed fields block; a keyless structure falls
-    // through to the plain type label (byte-identical to before).
+    // A structure with known fields — inferred from a literal construction or declared in a
+    // doc-comment — renders them as a typed fields block; a fieldless structure falls through to
+    // the plain type label.
     if let TypeKind::Structure(facet) = kind {
         if facet.fields.is_some() {
             let mut block = format!("**Тип:** {}\n\n", kernel_type_label(db, id, locale, false));

@@ -1579,6 +1579,44 @@ impl<'db> InferenceContext<'db> {
         )
     }
 
+    /// Gives a parameter the fields its doc-comment declares, for use inside the method's own body.
+    ///
+    /// The materialised signature serves calls from the outside; within the body a parameter is a
+    /// binding with no reaching write, and bare-name resolution answers `Unknown` for it. Without
+    /// this seed a documented structure is offered at every call site and nowhere in the method
+    /// that receives it.
+    ///
+    /// Ordinary modules only: effective (`&ИзменениеИКонтроль`) and weaving inference build their
+    /// symbols differently, and are left exactly as they were.
+    fn seed_documented_structure_parameters(&mut self) {
+        let DefWithBodyId::Method(local_id) = self.owner else {
+            return;
+        };
+        if self.local_symbols.is_some() || self.weaving_base.is_some() {
+            return;
+        }
+
+        let module = hir_def::ModuleId::new(self.context_file_id);
+        let symbol_tree = self.db.symbol_tree(module);
+        let method_id = hir_def::MethodId { module, local_id };
+        let Some(method_symbol) = symbol_tree.find_method_by_id(method_id) else {
+            return;
+        };
+        if method_symbol.docs.is_none() {
+            return;
+        }
+
+        let signature = crate::method_resolution::materialise_signature(self.db, method_symbol);
+        for (binding, ty) in self.body.params().zip(signature.params.iter().copied()) {
+            if !crate::lower::doc_structure::is_doc_structure(self.db, ty) {
+                continue;
+            }
+            self.binding_types.insert(binding, ty);
+            let name = NormName::intern(self.body.binding(binding).name.as_str());
+            self.var_types.insert(name, ty);
+        }
+    }
+
     pub fn infer_all(&mut self) {
         let _p = tracing::debug_span!("infer_all").entered();
 
@@ -1612,6 +1650,8 @@ impl<'db> InferenceContext<'db> {
                 collect_structure_shapes(&self.body, SeedRoots::NewLiterals, None)
             }
         };
+
+        self.seed_documented_structure_parameters();
 
         let stmts: Vec<StmtIdx> = self.body.body_stmts_typed().to_vec();
         self.infer_stmts(&stmts);

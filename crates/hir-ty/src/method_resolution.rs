@@ -227,13 +227,25 @@ pub fn resolve_aliased_manager_call(
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
-fn materialise_signature(db: &dyn TypeKernelDb, method_symbol: &MethodSymbol) -> FunctionSignature {
+pub(crate) fn materialise_signature(
+    db: &dyn TypeKernelDb,
+    method_symbol: &MethodSymbol,
+) -> FunctionSignature {
     let ctx = TyLoweringContext::new();
+    // Absent documentation is the common case, and then nothing below changes a single type.
+    let docs = method_symbol.docs.as_deref();
 
     let params: Box<[TypeId]> = method_symbol
         .params
         .iter()
-        .map(|p| p.type_ref.as_ref().map(|t| ctx.lower_type_ref_id(db, t)).unwrap_or(db.unknown()))
+        .map(|p| {
+            let base =
+                p.type_ref.as_ref().map(|t| ctx.lower_type_ref_id(db, t)).unwrap_or(db.unknown());
+            let documented = docs
+                .and_then(|docs| find_param_doc(docs, &p.name))
+                .map(|param_doc| param_doc.types.as_slice());
+            enrich_with_documented_structure(db, base, documented)
+        })
         .collect();
     let defaults: Box<[bool]> = method_symbol.params.iter().map(|p| p.has_default).collect();
 
@@ -242,9 +254,46 @@ fn materialise_signature(db: &dyn TypeKernelDb, method_symbol: &MethodSymbol) ->
         .as_ref()
         .map(|t| ctx.lower_type_ref_id(db, t))
         .unwrap_or_else(|| if method_symbol.is_function { db.unknown() } else { db.undefined() });
+    let ret =
+        enrich_with_documented_structure(db, ret, docs.map(|docs| docs.returned_value.as_slice()));
 
     let max_args = Some(params.len() as u32);
     FunctionSignature { params, defaults, ret, max_args, from_doc_comment: true }
+}
+
+/// Puts the fields a doc-comment declares into the slot's already lowered type.
+///
+/// Documentation is advisory here: it may only fill in the fields of a structure the declared type
+/// already carries. When the slot declares something else, or the documentation names no inline
+/// structure, the lowered type is returned untouched.
+fn enrich_with_documented_structure(
+    db: &dyn TypeKernelDb,
+    base: TypeId,
+    documented: Option<&[hir_def::docs::TypeDoc]>,
+) -> TypeId {
+    let Some(documented) = documented else {
+        return base;
+    };
+    let mut enriched = base;
+    for type_doc in documented {
+        let Some(expr) = hir_def::docs::parse_type_expr(type_doc) else {
+            continue;
+        };
+        if let Some(structure) = crate::lower::doc_structure::doc_structure_ty(db, &expr) {
+            enriched = crate::lower::doc_structure::substitute(db, enriched, structure);
+        }
+    }
+    enriched
+}
+
+/// Matched by name without regard to case, the same way the syntactic parameter hints are.
+fn find_param_doc<'a>(
+    docs: &'a hir_def::docs::MethodDocs,
+    name: &hir_def::Name,
+) -> Option<&'a hir_def::docs::ParameterDoc> {
+    use stdx::case::CaseExt;
+    let needle = name.as_str().fold_lower();
+    docs.parameters.iter().find(|param| param.name.fold_lower() == needle)
 }
 
 pub(crate) fn materialise_signature_enriched(
