@@ -55,24 +55,7 @@ pub(crate) mod heap_estimate {
     use super::*;
     use std::mem::size_of;
 
-    /// Approximate live bytes of an `FxHashMap`/hashbrown table holding `len`
-    /// entries of `(K, V)`: one control byte plus the `(K, V)` slot per bucket,
-    /// with bucket count grown to the next power of two above `len / (7/8)`.
-    pub(crate) fn map_table_bytes<K, V>(len: usize) -> usize {
-        if len == 0 {
-            return 0;
-        }
-        // `checked_*`/`saturating_*` guard the (theoretically) unbounded `len`:
-        // `next_power_of_two` panics in debug and wraps to 0 in release near
-        // `usize::MAX`. Real inference maps are body-arena-bounded, so this never
-        // triggers, but it keeps the estimator total.
-        let cap = (len * 8 / 7 + 1).checked_next_power_of_two().unwrap_or(len);
-        cap.saturating_mul(size_of::<K>() + size_of::<V>() + 1)
-    }
-
-    pub(super) fn vec_bytes<T>(len: usize) -> usize {
-        len * size_of::<T>()
-    }
+    pub(crate) use stdx::heap::{map_table_bytes, vec_bytes};
 
     /// Heap of the `expr`/`binding`-keyed maps plus their owned-string and
     /// nested-vec payloads, shared by all three inference-result shapes.

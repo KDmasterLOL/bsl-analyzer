@@ -1,5 +1,6 @@
 pub mod case;
 pub mod fs;
+pub mod heap;
 pub mod par_guard;
 pub mod thread;
 
