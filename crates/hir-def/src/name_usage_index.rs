@@ -170,7 +170,23 @@ pub fn file_name_offsets_query<'db>(
     Arc::new(FileNameOffsets { by_name })
 }
 
-#[salsa::tracked(lru = 4, returns(clone))]
+/// Approximate live heap bytes for Salsa's `memory_usage` report: the
+/// `by_name` table, each name's non-inlined `SmolStr` payload, and each
+/// name's file-id posting list. This is the aggregated inverted index over
+/// the whole source root, so it is typically the largest single memoised
+/// entry in the report. New heap-owning fields must be added here too.
+fn source_root_name_usage_heap(v: &Arc<SourceRootNameUsage>) -> usize {
+    use crate::heap_estimate::{map_table_bytes, name_bytes, vec_bytes};
+
+    let u = &**v;
+    let mut bytes = map_table_bytes::<Name, Vec<FileId>>(u.by_name.len());
+    for (name, files) in &u.by_name {
+        bytes += name_bytes(name) + vec_bytes::<FileId>(files.len());
+    }
+    bytes
+}
+
+#[salsa::tracked(lru = 4, heap_size = source_root_name_usage_heap, returns(clone))]
 pub fn source_root_name_usage_query(
     db: &dyn DefDatabase,
     source_root_input: SourceRootInput,
@@ -238,5 +254,21 @@ mod tests {
     fn source_root_name_usage_returns_empty_slice_on_miss() {
         let aggregator = SourceRootNameUsage::default();
         assert!(aggregator.files_with(&normalize_name(&Name::new("чтонибудь"))).is_empty());
+    }
+
+    #[test]
+    fn source_root_name_usage_heap_counts_table_names_and_postings() {
+        let long_name = "ОченьДлинноеИмяПроцедурыБольше23Символов".to_string();
+        let name_capacity = long_name.len();
+        let files = vec![FileId(1), FileId(2), FileId(3)];
+        let mut by_name = FxHashMap::default();
+        by_name.insert(Name::new(&long_name), files.clone());
+        let usage = Arc::new(SourceRootNameUsage { by_name });
+
+        let bytes = source_root_name_usage_heap(&usage);
+        // At least the spilled name payload plus the file-id posting list;
+        // well under a kilobyte for a single entry.
+        assert!(bytes > name_capacity + files.len() * std::mem::size_of::<FileId>());
+        assert!(bytes < 1024);
     }
 }

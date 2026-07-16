@@ -156,7 +156,37 @@ impl WorkspaceIndex {
     }
 }
 
-#[salsa::tracked(lru = 4, returns(clone))]
+/// Approximate live heap bytes for Salsa's `memory_usage` report: each map's
+/// table, the owned `Name` keys, the id posting lists, and `file_symbols`'
+/// per-file `SymbolInfo` names. New heap-owning fields must be added here too.
+fn workspace_index_heap(v: &Arc<WorkspaceIndex>) -> usize {
+    use crate::heap_estimate::{map_table_bytes, name_bytes, vec_bytes};
+
+    let idx = &**v;
+    let mut bytes = std::mem::size_of::<WorkspaceIndex>();
+
+    bytes += map_table_bytes::<Name, Vec<MethodId>>(idx.method_index.len());
+    for (name, ids) in &idx.method_index {
+        bytes += name_bytes(name) + vec_bytes::<MethodId>(ids.len());
+    }
+
+    bytes += map_table_bytes::<Name, Vec<VariableId>>(idx.variable_index.len());
+    for (name, ids) in &idx.variable_index {
+        bytes += name_bytes(name) + vec_bytes::<VariableId>(ids.len());
+    }
+
+    bytes += map_table_bytes::<FileId, Vec<SymbolInfo>>(idx.file_symbols.len());
+    for symbols in idx.file_symbols.values() {
+        bytes += vec_bytes::<SymbolInfo>(symbols.len());
+        for sym in symbols {
+            bytes += name_bytes(&sym.name);
+        }
+    }
+
+    bytes
+}
+
+#[salsa::tracked(lru = 4, heap_size = workspace_index_heap, returns(clone))]
 pub fn workspace_index_query(
     db: &dyn DefDatabase,
     source_root_input: base_db::SourceRootInput,

@@ -561,6 +561,75 @@ impl WorkspaceCallGraph {
     }
 }
 
+/// Heap bytes owned by a [`GraphNode`]'s `Name` fields (their `SmolStr`
+/// payloads when not inlined). Every variant is enumerated so a new node kind
+/// with a `Name` field cannot silently go uncounted.
+fn graph_node_name_heap(node: &GraphNode) -> usize {
+    use crate::heap_estimate::name_bytes;
+
+    match node {
+        GraphNode::Method(_) | GraphNode::ModuleCode(_) => 0,
+        GraphNode::Mdo { object_name, .. } => name_bytes(object_name),
+        GraphNode::Attribute { object_name, attr_name, .. } => {
+            name_bytes(object_name) + name_bytes(attr_name)
+        }
+        GraphNode::Form { owner, form_name } => {
+            owner.as_ref().map_or(0, |(_, name)| name_bytes(name)) + name_bytes(form_name)
+        }
+        GraphNode::FormItem { owner, form_name, item_name } => {
+            owner.as_ref().map_or(0, |(_, name)| name_bytes(name))
+                + name_bytes(form_name)
+                + name_bytes(item_name)
+        }
+        GraphNode::FormAttribute { owner, form_name, attr_name } => {
+            owner.as_ref().map_or(0, |(_, name)| name_bytes(name))
+                + name_bytes(form_name)
+                + name_bytes(attr_name)
+        }
+        GraphNode::TabularSection { object_name, section_name, .. } => {
+            name_bytes(object_name) + name_bytes(section_name)
+        }
+        GraphNode::TabularSectionAttribute { object_name, section_name, attr_name, .. } => {
+            name_bytes(object_name) + name_bytes(section_name) + name_bytes(attr_name)
+        }
+    }
+}
+
+/// Approximate live heap bytes for Salsa's `memory_usage` report: the
+/// `forward`/`reverse` adjacency tables (each key's node `Name`s plus its
+/// edge list, and each edge's endpoint `Name`s) and the `node_dispatch`
+/// table (its key `Name`s; [`MethodDispatch`] itself is `Copy`). Lives here
+/// (not in `queries::heap_estimate`) because the fields it reads are
+/// private to this module. New heap-owning fields must be added here too.
+pub(crate) fn workspace_call_graph_heap(v: &std::sync::Arc<WorkspaceCallGraph>) -> usize {
+    use crate::heap_estimate::{map_table_bytes, vec_bytes};
+
+    let g = &**v;
+    let mut bytes = std::mem::size_of::<WorkspaceCallGraph>();
+
+    let adjacency_heap = |table: &FxHashMap<GraphNode, Vec<WorkspaceCallEdge>>| -> usize {
+        let mut b = map_table_bytes::<GraphNode, Vec<WorkspaceCallEdge>>(table.len());
+        for (node, edges) in table {
+            b += graph_node_name_heap(node);
+            b += vec_bytes::<WorkspaceCallEdge>(edges.len());
+            for edge in edges {
+                b += graph_node_name_heap(&edge.from) + graph_node_name_heap(&edge.to);
+            }
+        }
+        b
+    };
+
+    bytes += adjacency_heap(&g.forward);
+    bytes += adjacency_heap(&g.reverse);
+
+    bytes += map_table_bytes::<GraphNode, MethodDispatch>(g.node_dispatch.len());
+    for node in g.node_dispatch.keys() {
+        bytes += graph_node_name_heap(node);
+    }
+
+    bytes
+}
+
 /// Enumerate a module's methods from the item tree, in top-level declaration
 /// order (so the index is each method's `local_id`). Reads declarations only and
 /// never lowers bodies — cheap enough to run over a whole configuration without
@@ -2156,5 +2225,42 @@ EndProcedure
 
         assert!(summary.methods[3].dispatch.can_run_on_client);
         assert!(!summary.methods[3].dispatch.can_run_on_server);
+    }
+
+    #[test]
+    fn workspace_call_graph_heap_counts_tables_edges_and_node_names() {
+        // Given: a graph with one edge from a method to a metadata object whose
+        // spelling exceeds the SmolStr inline cap (so its `Name` heap is nonzero),
+        // plus a dispatch entry for that same method.
+        let module = ModuleId::new(vfs::FileId(0));
+        let method = GraphNode::Method(MethodId { module, local_id: 0 });
+        let long_object_name = "ОченьДлинноеИмяСправочникаБольше23Символов";
+        let object_name_heap = long_object_name.len();
+        let mdo =
+            GraphNode::Mdo { mdo_type: MdoType::Catalog, object_name: Name::new(long_object_name) };
+
+        let mut graph = WorkspaceCallGraph::default();
+        graph.set_dispatch(
+            method.clone(),
+            MethodDispatch { can_run_on_client: true, can_run_on_server: false, no_context: false },
+        );
+        graph.insert(WorkspaceCallEdge {
+            from: method,
+            to: mdo,
+            kind: EdgeKind::ManagerAccess,
+            provenance: EdgeProvenance::Inferred,
+            crosses_client_to_server: false,
+        });
+
+        // When: the heap estimator runs on the graph.
+        let bytes = workspace_call_graph_heap(&std::sync::Arc::new(graph));
+
+        // Then: at least the spilled object name (charged once per adjacency
+        // side, forward + reverse); order of magnitude away from a blowup for
+        // a single edge (the three-table structure and the `GraphNode`
+        // enum's stack size dominate a one-entry estimate, unlike a plain
+        // string map).
+        assert!(bytes > object_name_heap * 2);
+        assert!(bytes < 8192);
     }
 }

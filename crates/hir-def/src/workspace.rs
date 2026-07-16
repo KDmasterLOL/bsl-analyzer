@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 use tracing::debug;
 use vfs::{FileId, FileSet};
 
@@ -23,6 +24,34 @@ pub struct CommonModuleInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorkspaceSymbols {
     pub common_modules: FxHashMap<Name, CommonModuleInfo>,
+}
+
+/// Approximate live heap bytes for Salsa's `memory_usage` report: the
+/// `common_modules` table, each module name's `Name` payload, and each
+/// module's `Vec<MethodSymbol>` — summing each method's name, params, and
+/// annotations. `docs`/`return_type_ref`/param `type_ref` payloads are not
+/// followed (mirrors `symbol_tree_heap`'s convention), a mild undercount.
+/// New heap-owning fields must be added here too.
+pub(crate) fn workspace_symbols_heap(v: &Arc<WorkspaceSymbols>) -> usize {
+    use crate::heap_estimate::{map_table_bytes, name_bytes, vec_bytes};
+    use crate::item_tree::Annotation;
+    use crate::ParamSymbol;
+
+    let s = &**v;
+    let mut bytes = map_table_bytes::<Name, CommonModuleInfo>(s.common_modules.len());
+    for (name, info) in &s.common_modules {
+        bytes += name_bytes(name);
+        bytes += vec_bytes::<MethodSymbol>(info.methods.len());
+        for method in &info.methods {
+            bytes += name_bytes(&method.name);
+            bytes += vec_bytes::<ParamSymbol>(method.params.len());
+            for param in &method.params {
+                bytes += name_bytes(&param.name);
+            }
+            bytes += vec_bytes::<Annotation>(method.annotations.len());
+        }
+    }
+    bytes
 }
 
 pub fn workspace_symbols(db: &dyn DefDatabase, files: &[FileId]) -> WorkspaceSymbols {
