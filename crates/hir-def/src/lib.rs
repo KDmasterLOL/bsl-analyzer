@@ -172,7 +172,7 @@ pub struct MethodId {
     pub local_id: u32,
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct MethodIdInput {
     #[returns(copy)]
     pub method_id: MethodId,

@@ -69,9 +69,69 @@ impl SourceRoot {
             SourceRootKind::Metadata => salsa::Durability::MEDIUM,
         }
     }
+
+    /// Approximate live heap bytes owned by this source root: delegates to its
+    /// `FileSet`. See [`FileSet::estimated_heap_size`] for the counting
+    /// convention, including its Arc-sharing over-count caveat.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.file_set.estimated_heap_size()
+    }
 }
 
-#[salsa::input(debug)]
+/// `heap_size` estimators for Salsa's `memory_usage` introspection over this
+/// module's `#[salsa::input]` / `#[salsa::interned]` structs. Each hook receives
+/// a reference to the tuple of ALL declared fields in declaration order (a
+/// 1-tuple for a single-field struct), per the fork's `heap_size = path`
+/// convention for input/interned structs.
+pub(crate) mod heap_estimate {
+    use super::{DiagnosticsConfigInput, SourceRoot};
+
+    pub(crate) fn file_text_input_heap((text,): &(String,)) -> usize {
+        text.capacity()
+    }
+
+    pub(crate) fn source_root_input_heap((root,): &(SourceRoot,)) -> usize {
+        root.estimated_heap_size()
+    }
+
+    /// New heap-owning fields on [`DiagnosticsConfigInput`] must be added here too.
+    pub(crate) fn diagnostics_config_id_heap((config,): &(DiagnosticsConfigInput,)) -> usize {
+        stdx::heap::vec_bytes::<String>(config.disabled.len())
+            + config.disabled.iter().map(String::capacity).sum::<usize>()
+            + stdx::heap::vec_bytes::<String>(config.enabled.len())
+            + config.enabled.iter().map(String::capacity).sum::<usize>()
+            + stdx::heap::vec_bytes::<(String, String)>(config.parameters.len())
+            + config.parameters.iter().map(|(k, v)| k.capacity() + v.capacity()).sum::<usize>()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::input::DiagnosticsConfigInput;
+
+        #[test]
+        fn diagnostics_config_id_heap_counts_string_payloads() {
+            let config = DiagnosticsConfigInput::from_raw(
+                vec!["Code1".to_string(), "Code2".to_string()],
+                vec!["Code3".to_string()],
+                vec![("Code4".to_string(), "some-long-parameter-value".to_string())],
+                false,
+                10,
+                crate::Locale::Ru,
+                false,
+            );
+            let strings_only: usize = config.disabled.iter().map(String::capacity).sum::<usize>()
+                + config.enabled.iter().map(String::capacity).sum::<usize>()
+                + config.parameters.iter().map(|(k, v)| k.capacity() + v.capacity()).sum::<usize>();
+
+            let bytes = diagnostics_config_id_heap(&(config,));
+            assert!(bytes >= strings_only);
+            assert!(bytes < 1024);
+        }
+    }
+}
+
+#[salsa::input(debug, heap_size = heap_estimate::file_text_input_heap)]
 pub struct FileTextInput {
     pub text: String,
 }
@@ -82,7 +142,7 @@ pub struct FileTextInput {
 /// (so an evicted+rederived text is sound). The model is probabilistic — a hash
 /// collision at the same length would alias two contents — which is acceptable
 /// for analysis caching but not a cryptographic guarantee.
-#[salsa::input(debug)]
+#[salsa::input(debug, heap_size = stdx::heap::zero)]
 pub struct FileRevisionInput {
     #[returns(copy)]
     pub revision: u64,
@@ -98,18 +158,18 @@ pub fn content_revision(text: &str) -> u64 {
     hasher.finish()
 }
 
-#[salsa::input(debug)]
+#[salsa::input(debug, heap_size = heap_estimate::source_root_input_heap)]
 pub struct SourceRootInput {
     pub root: SourceRoot,
 }
 
-#[salsa::input(debug)]
+#[salsa::input(debug, heap_size = stdx::heap::zero)]
 pub struct FileSourceRootInput {
     #[returns(copy)]
     pub source_root_id: SourceRootId,
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct FileIdInput {
     #[returns(copy)]
     pub file_id: vfs::FileId,
@@ -177,7 +237,7 @@ impl DiagnosticsConfigInput {
     }
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = heap_estimate::diagnostics_config_id_heap)]
 pub struct DiagnosticsConfigId {
     pub config: DiagnosticsConfigInput,
 }

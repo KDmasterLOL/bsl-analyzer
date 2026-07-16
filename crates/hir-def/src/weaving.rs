@@ -20,7 +20,7 @@ use crate::symbol_tree::MethodSymbol;
 /// Unlike [`crate::effective_module::EffectiveModuleId`] there is no text splice — the
 /// extension module keeps its own native text; only cross-module name resolution gains
 /// the base fallback.
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct WeavingModuleId<'db> {
     #[returns(copy)]
     pub ext_file: vfs::FileId,

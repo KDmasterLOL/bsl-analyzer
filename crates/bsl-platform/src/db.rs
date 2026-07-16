@@ -744,20 +744,39 @@ mod heap_estimate {
         stdx::heap::vec_bytes::<PlatformProperty>(v.len())
             + v.iter().map(PlatformProperty::estimated_heap_size).sum::<usize>()
     }
+
+    /// Heap of a [`super::TypeNameInput`]: its `name` string's own bytes. The
+    /// estimator receives the tuple of ALL declared fields in order (a 1-tuple
+    /// here), per the fork's `heap_size = path` convention for interned structs.
+    pub(super) fn type_name_input_heap((name,): &(String,)) -> usize {
+        name.capacity()
+    }
+
+    /// Heap of a [`super::MethodLookupInput`]: both owned strings.
+    pub(super) fn method_lookup_input_heap((type_name, method_name): &(String, String)) -> usize {
+        type_name.capacity() + method_name.capacity()
+    }
+
+    /// Heap of a [`super::PrefixedMethodLookupInput`]: both owned strings.
+    pub(super) fn prefixed_method_lookup_input_heap(
+        (prefix, method_name): &(String, String),
+    ) -> usize {
+        prefix.capacity() + method_name.capacity()
+    }
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = heap_estimate::type_name_input_heap)]
 pub struct TypeNameInput {
     pub name: String,
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = heap_estimate::method_lookup_input_heap)]
 pub struct MethodLookupInput {
     pub type_name: String,
     pub method_name: String,
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = heap_estimate::prefixed_method_lookup_input_heap)]
 pub struct PrefixedMethodLookupInput {
     pub prefix: String,
     pub method_name: String,

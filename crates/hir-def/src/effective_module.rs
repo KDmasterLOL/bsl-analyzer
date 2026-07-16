@@ -30,7 +30,7 @@ use crate::{
 
 /// Interned identity of an effective module: the (base, extension) file pair it is
 /// merged from. Mirrors the `#[salsa::interned(debug)]` style of `MethodIdInput`.
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct EffectiveModuleId<'db> {
     #[returns(copy)]
     pub base_file: vfs::FileId,
