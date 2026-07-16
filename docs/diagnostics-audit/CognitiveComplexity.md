@@ -106,10 +106,9 @@ handler'а.
   тернарник внутри вложенного statement, рекурсивный вызов, `Прервать`,
   `Продолжить`, `Для` с логическими границами и `Для каждого` со сложной
   коллекцией.
-- Streaming metrics в `crates/ide/src/streaming/file_processor.rs` пока
-  заполняют `complexity` и `cognitive_complexity` количеством функций. Это не
-  ломает саму диагностику, но создает риск расхождения пользовательских метрик
-  с diagnostic/code-lens расчетом.
+- CLI JSONL-метрики заполняют `complexity` и `cognitive_complexity` через
+  `module_hir_metrics`/`module_cyclomatic`, поэтому совпадают с
+  diagnostic/code-lens расчётом.
 
 ## Может ли инфраструктура улучшить качество
 
@@ -124,7 +123,7 @@ handler'а.
 - учет логических цепочек как sequences, а не отдельных бинарных узлов;
 - опциональный `MethodMetricsContext` с именем метода и доступом к symbols для
   рекурсии;
-- переиспользование HIR-метрик в streaming metrics вместо proxy по числу
+- переиспользование HIR-метрик в CLI JSONL-метриках вместо proxy по числу
   методов.
 
 ## Возможное объединение
@@ -163,7 +162,7 @@ visitor, который один раз проходит HIR и отдает н�
    `ForEach`, assignment target, index/field/new/await.
 7. Добавить regression tests на логические цепочки, `Прервать/Продолжить`,
    nested ternary, `#Если` и рекурсию.
-8. Перевести streaming `FileMetrics` на реальные HIR-метрики или явно
+8. Перевести JSONL `FileMetrics` на реальные HIR-метрики или явно
    переименовать proxy-поля, чтобы не смешивать их с diagnostic values.
 
 ## Вывод

@@ -27,7 +27,6 @@ triomphe.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-crossbeam-channel.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 either = "1.9"

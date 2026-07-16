@@ -26,8 +26,6 @@ indexmap.workspace = true
 tracing.workspace = true
 line-index.workspace = true
 parking_lot.workspace = true
-crossbeam-channel.workspace = true
-crossbeam-utils.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 

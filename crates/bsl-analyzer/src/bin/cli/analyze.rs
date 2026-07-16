@@ -88,7 +88,6 @@ pub fn analyze(
     _incremental: bool,
     _changed_files: Option<Vec<PathBuf>>,
     _git_diff: Option<String>,
-    streaming: bool,
     workers: Option<usize>,
     format: OutputFormat,
     only_diagnostic: Option<String>,
@@ -100,36 +99,18 @@ pub fn analyze(
         None
     };
 
-    if streaming {
-        tracing::warn!(
-            "The --streaming analyzer is deprecated and will be removed; Salsa is the default."
-        );
-        analyze_streaming(
-            source_dir,
-            workspace_dir,
-            output_dir,
-            config_path,
-            reporters,
-            quiet,
-            workers,
-            format,
-            only_diagnostic,
-            diff_filter,
-        )
-    } else {
-        analyze_salsa(
-            source_dir,
-            workspace_dir,
-            output_dir,
-            config_path,
-            reporters,
-            quiet,
-            workers,
-            format,
-            only_diagnostic,
-            diff_filter,
-        )
-    }
+    analyze_salsa(
+        source_dir,
+        workspace_dir,
+        output_dir,
+        config_path,
+        reporters,
+        quiet,
+        workers,
+        format,
+        only_diagnostic,
+        diff_filter,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -152,7 +133,7 @@ fn analyze_salsa(
     };
 
     use base_db::SourceDatabase;
-    use ide::streaming::FileMetrics;
+    use ide::jsonl::FileMetrics;
     use ide::{DiagnosticsConfig, DiagnosticsContext, RootDatabaseImpl};
     use ide_db::AnalysisProvider;
     use indicatif::{ProgressBar, ProgressStyle};
@@ -378,10 +359,10 @@ fn analyze_salsa(
 
     // The JSONL contract opens with a `start` event before any analysis. Salsa
     // emits the `file`/`done` events as a batch once the chunked run finishes
-    // (it collects and evicts per chunk rather than streaming live), so only the
-    // opener is hoisted here; content and ordering still mirror the streaming path.
+    // (it collects and evicts per chunk rather than emitting live), so only the
+    // opener is hoisted here; content and ordering still mirror the JSONL contract.
     if jsonl {
-        use ide::streaming::StartEvent;
+        use ide::jsonl::StartEvent;
 
         println!("{}", serde_json::to_string(&StartEvent::new(file_ids.len()))?);
     }
@@ -629,14 +610,14 @@ fn analyze_salsa(
         file_analyses.iter().flatten().map(|f| f.diagnostics.len()).sum();
 
     // JSONL emits one `file` event per analyzed file (clean files included),
-    // closed by `done`, mirroring the streaming `--format jsonl` contract (the
-    // `start` event was already emitted before analysis). `metrics` carries the
-    // real cyclomatic/cognitive complexity; `error` is set for files whose
-    // analysis panicked or whose text could not be read (so a crashed file is
-    // not silently reported as clean), and those are tallied into `done`'s
+    // closed by `done`, mirroring the `--format jsonl` contract (the `start`
+    // event was already emitted before analysis). `metrics` carries the real
+    // cyclomatic/cognitive complexity; `error` is set for files whose analysis
+    // panicked or whose text could not be read (so a crashed file is not
+    // silently reported as clean), and those are tallied into `done`'s
     // `failed_files`.
     if jsonl {
-        use ide::streaming::{DoneEvent, FileEvent};
+        use ide::jsonl::{DoneEvent, FileEvent};
 
         let mut failed_files = 0;
         for (i, (_, path)) in file_ids.iter().enumerate() {
@@ -703,360 +684,6 @@ fn analyze_salsa(
     }
 
     tracing::info!("Analysis complete");
-
-    Ok(())
-}
-
-/// Dump salsa's per-ingredient memory snapshot plus process RSS, so the gap
-/// between RSS and salsa-tracked bytes exposes untracked residency (parser
-/// green-node cache, file-text inputs, allocator retention). Sorted by live
-/// entry count: a query whose count tracks the file total is retaining
-/// everything (LRU not evicting).
-#[allow(clippy::too_many_arguments)]
-fn analyze_streaming(
-    source_dir: PathBuf,
-    workspace_dir: Option<PathBuf>,
-    output_dir: Option<PathBuf>,
-    config_path: Option<PathBuf>,
-    reporters: Vec<String>,
-    quiet: bool,
-    workers: Option<usize>,
-    format: OutputFormat,
-    only_diagnostic: Option<String>,
-    diff_filter: Option<bsl_analyzer::diff_filter::DiffFilter>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    use ide::{streaming::AnalysisOrchestrator, DiagnosticsConfig};
-    use vfs::FileId;
-    use walkdir::WalkDir;
-
-    let _span = tracing::info_span!("cli_analyze_streaming").entered();
-
-    let source_dir = std::fs::canonicalize(&source_dir).unwrap_or(source_dir);
-
-    let profiling_enabled = only_diagnostic.is_some();
-    if let Some(ref diag) = only_diagnostic {
-        tracing::info!("Profiling diagnostic (streaming mode): {}", diag);
-    }
-    if diff_filter.is_some() {
-        tracing::info!("Diff filter enabled (streaming mode)");
-    }
-
-    tracing::info!("Analyzing project (streaming mode): {:?}", source_dir);
-    tracing::info!("Workers: {:?}", workers);
-    tracing::info!("Format: {:?}", format);
-
-    let workspace_dir = workspace_dir.unwrap_or_else(|| source_dir.clone());
-    let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
-
-    let proj_config = if let Some(ref cfg) = config_path {
-        project_model::ProjectConfig::load_from_file(cfg).unwrap_or_default()
-    } else {
-        project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
-    };
-
-    let mut diag_config = DiagnosticsConfig::from_project_json(
-        &proj_config.diagnostics,
-        proj_config.output.resolve_locale().unwrap_or_default(),
-    );
-
-    if let Some(ref diag_name) = only_diagnostic {
-        diag_config.apply_cli_filters(std::slice::from_ref(diag_name), &[]);
-    }
-
-    tracing::info!(
-        disabled = diag_config.disabled.len(),
-        only_enabled = ?diag_config.only_enabled.as_ref().map(|v| v.len()),
-        params = diag_config.parameters.len(),
-        locale = ?diag_config.locale,
-        "Loaded DiagnosticsConfig (streaming mode)"
-    );
-
-    // Scope the file walk to the configuration source root (+ extension roots)
-    // instead of the raw `-s` dir, so vendored/build copies such as
-    // `.build/vendor` are not analyzed as a duplicate configuration.
-    let project = project_model::Project::with_config(&source_dir, proj_config.clone());
-    let source_roots = project.source_roots();
-
-    tracing::info!("Finding BSL files in {:?}", source_roots);
-    let mut bsl_files = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for root in &source_roots {
-        for entry in WalkDir::new(root).follow_links(true) {
-            let entry = entry?;
-            if entry.file_type().is_file()
-                && entry.path().extension().is_some_and(|ext| ext == "bsl")
-            {
-                let path = entry.path().to_path_buf();
-                if seen.insert(path.clone()) {
-                    bsl_files.push(path);
-                }
-            }
-        }
-    }
-
-    tracing::info!(
-        "Found {} BSL files across {} source root(s)",
-        bsl_files.len(),
-        source_roots.len()
-    );
-
-    if bsl_files.is_empty() {
-        tracing::warn!("No BSL files found in {:?}", source_roots);
-        if !matches!(format, OutputFormat::Jsonl) {
-            println!("No BSL files found!");
-        }
-        return Ok(());
-    }
-
-    let mut file_set = vfs::FileSet::new();
-    let mut all_file_ids: Vec<(FileId, PathBuf)> = Vec::new();
-
-    for (idx, path) in bsl_files.iter().enumerate() {
-        let file_id = FileId(idx as u32);
-        let vfs_path = vfs::VfsPath::new(path.clone());
-        file_set.insert(file_id, vfs_path);
-        all_file_ids.push((file_id, path.clone()));
-    }
-
-    let file_ids: Vec<(FileId, PathBuf)> = if let Some(ref filter) = diff_filter {
-        let filtered: Vec<_> = all_file_ids
-            .iter()
-            .filter(|(_, path)| {
-                let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
-                filter.should_analyze(rel_path)
-            })
-            .cloned()
-            .collect();
-        tracing::info!(
-            "After diff filter: {} files to analyze (from {} total in VFS)",
-            filtered.len(),
-            all_file_ids.len()
-        );
-        filtered
-    } else {
-        all_file_ids.clone()
-    };
-
-    let mut builder =
-        AnalysisOrchestrator::builder().workspace_root(&source_dir).diagnostics_config(diag_config);
-
-    if let Some(w) = workers {
-        builder = builder.num_workers(w);
-    }
-
-    if let Some(ref cfg) = config_path {
-        builder = builder.configuration_path(cfg);
-    }
-
-    let orchestrator = builder.build()?;
-
-    match format {
-        OutputFormat::Jsonl if diff_filter.is_some() => {
-            use std::time::Instant;
-
-            use ide::streaming::{DoneEvent, FileEvent, StartEvent};
-
-            let start = Instant::now();
-            let file_id_vec: Vec<FileId> = file_ids.iter().map(|(id, _)| *id).collect();
-            let total_files = file_id_vec.len();
-
-            let start_event = StartEvent::new(total_files);
-            println!("{}", serde_json::to_string(&start_event).unwrap());
-
-            let streaming_results =
-                orchestrator.analyze_with_progress(file_id_vec, file_set, |_, _| {})?;
-
-            let filter = diff_filter.as_ref().unwrap();
-            let mut total_diagnostics = 0;
-
-            for file_result in &streaming_results.file_results {
-                if let Some((_, path)) = file_ids.iter().find(|(id, _)| *id == file_result.file_id)
-                {
-                    let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
-                    let filtered: Vec<_> = file_result
-                        .diagnostics
-                        .iter()
-                        .filter(|d| {
-                            filter.diagnostic_in_diff(
-                                rel_path,
-                                d.start_line as u32,
-                                d.end_line as u32,
-                            )
-                        })
-                        .cloned()
-                        .collect();
-
-                    total_diagnostics += filtered.len();
-                    let file_event = FileEvent::new(
-                        path.display().to_string(),
-                        filtered,
-                        file_result.metrics.clone(),
-                        file_result.error.as_ref().map(|e| e.to_string()),
-                    );
-                    println!("{}", serde_json::to_string(&file_event).unwrap());
-                }
-            }
-
-            let done_event = DoneEvent::new(
-                start.elapsed().as_secs_f64(),
-                streaming_results.file_results.len(),
-                total_diagnostics,
-                streaming_results.file_results.iter().filter(|r| r.error.is_some()).count(),
-            );
-            println!("{}", serde_json::to_string(&done_event).unwrap());
-
-            tracing::info!("JSONL streaming analysis complete (with diff filter)");
-        }
-        OutputFormat::Jsonl => {
-            let file_id_vec: Vec<FileId> = file_ids.iter().map(|(id, _)| *id).collect();
-            let _summary = orchestrator.analyze_jsonl(file_id_vec, file_set)?;
-            tracing::info!("JSONL streaming analysis complete");
-        }
-        OutputFormat::Console => {
-            use std::time::Instant;
-
-            use indicatif::{ProgressBar, ProgressStyle};
-
-            use bsl_analyzer::reporters::{AnalysisResults, FileAnalysis, ReporterRegistry};
-
-            let start = Instant::now();
-            let total_files = file_ids.len();
-
-            let progress = if !quiet {
-                let pb = ProgressBar::new(total_files as u64);
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template(
-                            "[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}",
-                        )
-                        .unwrap()
-                        .progress_chars("#>-"),
-                );
-                Some(pb)
-            } else {
-                None
-            };
-
-            let progress_clone = progress.clone();
-            let start_clone = start;
-
-            let file_id_vec: Vec<FileId> = file_ids.iter().map(|(id, _)| *id).collect();
-            let streaming_results = orchestrator.analyze_with_progress(
-                file_id_vec,
-                file_set,
-                |processed, _total| {
-                    if let Some(ref pb) = progress_clone {
-                        pb.set_position(processed as u64);
-                        let elapsed_secs = start_clone.elapsed().as_secs_f64();
-                        if elapsed_secs > 0.0 {
-                            pb.set_message(format!(
-                                "{:.0} files/sec",
-                                processed as f64 / elapsed_secs
-                            ));
-                        }
-                    }
-                },
-            )?;
-
-            if let Some(ref pb) = progress {
-                pb.finish_with_message("Analysis complete");
-            }
-
-            let elapsed = start.elapsed();
-
-            let mut all_diagnostics = Vec::new();
-
-            for file_result in &streaming_results.file_results {
-                if !file_result.diagnostics.is_empty() {
-                    if let Some((_, path)) =
-                        file_ids.iter().find(|(id, _)| *id == file_result.file_id)
-                    {
-                        let filtered_diagnostics = if let Some(ref filter) = diff_filter {
-                            let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
-                            file_result
-                                .diagnostics
-                                .iter()
-                                .filter(|d| {
-                                    filter.diagnostic_in_diff(
-                                        rel_path,
-                                        d.start_line as u32,
-                                        d.end_line as u32,
-                                    )
-                                })
-                                .cloned()
-                                .collect()
-                        } else {
-                            file_result.diagnostics.clone()
-                        };
-
-                        if !filtered_diagnostics.is_empty() {
-                            all_diagnostics.push(FileAnalysis {
-                                path: path.clone(),
-                                relative_path: path
-                                    .strip_prefix(&workspace_dir)
-                                    .unwrap_or(path)
-                                    .to_path_buf(),
-                                diagnostics: filtered_diagnostics,
-                                line_snippets: Vec::new(),
-                            });
-                        }
-                    }
-                }
-            }
-
-            let results = AnalysisResults {
-                files_analyzed: bsl_files.len(),
-                files_with_issues: all_diagnostics.len(),
-                total_diagnostics: streaming_results.total_diagnostics,
-                elapsed_secs: elapsed.as_secs_f64(),
-                diagnostics: all_diagnostics,
-                source_dir: source_dir.clone(),
-                workspace_dir: workspace_dir.clone(),
-            };
-
-            std::fs::create_dir_all(&output_dir)?;
-
-            let registry = ReporterRegistry::new();
-            let reporter_keys =
-                if reporters.is_empty() { vec!["console".to_string()] } else { reporters };
-
-            for key in &reporter_keys {
-                match registry.get(key) {
-                    Some(reporter) => {
-                        if let Err(e) = reporter.report(&results, &output_dir) {
-                            tracing::error!("Reporter '{}' failed: {}", key, e);
-                            eprintln!("Error: Reporter '{}' failed: {}", key, e);
-                        }
-                    }
-                    None => {
-                        eprintln!("Error: Unknown reporter '{}'", key);
-                        eprintln!("Valid reporters: {}", registry.keys().join(", "));
-                        return Err(format!("Unknown reporter: {}", key).into());
-                    }
-                }
-            }
-
-            if profiling_enabled {
-                if let Some(diag_name) = only_diagnostic {
-                    let timings: Vec<FileTiming> = streaming_results
-                        .file_results
-                        .iter()
-                        .filter_map(|fr| {
-                            file_ids.iter().find(|(id, _)| *id == fr.file_id).map(|(_, path)| {
-                                FileTiming { path: path.clone(), duration: fr.duration }
-                            })
-                        })
-                        .collect();
-
-                    if let Some(stats) = ProfilingStats::from_timings(diag_name, timings) {
-                        stats.print();
-                    }
-                }
-            }
-
-            tracing::info!("Streaming analysis complete");
-        }
-    }
 
     Ok(())
 }

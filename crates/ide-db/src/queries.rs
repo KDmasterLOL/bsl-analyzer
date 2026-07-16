@@ -543,13 +543,6 @@ pub struct ModuleHirMetrics {
 }
 
 impl ModuleHirMetrics {
-    pub(crate) fn from_methods(
-        methods: rustc_hash::FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>>,
-        module_code: Option<Arc<hir::metrics::HirMethodMetrics>>,
-    ) -> Self {
-        Self { methods, module_code }
-    }
-
     pub fn get(&self, local_id: u32) -> Option<Arc<hir::metrics::HirMethodMetrics>> {
         self.methods.get(&local_id).cloned()
     }
@@ -582,10 +575,6 @@ pub struct ModuleCyclomatic {
 }
 
 impl ModuleCyclomatic {
-    pub(crate) fn from_methods(methods: rustc_hash::FxHashMap<u32, u32>) -> Self {
-        Self { methods }
-    }
-
     pub fn get(&self, local_id: u32) -> u32 {
         self.methods.get(&local_id).copied().unwrap_or(1)
     }
