@@ -213,3 +213,158 @@ fn rejects_missing_target_version_when_bounds_exist() {
         "overlay target DOMDocument.AppendChild has no valid minimum version"
     );
 }
+
+fn property_data() -> Value {
+    json!({
+        "types": [
+            {"name": "ФормаКлиентскогоПриложения", "english_name": "ClientApplicationForm"}
+        ],
+        "properties": [
+            {"id": 7, "type_name": "ClientApplicationForm", "name": "Заголовок", "english_name": "Title"}
+        ]
+    })
+}
+
+fn property_addition_overlay(entry: Value) -> String {
+    json!({
+        "schema_version": 1,
+        "method_parameter_overrides": [],
+        "type_property_additions": [entry]
+    })
+    .to_string()
+}
+
+fn window_mode_addition() -> Value {
+    json!({
+        "canonical_type": "ClientApplicationForm",
+        "russian_name": "РежимОткрытияОкна",
+        "english_name": "WindowOpeningMode",
+        "property_types": ["РежимОткрытияОкнаФормы"],
+        "is_readonly": false,
+        "min_version": "8.2",
+        "evidence_source": "v8std #std742",
+        "rationale": "help archive files it under the enum type name"
+    })
+}
+
+#[test]
+fn appends_type_property_addition_with_synthetic_id() {
+    let mut data = property_data();
+
+    apply_type_property_additions(&mut data, &property_addition_overlay(window_mode_addition()))
+        .unwrap();
+
+    let properties = data["properties"].as_array().unwrap();
+    assert_eq!(properties.len(), 2);
+    let added = &properties[1];
+    assert_eq!(added["type_name"], "ClientApplicationForm");
+    assert_eq!(added["name"], "РежимОткрытияОкна");
+    assert_eq!(added["english_name"], "WindowOpeningMode");
+    assert_eq!(added["property_types"][0], "РежимОткрытияОкнаФормы");
+    // max existing id (7) + 1
+    assert_eq!(added["id"], 8);
+}
+
+#[test]
+fn absent_additions_section_is_a_no_op() {
+    let mut data = property_data();
+    let overlay = json!({
+        "schema_version": 1,
+        "method_parameter_overrides": []
+    })
+    .to_string();
+
+    apply_type_property_additions(&mut data, &overlay).unwrap();
+
+    assert_eq!(data["properties"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn rejects_addition_for_unknown_type() {
+    let mut data = property_data();
+    let mut entry = window_mode_addition();
+    entry["canonical_type"] = Value::String("NoSuchType".to_owned());
+
+    let error =
+        apply_type_property_additions(&mut data, &property_addition_overlay(entry)).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "type property addition target NoSuchType is not a known platform type (canonical_type must be the English type name)"
+    );
+}
+
+#[test]
+fn rejects_russian_canonical_type() {
+    // The property index keys on the English type name, so a Russian alias would
+    // produce a property `get_type_properties` can never resolve.
+    let mut data = property_data();
+    let mut entry = window_mode_addition();
+    entry["canonical_type"] = Value::String("ФормаКлиентскогоПриложения".to_owned());
+
+    let error =
+        apply_type_property_additions(&mut data, &property_addition_overlay(entry)).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "type property addition target ФормаКлиентскогоПриложения is not a known platform type (canonical_type must be the English type name)"
+    );
+}
+
+#[test]
+fn rejects_addition_that_already_exists() {
+    let mut data = property_data();
+    let mut entry = window_mode_addition();
+    entry["russian_name"] = Value::String("Заголовок".to_owned());
+    entry["english_name"] = Value::String("Title".to_owned());
+
+    let error =
+        apply_type_property_additions(&mut data, &property_addition_overlay(entry)).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "type property addition ClientApplicationForm.Title already exists in the extracted data"
+    );
+}
+
+#[test]
+fn rejects_addition_colliding_with_existing_english_name_via_russian() {
+    // property_data() has Заголовок/Title. An addition whose Russian name is
+    // "Title" would shadow that property in the shared name index, so it must be
+    // rejected even though no RU→RU or EN→EN pair matches directly.
+    let mut data = property_data();
+    let mut entry = window_mode_addition();
+    entry["russian_name"] = Value::String("Title".to_owned());
+
+    let error =
+        apply_type_property_additions(&mut data, &property_addition_overlay(entry)).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "type property addition ClientApplicationForm.WindowOpeningMode already exists in the extracted data"
+    );
+}
+
+#[test]
+fn rejects_addition_with_empty_property_types() {
+    let mut data = property_data();
+    let mut entry = window_mode_addition();
+    entry["property_types"] = json!([]);
+
+    let error =
+        apply_type_property_additions(&mut data, &property_addition_overlay(entry)).unwrap_err();
+
+    assert_eq!(error.to_string(), "type property addition 0 property_types must not be empty");
+}
+
+#[test]
+fn curated_overlay_adds_window_opening_mode() {
+    let mut data = property_data();
+
+    apply_type_property_additions(&mut data, &valid_overlay()).unwrap();
+
+    let added = data["properties"].as_array().unwrap().iter().any(|prop| {
+        prop["type_name"] == "ClientApplicationForm" && prop["name"] == "РежимОткрытияОкна"
+    });
+    assert!(added, "curated overlay must add ClientApplicationForm.РежимОткрытияОкна");
+}
