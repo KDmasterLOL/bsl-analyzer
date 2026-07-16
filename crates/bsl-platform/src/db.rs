@@ -703,6 +703,49 @@ fn get_keyword_docs_static(keyword: &str) -> Option<crate::types::KeywordDocs> {
 
 pub type PlatformData = PlatformDataInner;
 
+/// `heap_size` estimators for Salsa's `memory_usage` report on the platform
+/// lookup queries. Each thinly wraps the target type's own `estimated_heap_size`
+/// (defined next to the type in `types.rs`) for the `Option`/`Arc<Vec<_>>`
+/// shape the query actually memoises.
+mod heap_estimate {
+    use std::sync::Arc;
+
+    use super::{
+        GlobalFunction, PlatformConstructor, PlatformMethod, PlatformProperty, PlatformType,
+    };
+
+    pub(super) fn platform_type_heap(v: &Option<PlatformType>) -> usize {
+        v.as_ref().map_or(0, PlatformType::estimated_heap_size)
+    }
+
+    pub(super) fn platform_method_heap(v: &Option<PlatformMethod>) -> usize {
+        v.as_ref().map_or(0, PlatformMethod::estimated_heap_size)
+    }
+
+    pub(super) fn method_vec_heap(v: &Arc<Vec<PlatformMethod>>) -> usize {
+        stdx::heap::vec_bytes::<PlatformMethod>(v.len())
+            + v.iter().map(PlatformMethod::estimated_heap_size).sum::<usize>()
+    }
+
+    pub(super) fn global_function_heap(v: &Option<GlobalFunction>) -> usize {
+        v.as_ref().map_or(0, GlobalFunction::estimated_heap_size)
+    }
+
+    pub(super) fn constructor_vec_heap(v: &Arc<Vec<PlatformConstructor>>) -> usize {
+        stdx::heap::vec_bytes::<PlatformConstructor>(v.len())
+            + v.iter().map(PlatformConstructor::estimated_heap_size).sum::<usize>()
+    }
+
+    pub(super) fn platform_property_heap(v: &Option<PlatformProperty>) -> usize {
+        v.as_ref().map_or(0, PlatformProperty::estimated_heap_size)
+    }
+
+    pub(super) fn property_vec_heap(v: &Arc<Vec<PlatformProperty>>) -> usize {
+        stdx::heap::vec_bytes::<PlatformProperty>(v.len())
+            + v.iter().map(PlatformProperty::estimated_heap_size).sum::<usize>()
+    }
+}
+
 #[salsa::interned(debug)]
 pub struct TypeNameInput {
     pub name: String,
@@ -720,7 +763,7 @@ pub struct PrefixedMethodLookupInput {
     pub method_name: String,
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_type_heap, returns(as_ref))]
 pub fn platform_type_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -730,7 +773,7 @@ pub fn platform_type_query<'db>(
     data.get_type(name).cloned()
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_method_heap, returns(as_ref))]
 pub fn platform_method_query<'db>(
     db: &'db dyn salsa::Database,
     input: MethodLookupInput<'db>,
@@ -741,7 +784,7 @@ pub fn platform_method_query<'db>(
     data.get_method(type_name, method_name).cloned()
 }
 
-#[salsa::tracked(lru = 128, returns(ref))]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::method_vec_heap, returns(ref))]
 pub fn type_methods_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -751,7 +794,7 @@ pub fn type_methods_query<'db>(
     Arc::new(data.get_type_methods(type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 128, returns(ref))]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::method_vec_heap, returns(ref))]
 pub fn manager_methods_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -761,7 +804,7 @@ pub fn manager_methods_query<'db>(
     Arc::new(data.get_manager_methods(prefix).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_method_heap, returns(as_ref))]
 pub fn prefixed_method_query<'db>(
     db: &'db dyn salsa::Database,
     input: PrefixedMethodLookupInput<'db>,
@@ -808,7 +851,7 @@ fn sort_and_deduplicate_methods(mut methods: Vec<PlatformMethod>) -> Vec<Platfor
     methods
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::global_function_heap, returns(as_ref))]
 pub fn global_function_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -818,7 +861,7 @@ pub fn global_function_query<'db>(
     data.get_global_function(name).cloned()
 }
 
-#[salsa::tracked(lru = 128, returns(ref))]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::constructor_vec_heap, returns(ref))]
 pub fn platform_constructors_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -828,7 +871,7 @@ pub fn platform_constructors_query<'db>(
     Arc::new(data.get_constructors(type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_property_heap, returns(as_ref))]
 pub fn platform_property_query<'db>(
     db: &'db dyn salsa::Database,
     input: MethodLookupInput<'db>,
@@ -839,7 +882,7 @@ pub fn platform_property_query<'db>(
     data.get_property(type_name, prop_name).cloned()
 }
 
-#[salsa::tracked(lru = 128, returns(ref))]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::property_vec_heap, returns(ref))]
 pub fn type_properties_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -849,7 +892,7 @@ pub fn type_properties_query<'db>(
     Arc::new(data.get_type_properties(type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_property_heap, returns(as_ref))]
 pub fn global_property_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -859,7 +902,7 @@ pub fn global_property_query<'db>(
     data.get_global_property(name).cloned()
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_method_heap, returns(as_ref))]
 pub fn global_member_method_query<'db>(
     db: &'db dyn salsa::Database,
     input: MethodLookupInput<'db>,
