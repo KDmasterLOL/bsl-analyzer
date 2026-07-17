@@ -517,10 +517,9 @@ impl ModuleBodies {
             let mut b =
                 crate::body::body_heap(&r.body) + crate::body::source_map_heap(&r.source_map);
             b += vec_bytes::<BodyDiagnostic>(r.diagnostics.len());
-            b += map_table_bytes::<String, ()>(r.referenced_externals.len());
-            for s in &r.referenced_externals {
-                b += s.capacity();
-            }
+            // `NormName` keys are `Copy` ids into the global intern pool, so
+            // unlike the old `String` set there is no per-element byte sum.
+            b += map_table_bytes::<intern::NormName, ()>(r.referenced_externals.len());
             b += vec_bytes::<body::ExternalRef>(r.external_refs.len());
             for ext in &r.external_refs {
                 b += external_ref_name_heap(ext);

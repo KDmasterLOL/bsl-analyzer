@@ -14,6 +14,7 @@ use hir_def::symbol_tree::SymbolTree;
 use hir_def::{
     sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId, StmtId,
 };
+use intern::NormName;
 use once_cell::sync::Lazy;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -1035,8 +1036,8 @@ impl<'db> InferenceContext<'db> {
     }
 
     fn body_declares_binding(&self, name: &hir_def::Name) -> bool {
-        let target = name.as_str().fold_lower();
-        self.body.bindings_iter().any(|(_, b)| b.name.as_str().fold_lower() == target)
+        let target = NormName::intern(name.as_str());
+        self.body.bindings_iter().any(|(_, b)| NormName::intern(b.name.as_str()) == target)
     }
 
     /// True when the receiver is a reassigned local variable and a definition

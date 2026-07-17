@@ -1,3 +1,4 @@
+use intern::NormName;
 use stdx::case::CaseExt;
 use syntax::{
     ast::{AstNode, PreIfDir},
@@ -209,7 +210,7 @@ fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingIdx> 
     ctx.register_param(name_token.text());
 
     if !is_val {
-        ctx.by_ref_param_names.insert(name_token.text().fold_lower());
+        ctx.by_ref_param_names.insert(NormName::intern(name_token.text()));
     }
 
     let default_value = param
@@ -454,16 +455,17 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     };
     if let Some((ref name, range)) = target_name {
         let key = name.as_str().fold_lower();
+        let norm_key = NormName::intern(name.as_str());
 
-        let existing_binding_kind = if ctx.local_vars.contains_key(&key) {
+        let existing_binding_kind = if ctx.local_vars.contains_key(&norm_key) {
             Some(crate::body::ExistingBindingKind::Local)
-        } else if ctx.param_names.contains(&key) {
+        } else if ctx.param_names.contains(&norm_key) {
             Some(crate::body::ExistingBindingKind::Param)
         } else {
             None
         };
 
-        if !ctx.local_vars.contains_key(&key) && !ctx.param_names.contains(&key) {
+        if !ctx.local_vars.contains_key(&norm_key) && !ctx.param_names.contains(&norm_key) {
             ctx.register_local_var(name.clone(), range);
         }
 
@@ -478,7 +480,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             ctx.emit(BodyDiagnostic::ThisObjectAssign { range });
         }
 
-        if ctx.is_function && ctx.by_ref_param_names.contains(&key) {
+        if ctx.is_function && ctx.by_ref_param_names.contains(&norm_key) {
             ctx.emit(BodyDiagnostic::FunctionOutParameter {
                 name: name.as_str().to_string(),
                 range,
