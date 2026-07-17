@@ -37,6 +37,7 @@ vfs-notify.workspace = true
 paths.workspace = true
 line-index.workspace = true
 stdx.workspace = true
+intern.workspace = true
 profile.workspace = true
 mcp-server.workspace = true
 bsl-debug.workspace = true

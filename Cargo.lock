@@ -264,6 +264,7 @@ dependencies = [
  "ide-db",
  "ide-host-core",
  "indicatif",
+ "intern",
  "lexer",
  "line-index",
  "lsp-server",
@@ -2098,9 +2099,12 @@ dependencies = [
 name = "intern"
 version = "0.2.60"
 dependencies = [
+ "boxcar",
+ "criterion",
  "dashmap",
- "once_cell",
  "rustc-hash 2.1.2",
+ "smol_str",
+ "stdx",
 ]
 
 [[package]]
