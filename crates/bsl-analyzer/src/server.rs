@@ -258,6 +258,15 @@ fn idle_trim_disabled() -> bool {
     std::env::var("BSL_IDLE_TRIM").is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("off"))
 }
 
+/// Opt-in live-session memory observability (`BSL_MEM_REPORT_IDLE=1`): print the
+/// salsa memory/event tables to stderr on the first tick of each idle period (the
+/// state the preceding editing burst left behind) and again right after an idle
+/// trim (what the trim reclaimed). Off by default — the tables are ~50 lines per
+/// snapshot and only useful while measuring a session.
+fn idle_mem_report_enabled() -> bool {
+    matches!(std::env::var("BSL_MEM_REPORT_IDLE").as_deref(), Ok("1"))
+}
+
 /// Memory budget in megabytes under which the idle trim is skipped, overridable via
 /// `BSL_IDLE_TRIM_MEM_BUDGET_MB`. The `0` default always trims: an idle server has
 /// nothing in flight to cancel, eviction beyond the caps is the point, and the cost
@@ -300,10 +309,20 @@ fn idle_trim_kind(state: &GlobalState, over_budget: bool) -> Option<IdleTrimKind
 /// retention. Runs on the event-loop thread, which owns `&mut` to the database; the
 /// quiescence gate guarantees no live snapshot, so the exclusive borrow cannot block.
 fn handle_idle_tick(state: &mut GlobalState) {
+    state.idle_ticks = state.idle_ticks.saturating_add(1);
+
+    // Ahead of the trim kill-switch on purpose: measuring raw accumulation with
+    // `BSL_IDLE_TRIM=0` still needs the idle snapshot.
+    if idle_mem_report_enabled() && state.idle_ticks == 1 {
+        let db = state.analysis_host.raw_database();
+        const LABEL: &str = "idle (first tick after activity)";
+        crate::mem_report::print_salsa_memory_report(db, LABEL);
+        crate::mem_report::print_salsa_event_report(db, LABEL);
+    }
+
     if idle_trim_disabled() {
         return;
     }
-    state.idle_ticks = state.idle_ticks.saturating_add(1);
 
     let over_budget = crate::handlers::workspace_batch::over_mem_budget(idle_trim_mem_budget_mb());
     let Some(kind) = idle_trim_kind(state, over_budget) else {
@@ -329,6 +348,13 @@ fn handle_idle_tick(state: &mut GlobalState) {
         }
     }
     profile::purge_allocator();
+
+    if idle_mem_report_enabled() {
+        let db = state.analysis_host.raw_database();
+        let label = format!("idle post-trim ({kind:?})");
+        crate::mem_report::print_salsa_memory_report(db, &label);
+        crate::mem_report::print_salsa_event_report(db, &label);
+    }
 
     state.idle_shallow_trimmed = true;
     if kind == IdleTrimKind::Deep {
