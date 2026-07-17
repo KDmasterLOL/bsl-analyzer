@@ -354,7 +354,7 @@ pub struct InferenceContext<'db> {
 
     return_expr_ids: Vec<ExprId>,
 
-    var_types: FxHashMap<String, TypeId>,
+    var_types: FxHashMap<NormName, TypeId>,
 
     implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
 
@@ -989,7 +989,11 @@ impl<'db> InferenceContext<'db> {
     pub fn finish(self) -> BodyInferenceResult {
         BodyInferenceResult {
             owner: self.owner,
-            var_types: self.var_types,
+            // `var_types` is `NormName`-keyed internally (the hot lookup path during
+            // inference); the public result stays `String`-keyed for its many
+            // consumers across crate boundaries, so materialise once here — a
+            // single allocation per body, replacing a fold per lookup.
+            var_types: self.var_types.iter().map(|(k, v)| (k.as_str().to_string(), *v)).collect(),
             implicit_locals: self.implicit_locals,
             binding_types: self.binding_types,
             expr_types: self.expr_types,
@@ -1218,7 +1222,8 @@ impl<'db> InferenceContext<'db> {
                             None if existing_module_variable => {}
                             None => {
                                 let key = name.as_str().fold_lower();
-                                self.assigned_var_names.insert(NormName::intern(name.as_str()));
+                                let norm_key = NormName::intern(name.as_str());
+                                self.assigned_var_names.insert(norm_key);
                                 let unknown = self.db.unknown();
                                 self.implicit_locals
                                     .entry(key.clone())
@@ -1241,7 +1246,7 @@ impl<'db> InferenceContext<'db> {
                                         }],
                                     });
                                 if !self.is_unknown(value_ty) {
-                                    self.var_types.insert(key, value_ty);
+                                    self.var_types.insert(norm_key, value_ty);
                                 }
                             }
                         }
@@ -1359,7 +1364,7 @@ impl<'db> InferenceContext<'db> {
             Stmt::For { var, from, to, body } => {
                 self.infer_expr(ExprId::from_idx(*from));
                 self.infer_expr(ExprId::from_idx(*to));
-                let var_name = self.body.binding_idx(*var).name.as_str().fold_lower();
+                let var_name = NormName::intern(self.body.binding_idx(*var).name.as_str());
                 let number = self.db.number(None, None);
                 self.var_types.insert(var_name, number);
                 self.binding_types.insert(BindingId::from_idx(*var), number);
@@ -1371,7 +1376,7 @@ impl<'db> InferenceContext<'db> {
                 if let Some(elem_ty) =
                     crate::iteration_lookup::resolve_iter_element_ty(self.db, coll_ty)
                 {
-                    let var_name = self.body.binding_idx(*var).name.as_str().fold_lower();
+                    let var_name = NormName::intern(self.body.binding_idx(*var).name.as_str());
                     self.var_types.insert(var_name, elem_ty);
                     self.binding_types.insert(BindingId::from_idx(*var), elem_ty);
                 }
@@ -1669,7 +1674,7 @@ impl<'db> InferenceContext<'db> {
 
         let resolved = resolver.resolve_name(self.db, name);
 
-        if let Some(ty) = self.var_types.get(&name.as_str().fold_lower()) {
+        if let Some(ty) = self.var_types.get(&NormName::intern(name.as_str())) {
             trace!("resolved {} via var_types = {:?}", name, ty);
             let ty_id = *ty;
             // Structure-literal key enrichment: a local typed as a `Структура` gets its collected
