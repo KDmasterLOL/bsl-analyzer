@@ -345,6 +345,7 @@ name = "bsl-metadata"
 version = "0.2.60"
 dependencies = [
  "bsl-platform",
+ "intern",
  "rayon",
  "roxmltree",
  "rustc-hash 2.1.2",
