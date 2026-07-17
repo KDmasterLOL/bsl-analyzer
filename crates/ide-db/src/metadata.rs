@@ -1,4 +1,6 @@
 use bsl_metadata::Configuration;
+use intern::NormName;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use stdx::case::CaseExt;
@@ -236,20 +238,23 @@ pub(crate) mod heap_estimate {
             + string_key_map_heap(module_file_by_name)
     }
 
+    // `NormName` keys are `Copy` ids into the global intern pool: the table
+    // itself is the whole cost, unlike the `String`-keyed indexes below whose
+    // key bytes are each table's own allocation.
     pub(crate) fn config_index_heap(v: &Arc<super::ConfigIndex>) -> usize {
-        let by_name_bytes =
-            stdx::heap::map_table_bytes::<(bsl_metadata::MdoType, String), super::MdoFileIds>(
-                v.by_name.len(),
-            ) + v.by_name.keys().map(|(_, name)| name.capacity()).sum::<usize>();
-        let register_bytes =
-            stdx::heap::map_table_bytes::<String, (bsl_metadata::MdoType, super::MdoFileIds)>(
-                v.register_by_name.len(),
-            ) + v.register_by_name.keys().map(String::capacity).sum::<usize>();
+        let by_name_bytes = stdx::heap::map_table_bytes::<
+            (bsl_metadata::MdoType, intern::NormName),
+            super::MdoFileIds,
+        >(v.by_name.len());
+        let register_bytes = stdx::heap::map_table_bytes::<
+            intern::NormName,
+            (bsl_metadata::MdoType, super::MdoFileIds),
+        >(v.register_by_name.len());
         by_name_bytes + register_bytes
     }
 
     pub(crate) fn defined_type_index_heap(v: &Arc<super::DefinedTypeIndex>) -> usize {
-        string_key_map_heap(&v.by_name)
+        stdx::heap::map_table_bytes::<intern::NormName, vfs::FileId>(v.by_name.len())
     }
 
     pub(crate) fn common_module_index_heap(v: &Arc<super::CommonModuleIndex>) -> usize {
@@ -636,23 +641,23 @@ pub struct MdoFileIds {
 /// structure input, so a content edit leaves it memoised.
 #[derive(Default, PartialEq, Eq, Debug)]
 pub struct ConfigIndex {
-    by_name: std::collections::HashMap<(bsl_metadata::MdoType, String), MdoFileIds>,
+    by_name: FxHashMap<(bsl_metadata::MdoType, NormName), MdoFileIds>,
     /// Registers keyed by name alone (no kind), for callers that know only the
     /// register name (e.g. a `Движения.<Register>` movement touch). A register
     /// name is unique within a config root, so this carries its kind alongside.
-    register_by_name: std::collections::HashMap<String, (bsl_metadata::MdoType, MdoFileIds)>,
+    register_by_name: FxHashMap<NormName, (bsl_metadata::MdoType, MdoFileIds)>,
 }
 
 impl ConfigIndex {
     pub fn lookup(&self, kind: bsl_metadata::MdoType, name: &str) -> Option<MdoFileIds> {
-        self.by_name.get(&(kind, name.fold_lower())).copied()
+        self.by_name.get(&(kind, NormName::intern(name))).copied()
     }
 
     pub fn lookup_register_by_name(
         &self,
         name: &str,
     ) -> Option<(bsl_metadata::MdoType, MdoFileIds)> {
-        self.register_by_name.get(&name.fold_lower()).copied()
+        self.register_by_name.get(&NormName::intern(name)).copied()
     }
 
     pub fn len(&self) -> usize {
@@ -675,13 +680,14 @@ pub fn config_index(
     let _span = tracing::info_span!("config_index").entered();
 
     let entries = listing.entries(db);
-    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
-    let mut register_by_name = std::collections::HashMap::new();
+    let mut by_name: FxHashMap<_, _> =
+        FxHashMap::with_capacity_and_hasher(entries.len(), Default::default());
+    let mut register_by_name = FxHashMap::default();
     for entry in entries.iter() {
         let ids = MdoFileIds { main: entry.main, predefined: entry.predefined };
-        by_name.insert((entry.kind, entry.name.fold_lower()), ids);
+        by_name.insert((entry.kind, NormName::intern(&entry.name)), ids);
         if entry.kind.is_register() {
-            register_by_name.insert(entry.name.fold_lower(), (entry.kind, ids));
+            register_by_name.insert(NormName::intern(&entry.name), (entry.kind, ids));
         }
     }
     Arc::new(ConfigIndex { by_name, register_by_name })
@@ -801,12 +807,12 @@ pub fn parse_defined_type_query(
 /// invalidate it.
 #[derive(Default, PartialEq, Eq, Debug)]
 pub struct DefinedTypeIndex {
-    by_name: std::collections::HashMap<String, vfs::FileId>,
+    by_name: FxHashMap<NormName, vfs::FileId>,
 }
 
 impl DefinedTypeIndex {
     pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
-        self.by_name.get(&name.fold_lower()).copied()
+        self.by_name.get(&NormName::intern(name)).copied()
     }
 }
 
@@ -819,9 +825,10 @@ pub fn defined_type_index(
     let _span = tracing::info_span!("defined_type_index").entered();
 
     let entries = listing.defined_types(db);
-    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    let mut by_name: FxHashMap<_, _> =
+        FxHashMap::with_capacity_and_hasher(entries.len(), Default::default());
     for entry in entries.iter() {
-        by_name.insert(entry.name.fold_lower(), entry.main);
+        by_name.insert(NormName::intern(&entry.name), entry.main);
     }
     Arc::new(DefinedTypeIndex { by_name })
 }

@@ -66,14 +66,22 @@ pub fn print_salsa_memory_report(db: &ide::RootDatabaseImpl, label: &str) {
         tf as f64 / 1048576.0,
         th as f64 / 1048576.0
     );
+    // The NormName pool is process-global, not a salsa ingredient, so it needs
+    // its own row — otherwise it hides in the untracked RSS remainder.
+    let pool = intern::pool_stats();
+    let pool_mb = pool.heap_bytes as f64 / 1048576.0;
+    eprintln!(
+        "--- intern pool (non-salsa): norms={} raw_cached={} heap~={pool_mb:.1}MB ---",
+        pool.norm_count, pool.raw_count
+    );
     if let (Some(hwm), Some(rss)) = (proc_kb("VmHWM:"), proc_kb("VmRSS:")) {
         let salsa_mb = (tm + tf + th) as f64 / 1048576.0;
         eprintln!(
-            "--- process: VmHWM(peak)={:.1}MB VmRSS(now)={:.1}MB | salsa-tracked={:.1}MB | untracked(node-cache+text+alloc)~={:.1}MB ---",
+            "--- process: VmHWM(peak)={:.1}MB VmRSS(now)={:.1}MB | salsa-tracked={:.1}MB | intern-pool~={pool_mb:.1}MB | untracked(node-cache+text+alloc)~={:.1}MB ---",
             hwm as f64 / 1024.0,
             rss as f64 / 1024.0,
             salsa_mb,
-            rss as f64 / 1024.0 - salsa_mb
+            rss as f64 / 1024.0 - salsa_mb - pool_mb
         );
     }
 }

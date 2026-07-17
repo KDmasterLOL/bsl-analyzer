@@ -264,6 +264,7 @@ dependencies = [
  "ide-db",
  "ide-host-core",
  "indicatif",
+ "intern",
  "lexer",
  "line-index",
  "lsp-server",
@@ -344,6 +345,7 @@ name = "bsl-metadata"
 version = "0.2.60"
 dependencies = [
  "bsl-platform",
+ "intern",
  "rayon",
  "roxmltree",
  "rustc-hash 2.1.2",
@@ -1939,6 +1941,7 @@ dependencies = [
  "hir",
  "hir-ty",
  "indexmap",
+ "intern",
  "line-index",
  "parking_lot",
  "parser",
@@ -1968,6 +1971,7 @@ dependencies = [
  "fixedbitset",
  "hir",
  "ide-db",
+ "intern",
  "itertools 0.12.1",
  "lexer",
  "line-index",
@@ -2098,9 +2102,12 @@ dependencies = [
 name = "intern"
 version = "0.2.60"
 dependencies = [
+ "boxcar",
+ "criterion",
  "dashmap",
- "once_cell",
  "rustc-hash 2.1.2",
+ "smol_str",
+ "stdx",
 ]
 
 [[package]]

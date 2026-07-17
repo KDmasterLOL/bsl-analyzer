@@ -1,3 +1,4 @@
+use intern::NormName;
 use rustc_hash::FxHashSet;
 use stdx::case::CaseExt;
 
@@ -382,14 +383,14 @@ fn check_module_var_declarations(
         return Vec::new();
     }
 
-    let mut all_referenced_externals: rustc_hash::FxHashSet<String> =
+    let mut all_referenced_externals: rustc_hash::FxHashSet<NormName> =
         rustc_hash::FxHashSet::default();
 
     for (_local_id, lower_result) in module_bodies.iter_lower_results() {
-        all_referenced_externals.extend(lower_result.referenced_externals.iter().cloned());
+        all_referenced_externals.extend(lower_result.referenced_externals.iter().copied());
     }
     if let Some(module_code_result) = module_bodies.module_code_result() {
-        all_referenced_externals.extend(module_code_result.referenced_externals.iter().cloned());
+        all_referenced_externals.extend(module_code_result.referenced_externals.iter().copied());
     }
 
     let mut diagnostics = Vec::new();
@@ -397,7 +398,7 @@ fn check_module_var_declarations(
         if var.is_export {
             continue;
         }
-        let key = var.name.fold_lower();
+        let key = NormName::intern(&var.name);
         if !all_referenced_externals.contains(&key) {
             diagnostics.push(create_diagnostic(&var.name, var.range, code, ctx));
         }

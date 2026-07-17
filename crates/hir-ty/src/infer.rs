@@ -14,6 +14,7 @@ use hir_def::symbol_tree::SymbolTree;
 use hir_def::{
     sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId, StmtId,
 };
+use intern::NormName;
 use once_cell::sync::Lazy;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -353,11 +354,11 @@ pub struct InferenceContext<'db> {
 
     return_expr_ids: Vec<ExprId>,
 
-    var_types: FxHashMap<String, TypeId>,
+    var_types: FxHashMap<NormName, TypeId>,
 
     implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
 
-    assigned_var_names: rustc_hash::FxHashSet<String>,
+    assigned_var_names: rustc_hash::FxHashSet<NormName>,
 
     binding_types: FxHashMap<BindingId, TypeId>,
 
@@ -382,7 +383,7 @@ pub struct InferenceContext<'db> {
     /// module wins on a name collision). Built once per inference run on first bare-call
     /// miss and reused, so a global-util-heavy body does not re-enumerate global modules
     /// per call. `None` until first consulted. See [`Self::global_export_map`].
-    global_exports: Option<Arc<FxHashMap<String, hir_def::MethodId>>>,
+    global_exports: Option<Arc<FxHashMap<NormName, hir_def::MethodId>>>,
 
     /// Per-body literal `Структура` shapes (keys built via `Новый Структура` / `.Вставить`), keyed
     /// by lowercased local name. Collected once at the start of [`Self::infer_all`] and used to
@@ -702,14 +703,14 @@ impl<'db> InferenceContext<'db> {
 
     /// Lazily build (and cache) the unqualified-export lookup of the global common
     /// modules visible to this body. See [`Self::global_exports`].
-    fn global_export_map(&mut self) -> Arc<FxHashMap<String, hir_def::MethodId>> {
+    fn global_export_map(&mut self) -> Arc<FxHashMap<NormName, hir_def::MethodId>> {
         if let Some(map) = &self.global_exports {
             return Arc::clone(map);
         }
         let resolver = self.get_resolver();
-        let mut map: FxHashMap<String, hir_def::MethodId> = FxHashMap::default();
+        let mut map: FxHashMap<NormName, hir_def::MethodId> = FxHashMap::default();
         for (_module, method_name, method_id) in resolver.global_common_module_exports(self.db) {
-            map.entry(method_name.as_str().fold_lower()).or_insert(method_id);
+            map.entry(NormName::intern(method_name.as_str())).or_insert(method_id);
         }
         let arc = Arc::new(map);
         self.global_exports = Some(Arc::clone(&arc));
@@ -743,7 +744,7 @@ impl<'db> InferenceContext<'db> {
         args: &[ExprId],
         callee: ExprId,
     ) -> Option<TypeId> {
-        let method_id = self.global_export_map().get(&name.as_str().fold_lower()).copied()?;
+        let method_id = self.global_export_map().get(&NormName::intern(name.as_str())).copied()?;
 
         self.check_common_module_callee_env(callee, None, method_id.module);
 
@@ -988,7 +989,11 @@ impl<'db> InferenceContext<'db> {
     pub fn finish(self) -> BodyInferenceResult {
         BodyInferenceResult {
             owner: self.owner,
-            var_types: self.var_types,
+            // `var_types` is `NormName`-keyed internally (the hot lookup path during
+            // inference); the public result stays `String`-keyed for its many
+            // consumers across crate boundaries, so materialise once here — a
+            // single allocation per body, replacing a fold per lookup.
+            var_types: self.var_types.iter().map(|(k, v)| (k.as_str().to_string(), *v)).collect(),
             implicit_locals: self.implicit_locals,
             binding_types: self.binding_types,
             expr_types: self.expr_types,
@@ -1035,8 +1040,8 @@ impl<'db> InferenceContext<'db> {
     }
 
     fn body_declares_binding(&self, name: &hir_def::Name) -> bool {
-        let target = name.as_str().fold_lower();
-        self.body.bindings_iter().any(|(_, b)| b.name.as_str().fold_lower() == target)
+        let target = NormName::intern(name.as_str());
+        self.body.bindings_iter().any(|(_, b)| NormName::intern(b.name.as_str()) == target)
     }
 
     /// True when the receiver is a reassigned local variable and a definition
@@ -1217,7 +1222,8 @@ impl<'db> InferenceContext<'db> {
                             None if existing_module_variable => {}
                             None => {
                                 let key = name.as_str().fold_lower();
-                                self.assigned_var_names.insert(key.clone());
+                                let norm_key = NormName::intern(name.as_str());
+                                self.assigned_var_names.insert(norm_key);
                                 let unknown = self.db.unknown();
                                 self.implicit_locals
                                     .entry(key.clone())
@@ -1240,7 +1246,7 @@ impl<'db> InferenceContext<'db> {
                                         }],
                                     });
                                 if !self.is_unknown(value_ty) {
-                                    self.var_types.insert(key, value_ty);
+                                    self.var_types.insert(norm_key, value_ty);
                                 }
                             }
                         }
@@ -1358,7 +1364,7 @@ impl<'db> InferenceContext<'db> {
             Stmt::For { var, from, to, body } => {
                 self.infer_expr(ExprId::from_idx(*from));
                 self.infer_expr(ExprId::from_idx(*to));
-                let var_name = self.body.binding_idx(*var).name.as_str().fold_lower();
+                let var_name = NormName::intern(self.body.binding_idx(*var).name.as_str());
                 let number = self.db.number(None, None);
                 self.var_types.insert(var_name, number);
                 self.binding_types.insert(BindingId::from_idx(*var), number);
@@ -1370,7 +1376,7 @@ impl<'db> InferenceContext<'db> {
                 if let Some(elem_ty) =
                     crate::iteration_lookup::resolve_iter_element_ty(self.db, coll_ty)
                 {
-                    let var_name = self.body.binding_idx(*var).name.as_str().fold_lower();
+                    let var_name = NormName::intern(self.body.binding_idx(*var).name.as_str());
                     self.var_types.insert(var_name, elem_ty);
                     self.binding_types.insert(BindingId::from_idx(*var), elem_ty);
                 }
@@ -1668,7 +1674,7 @@ impl<'db> InferenceContext<'db> {
 
         let resolved = resolver.resolve_name(self.db, name);
 
-        if let Some(ty) = self.var_types.get(&name.as_str().fold_lower()) {
+        if let Some(ty) = self.var_types.get(&NormName::intern(name.as_str())) {
             trace!("resolved {} via var_types = {:?}", name, ty);
             let ty_id = *ty;
             // Structure-literal key enrichment: a local typed as a `Структура` gets its collected
@@ -1770,7 +1776,7 @@ impl<'db> InferenceContext<'db> {
         if workspace_owns_common_module
             && !user_shadows
             && !body_binding_shadows
-            && !self.assigned_var_names.contains(&name.as_str().fold_lower())
+            && !self.assigned_var_names.contains(&NormName::intern(name.as_str()))
         {
             let source_root_id =
                 self.db.file_source_root_input(self.context_file_id).source_root_id(self.db);
@@ -1933,7 +1939,7 @@ impl<'db> InferenceContext<'db> {
                 let mut static_receiver = false;
                 if let Expr::Path(recv) = self.body.expr(base_id) {
                     let recv = recv.clone();
-                    if !self.assigned_var_names.contains(&recv.as_str().fold_lower())
+                    if !self.assigned_var_names.contains(&NormName::intern(recv.as_str()))
                         && !self.body_declares_binding(&recv)
                     {
                         static_receiver = true;
@@ -2221,7 +2227,7 @@ impl<'db> InferenceContext<'db> {
         // → Platform precedence.
         if let Some(name) = &bare_callee_name {
             if !self.body_declares_binding(name)
-                && !self.assigned_var_names.contains(&name.as_str().fold_lower())
+                && !self.assigned_var_names.contains(&NormName::intern(name.as_str()))
                 && !self.bare_module_method_exists(name)
             {
                 if let Some(ret) = self.resolve_bare_global_export(name, args, callee) {
@@ -2313,7 +2319,7 @@ impl<'db> InferenceContext<'db> {
             TypeKind::Unknown => {
                 if let Some(name) = bare_callee_name.as_ref() {
                     if !self.body_declares_binding(name)
-                        && !self.assigned_var_names.contains(&name.as_str().fold_lower())
+                        && !self.assigned_var_names.contains(&NormName::intern(name.as_str()))
                     {
                         let symbol_tree = match &self.local_symbols {
                             Some(symbols) => Arc::clone(symbols),
@@ -2528,7 +2534,7 @@ impl<'db> InferenceContext<'db> {
         if self.body_declares_binding(module_name) {
             return None;
         }
-        if self.assigned_var_names.contains(&module_name.as_str().fold_lower()) {
+        if self.assigned_var_names.contains(&NormName::intern(module_name.as_str())) {
             return None;
         }
 

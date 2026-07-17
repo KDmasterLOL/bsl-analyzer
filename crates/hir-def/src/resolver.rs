@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use stdx::case::CaseExt;
 
 use bsl_metadata::MdObject;
 
@@ -278,10 +277,10 @@ impl Resolver {
         }
         let Some(module_id) = self.module_id() else { return Vec::new() };
         let mut names = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         for cfg in db.configurations(module_id.file_id).iter() {
             for cm in cfg.configuration.common_modules() {
-                if cm.is_global() && seen.insert(cm.name().fold_lower()) {
+                if cm.is_global() && seen.insert(intern::NormName::intern(cm.name())) {
                     names.push(Name::new(cm.name()));
                 }
             }
@@ -331,7 +330,7 @@ impl Resolver {
             for module_id in candidates {
                 let symbol_tree = db.symbol_tree_ref(module_id);
                 for method in symbol_tree.exported_methods() {
-                    if seen.insert(method.name.as_str().fold_lower()) {
+                    if seen.insert(intern::NormName::intern(method.name.as_str())) {
                         exports.push((module_name.clone(), method.name.clone(), method.id));
                     }
                 }

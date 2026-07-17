@@ -23,6 +23,10 @@ pub struct PlatformDataInner {
     /// Folded English type name → indices of that type's methods. Replaces the
     /// O(all-methods) per-call `to_lowercase` scan in [`get_type_methods`].
     methods_by_type: FxHashMap<SmolStr, Vec<usize>>,
+    /// Folded first segment of a dotted type name (the manager prefix) → indices
+    /// of methods on that manager's types. Replaces the O(all-methods) per-call
+    /// `to_lowercase` scan in [`get_manager_methods`].
+    manager_methods_by_prefix: FxHashMap<SmolStr, Vec<usize>>,
     global_functions: Vec<GlobalFunction>,
     global_functions_by_name: FxHashMap<SmolStr, usize>,
     method_docs_by_id: FxHashMap<u32, usize>,
@@ -118,6 +122,7 @@ impl PlatformDataInner {
 
         let mut methods_by_name = FxHashMap::default();
         let mut methods_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
+        let mut manager_methods_by_prefix: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
 
         let mut type_en_to_ru: FxHashMap<SmolStr, SmolStr> = FxHashMap::default();
         for ty in &types {
@@ -132,6 +137,9 @@ impl PlatformDataInner {
             let en_method_key: SmolStr = method.english_name.fold_lower().into();
 
             methods_by_type.entry(en_type_key.clone()).or_default().push(idx);
+            if let Some((manager_prefix, _)) = en_type_key.split_once('.') {
+                manager_methods_by_prefix.entry(manager_prefix.into()).or_default().push(idx);
+            }
             methods_by_name.insert((en_type_key.clone(), ru_method_key.clone()), idx);
             methods_by_name.insert((en_type_key.clone(), en_method_key.clone()), idx);
 
@@ -254,6 +262,7 @@ impl PlatformDataInner {
             methods,
             methods_by_name,
             methods_by_type,
+            manager_methods_by_prefix,
             global_functions,
             global_functions_by_name,
             method_docs_by_id,
@@ -313,8 +322,25 @@ impl PlatformDataInner {
     }
 
     pub fn get_manager_methods(&self, manager_prefix: &str) -> Vec<&PlatformMethod> {
-        let prefix = format!("{}.", manager_prefix.fold_lower());
-        self.methods.iter().filter(|m| m.type_name.fold_lower().starts_with(&prefix)).collect()
+        let folded = manager_prefix.fold_lower();
+        // The index is keyed by the segment before the first dot; a dotted
+        // prefix narrows the bucket with the original `starts_with` check.
+        let (head, dotted_rest) = match folded.split_once('.') {
+            Some((head, _)) => (head, true),
+            None => (folded.as_str(), false),
+        };
+        let Some(indices) = self.manager_methods_by_prefix.get(head) else {
+            return Vec::new();
+        };
+        if !dotted_rest {
+            return indices.iter().filter_map(|&idx| self.methods.get(idx)).collect();
+        }
+        let full_prefix = format!("{folded}.");
+        indices
+            .iter()
+            .filter_map(|&idx| self.methods.get(idx))
+            .filter(|m| m.type_name.fold_lower().starts_with(&full_prefix))
+            .collect()
     }
 
     pub fn get_global_function(&self, name: &str) -> Option<&GlobalFunction> {

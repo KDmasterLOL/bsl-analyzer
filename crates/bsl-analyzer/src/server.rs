@@ -346,6 +346,9 @@ fn handle_idle_tick(state: &mut GlobalState) {
         if let Err(err) = state.task_pool.try_broadcast(syntax::clear_shared_node_cache) {
             tracing::debug!(?err, "idle trim: worker green-node cache clear skipped");
         }
+        // The raw-spelling side of the NormName pool is an accelerator cache
+        // that grows with edit churn; dropping it never invalidates ids.
+        intern::trim_raw_cache();
     }
     profile::purge_allocator();
 

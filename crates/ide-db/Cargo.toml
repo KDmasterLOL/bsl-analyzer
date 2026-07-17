@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 stdx.workspace = true
+intern.workspace = true
 parser.workspace = true
 hir.workspace = true
 sdbl-hir.workspace = true
