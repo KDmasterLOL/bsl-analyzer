@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use ide::{Analysis, RootDatabaseImpl};
 use vfs::{FileId, Vfs, VfsPath};
 
-use super::workspace_sweep::{CodeAggregate, SweepOptions, WorkspaceSweep};
+use super::workspace_sweep::{CodeAggregate, SweepCancel, SweepOptions, WorkspaceSweep};
 
 /// Adapts the resident's owned [`Vfs`] to the lock-neutral [`ide_host_core::VfsWrite`]
 /// the shared metadata policy expects. The resident is only ever touched while the
@@ -93,13 +93,21 @@ impl DiagnosticsResident {
     /// discipline). The caller MUST hold the state lock for the whole sweep so no
     /// reload mutates the master db mid-flight — that would cancel the cloned queries.
     /// Bounded by `opts.max_files` over a stable FileId order, so a cap is deterministic.
+    ///
+    /// `cancel` is the sweep's cancellation bridge: each worker registers its clone's
+    /// salsa token before its first query, so `cancel_all` unwinds in-flight queries at
+    /// their next salsa boundary and the file-boundary check skips the rest. Only
+    /// worker-clone tokens are ever cancelled — the master db handle stays untouched,
+    /// so concurrent `diagnostics` calls and later sweeps are unaffected.
     pub(crate) fn workspace_aggregates(
         &self,
         config: &ide::DiagnosticsConfig,
         opts: &SweepOptions,
+        cancel: &SweepCancel,
     ) -> WorkspaceSweep {
         use rayon::prelude::*;
         use std::collections::HashSet;
+        use std::panic::AssertUnwindSafe;
 
         let mut files: Vec<FileId> = self.by_path.values().copied().collect();
         files.sort_by_key(|f| f.0);
@@ -107,24 +115,54 @@ impl DiagnosticsResident {
         let truncated = files_total > opts.max_files;
         let swept = &files[..opts.max_files.min(files_total)];
 
-        // Per file: the (code, bucket) of each diagnostic. Each rayon worker owns a db
-        // clone; queries run in parallel on the shared, unmutated Salsa storage.
-        let per_file: Vec<Vec<(String, ide::SeverityBucket)>> = swept
+        // Per file: the (code, bucket) of each diagnostic, `None` for a file skipped or
+        // unwound by cancellation. Each rayon worker owns an `Analysis` over a db clone;
+        // queries run in parallel on the shared, unmutated Salsa storage. The salsa
+        // token is per-handle, so it must be taken from the exact handle the worker
+        // queries — registered lazily on the worker's first file, and re-registered
+        // after every rayon split (`SweepWorker::clone` resets the flag). The catch
+        // keeps a cancellation unwind inside the worker: the sweep degrades to skipped
+        // files instead of a panic crossing rayon into the state lock.
+        let per_file: Vec<Option<Vec<(String, ide::SeverityBucket)>>> = swept
             .par_iter()
-            .map_with(self.db.clone(), |db, &file_id| {
-                let analysis = Analysis::from_database(db.clone());
-                analysis
-                    .diagnostics(file_id, config)
-                    .iter()
-                    .map(|d| (d.code.as_str().to_string(), ide::SeverityBucket::from(d.severity)))
-                    .collect()
+            .map_with(SweepWorker::new(self.db.clone()), |worker, &file_id| {
+                if !worker.registered {
+                    cancel
+                        .register(salsa::Database::cancellation_token(worker.analysis.database()));
+                    worker.registered = true;
+                }
+                if cancel.is_cancelled() {
+                    return None;
+                }
+                let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+                    worker
+                        .analysis
+                        .diagnostics(file_id, config)
+                        .iter()
+                        .map(|d| {
+                            (d.code.as_str().to_string(), ide::SeverityBucket::from(d.severity))
+                        })
+                        .collect()
+                }));
+                match caught {
+                    Ok(diags) => Some(diags),
+                    // Only the request's own cancellation may degrade to a skipped
+                    // file. A pending write cannot exist under the resident mutex
+                    // and a propagated panic is a real defect in a sibling worker —
+                    // re-raise both instead of hiding them behind valid aggregates.
+                    Err(salsa::Cancelled::Local) => None,
+                    Err(other) => std::panic::resume_unwind(Box::new(other)),
+                }
             })
             .collect();
+
+        let cancelled = cancel.is_cancelled();
+        let files_swept = per_file.iter().filter(|r| r.is_some()).count();
 
         // Fold: code -> (bucket, total count, files-affected). All occurrences of a code
         // share a bucket under one config, so first-seen is representative.
         let mut map: HashMap<String, (ide::SeverityBucket, usize, usize)> = HashMap::new();
-        for file_diags in &per_file {
+        for file_diags in per_file.iter().flatten() {
             let mut seen_here: HashSet<&str> = HashSet::new();
             for (code, bucket) in file_diags {
                 let entry = map.entry(code.clone()).or_insert((*bucket, 0, 0));
@@ -151,7 +189,29 @@ impl DiagnosticsResident {
             b.severity.cmp(&a.severity).then(b.count.cmp(&a.count)).then(a.code.cmp(&b.code))
         });
 
-        WorkspaceSweep { aggregates, files_swept: swept.len(), files_total, truncated }
+        WorkspaceSweep { aggregates, files_swept, files_total, truncated, cancelled }
+    }
+}
+
+/// Per-rayon-worker sweep state: an [`Analysis`] over an owned db clone plus whether
+/// that clone's salsa cancellation token has been registered with the sweep's
+/// [`SweepCancel`]. A rayon split clones the worker; the fresh db handle carries a
+/// FRESH token, so `Clone` resets `registered` and the split re-registers before its
+/// first query.
+struct SweepWorker {
+    analysis: Analysis,
+    registered: bool,
+}
+
+impl SweepWorker {
+    fn new(db: RootDatabaseImpl) -> Self {
+        Self { analysis: Analysis::from_database(db), registered: false }
+    }
+}
+
+impl Clone for SweepWorker {
+    fn clone(&self) -> Self {
+        Self::new(self.analysis.database().clone())
     }
 }
 
@@ -473,6 +533,139 @@ mod tests {
             }
             _ => panic!("expected Ready outcome from a loaded db"),
         }
+    }
+
+    fn sweep_opts() -> super::super::SweepOptions {
+        super::super::SweepOptions {
+            min_severity: ide::SeverityBucket::Hint,
+            codes: Vec::new(),
+            max_files: 1000,
+        }
+    }
+
+    /// A sweep whose cancellation was requested before it started produces an honest
+    /// partial result (no files, `cancelled` set) and leaves the resident fully
+    /// usable: a follow-up sweep with a fresh token registry completes normally —
+    /// cancellation touches only per-worker clone tokens, never the master db.
+    #[test]
+    fn pre_cancelled_sweep_is_partial_and_leaves_the_resident_usable() {
+        use super::super::SweepCancel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let cancelled_sweep = SweepCancel::default();
+        cancelled_sweep.cancel_all();
+        let out = state.read(|resident, _| {
+            resident.workspace_aggregates(resident.config(), &sweep_opts(), &cancelled_sweep)
+        });
+        match out {
+            ResidentOutcome::Ready(sweep, _) => {
+                assert!(sweep.cancelled, "the sweep must report the cancellation");
+                assert_eq!(sweep.files_swept, 0, "no file completes under a pre-cancelled sweep");
+                assert!(sweep.aggregates.is_empty());
+                assert_eq!(sweep.files_total, 1, "coverage bookkeeping still describes the config");
+            }
+            _ => panic!("expected Ready outcome"),
+        }
+
+        let out = state.read(|resident, _| {
+            resident.workspace_aggregates(resident.config(), &sweep_opts(), &SweepCancel::default())
+        });
+        match out {
+            ResidentOutcome::Ready(sweep, _) => {
+                assert!(!sweep.cancelled);
+                assert_eq!(sweep.files_swept, 1, "a fresh sweep over the same resident completes");
+            }
+            _ => panic!("expected Ready outcome"),
+        }
+    }
+
+    /// The core mechanism the sweep relies on, exercised deterministically: a
+    /// cancelled salsa token of a worker-style db clone unwinds an in-flight
+    /// diagnostics computation with `Cancelled::Local` (mid-file, not just at the
+    /// file-boundary check), the catch contains the unwind, and the master handle
+    /// keeps serving queries afterwards.
+    #[test]
+    fn cancelled_clone_token_unwinds_a_diagnostics_query() {
+        use ide::DiagnosticsConfig;
+        use std::panic::AssertUnwindSafe;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let path = module_path(root, "Сервер");
+        let out = state.read(|resident, _| {
+            let file_id = resident.file_id_for(&path).expect("path resolves to a resident FileId");
+
+            let analysis = resident.analysis();
+            salsa::Database::cancellation_token(analysis.database()).cancel();
+            let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+                analysis.diagnostics(file_id, &DiagnosticsConfig::default()).len()
+            }));
+            let unwound = matches!(caught, Err(salsa::Cancelled::Local));
+
+            // A fresh clone is a different salsa handle with its own token: the
+            // same query must complete normally after the first clone's cancel —
+            // reaching the return proves it did not unwind.
+            let _ = resident.analysis().diagnostics(file_id, &DiagnosticsConfig::default());
+            unwound
+        });
+        match out {
+            ResidentOutcome::Ready(unwound, _) => {
+                assert!(unwound, "a cancelled clone token must unwind the query with Local");
+            }
+            _ => panic!("expected Ready outcome"),
+        }
+    }
+
+    /// A cancel arriving after the sweep completed is a no-op: the result is already
+    /// final and the resident keeps serving per-file diagnostics.
+    #[test]
+    fn late_cancel_after_sweep_completion_is_a_noop() {
+        use super::super::SweepCancel;
+        use ide::DiagnosticsConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let cancel = SweepCancel::default();
+        let out = state.read(|resident, _| {
+            resident.workspace_aggregates(resident.config(), &sweep_opts(), &cancel)
+        });
+        let sweep = match out {
+            ResidentOutcome::Ready(sweep, _) => sweep,
+            _ => panic!("expected Ready outcome"),
+        };
+        assert!(!sweep.cancelled);
+        assert_eq!(sweep.files_swept, 1);
+
+        cancel.cancel_all();
+
+        let path = module_path(root, "Сервер");
+        let out = state.read(|resident, _| {
+            let file_id = resident.file_id_for(&path).expect("path resolves to a resident FileId");
+            resident.analysis().diagnostics(file_id, &DiagnosticsConfig::default()).len()
+        });
+        assert!(
+            matches!(out, ResidentOutcome::Ready(_, _)),
+            "the resident must keep serving per-file diagnostics after a late cancel"
+        );
     }
 
     /// A symlink inside the config tree must not drop the common module's back-link.

@@ -1008,6 +1008,7 @@ impl McpServer {
     async fn diagnostics(
         &self,
         params: Parameters<DiagnosticsParams>,
+        ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let p = params.0;
         match p.action.as_str() {
@@ -1030,7 +1031,7 @@ impl McpServer {
                 Ok(tools::diagnostics::status(&diag.status_report()))
             }
             "file" => self.diagnostics_file(p).await,
-            "workspace" => self.diagnostics_workspace(p).await,
+            "workspace" => self.diagnostics_workspace(p, ct).await,
             other => Err(McpError::invalid_params(
                 format!(
                     "Unknown action '{other}'. Expected: catalog, schema, status, file, workspace"
@@ -1119,11 +1120,19 @@ impl McpServer {
     /// returns per-code aggregates only (no per-finding detail). The rayon sweep runs
     /// under the resident lock (so no reload mutates the db mid-sweep), which serialises
     /// other diagnostics calls for its duration — acceptable for a capped, opt-in pass.
+    ///
+    /// `ct` is the rmcp per-request token, cancelled on MCP `notifications/cancelled`
+    /// and on transport shutdown; on cancel the call answers immediately with an
+    /// error while the sweep's per-worker salsa tokens unwind it early, releasing
+    /// the resident lock instead of silently running to completion for minutes.
     async fn diagnostics_workspace(
         &self,
         p: DiagnosticsParams,
+        ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
-        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome, SweepOptions};
+        use crate::diagnostics_state::{
+            DiagnosticsStatus, ResidentOutcome, SweepCancel, SweepOptions,
+        };
         use tools::diagnostics::{
             parse_min_severity, DEFAULT_MAX_SWEEP_FILES, MAX_SWEEP_FILES_CEILING,
         };
@@ -1161,14 +1170,30 @@ impl McpServer {
             max_files: p.max_files.unwrap_or(DEFAULT_MAX_SWEEP_FILES).min(MAX_SWEEP_FILES_CEILING),
         };
 
-        tokio::task::spawn_blocking(move || {
+        // Bridge MCP cancellation into the sweep: rmcp cancels `ct` on
+        // `notifications/cancelled`; `join_unless_cancelled` observes it, fans the
+        // cancel out to every per-worker salsa token the sweep has registered, and
+        // answers immediately instead of waiting out the resident queue. Only
+        // worker-clone tokens are cancelled — the master db and concurrent
+        // diagnostics calls stay untouched.
+        let cancel = std::sync::Arc::new(SweepCancel::default());
+
+        let started = std::time::Instant::now();
+        let sweep_cancel = std::sync::Arc::clone(&cancel);
+        let join = tokio::task::spawn_blocking(move || {
             let outcome = diag.read(|resident, generation| {
-                tools::diagnostics::workspace_findings(
-                    resident,
-                    &opts,
-                    generation,
-                    max_output_tokens,
-                )
+                let sweep = resident.workspace_aggregates(resident.config(), &opts, &sweep_cancel);
+                if sweep.cancelled {
+                    tracing::info!(
+                        tool = "diagnostics",
+                        action = "workspace",
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        files_processed = sweep.files_swept,
+                        files_total = sweep.files_total,
+                        "MCP call cancelled, sweep unwound early"
+                    );
+                }
+                tools::diagnostics::workspace_findings(&sweep, generation, max_output_tokens)
             });
             match outcome {
                 ResidentOutcome::Ready(result, freshness) => {
@@ -1183,9 +1208,42 @@ impl McpServer {
                     Err(McpError::internal_error(format!("diagnostics database: {msg}"), None))
                 }
             }
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+        });
+        match join_unless_cancelled(ct, cancel, join).await {
+            // Per the MCP cancellation spec the client ignores any response after
+            // its `notifications/cancelled`, so answer with a plain error instead
+            // of inventing a partial-success shape; the detached sweep logs the
+            // partial coverage on its own.
+            None => Err(McpError::internal_error("request cancelled", None)),
+            Some(joined) => {
+                joined.map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+        }
+    }
+}
+
+/// Await the sweep's blocking task under the rmcp per-request token. Cancellation
+/// wins: when `ct` fires (MCP `notifications/cancelled` or transport shutdown) —
+/// including a token already cancelled before the first poll — the sweep's salsa
+/// tokens are cancelled via `cancel.cancel_all()` and `None` is returned right
+/// away, WITHOUT waiting for the blocking task: it may still be queued behind
+/// another sweep on the resident mutex, and once it runs it exits early and logs
+/// on its own. `Some(join result)` when the task finishes first; a completed call
+/// never cancels anything.
+async fn join_unless_cancelled<T>(
+    ct: tokio_util::sync::CancellationToken,
+    cancel: std::sync::Arc<crate::diagnostics_state::SweepCancel>,
+    mut join: tokio::task::JoinHandle<T>,
+) -> Option<Result<T, tokio::task::JoinError>> {
+    tokio::select! {
+        // Biased so an already-cancelled token deterministically beats a completed
+        // join — a cancelled request must never race into a normal response.
+        biased;
+        _ = ct.cancelled() => {
+            cancel.cancel_all();
+            None
+        }
+        joined = &mut join => Some(joined),
     }
 }
 
@@ -1583,5 +1641,69 @@ mod contract {
               - type_name: Owning platform type when `name` is a member of a specific type (optional).
 
         "###]].assert_eq(&rendered);
+    }
+}
+
+#[cfg(test)]
+mod cancel_bridge {
+    use super::join_unless_cancelled;
+    use crate::diagnostics_state::SweepCancel;
+    use std::sync::Arc;
+
+    /// A token cancelled before the first poll deterministically wins over an
+    /// already-completed join: the sweep registry is cancelled and no normal
+    /// response can race out.
+    #[tokio::test]
+    async fn pre_cancelled_token_beats_a_completed_join() {
+        let ct = tokio_util::sync::CancellationToken::new();
+        ct.cancel();
+        let cancel = Arc::new(SweepCancel::default());
+        let join = tokio::task::spawn_blocking(|| 42);
+        let _ = join.is_finished();
+
+        let out = join_unless_cancelled(ct, Arc::clone(&cancel), join).await;
+        assert!(out.is_none(), "a cancelled request must never produce a normal response");
+        assert!(cancel.is_cancelled(), "the cancel must fan out to the sweep registry");
+    }
+
+    /// A cancel arriving while the blocking task is stuck (queued on the resident
+    /// mutex in production) answers immediately instead of waiting the task out.
+    #[tokio::test]
+    async fn mid_flight_cancel_answers_without_waiting_for_the_join() {
+        let ct = tokio_util::sync::CancellationToken::new();
+        let cancel = Arc::new(SweepCancel::default());
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let join = tokio::task::spawn_blocking(move || rx.recv());
+
+        let guard = join_unless_cancelled(ct.clone(), Arc::clone(&cancel), join);
+        let canceller = async {
+            tokio::task::yield_now().await;
+            ct.cancel();
+        };
+        // The guard can only resolve through the cancel arm: the blocking task
+        // stays parked on the channel until we release it below.
+        let (out, ()) = tokio::join!(guard, canceller);
+        assert!(out.is_none(), "cancellation must not wait for the blocked task");
+        assert!(cancel.is_cancelled());
+
+        tx.send(()).expect("the detached task is still alive and picks up the release");
+    }
+
+    /// A call that completes first returns the join result untouched, and a late
+    /// cancel is a no-op for the (finished) sweep.
+    #[tokio::test]
+    async fn completed_join_is_returned_and_a_late_cancel_is_a_noop() {
+        let ct = tokio_util::sync::CancellationToken::new();
+        let cancel = Arc::new(SweepCancel::default());
+        let join = tokio::task::spawn_blocking(|| 7);
+
+        let out = join_unless_cancelled(ct.clone(), Arc::clone(&cancel), join).await;
+        let value = out.expect("uncancelled call yields the join").expect("no panic");
+        assert_eq!(value, 7);
+        assert!(!cancel.is_cancelled(), "a completed call must not cancel anything");
+
+        ct.cancel();
+        tokio::task::yield_now().await;
+        assert!(!cancel.is_cancelled(), "a cancel after completion has nothing to reach");
     }
 }

@@ -2498,6 +2498,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "vfs",
  "walkdir",
