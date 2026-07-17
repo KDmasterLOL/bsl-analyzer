@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicUsize, Arc},
 };
 
@@ -77,6 +77,17 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// CLI inputs selecting the analysis scope, applied in priority order:
+/// `--diff-filter` JSON > `--git-diff <ref>` > `--changed-files` > `[analysis].diff_base`.
+/// (`--git-diff` and `--changed-files` are mutually exclusive at the clap level:
+/// two competing explicit sources are an input error, not a silent preference.)
+struct ScopeCliArgs {
+    incremental: bool,
+    changed_files: Option<Vec<PathBuf>>,
+    git_diff: Option<String>,
+    diff_filter: Option<PathBuf>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn analyze(
     source_dir: PathBuf,
@@ -85,20 +96,14 @@ pub fn analyze(
     config_path: Option<PathBuf>,
     reporters: Vec<String>,
     quiet: bool,
-    _incremental: bool,
-    _changed_files: Option<Vec<PathBuf>>,
-    _git_diff: Option<String>,
+    incremental: bool,
+    changed_files: Option<Vec<PathBuf>>,
+    git_diff: Option<String>,
     workers: Option<usize>,
     format: OutputFormat,
     only_diagnostic: Option<String>,
     diff_filter_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let diff_filter = if let Some(ref path) = diff_filter_path {
-        Some(bsl_analyzer::diff_filter::DiffFilter::load(path)?)
-    } else {
-        None
-    };
-
     analyze_salsa(
         source_dir,
         workspace_dir,
@@ -109,8 +114,70 @@ pub fn analyze(
         workers,
         format,
         only_diagnostic,
-        diff_filter,
+        ScopeCliArgs { incremental, changed_files, git_diff, diff_filter: diff_filter_path },
     )
+}
+
+/// Build the effective [`base_db::AnalysisScope`]. A configured-but-broken git
+/// source (missing repo/ref) is a hard error: silently analyzing everything
+/// would defeat the point of the filter in CI.
+fn build_scope(
+    source_dir: &Path,
+    args: &ScopeCliArgs,
+    config_diff_base: Option<&str>,
+) -> Result<Option<Arc<base_db::AnalysisScope>>, Box<dyn Error + Send + Sync>> {
+    use base_db::AnalysisScope;
+
+    if let Some(path) = &args.diff_filter {
+        let content = std::fs::read_to_string(path)?;
+        let report: vcs::DiffReport = serde_json::from_str(&content)?;
+        tracing::info!(
+            path = %path.display(),
+            files = report.files.len(),
+            base = %report.base_ref,
+            "analysis scope from external diff report"
+        );
+        return Ok(Some(Arc::new(AnalysisScope::from_relative_report(
+            report.base_ref,
+            report.files.into_iter().map(|(path, change)| (path, change.hunks)),
+        ))));
+    }
+
+    if let Some(base) = &args.git_diff {
+        return Ok(Some(Arc::new(scope_from_git(source_dir, base)?)));
+    }
+
+    if let Some(files) = &args.changed_files {
+        return Ok(Some(Arc::new(AnalysisScope::from_whole_files(
+            "changed-files",
+            files.iter().cloned(),
+        ))));
+    }
+
+    if let Some(base) = config_diff_base {
+        return Ok(Some(Arc::new(scope_from_git(source_dir, base)?)));
+    }
+
+    if args.incremental {
+        tracing::warn!(
+            "--incremental without --changed-files/--git-diff and no [analysis].diff_base: analyzing everything"
+        );
+    }
+
+    Ok(None)
+}
+
+fn scope_from_git(
+    source_dir: &Path,
+    base: &str,
+) -> Result<base_db::AnalysisScope, Box<dyn Error + Send + Sync>> {
+    let diff = vcs::generate_workdir_diff_report(source_dir, base, true)
+        .map_err(|e| format!("analysis scope from git ref '{base}' failed: {e}"))?;
+    Ok(base_db::AnalysisScope::from_report(
+        diff.report.base_ref,
+        &diff.workdir,
+        diff.report.files.into_iter().map(|(path, change)| (path, change.hunks)),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -124,7 +191,7 @@ fn analyze_salsa(
     workers: Option<usize>,
     format: OutputFormat,
     only_diagnostic: Option<String>,
-    diff_filter: Option<bsl_analyzer::diff_filter::DiffFilter>,
+    scope_args: ScopeCliArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use std::{
         panic::{catch_unwind, AssertUnwindSafe},
@@ -164,11 +231,14 @@ fn analyze_salsa(
     if let Some(ref diag) = only_diagnostic {
         tracing::info!("Profiling diagnostic: {}", diag);
     }
-    if diff_filter.is_some() {
-        tracing::info!("Diff filter enabled");
-    }
 
     let start = Instant::now();
+
+    // Absolute walk paths are required for scope matching: a native git scope
+    // keys files by absolute path, so a relative `-s .` would match nothing.
+    let source_dir = source_dir
+        .canonicalize()
+        .map_err(|e| format!("source directory {}: {e}", source_dir.display()))?;
 
     let workspace_dir = workspace_dir.unwrap_or_else(|| source_dir.clone());
     let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
@@ -179,6 +249,8 @@ fn analyze_salsa(
     } else {
         project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
     };
+
+    let scope = build_scope(&source_dir, &scope_args, proj_config.analysis.diff_base.as_deref())?;
 
     let _metadata = proj_config.load_metadata(&source_dir);
     let configuration_path = proj_config.configuration_path(&source_dir);
@@ -240,20 +312,23 @@ fn analyze_salsa(
         all_file_ids.push((file_id, path.clone()));
     }
 
-    let file_ids: Vec<(FileId, PathBuf)> = if let Some(ref filter) = diff_filter {
-        let filtered: Vec<_> = all_file_ids
-            .iter()
-            .filter(|(_, path)| {
-                let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
-                filter.should_analyze(rel_path)
-            })
-            .cloned()
-            .collect();
+    let file_ids: Vec<(FileId, PathBuf)> = if let Some(ref scope) = scope {
+        let filtered: Vec<_> =
+            all_file_ids.iter().filter(|(_, path)| scope.is_file_in_scope(path)).cloned().collect();
         tracing::info!(
-            "After diff filter: {} files to analyze (from {} total in VFS)",
+            "Analysis scope (base '{}'): {} of {} files",
+            scope.base_ref(),
             filtered.len(),
             all_file_ids.len()
         );
+        if !quiet && !jsonl {
+            println!(
+                "Analysis scope (base '{}'): {} of {} files",
+                scope.base_ref(),
+                filtered.len(),
+                all_file_ids.len()
+            );
+        }
         filtered
     } else {
         all_file_ids.clone()
@@ -301,6 +376,8 @@ fn analyze_salsa(
         config.apply_cli_filters(std::slice::from_ref(diag_name), &[]);
     }
 
+    config.scope = scope.clone();
+
     tracing::info!(
         disabled = config.disabled.len(),
         only_enabled = ?config.only_enabled.as_ref().map(|v| v.len()),
@@ -312,8 +389,6 @@ fn analyze_salsa(
     let processed = Arc::new(AtomicUsize::new(0));
     let progress_arc = Arc::new(progress);
     let workspace_dir_arc = Arc::new(workspace_dir.clone());
-    let source_dir_arc = Arc::new(source_dir.clone());
-    let diff_filter_arc = Arc::new(diff_filter);
     // Process in chunks, trimming salsa's LRU caches and the parser's green-node
     // cache between chunks. A single-revision batch never trips salsa's automatic
     // (revision-boundary) eviction, so without this every file's heavy memos
@@ -475,21 +550,10 @@ fn analyze_salsa(
                         };
 
                         let file_line_index = line_index::LineIndex::new(&file_text);
-                        let mut diagnostic_outputs: Vec<_> = diagnostics
+                        let diagnostic_outputs: Vec<_> = diagnostics
                             .iter()
                             .map(|d| d.to_output_with_index(&file_text, &file_line_index))
                             .collect();
-
-                        if let Some(ref filter) = *diff_filter_arc {
-                            let rel_path = path.strip_prefix(&*source_dir_arc).unwrap_or(path);
-                            diagnostic_outputs.retain(|d| {
-                                filter.diagnostic_in_diff(
-                                    rel_path,
-                                    d.start_line as u32,
-                                    d.end_line as u32,
-                                )
-                            });
-                        }
 
                         if diagnostic_outputs.is_empty() {
                             None

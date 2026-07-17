@@ -11,7 +11,6 @@ pub mod call_hierarchy_index_overlay;
 mod call_hierarchy_index_service;
 pub mod call_hierarchy_index_state;
 pub mod diagnostics_state;
-pub mod diff_filter;
 pub mod features_state;
 pub mod frozen_context;
 pub mod global_state;

@@ -4,7 +4,7 @@ use vfs::FileId;
 
 use crate::{RootDatabase, RootDatabaseImpl};
 
-pub(crate) fn get_file_path(db: &dyn RootDatabase, file_id: FileId) -> Option<PathBuf> {
+pub fn get_file_path(db: &dyn RootDatabase, file_id: FileId) -> Option<PathBuf> {
     let db_impl = db.as_any().downcast_ref::<RootDatabaseImpl>()?;
     db_impl.get_file_path(file_id)
 }

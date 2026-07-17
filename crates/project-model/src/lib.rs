@@ -307,6 +307,22 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub output: OutputConfig,
+
+    #[serde(default)]
+    pub analysis: AnalysisConfig,
+}
+
+/// `[analysis]` — restricting the set of files/lines diagnostics are reported
+/// for. Affects diagnostics only; indexing and type inference still cover the
+/// whole configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisConfig {
+    /// Git ref (typically the vendor branch) to diff against: only files/lines
+    /// that differ from `merge-base(diff_base, HEAD)` get diagnostics.
+    /// `None` = no restriction.
+    #[serde(default)]
+    pub diff_base: Option<String>,
 }
 
 impl ProjectConfig {
@@ -984,6 +1000,8 @@ fn discover_git_dir(start_dir: &Path) -> Option<PathBuf> {
 struct TomlConfig {
     #[serde(default)]
     source: TomlSourceConfig,
+    #[serde(default)]
+    analysis: TomlAnalysisConfig,
     #[serde(default = "default_toml_table")]
     diagnostics: toml::Value,
     #[serde(default)]
@@ -1002,6 +1020,7 @@ impl Default for TomlConfig {
     fn default() -> Self {
         Self {
             source: TomlSourceConfig::default(),
+            analysis: TomlAnalysisConfig::default(),
             diagnostics: default_toml_table(),
             code_lens: CodeLensConfig::default(),
             formatting: FormattingConfig::default(),
@@ -1019,6 +1038,13 @@ struct TomlSourceConfig {
     root: Option<String>,
     #[serde(default)]
     extensions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlAnalysisConfig {
+    #[serde(default)]
+    diff_base: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1080,6 +1106,7 @@ impl From<TomlConfig> for ProjectConfig {
             configuration_root: toml.source.root,
             language: None,
             extensions: toml.source.extensions,
+            analysis: AnalysisConfig { diff_base: toml.analysis.diff_base },
             search: SearchConfig {
                 baseline: SearchBaselineConfig {
                     backend: toml.search.baseline.backend,
@@ -1852,6 +1879,28 @@ extensions = ["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"]
             project.extensions,
             Some(vec!["src/cfe/BMS_RU_UT".to_string(), "src/cfe/YAxUnit".to_string()])
         );
+    }
+
+    #[test]
+    fn toml_config_reads_analysis_diff_base() {
+        let toml_str = "[analysis]\ndiff_base = \"vendor\"\n";
+        let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
+        let project = ProjectConfig::from(config);
+        assert_eq!(project.analysis.diff_base.as_deref(), Some("vendor"));
+
+        let unset: super::TomlConfig = toml::from_str("").unwrap();
+        assert!(ProjectConfig::from(unset).analysis.diff_base.is_none());
+
+        let unknown: Result<super::TomlConfig, _> =
+            toml::from_str("[analysis]\ndiffBase = \"vendor\"\n");
+        assert!(unknown.is_err(), "unknown [analysis] keys must be rejected");
+    }
+
+    #[test]
+    fn json_config_reads_analysis_diff_base_camel_case() {
+        let json = r#"{ "analysis": { "diffBase": "vendor" } }"#;
+        let project: ProjectConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(project.analysis.diff_base.as_deref(), Some("vendor"));
     }
 
     #[test]

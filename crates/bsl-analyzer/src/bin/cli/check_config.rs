@@ -101,6 +101,11 @@ fn build_check_config_report(
     );
     let _ =
         writeln!(out, "  Language:    {}", project_config.language.as_deref().unwrap_or("default"));
+    let _ = writeln!(
+        out,
+        "  Diff base:   {}",
+        project_config.analysis.diff_base.as_deref().unwrap_or("none (full analysis)")
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Diagnostics:");
     let _ = writeln!(out, "  ordinaryAppSupport: {}", diagnostics_config.ordinary_app_support);

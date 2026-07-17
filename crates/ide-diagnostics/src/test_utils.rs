@@ -140,7 +140,7 @@ pub fn assert_diagnostic_range_multiline(
     );
 }
 
-fn create_test_db(code: &str) -> (ide_db::RootDatabaseImpl, vfs::FileId) {
+pub(crate) fn create_test_db(code: &str) -> (ide_db::RootDatabaseImpl, vfs::FileId) {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use test_fixture::Fixture;

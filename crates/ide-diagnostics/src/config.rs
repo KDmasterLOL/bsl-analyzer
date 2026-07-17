@@ -60,6 +60,10 @@ pub struct DiagnosticsConfig {
     /// the native ones, so migrating a project does not require rewriting suppression comments.
     /// On by default; set `bsllsSuppressionCompat = false` in the project config to disable.
     pub bslls_suppression_compat: bool,
+    /// Restricts diagnostics to files/lines changed relative to a reference state
+    /// (vendor-diff filter). Set programmatically by the driving surface, never
+    /// from the `[diagnostics]` project config.
+    pub scope: Option<std::sync::Arc<base_db::AnalysisScope>>,
 }
 
 impl Default for DiagnosticsConfig {
@@ -74,6 +78,7 @@ impl Default for DiagnosticsConfig {
             only_enabled: None,
             locale: Locale::default(),
             bslls_suppression_compat: true,
+            scope: None,
         }
     }
 }
@@ -131,6 +136,7 @@ impl DiagnosticsConfig {
             only_enabled: None,
             locale: Locale::default(),
             bslls_suppression_compat: true,
+            scope: None,
         }
     }
 
@@ -221,6 +227,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                     only_enabled: None,
                     locale: Locale::default(),
                     bslls_suppression_compat,
+                    scope: None,
                 })
             }
         }
@@ -315,6 +322,7 @@ impl DiagnosticsConfig {
             only_enabled: None,
             locale: input.locale,
             bslls_suppression_compat: input.bslls_suppression_compat,
+            scope: input.scope.clone(),
         }
     }
 

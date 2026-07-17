@@ -9,6 +9,7 @@ mod change;
 mod input;
 mod locale;
 mod queries;
+pub mod scope;
 
 pub use change::FileChange;
 pub use input::{
@@ -21,6 +22,7 @@ pub use queries::{
     decode_disk_bytes, file_text_query, method_regions_query, parse_query, read_disk_text,
     resolve_vfs_path_query, set_parse_lru_sweep_mode,
 };
+pub use scope::AnalysisScope;
 
 #[salsa::db]
 pub trait SourceDatabase: salsa::Database {

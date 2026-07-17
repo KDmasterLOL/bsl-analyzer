@@ -1,0 +1,21 @@
+[package]
+name = "vcs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "git2-backed diff reports for analysis scoping (vendor-diff filter)"
+
+[lib]
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+git2.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
