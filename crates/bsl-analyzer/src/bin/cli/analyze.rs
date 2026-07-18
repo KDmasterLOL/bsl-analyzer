@@ -103,6 +103,7 @@ pub fn analyze(
     format: OutputFormat,
     only_diagnostic: Option<String>,
     diff_filter_path: Option<PathBuf>,
+    ignored_authors: Vec<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     analyze_salsa(
         source_dir,
@@ -115,7 +116,31 @@ pub fn analyze(
         format,
         only_diagnostic,
         ScopeCliArgs { incremental, changed_files, git_diff, diff_filter: diff_filter_path },
+        ignored_authors,
     )
+}
+
+/// Build the author filter from the CLI list (which replaces the config list,
+/// mirroring how `--git-diff` overrides `[analysis].diff_base`). A configured
+/// filter that cannot work — no repository, shallow clone, unborn HEAD — is a
+/// hard error: silently reporting vendor findings would defeat the filter.
+fn build_author_filter(
+    source_dir: &Path,
+    cli_authors: &[String],
+    config_authors: &[String],
+) -> Result<Option<Arc<vcs::AuthorFilter>>, Box<dyn Error + Send + Sync>> {
+    let effective = if cli_authors.is_empty() { config_authors } else { cli_authors };
+    if effective.is_empty() {
+        return Ok(None);
+    }
+    let filter = vcs::AuthorFilter::new(source_dir, effective.to_vec())
+        .map_err(|e| format!("author filter: {e}"))?;
+    tracing::info!(
+        authors = effective.len(),
+        head = %filter.head_identity(),
+        "author filter active"
+    );
+    Ok(Some(Arc::new(filter)))
 }
 
 /// Build the effective [`base_db::AnalysisScope`]. A configured-but-broken git
@@ -192,6 +217,7 @@ fn analyze_salsa(
     format: OutputFormat,
     only_diagnostic: Option<String>,
     scope_args: ScopeCliArgs,
+    ignored_authors: Vec<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use std::{
         panic::{catch_unwind, AssertUnwindSafe},
@@ -251,6 +277,8 @@ fn analyze_salsa(
     };
 
     let scope = build_scope(&source_dir, &scope_args, proj_config.analysis.diff_base.as_deref())?;
+    let author_filter =
+        build_author_filter(&source_dir, &ignored_authors, &proj_config.analysis.ignored_authors)?;
 
     let _metadata = proj_config.load_metadata(&source_dir);
     let configuration_path = proj_config.configuration_path(&source_dir);
@@ -387,6 +415,14 @@ fn analyze_salsa(
     );
     let config = Arc::new(config);
     let processed = Arc::new(AtomicUsize::new(0));
+    // Author-filter accounting. Blame errors other than the tolerated
+    // not-in-HEAD class are fatal for the run (a partially filtered report is
+    // worse than a failed one), but rayon workers cannot abort the pool —
+    // the first error is parked here and re-raised after the chunk loop.
+    let author_seen = AtomicUsize::new(0);
+    let author_dropped = AtomicUsize::new(0);
+    let author_blame_us = std::sync::atomic::AtomicU64::new(0);
+    let author_fatal: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let progress_arc = Arc::new(progress);
     let workspace_dir_arc = Arc::new(workspace_dir.clone());
     // Process in chunks, trimming salsa's LRU caches and the parser's green-node
@@ -550,6 +586,51 @@ fn analyze_salsa(
                         };
 
                         let file_line_index = line_index::LineIndex::new(&file_text);
+
+                        let diagnostics = if let Some(filter) = author_filter.as_deref() {
+                            let blame_start = std::time::Instant::now();
+                            let keep = filter.lines_kept_cached(path, file_text.as_bytes());
+                            author_blame_us.fetch_add(
+                                blame_start.elapsed().as_micros() as u64,
+                                Ordering::Relaxed,
+                            );
+                            match keep {
+                                Ok(keep) => {
+                                    let before = diagnostics.len();
+                                    author_seen.fetch_add(before, Ordering::Relaxed);
+                                    let filtered: Vec<_> = diagnostics
+                                        .into_iter()
+                                        .filter(|d| {
+                                            let start =
+                                                file_line_index.line_col(d.range.start()).line;
+                                            // Half-open range: for a non-empty range the
+                                            // last covered line comes from `end - 1`.
+                                            let end_offset = if d.range.is_empty() {
+                                                d.range.start()
+                                            } else {
+                                                d.range.end() - line_index::TextSize::from(1)
+                                            };
+                                            let end = file_line_index.line_col(end_offset).line;
+                                            keep.range_survives(start + 1, end + 1)
+                                        })
+                                        .collect();
+                                    author_dropped
+                                        .fetch_add(before - filtered.len(), Ordering::Relaxed);
+                                    filtered
+                                }
+                                Err(e) => {
+                                    let message = format!("author filter: {e}");
+                                    let mut fatal = author_fatal.lock().unwrap();
+                                    if fatal.is_none() {
+                                        *fatal = Some(message.clone());
+                                    }
+                                    return (None, timing, metrics, Some(message));
+                                }
+                            }
+                        } else {
+                            diagnostics
+                        };
+
                         let diagnostic_outputs: Vec<_> = diagnostics
                             .iter()
                             .map(|d| d.to_output_with_index(&file_text, &file_line_index))
@@ -642,6 +723,22 @@ fn analyze_salsa(
 
     let elapsed = start.elapsed();
 
+    // A fatal blame error aborts the run, but only AFTER the JSONL stream is
+    // closed properly (`file` events + `done`): consumers must never see a
+    // start-only stream. Per-file errors are already recorded in the results.
+    let author_fatal_msg = author_fatal.lock().unwrap().take();
+    if author_filter.is_some() && author_fatal_msg.is_none() {
+        let seen = author_seen.load(Ordering::Relaxed);
+        let dropped = author_dropped.load(Ordering::Relaxed);
+        let blame_secs = author_blame_us.load(Ordering::Relaxed) as f64 / 1e6;
+        tracing::info!(seen, dropped, blame_secs, "author filter applied");
+        if !quiet && !jsonl {
+            println!(
+                "Author filter: dropped {dropped} of {seen} finding(s) (blame {blame_secs:.1}s)"
+            );
+        }
+    }
+
     if report_mem {
         bsl_analyzer::mem_report::print_salsa_memory_report(&db, "TROUGH (post-eviction)");
         bsl_analyzer::mem_report::print_salsa_event_report(&db, "TROUGH (post-eviction)");
@@ -704,8 +801,15 @@ fn analyze_salsa(
             DoneEvent::new(elapsed.as_secs_f64(), file_ids.len(), total_diagnostics, failed_files);
         println!("{}", serde_json::to_string(&done_event)?);
 
+        if let Some(message) = author_fatal_msg {
+            return Err(message.into());
+        }
         tracing::info!("JSONL analysis complete");
         return Ok(());
+    }
+
+    if let Some(message) = author_fatal_msg {
+        return Err(message.into());
     }
 
     let all_diagnostics: Vec<FileAnalysis> = file_analyses.into_iter().flatten().collect();

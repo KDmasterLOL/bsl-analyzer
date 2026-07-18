@@ -398,8 +398,9 @@ impl DiagnosticsState {
         }
     }
 
-    /// Compare the scope's resolved (base, HEAD) OIDs against the live refs —
-    /// throttled, off the request hot path — and rescope when they moved.
+    /// Compare the scope's resolved (base, HEAD) OIDs — and the author
+    /// filter's pinned HEAD — against the live refs, throttled off the request
+    /// hot path, and rebuild whichever went stale.
     fn check_scope_ref_drift(&self, root: &Path) {
         {
             let mut at = lock_recover(&self.scope_ref_check_at);
@@ -408,18 +409,49 @@ impl DiagnosticsState {
             }
             *at = Some(Instant::now());
         }
-        let (base, stored) = {
+        let (base, stored, author_identity, ignored_authors, generation) = {
             let inner = lock_recover(&self.inner);
             let Some(resident) = inner.resident.as_ref() else { return };
-            let Some(base) = resident.diff_base.clone() else { return };
-            (base, resident.scope_identity.clone())
+            (
+                resident.diff_base.clone(),
+                resident.scope_identity.clone(),
+                resident.author_filter.as_ref().map(|f| (f.head_identity(), f.mailmap_fp())),
+                resident.ignored_authors.clone(),
+                inner.generation,
+            )
         };
-        let Ok(identity) = vcs::scope_ref_identity(root, &base) else {
-            return;
-        };
-        if stored.as_ref().is_some_and(|s| s != &identity) {
-            tracing::info!("scope refs moved without file events; rebuilding vendor-diff scope");
-            self.rescope_out_of_lock(root, &base);
+
+        if let Some(base) = base {
+            if let Ok(identity) = vcs::scope_ref_identity(root, &base) {
+                if stored.as_ref().is_some_and(|s| s != &identity) {
+                    tracing::info!(
+                        "scope refs moved without file events; rebuilding vendor-diff scope"
+                    );
+                    self.rescope_out_of_lock(root, &base);
+                }
+            }
+        }
+
+        if author_filter_rebuild_needed(
+            &ignored_authors,
+            author_identity.as_ref().map(|(head, mm)| (head.as_str(), *mm)),
+            vcs::head_identity(root).ok().as_deref(),
+            vcs::mailmap_fingerprint(root),
+        ) {
+            tracing::info!("attribution inputs moved; rebuilding the ignored-authors filter");
+            // Rebuild outside the lock (repo open + ref resolve), publish
+            // under a short one — unless the resident changed meanwhile (a
+            // reload or drift apply bumped the generation): the fresh resident
+            // carries or will recompute its own filter, and a stale publish
+            // here could overwrite it.
+            let filter = super::resident::build_author_filter(root, &ignored_authors);
+            let mut inner = lock_recover(&self.inner);
+            if inner.reload == ReloadState::Running || inner.generation != generation {
+                return;
+            }
+            if let Some(resident) = inner.resident.as_mut() {
+                resident.author_filter = filter;
+            }
         }
     }
 
@@ -596,6 +628,34 @@ pub(super) fn compute_freshness(inner: &Inner, scan: Option<&OwnedScan>) -> Fres
     }
 }
 
+/// Whether the ignored-authors filter must be (re)built. Fail-open logic:
+/// a filter attributing against inputs that no longer exist or moved is
+/// rebuilt (an unreadable repository then yields `None` = no suppression),
+/// and a missing filter is retried once the repository becomes usable again.
+fn author_filter_rebuild_needed(
+    configured_authors: &[String],
+    stored: Option<(&str, u64)>,
+    live_head: Option<&str>,
+    live_mailmap: Option<u64>,
+) -> bool {
+    if configured_authors.is_empty() {
+        return false;
+    }
+    match (stored, live_head) {
+        // Attribution inputs moved under an active filter.
+        (Some((stored_head, stored_mm)), Some(live)) => {
+            stored_head != live || live_mailmap != Some(stored_mm)
+        }
+        // Active filter over a repository that can no longer resolve HEAD:
+        // rebuild (and fail open) rather than keep suppressing against
+        // obsolete history.
+        (Some(_), None) => true,
+        // No filter was built but the repository is usable now — retry.
+        (None, Some(_)) => true,
+        (None, None) => false,
+    }
+}
+
 pub(super) fn config_fingerprint(root: &Path) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -626,10 +686,32 @@ mod tests {
     use crate::diagnostics_state::ResidentOutcome;
 
     use super::super::drift::{
-        clamp_reconcile_interval, ScanCache, FORCE_RESCAN_FLOOR, MIN_RECONCILE_INTERVAL,
-        RECONCILE_INTERVAL,
+        author_filter_rebuild_needed, clamp_reconcile_interval, ScanCache, FORCE_RESCAN_FLOOR,
+        MIN_RECONCILE_INTERVAL, RECONCILE_INTERVAL,
     };
     use super::super::test_support::*;
+
+    #[test]
+    fn author_filter_rebuild_decision_covers_every_transition() {
+        let authors = vec!["Фирма 1С".to_string()];
+        let none: &[String] = &[];
+
+        // Not configured: never rebuild, whatever the repo state.
+        assert!(!author_filter_rebuild_needed(none, None, Some("h1"), Some(1)));
+        assert!(!author_filter_rebuild_needed(none, Some(("h1", 1)), None, None));
+
+        // Steady state: same HEAD, same mailmap.
+        assert!(!author_filter_rebuild_needed(&authors, Some(("h1", 1)), Some("h1"), Some(1)));
+        // HEAD moved, mailmap edited, or mailmap unreadable → rebuild.
+        assert!(author_filter_rebuild_needed(&authors, Some(("h1", 1)), Some("h2"), Some(1)));
+        assert!(author_filter_rebuild_needed(&authors, Some(("h1", 1)), Some("h1"), Some(2)));
+        assert!(author_filter_rebuild_needed(&authors, Some(("h1", 1)), Some("h1"), None));
+        // Active filter over a repo that lost HEAD → rebuild (fails open).
+        assert!(author_filter_rebuild_needed(&authors, Some(("h1", 1)), None, None));
+        // Filter missing, repo became usable → retry; still broken → wait.
+        assert!(author_filter_rebuild_needed(&authors, None, Some("h1"), Some(1)));
+        assert!(!author_filter_rebuild_needed(&authors, None, None, None));
+    }
     use super::*;
     use crate::change_hub::ChangeKind;
     use ide::DiagnosticsConfig;

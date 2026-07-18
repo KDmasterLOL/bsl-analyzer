@@ -20,6 +20,7 @@ parser.workspace = true
 project-model.workspace = true
 sdbl-hir.workspace = true
 syntax.workspace = true
+line-index.workspace = true
 ide.workspace = true
 base-db.workspace = true
 vcs.workspace = true

@@ -472,6 +472,10 @@ impl DiagnosticsState {
             config.scope = scope;
             scope_identity = identity;
         }
+        // `[analysis].ignored_authors`: blame-backed line filter, pinned to the
+        // current HEAD; the drift poll rebuilds it when the refs move.
+        let ignored_authors = project.config.analysis.ignored_authors.clone();
+        let author_filter = super::resident::build_author_filter(root, &ignored_authors);
         let source_root = build_source_root(&files);
         // Disk-backed: register each file's content revision and drop its text, so the
         // whole-workspace resident is not pinned as salsa inputs (which OOMs on a large
@@ -522,6 +526,8 @@ impl DiagnosticsState {
                 workspace_root: root.to_path_buf(),
                 diff_base,
                 scope_identity,
+                ignored_authors,
+                author_filter,
             },
             stats,
             config_fp,

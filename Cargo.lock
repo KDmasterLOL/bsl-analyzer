@@ -2538,6 +2538,7 @@ dependencies = [
  "ide-host-core",
  "interprocess",
  "libc",
+ "line-index",
  "naparnik",
  "notify",
  "onec-client",

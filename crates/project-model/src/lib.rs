@@ -323,6 +323,13 @@ pub struct AnalysisConfig {
     /// `None` = no restriction.
     #[serde(default)]
     pub diff_base: Option<String>,
+
+    /// Suppress diagnostics on lines whose git-blame author (name or email,
+    /// exact match) is listed here — "show findings only on our own code".
+    /// Empty = no restriction. Applied by CLI `analyze` and MCP; the LSP does
+    /// not apply it yet and warns when it is configured.
+    #[serde(default)]
+    pub ignored_authors: Vec<String>,
 }
 
 impl ProjectConfig {
@@ -1045,6 +1052,8 @@ struct TomlSourceConfig {
 struct TomlAnalysisConfig {
     #[serde(default)]
     diff_base: Option<String>,
+    #[serde(default)]
+    ignored_authors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1106,7 +1115,10 @@ impl From<TomlConfig> for ProjectConfig {
             configuration_root: toml.source.root,
             language: None,
             extensions: toml.source.extensions,
-            analysis: AnalysisConfig { diff_base: toml.analysis.diff_base },
+            analysis: AnalysisConfig {
+                diff_base: toml.analysis.diff_base,
+                ignored_authors: toml.analysis.ignored_authors,
+            },
             search: SearchConfig {
                 baseline: SearchBaselineConfig {
                     backend: toml.search.baseline.backend,
@@ -1901,6 +1913,24 @@ extensions = ["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"]
         let json = r#"{ "analysis": { "diffBase": "vendor" } }"#;
         let project: ProjectConfig = serde_json::from_str(json).unwrap();
         assert_eq!(project.analysis.diff_base.as_deref(), Some("vendor"));
+    }
+
+    #[test]
+    fn toml_config_reads_analysis_ignored_authors() {
+        let toml_str = "[analysis]\nignored_authors = [\"Фирма 1С\", \"vendor@example.com\"]\n";
+        let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
+        let project = ProjectConfig::from(config);
+        assert_eq!(project.analysis.ignored_authors, ["Фирма 1С", "vendor@example.com"]);
+
+        let unset: super::TomlConfig = toml::from_str("").unwrap();
+        assert!(ProjectConfig::from(unset).analysis.ignored_authors.is_empty());
+    }
+
+    #[test]
+    fn json_config_reads_analysis_ignored_authors_camel_case() {
+        let json = r#"{ "analysis": { "ignoredAuthors": ["Фирма 1С"] } }"#;
+        let project: ProjectConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(project.analysis.ignored_authors, ["Фирма 1С"]);
     }
 
     #[test]

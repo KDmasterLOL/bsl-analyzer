@@ -46,6 +46,12 @@ pub(crate) struct DiagnosticsResident {
     /// Resolved (base, HEAD) OIDs the current scope was built against; the
     /// drift poll rebuilds when the live refs no longer match (ref-only moves).
     pub(super) scope_identity: Option<(String, String)>,
+    /// `[analysis].ignored_authors` from the project config, kept for the
+    /// drift-time filter rebuild when HEAD moves.
+    pub(super) ignored_authors: Vec<String>,
+    /// Blame-backed line filter pinned to one HEAD state; `None` when not
+    /// configured or when the repository cannot support it (fail-open).
+    pub(super) author_filter: Option<std::sync::Arc<vcs::AuthorFilter>>,
 }
 
 impl DiagnosticsResident {
@@ -99,10 +105,97 @@ impl DiagnosticsResident {
     /// root, canonicalised). `true` when no scope is configured.
     pub(crate) fn path_in_scope(&self, path: &Path) -> bool {
         let Some(scope) = self.config.scope.as_ref() else { return true };
+        scope.is_file_in_scope(&self.abs_path_for(path))
+    }
+
+    /// The blame-backed `ignored_authors` filter, when active.
+    pub(crate) fn author_filter(&self) -> Option<&std::sync::Arc<vcs::AuthorFilter>> {
+        self.author_filter.as_ref()
+    }
+
+    /// Resolve a request path to the absolute canonical form the resident and
+    /// the git workdir agree on.
+    pub(crate) fn abs_path_for(&self, path: &Path) -> PathBuf {
         let abs =
             if path.is_absolute() { path.to_path_buf() } else { self.workspace_root.join(path) };
-        let abs = abs.canonicalize().unwrap_or(abs);
-        scope.is_file_in_scope(&abs)
+        abs.canonicalize().unwrap_or(abs)
+    }
+}
+
+/// Build the `ignored_authors` blame filter for `root`. `None` — with a
+/// warning — when the repository cannot support attribution (missing, bare,
+/// shallow, unborn HEAD): MCP fails open and reports everything, matching the
+/// scope policy; only the CLI treats these as hard errors.
+pub(crate) fn build_author_filter(
+    root: &Path,
+    authors: &[String],
+) -> Option<std::sync::Arc<vcs::AuthorFilter>> {
+    if authors.is_empty() {
+        return None;
+    }
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    match vcs::AuthorFilter::new(&root, authors.to_vec()) {
+        Ok(filter) => {
+            tracing::info!(
+                authors = authors.len(),
+                head = %filter.head_identity(),
+                "ignored-authors filter active"
+            );
+            Some(std::sync::Arc::new(filter))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "ignored-authors filter unavailable; reporting all findings");
+            None
+        }
+    }
+}
+
+/// Whether a diagnostic on `range` survives the author filter: any covered
+/// line kept → survives. Uses the scope-gate line mapping (half-open range →
+/// last line from `end - 1`, empty range anchors at `start`).
+pub(crate) fn diagnostic_survives_authors(
+    keep: &vcs::LineKeep,
+    index: &line_index::LineIndex,
+    range: syntax::TextRange,
+) -> bool {
+    let start = index.line_col(range.start()).line;
+    let end_offset =
+        if range.is_empty() { range.start() } else { range.end() - line_index::TextSize::from(1) };
+    let end = index.line_col(end_offset).line;
+    keep.range_survives(start + 1, end + 1)
+}
+
+/// Drop diagnostics attributed to ignored authors, counting what was dropped.
+/// Any blame failure keeps the file's findings intact (fail-open) — MCP must
+/// degrade to noise, never to silence.
+fn filter_by_author(
+    analysis: &Analysis,
+    file_id: FileId,
+    path: Option<&Path>,
+    filter: &vcs::AuthorFilter,
+    diagnostics: Vec<ide::Diagnostic>,
+    ignored: &std::sync::atomic::AtomicUsize,
+) -> Vec<ide::Diagnostic> {
+    let Some(path) = path else { return diagnostics };
+    let text = analysis.file_text(file_id);
+    match filter.lines_kept_cached(path, text.as_bytes()) {
+        Ok(keep) => {
+            if keep.ignored_line_count() == 0 {
+                return diagnostics;
+            }
+            let index = line_index::LineIndex::new(&text);
+            let before = diagnostics.len();
+            let kept: Vec<_> = diagnostics
+                .into_iter()
+                .filter(|d| diagnostic_survives_authors(&keep, &index, d.range))
+                .collect();
+            ignored.fetch_add(before - kept.len(), std::sync::atomic::Ordering::Relaxed);
+            kept
+        }
+        Err(error) => {
+            tracing::warn!(%error, "blame failed; keeping every finding for the file");
+            diagnostics
+        }
     }
 }
 
@@ -178,6 +271,16 @@ impl DiagnosticsResident {
         let truncated = in_scope > opts.max_files;
         let swept = &files[..opts.max_files.min(in_scope)];
 
+        // Author filter: blame runs inside the sweep workers (the sweep holds
+        // the state lock for its whole duration anyway), keyed back to paths.
+        let author_filter = self.author_filter.as_ref();
+        let path_of: HashMap<FileId, &str> = if author_filter.is_some() {
+            self.by_path.iter().map(|(path, id)| (*id, path.as_str())).collect()
+        } else {
+            HashMap::new()
+        };
+        let author_ignored = std::sync::atomic::AtomicUsize::new(0);
+
         // Per file: the (code, bucket) of each diagnostic, `None` for a file skipped or
         // unwound by cancellation. Each rayon worker owns an `Analysis` over a db clone;
         // queries run in parallel on the shared, unmutated Salsa storage. The salsa
@@ -198,9 +301,22 @@ impl DiagnosticsResident {
                     return None;
                 }
                 let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
-                    worker
-                        .analysis
-                        .diagnostics(file_id, config)
+                    let diagnostics = worker.analysis.diagnostics(file_id, config);
+                    let diagnostics = match author_filter {
+                        Some(filter) if !diagnostics.is_empty() => {
+                            let path = path_of.get(&file_id).map(Path::new);
+                            filter_by_author(
+                                &worker.analysis,
+                                file_id,
+                                path,
+                                filter,
+                                diagnostics,
+                                &author_ignored,
+                            )
+                        }
+                        _ => diagnostics,
+                    };
+                    diagnostics
                         .iter()
                         .map(|d| {
                             (d.code.as_str().to_string(), ide::SeverityBucket::from(d.severity))
@@ -257,6 +373,8 @@ impl DiagnosticsResident {
             files_swept,
             files_total,
             files_out_of_scope,
+            findings_ignored_by_author: author_ignored.load(std::sync::atomic::Ordering::Relaxed),
+            author_head: author_filter.map(|f| f.short_identity()),
             truncated,
             cancelled,
         }

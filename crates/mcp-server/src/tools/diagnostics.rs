@@ -215,6 +215,35 @@ pub(crate) fn file_findings(
     // Analyse against the project's effective config (the single source of truth shared
     // with LSP and CLI), so disabled rules and tuned thresholds are honoured.
     let diagnostics = analysis.diagnostics(file_id, resident.config());
+
+    // Author filter before any histogram or shaping, so `counts` reflects what
+    // the response can actually show. Blame failures keep everything (fail-open).
+    let mut findings_ignored_by_author = 0usize;
+    let diagnostics = match resident.author_filter() {
+        Some(filter) if !diagnostics.is_empty() => {
+            match filter.lines_kept_cached(&resident.abs_path_for(path), file_text.as_bytes()) {
+                Ok(keep) => {
+                    let index = line_index::LineIndex::new(&file_text);
+                    let before = diagnostics.len();
+                    let kept: Vec<_> = diagnostics
+                        .into_iter()
+                        .filter(|d| {
+                            crate::diagnostics_state::diagnostic_survives_authors(
+                                &keep, &index, d.range,
+                            )
+                        })
+                        .collect();
+                    findings_ignored_by_author = before - kept.len();
+                    kept
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "blame failed; keeping every finding for the file");
+                    diagnostics
+                }
+            }
+        }
+        _ => diagnostics,
+    };
     // Method spans for the graph bridge: each finding inside a method carries the
     // method's durable graph id so the agent can pivot to `graph callers`.
     let methods = method_ranges(&analysis.document_symbols(file_id));
@@ -258,8 +287,15 @@ pub(crate) fn file_findings(
         .map(|budget| trim_items_to_budget(&mut findings, budget))
         .unwrap_or(false);
 
+    // The author filter attributes against pinned inputs (HEAD + mailmap);
+    // folding them into the result id makes a filter rebuild after a ref move
+    // or mailmap edit observable without a content change.
+    let mut rid = result_id(path, generation, &file_text);
+    if let Some(filter) = resident.author_filter() {
+        rid = format!("{rid}@{}", filter.short_identity());
+    }
     let mut body = json!({
-        "result_id": result_id(path, generation, &file_text),
+        "result_id": rid,
         "kind": "full",
         "counts": counts.to_value(),
         "truncated": count_capped || budget_exhausted,
@@ -271,6 +307,11 @@ pub(crate) fn file_findings(
         body["out_of_scope"] = json!(true);
         body["scope_hint"] =
             json!("file has no changed lines vs [analysis].diff_base and was not analyzed");
+    }
+    if findings_ignored_by_author > 0 {
+        body["findings_ignored_by_author"] = json!(findings_ignored_by_author);
+        body["author_hint"] =
+            json!("findings on lines authored by [analysis].ignored_authors were suppressed");
     }
     if budget_exhausted {
         body["budget_exhausted"] = json!(true);
@@ -313,8 +354,14 @@ pub(crate) fn workspace_findings(
         .map(|budget| trim_items_to_budget(&mut aggregates, budget))
         .unwrap_or(false);
 
+    // Fold the author filter's pinned identity (HEAD + mailmap) into the id:
+    // a filter rebuild changes the aggregates without bumping the generation.
+    let rid = match sweep.author_head.as_deref() {
+        Some(identity) => format!("workspace@{generation}@{identity}"),
+        None => format!("workspace@{generation}"),
+    };
     let mut body = json!({
-        "result_id": format!("workspace@{generation}"),
+        "result_id": rid,
         "files_swept": sweep.files_swept,
         "files_total": sweep.files_total,
         "truncated": sweep.truncated || budget_exhausted,
@@ -324,6 +371,11 @@ pub(crate) fn workspace_findings(
         body["files_out_of_scope"] = json!(sweep.files_out_of_scope);
         body["scope_hint"] =
             json!("files with no changed lines vs [analysis].diff_base were not analyzed");
+    }
+    if sweep.findings_ignored_by_author > 0 {
+        body["findings_ignored_by_author"] = json!(sweep.findings_ignored_by_author);
+        body["author_hint"] =
+            json!("findings on lines authored by [analysis].ignored_authors were suppressed");
     }
     if budget_exhausted {
         body["budget_exhausted"] = json!(true);
@@ -439,7 +491,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "6",
+        "schema_version": "7",
         "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
@@ -484,13 +536,15 @@ fn schema_json() -> Value {
             "fix": "{ label } (detailed only, when present)"
         },
         "file_result": {
-            "result_id": "<path>@<generation>@<content-hash> — pull-model freshness handle",
+            "result_id": "<path>@<generation>@<content-hash>[@<blame-head>] — pull-model freshness handle; the blame-head suffix appears when [analysis].ignored_authors is active",
             "kind": "full — (unchanged reserved for a future previous_result_id round-trip)",
-            "counts": "{ error, warning, info, hint } — full histogram before the floor/cap",
+            "counts": "{ error, warning, info, hint } — full histogram before the floor/cap (after the author filter)",
             "truncated": "bool — the findings cap was hit; counts still complete",
             "findings": "finding[]",
             "out_of_scope": "bool — file has no changed lines vs [analysis].diff_base and was NOT analyzed; an empty findings list is not 'clean' (present only under a configured scope)",
-            "scope_hint": "string — present with out_of_scope"
+            "scope_hint": "string — present with out_of_scope",
+            "findings_ignored_by_author": "usize — findings suppressed because every covered line is blamed to [analysis].ignored_authors; present only when > 0",
+            "author_hint": "string — present with findings_ignored_by_author"
         },
         "workspace_params": {
             "min_severity": "error | warning | info | hint (default warning) — inclusive floor",
@@ -498,7 +552,9 @@ fn schema_json() -> Value {
             "max_files": "usize — cap on files swept (default 1000, hard ceiling 5000); a larger config surfaces as truncated with the true files_total"
         },
         "workspace_result": {
-            "result_id": "workspace@<generation>",
+            "result_id": "workspace@<generation>[@<blame-head>] — the blame-head suffix appears when [analysis].ignored_authors is active",
+            "findings_ignored_by_author": "usize — findings suppressed by [analysis].ignored_authors across the sweep; present only when > 0",
+            "author_hint": "string — present with findings_ignored_by_author",
             "files_swept": "usize — files actually analyzed",
             "files_total": "usize — ALL resident files; files_swept can trail it because of the file cap (truncated) AND/OR the analysis scope (files_out_of_scope)",
             "files_out_of_scope": "usize — files excluded by [analysis].diff_base (no changed lines); present only when > 0",
@@ -544,7 +600,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "6");
+        assert_eq!(body["schema_version"], "7");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
@@ -751,6 +807,84 @@ mod tests {
                 FileFilters { codes: vec!["NoSuchCodeFilter".to_string()], ..default_filters() };
             let body = run(&state, &path, &filters);
             assert_eq!(body["findings"].as_array().unwrap().len(), 0);
+        }
+
+        fn run_git(dir: &Path, args: &[&str]) {
+            let mut cmd = std::process::Command::new("git");
+            // Inherited GIT_* variables (e.g. GIT_AUTHOR_NAME when the test
+            // suite runs inside a `git commit` pre-commit hook) override the
+            // `-c` identity below and would reattribute the fixture commits.
+            for (key, _) in std::env::vars_os() {
+                if key.to_string_lossy().starts_with("GIT_") {
+                    cmd.env_remove(&key);
+                }
+            }
+            let output = cmd
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=Фирма Тест", "-c", "user.email=vendor@example.com"])
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed:\n{}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[test]
+        fn author_filter_suppresses_vendor_findings_in_file_and_sweep() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            // An unclosed procedure reliably yields findings on the vendor lines.
+            write_common_module(root, "Сервер", "Процедура Тест(\n");
+            write(root, "bsl-analyzer.toml", "[analysis]\nignored_authors = [\"Фирма Тест\"]\n");
+            run_git(root, &["init", "-q"]);
+            run_git(root, &["add", "."]);
+            run_git(root, &["commit", "-q", "-m", "vendor"]);
+
+            let state = ready_state(root);
+            let path = root.join("CommonModules/Сервер/Ext/Module.bsl");
+
+            let body = run(&state, &path, &default_filters());
+            assert_eq!(
+                body["findings"].as_array().unwrap().len(),
+                0,
+                "vendor-authored findings must be suppressed: {body}"
+            );
+            let ignored = body["findings_ignored_by_author"].as_u64().unwrap_or(0);
+            assert!(ignored > 0, "suppressed findings must be counted: {body}");
+            assert!(body["author_hint"].is_string());
+            // counts reflect the post-filter view.
+            for sev in ["error", "warning", "info", "hint"] {
+                assert_eq!(body["counts"][sev], 0, "counts.{sev} must be filtered: {body}");
+            }
+            // result_id = <path>@<gen>@<hash>@<blame-head>.
+            let id = body["result_id"].as_str().unwrap();
+            assert_eq!(id.rsplitn(4, '@').count(), 4, "result_id carries the blame head: {id}");
+
+            let sweep = match state.read(|resident, _| {
+                resident.workspace_aggregates(
+                    resident.config(),
+                    &SweepOptions {
+                        min_severity: SeverityBucket::Hint,
+                        codes: Vec::new(),
+                        max_files: 100,
+                    },
+                    &SweepCancel::default(),
+                )
+            }) {
+                ResidentOutcome::Ready(sweep, _) => sweep,
+                _ => panic!("expected Ready outcome"),
+            };
+            assert!(
+                sweep.findings_ignored_by_author > 0,
+                "the sweep must count author-suppressed findings"
+            );
+            assert!(sweep.aggregates.is_empty(), "nothing should aggregate after the filter");
+            assert!(sweep.author_head.is_some());
         }
 
         /// The project's diagnostics settings reach the findings end-to-end, not just

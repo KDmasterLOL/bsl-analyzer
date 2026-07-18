@@ -267,6 +267,9 @@ pub struct GlobalState {
     /// The last scope failure shown via `window/showMessage`, so a persistent
     /// failure warns once instead of on every save-triggered rebuild.
     pub(crate) scope_warning_shown: Option<String>,
+    /// Whether the "ignored_authors is not applied in LSP" notice went out,
+    /// so config reloads do not repeat it.
+    pub(crate) author_warning_shown: bool,
 
     pub(crate) lsp_locale: Option<Locale>,
     pub position_encoding: PositionEncoding,
@@ -441,6 +444,7 @@ impl GlobalState {
             scope_dirty_docs: std::collections::HashSet::new(),
             scope_ref_identity: None,
             scope_warning_shown: None,
+            author_warning_shown: false,
             lsp_locale: None,
             position_encoding: PositionEncoding::default(),
             supports_insert_text_mode_adjust_indentation: false,

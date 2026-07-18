@@ -238,6 +238,33 @@ impl GlobalState {
         self.request_workspace_diagnostic_refresh();
     }
 
+    /// `[analysis].ignored_authors` is applied by CLI `analyze` and MCP, but
+    /// not (yet) by the LSP diagnostics pipeline. Say so once instead of
+    /// silently showing findings the other surfaces suppress.
+    pub(crate) fn warn_author_filter_unsupported(&mut self) {
+        let configured =
+            self.project.as_ref().is_some_and(|p| !p.config.analysis.ignored_authors.is_empty());
+        if !configured {
+            self.author_warning_shown = false;
+            return;
+        }
+        if self.author_warning_shown {
+            return;
+        }
+        self.author_warning_shown = true;
+        let params = lsp_types::ShowMessageParams {
+            typ: lsp_types::MessageType::INFO,
+            message: "bsl-analyzer: [analysis].ignored_authors is applied by `analyze` and MCP \
+                      diagnostics, but not by editor diagnostics yet — the editor may show \
+                      findings those surfaces suppress."
+                .to_string(),
+        };
+        let notification = lsp_server::Notification::new("window/showMessage".to_string(), params);
+        if let Err(e) = self.sender.send(notification.into()) {
+            tracing::error!("failed to send author filter notice: {e}");
+        }
+    }
+
     fn show_scope_warning(&mut self, error: &str) {
         // One warning per distinct failure: a save-triggered rebuild against a
         // permanently invalid base must not spam the client on every save.
