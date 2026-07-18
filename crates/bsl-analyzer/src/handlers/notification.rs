@@ -69,7 +69,13 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
 
     let db = state.analysis_host.raw_database().clone();
     state.diagnostics_tokens.insert(uri.clone(), db.cancellation_token());
-    let config = state.diagnostics_config().clone();
+    let mut config = state.diagnostics_config().clone();
+    // An edited-but-unsaved buffer no longer matches the disk state the
+    // vendor-diff scope was computed against: analyze it whole-file until the
+    // save rebuilds the scope.
+    if config.scope.is_some() && state.scope_dirty_docs.contains(uri) {
+        config.scope = None;
+    }
     let position_encoding = state.position_encoding;
     let uri = uri.clone();
     let queued_at = Instant::now();
@@ -311,6 +317,8 @@ pub fn handle_did_change(
         return Ok(());
     }
 
+    state.scope_dirty_docs.insert(uri.clone());
+
     let text = state
         .mem_docs
         .get(&uri)
@@ -343,6 +351,9 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
     if let Some(token) = state.diagnostics_tokens.remove(&uri) {
         token.cancel();
     }
+    // The buffer (and its unsaved edits) is gone: the disk-derived scope
+    // describes the file again.
+    state.scope_dirty_docs.remove(&uri);
     match crate::lsp::file_id(state, &uri) {
         Ok(file_id) => {
             if let Some(token) = state.preload_tokens.remove(&file_id) {
@@ -445,6 +456,15 @@ pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParam
     // (directly, or via inter-file dependencies); re-arm the batch. Salsa memoization
     // keeps the re-run cheap — only the changed file and its dependents recompute.
     state.mark_workspace_batch_dirty();
+
+    // The saved bytes moved the disk state the vendor-diff scope was computed
+    // against: rebuild it (coalesced), and put the no-longer-dirty document
+    // back under the disk-derived filter right away.
+    if state.scope_dirty_docs.remove(&uri) && state.diagnostics_config().scope.is_some() {
+        schedule_diagnostics(state, &uri);
+    }
+    state.request_scope_rebuild();
+    state.maybe_spawn_scope_build();
 
     Ok(())
 }

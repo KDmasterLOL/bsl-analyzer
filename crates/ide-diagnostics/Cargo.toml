@@ -34,6 +34,7 @@ spellbook.workspace = true
 text-size.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 expect-test.workspace = true
 parser.workspace = true
 test-fixture.workspace = true

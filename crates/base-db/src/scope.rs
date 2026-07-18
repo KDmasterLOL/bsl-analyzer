@@ -71,6 +71,32 @@ impl AnalysisScope {
         Self::build(base_ref.into(), files.collect(), false)
     }
 
+    /// Like [`Self::from_report`], but for a caller that addresses files
+    /// through `lexical_root` (e.g. an LSP `root_uri` that may traverse a
+    /// symlink) while git resolved the workdir through `realpath`: report keys
+    /// under the canonical form of `lexical_root` are re-anchored onto its
+    /// lexical spelling so they match the caller's file paths exactly.
+    pub fn from_report_anchored(
+        base_ref: impl Into<String>,
+        workdir: &Path,
+        lexical_root: &Path,
+        files: impl IntoIterator<Item = (String, Option<Vec<[u32; 2]>>)>,
+    ) -> Self {
+        let root_real = lexical_root.canonicalize().unwrap_or_else(|_| lexical_root.to_path_buf());
+        let files = files
+            .into_iter()
+            .map(|(rel, hunks)| {
+                let abs = workdir.join(normalize_path(&rel));
+                let abs = match abs.strip_prefix(&root_real) {
+                    Ok(suffix) => lexical_root.join(suffix),
+                    Err(_) => abs,
+                };
+                (abs, convert_hunks(hunks))
+            })
+            .collect();
+        Self::build(base_ref.into(), files, false)
+    }
+
     /// Scope from an external relative-key report (`--diff-filter` JSON as
     /// produced by rtools): matched by path suffix.
     pub fn from_relative_report(
@@ -274,6 +300,34 @@ mod tests {
                 ("src/Untouched.bsl".to_string(), Some(vec![])),
             ],
         )
+    }
+
+    /// A workspace addressed through a symlink must still match: git resolves
+    /// the workdir through `realpath`, the anchored constructor re-anchors the
+    /// keys onto the caller's lexical root.
+    #[cfg(unix)]
+    #[test]
+    fn anchored_report_matches_paths_through_a_symlinked_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // Keys come from git as workdir(realpath)-relative.
+        let real_canon = real.canonicalize().unwrap();
+        let scope = AnalysisScope::from_report_anchored(
+            "vendor",
+            &real_canon,
+            &link,
+            [("src/Module.bsl".to_string(), None)],
+        );
+
+        assert!(
+            scope.is_file_in_scope(&link.join("src/Module.bsl")),
+            "the lexical (symlinked) spelling must be in scope"
+        );
+        assert!(!scope.is_file_in_scope(&real_canon.join("src/Module.bsl")));
     }
 
     #[test]

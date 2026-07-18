@@ -265,6 +265,13 @@ pub(crate) fn file_findings(
         "truncated": count_capped || budget_exhausted,
         "findings": findings,
     });
+    // An empty report for a file outside the vendor-diff scope must not read as
+    // "no findings": say explicitly that the file was not analyzed.
+    if !resident.path_in_scope(path) {
+        body["out_of_scope"] = json!(true);
+        body["scope_hint"] =
+            json!("file has no changed lines vs [analysis].diff_base and was not analyzed");
+    }
     if budget_exhausted {
         body["budget_exhausted"] = json!(true);
         // When the count cap also fired, say so: raising `max_output_tokens` alone stops at
@@ -313,6 +320,11 @@ pub(crate) fn workspace_findings(
         "truncated": sweep.truncated || budget_exhausted,
         "aggregates": aggregates,
     });
+    if sweep.files_out_of_scope > 0 {
+        body["files_out_of_scope"] = json!(sweep.files_out_of_scope);
+        body["scope_hint"] =
+            json!("files with no changed lines vs [analysis].diff_base were not analyzed");
+    }
     if budget_exhausted {
         body["budget_exhausted"] = json!(true);
         body["budget_hint"] =
@@ -427,7 +439,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "5",
+        "schema_version": "6",
         "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
@@ -476,7 +488,9 @@ fn schema_json() -> Value {
             "kind": "full — (unchanged reserved for a future previous_result_id round-trip)",
             "counts": "{ error, warning, info, hint } — full histogram before the floor/cap",
             "truncated": "bool — the findings cap was hit; counts still complete",
-            "findings": "finding[]"
+            "findings": "finding[]",
+            "out_of_scope": "bool — file has no changed lines vs [analysis].diff_base and was NOT analyzed; an empty findings list is not 'clean' (present only under a configured scope)",
+            "scope_hint": "string — present with out_of_scope"
         },
         "workspace_params": {
             "min_severity": "error | warning | info | hint (default warning) — inclusive floor",
@@ -486,7 +500,9 @@ fn schema_json() -> Value {
         "workspace_result": {
             "result_id": "workspace@<generation>",
             "files_swept": "usize — files actually analyzed",
-            "files_total": "usize — resident files (files_swept < files_total ⇒ capped)",
+            "files_total": "usize — ALL resident files; files_swept can trail it because of the file cap (truncated) AND/OR the analysis scope (files_out_of_scope)",
+            "files_out_of_scope": "usize — files excluded by [analysis].diff_base (no changed lines); present only when > 0",
+            "scope_hint": "string — present with files_out_of_scope",
             "truncated": "bool — the file cap was hit",
             "aggregates": "{ code, severity, count, files_affected }[] — per-code, most-severe-then-most-frequent first; NO per-finding detail"
         },
@@ -528,7 +544,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "5");
+        assert_eq!(body["schema_version"], "6");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));

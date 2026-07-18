@@ -148,6 +148,80 @@ mod tests {
         );
     }
 
+    /// The extension-merge exit is scope-gated too: an extension module that
+    /// pairs to a base (weaving active) must not resurrect diagnostics on
+    /// unchanged lines, and an out-of-scope extension file yields nothing at
+    /// all — the base-aware passes run after the standalone `diagnostics()`
+    /// call, so this guards the actual final pipeline.
+    #[test]
+    fn extension_merge_exit_is_scope_gated() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{FileId, FileSet, VfsPath};
+
+        let temp = tempfile::tempdir().unwrap();
+        let main_root = temp.path().join("src/cf");
+        let ext_root = temp.path().join("src/cfe/X");
+        std::fs::create_dir_all(&main_root).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+
+        let mut db = RootDatabaseImpl::new();
+        db.set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+
+        let main_file = FileId(0);
+        let ext_file = FileId(1);
+        let mut file_set = FileSet::new();
+        let main_path = main_root.join("CommonModules/М/Ext/Module.bsl");
+        let ext_path = ext_root.join("CommonModules/М/Ext/Module.bsl");
+        file_set.insert(main_file, VfsPath::new(main_path.to_string_lossy().as_ref()));
+        file_set.insert(ext_file, VfsPath::new(ext_path.to_string_lossy().as_ref()));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(main_file, SourceRootId(0));
+        db.set_file_source_root(ext_file, SourceRootId(0));
+
+        db.set_file_text(main_file, "Процедура М() Экспорт\nКонецПроцедуры");
+        // Self-assignment on 1-based line 4 of the extension module.
+        db.set_file_text(
+            ext_file,
+            "&Вместо(\"М\")\nПроцедура Расш_М()\n\tА = 1;\n\tА = А;\nКонецПроцедуры",
+        );
+        assert!(
+            ide_db::weaving_target(&db, ext_file).is_some(),
+            "fixture must actually pair the extension to its base"
+        );
+
+        let baseline = crate::file_diagnostics(&db, ext_file, &DiagnosticsConfig::all_enabled());
+        assert!(has_self_assign(&baseline), "weaving pipeline baseline must fire: {baseline:?}");
+
+        let ext_rel = "src/cfe/X/CommonModules/М/Ext/Module.bsl";
+
+        // Line-gate at the merge exit: only line 1 changed → line 4 drops.
+        let mut on_line_one = DiagnosticsConfig::all_enabled();
+        on_line_one.scope = Some(Arc::new(AnalysisScope::from_report(
+            "vendor",
+            temp.path(),
+            [(ext_rel.to_string(), Some(vec![[1, 1]]))],
+        )));
+        let gated = crate::file_diagnostics(&db, ext_file, &on_line_one);
+        assert!(
+            !has_self_assign(&gated),
+            "a diagnostic on an unchanged line must not survive the merge exit: {gated:?}"
+        );
+
+        // File-gate: the extension file is not in the scope at all.
+        let mut other_file_only = DiagnosticsConfig::all_enabled();
+        other_file_only.scope = Some(Arc::new(AnalysisScope::from_report(
+            "vendor",
+            temp.path(),
+            [("src/cf/CommonModules/М/Ext/Module.bsl".to_string(), None)],
+        )));
+        let none = crate::file_diagnostics(&db, ext_file, &other_file_only);
+        assert!(none.is_empty(), "out-of-scope extension file must yield nothing: {none:?}");
+    }
+
     /// A half-open range ending exactly at the start of the next line must not
     /// count as touching that line.
     #[test]

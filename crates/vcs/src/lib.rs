@@ -104,6 +104,16 @@ pub fn generate_workdir_diff_report(
     })
 }
 
+/// Cheap identity of a scope's inputs: the resolved OIDs of `base` and `HEAD`.
+/// Changes exactly when a rebuilt scope could differ for an unchanged worktree
+/// (a ref moved without touching watched files — fetch, rebase, branch reset).
+pub fn scope_ref_identity(repo_path: &Path, base: &str) -> Result<(String, String)> {
+    let repo = discover_repo(repo_path)?;
+    let base_oid = resolve_commit(&repo, base)?.id().to_string();
+    let head_oid = resolve_commit(&repo, "HEAD")?.id().to_string();
+    Ok((base_oid, head_oid))
+}
+
 fn discover_repo(repo_path: &Path) -> Result<Repository> {
     Repository::discover(repo_path).map_err(|e| anyhow!("git repository not found: {e}"))
 }

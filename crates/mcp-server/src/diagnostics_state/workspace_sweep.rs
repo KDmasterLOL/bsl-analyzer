@@ -26,6 +26,9 @@ pub(crate) struct WorkspaceSweep {
     /// smaller when the sweep was cancelled mid-flight.
     pub files_swept: usize,
     pub files_total: usize,
+    /// Files excluded by the vendor-diff analysis scope (no changed lines vs the
+    /// configured base); 0 when no scope is configured.
+    pub files_out_of_scope: usize,
     pub truncated: bool,
     /// The sweep was cancelled mid-flight (MCP `notifications/cancelled` or transport
     /// shutdown); `aggregates` cover only the `files_swept` files processed before it.

@@ -72,6 +72,9 @@ pub(crate) struct DiagnosticsState {
     /// Count of actual workspace walks (not cache hits), so a test can assert the
     /// event-driven hot path performs no scan.
     pub(super) scan_count: Arc<AtomicUsize>,
+    /// When the drift poll last compared the scope's resolved git refs, so the
+    /// ref-only-movement check stays off the per-request hot path.
+    pub(super) scope_ref_check_at: Arc<Mutex<Option<Instant>>>,
     /// One-shot test seam fired between the reconciler's first drain and its scan.
     #[cfg(test)]
     pub(super) reconcile_probe: ReconcileProbe,
@@ -116,6 +119,7 @@ impl DiagnosticsState {
             last_reconcile: Arc::new(Mutex::new(Instant::now())),
             reconcile_interval: reconcile_interval(),
             scan_count: Arc::new(AtomicUsize::new(0)),
+            scope_ref_check_at: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             reconcile_probe: Arc::new(Mutex::new(None)),
         }
@@ -454,10 +458,20 @@ impl DiagnosticsState {
             .into_iter()
             .map(|(label, path)| (label, path.canonicalize().unwrap_or(path)))
             .collect();
-        let config = ide::DiagnosticsConfig::from_project_json(
+        let mut config = ide::DiagnosticsConfig::from_project_json(
             &project.config.diagnostics,
             project.config.output.resolve_locale().unwrap_or_default(),
         );
+        // `[analysis].diff_base`: restrict diagnostics to the vendor diff. Computed
+        // synchronously — the resident build is already the heavy bootstrap phase —
+        // and refreshed on body drift so the filter tracks the working copy.
+        let diff_base = project.config.analysis.diff_base.clone();
+        let mut scope_identity = None;
+        if let Some(base) = diff_base.as_deref() {
+            let (scope, identity) = super::resident::build_scope(root, base);
+            config.scope = scope;
+            scope_identity = identity;
+        }
         let source_root = build_source_root(&files);
         // Disk-backed: register each file's content revision and drop its text, so the
         // whole-workspace resident is not pinned as salsa inputs (which OOMs on a large
@@ -500,7 +514,15 @@ impl DiagnosticsState {
         let config_fp = config_fingerprint(root);
 
         Ok((
-            DiagnosticsResident { db, vfs, by_path, config, workspace_root: root.to_path_buf() },
+            DiagnosticsResident {
+                db,
+                vfs,
+                by_path,
+                config,
+                workspace_root: root.to_path_buf(),
+                diff_base,
+                scope_identity,
+            },
             stats,
             config_fp,
         ))

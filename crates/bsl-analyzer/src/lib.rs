@@ -6,6 +6,7 @@ pub mod tracing {
 }
 
 pub mod analysis_host;
+pub mod analysis_scope;
 pub mod bench;
 pub mod call_hierarchy_index_overlay;
 mod call_hierarchy_index_service;

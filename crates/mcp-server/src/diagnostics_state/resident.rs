@@ -40,6 +40,12 @@ pub(crate) struct DiagnosticsResident {
     /// uses (`source_dir`), so an absolute finding path strips to the graph encoder's rel
     /// and the `method/file/<rel>::<name>` graph bridge resolves.
     pub(super) workspace_root: PathBuf,
+    /// `[analysis].diff_base` from the project config; drives the drift-time
+    /// rescope so the vendor-diff filter tracks the moving working copy.
+    pub(super) diff_base: Option<String>,
+    /// Resolved (base, HEAD) OIDs the current scope was built against; the
+    /// drift poll rebuilds when the live refs no longer match (ref-only moves).
+    pub(super) scope_identity: Option<(String, String)>,
 }
 
 impl DiagnosticsResident {
@@ -88,6 +94,51 @@ impl DiagnosticsResident {
         &self.config
     }
 
+    /// Whether `path` has any line in the vendor-diff analysis scope. Resolves
+    /// the path the same way [`Self::file_id_for`] does (relative → workspace
+    /// root, canonicalised). `true` when no scope is configured.
+    pub(crate) fn path_in_scope(&self, path: &Path) -> bool {
+        let Some(scope) = self.config.scope.as_ref() else { return true };
+        let abs =
+            if path.is_absolute() { path.to_path_buf() } else { self.workspace_root.join(path) };
+        let abs = abs.canonicalize().unwrap_or(abs);
+        scope.is_file_in_scope(&abs)
+    }
+}
+
+/// Compute the vendor-diff scope for `root` against `base` (workdir mode, so
+/// uncommitted and untracked edits count as changed), plus the resolved
+/// (base, HEAD) identity the drift poll compares against. Scope `None` — and
+/// a warning — when the repo or ref cannot be resolved: MCP fails open,
+/// matching LSP.
+pub(crate) type ScopeBuild =
+    (Option<std::sync::Arc<base_db::AnalysisScope>>, Option<(String, String)>);
+
+pub(crate) fn build_scope(root: &Path, base: &str) -> ScopeBuild {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let identity = vcs::scope_ref_identity(&root, base).ok();
+    match vcs::generate_workdir_diff_report(&root, base, true) {
+        Ok(diff) => {
+            let scope = std::sync::Arc::new(base_db::AnalysisScope::from_report(
+                diff.report.base_ref,
+                &diff.workdir,
+                diff.report.files.into_iter().map(|(path, change)| (path, change.hunks)),
+            ));
+            tracing::info!(
+                base,
+                files_in_scope = scope.in_scope_file_count(),
+                "vendor-diff analysis scope active"
+            );
+            (Some(scope), identity)
+        }
+        Err(error) => {
+            tracing::warn!(base, %error, "vendor-diff scope unavailable; analyzing everything");
+            (None, identity)
+        }
+    }
+}
+
+impl DiagnosticsResident {
     /// Workspace-wide diagnostics aggregated per code (the `workspace` action). Runs
     /// rayon over per-worker db clones (shared Salsa storage, the CLI `analyze`
     /// discipline). The caller MUST hold the state lock for the whole sweep so no
@@ -109,11 +160,23 @@ impl DiagnosticsResident {
         use std::collections::HashSet;
         use std::panic::AssertUnwindSafe;
 
-        let mut files: Vec<FileId> = self.by_path.values().copied().collect();
+        // Vendor-diff file-gate: unchanged-vs-base files are excluded up front so the
+        // sweep never walks thousands of files whose report is guaranteed empty;
+        // `files_out_of_scope` keeps the coverage bookkeeping honest about the gap.
+        let mut files: Vec<FileId> = Vec::with_capacity(self.by_path.len());
+        let mut files_out_of_scope = 0usize;
+        for (path, file_id) in &self.by_path {
+            if config.scope.as_ref().is_none_or(|s| s.is_file_in_scope(Path::new(path))) {
+                files.push(*file_id);
+            } else {
+                files_out_of_scope += 1;
+            }
+        }
         files.sort_by_key(|f| f.0);
-        let files_total = files.len();
-        let truncated = files_total > opts.max_files;
-        let swept = &files[..opts.max_files.min(files_total)];
+        let files_total = self.by_path.len();
+        let in_scope = files.len();
+        let truncated = in_scope > opts.max_files;
+        let swept = &files[..opts.max_files.min(in_scope)];
 
         // Per file: the (code, bucket) of each diagnostic, `None` for a file skipped or
         // unwound by cancellation. Each rayon worker owns an `Analysis` over a db clone;
@@ -189,7 +252,14 @@ impl DiagnosticsResident {
             b.severity.cmp(&a.severity).then(b.count.cmp(&a.count)).then(a.code.cmp(&b.code))
         });
 
-        WorkspaceSweep { aggregates, files_swept, files_total, truncated, cancelled }
+        WorkspaceSweep {
+            aggregates,
+            files_swept,
+            files_total,
+            files_out_of_scope,
+            truncated,
+            cancelled,
+        }
     }
 }
 
@@ -540,6 +610,62 @@ mod tests {
             min_severity: ide::SeverityBucket::Hint,
             codes: Vec::new(),
             max_files: 1000,
+        }
+    }
+
+    /// Under a vendor-diff scope the sweep analyses only files with changed lines;
+    /// the excluded rest is counted so the coverage bookkeeping stays honest.
+    #[test]
+    fn sweep_under_scope_excludes_unchanged_files_and_counts_them() {
+        use std::sync::Arc;
+
+        use super::super::SweepCancel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        // A second module, so the scope has something to exclude.
+        super::super::test_support::write_common_module(
+            root,
+            "Клиент",
+            false,
+            "&НаКлиенте\nПроцедура Показать() Экспорт КонецПроцедуры",
+        );
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let out = state.read(|resident, _| {
+            let workdir =
+                resident.workspace_root().canonicalize().expect("workspace root canonicalizes");
+            let module = module_path(root, "Сервер").canonicalize().expect("module exists");
+            let rel = module
+                .strip_prefix(&workdir)
+                .expect("module under workspace root")
+                .to_string_lossy()
+                .into_owned();
+            let scope =
+                Arc::new(base_db::AnalysisScope::from_report("vendor", &workdir, [(rel, None)]));
+
+            let mut config = resident.config().clone();
+            config.scope = Some(scope);
+            let sweep =
+                resident.workspace_aggregates(&config, &sweep_opts(), &SweepCancel::default());
+            (resident.file_count(), sweep)
+        });
+        match out {
+            ResidentOutcome::Ready((file_count, sweep), _) => {
+                assert!(file_count > 1, "the fixture must contain more than one .bsl");
+                assert_eq!(sweep.files_total, file_count);
+                assert_eq!(
+                    sweep.files_out_of_scope,
+                    file_count - 1,
+                    "everything except the admitted module must be excluded"
+                );
+                assert_eq!(sweep.files_swept, 1, "only the in-scope module is analysed");
+            }
+            _ => panic!("expected Ready"),
         }
     }
 

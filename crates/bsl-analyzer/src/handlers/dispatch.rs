@@ -170,6 +170,7 @@ impl RequestDispatcher<'_> {
             client_sender: self.global_state.sender.clone(),
             mem_docs: self.global_state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&self.global_state.vfs.read()),
+            scope_dirty_docs: self.global_state.scope_dirty_docs.clone(),
         };
 
         let id = req.id;
@@ -603,6 +604,7 @@ mod tests {
             client_sender: state.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: crate::frozen_context::FrozenFilePaths::freeze(&state.vfs.read()),
+            scope_dirty_docs: state.scope_dirty_docs.clone(),
         };
         (ctx, token)
     }

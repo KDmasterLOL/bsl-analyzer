@@ -12,6 +12,10 @@ use super::types::{DiagnosticsStatus, Freshness, ReloadState};
 
 pub(super) const DRIFT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How often the drift poll re-resolves the scope's git refs (base, HEAD) to
+/// notice ref-only movement. A couple of `rev-parse`s per minute is free.
+pub(super) const SCOPE_REF_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
 pub(super) const FORCE_RESCAN_FLOOR: Duration = Duration::from_millis(250);
 
 pub(super) const RECONCILE_INTERVAL: Duration = Duration::from_secs(90);
@@ -72,6 +76,11 @@ impl DiagnosticsState {
         if !matches!(self.status(), DiagnosticsStatus::Ready { .. }) {
             return;
         }
+
+        // Ref-only git movement (fetch/rebase/reset) changes what the scope
+        // should be without any watched-file event; this is the only place
+        // that can notice it.
+        self.check_scope_ref_drift(&root);
 
         // The `metadata object` miss escape hatch forces a scan regardless of hub health.
         if self.force_scan.swap(false, Ordering::SeqCst) {
@@ -231,6 +240,7 @@ impl DiagnosticsState {
         new_fp: &HashMap<String, u64>,
     ) {
         let mut needs_rebuild = false;
+        let mut rescope: Option<(PathBuf, String)> = None;
         {
             let mut inner = lock_recover(&self.inner);
             if inner.reload == ReloadState::Running {
@@ -252,6 +262,15 @@ impl DiagnosticsState {
             if rebuild {
                 needs_rebuild = true;
             } else {
+                // Body drift moved the working copy the vendor-diff scope was
+                // computed against (save, checkout, pull). The git diff can take
+                // seconds, so only capture the inputs here — the recompute runs
+                // after this lock is released. No-op without a configured base.
+                if !added_bsl.is_empty() || !modified_bsl.is_empty() || !removed_bsl.is_empty() {
+                    if let Some(base) = resident.diff_base.clone() {
+                        rescope = Some((resident.workspace_root().to_path_buf(), base));
+                    }
+                }
                 for (key, fp) in new_fp {
                     stats.insert(key.clone(), *fp);
                 }
@@ -276,6 +295,8 @@ impl DiagnosticsState {
         }
         if needs_rebuild {
             self.kick_full_reload();
+        } else if let Some((root, base)) = rescope {
+            self.rescope_out_of_lock(&root, &base);
         }
     }
 
@@ -291,6 +312,7 @@ impl DiagnosticsState {
             scan.stats.iter().map(|s| (s.path.as_str(), s.fingerprint())).collect();
 
         let mut needs_rebuild = false;
+        let mut rescope: Option<(PathBuf, String)> = None;
         {
             let mut inner = lock_recover(&self.inner);
             // A full rebuild already in flight will publish a fresh resident; defer to it
@@ -322,6 +344,15 @@ impl DiagnosticsState {
             if rebuild {
                 needs_rebuild = true;
             } else {
+                // Body drift moved the working copy the vendor-diff scope was
+                // computed against (save, checkout, pull). The git diff can take
+                // seconds, so only capture the inputs here — the recompute runs
+                // after this lock is released. No-op without a configured base.
+                if !added_bsl.is_empty() || !modified_bsl.is_empty() || !removed_bsl.is_empty() {
+                    if let Some(base) = resident.diff_base.clone() {
+                        rescope = Some((resident.workspace_root().to_path_buf(), base));
+                    }
+                }
                 // Advance the drift baseline to the scan we reconciled against: every
                 // applied body and every XML add/remove/edit is now reflected in the
                 // resident, so its state equals `scan`. Rebasing even when nothing moved
@@ -346,6 +377,49 @@ impl DiagnosticsState {
         }
         if needs_rebuild {
             self.kick_full_reload();
+        } else if let Some((root, base)) = rescope {
+            self.rescope_out_of_lock(&root, &base);
+        }
+    }
+
+    /// Recompute the vendor-diff scope OUTSIDE the resident lock (the git diff
+    /// can take seconds on a large working copy) and publish it under a short
+    /// lock — unless a full reload started meanwhile: the rebuilt resident
+    /// computes its own fresh scope.
+    fn rescope_out_of_lock(&self, root: &Path, base: &str) {
+        let (scope, identity) = super::resident::build_scope(root, base);
+        let mut inner = lock_recover(&self.inner);
+        if inner.reload == ReloadState::Running {
+            return;
+        }
+        if let Some(resident) = inner.resident.as_mut() {
+            resident.config.scope = scope;
+            resident.scope_identity = identity;
+        }
+    }
+
+    /// Compare the scope's resolved (base, HEAD) OIDs against the live refs —
+    /// throttled, off the request hot path — and rescope when they moved.
+    fn check_scope_ref_drift(&self, root: &Path) {
+        {
+            let mut at = lock_recover(&self.scope_ref_check_at);
+            if at.is_some_and(|t| t.elapsed() < SCOPE_REF_CHECK_INTERVAL) {
+                return;
+            }
+            *at = Some(Instant::now());
+        }
+        let (base, stored) = {
+            let inner = lock_recover(&self.inner);
+            let Some(resident) = inner.resident.as_ref() else { return };
+            let Some(base) = resident.diff_base.clone() else { return };
+            (base, resident.scope_identity.clone())
+        };
+        let Ok(identity) = vcs::scope_ref_identity(root, &base) else {
+            return;
+        };
+        if stored.as_ref().is_some_and(|s| s != &identity) {
+            tracing::info!("scope refs moved without file events; rebuilding vendor-diff scope");
+            self.rescope_out_of_lock(root, &base);
         }
     }
 

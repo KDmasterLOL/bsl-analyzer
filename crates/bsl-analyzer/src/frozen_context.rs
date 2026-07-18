@@ -95,6 +95,9 @@ pub struct LatencyRequestContext {
     pub client_sender: Sender<Message>,
     pub mem_docs: FrozenMemDocs,
     pub file_paths: FrozenFilePaths,
+    /// Open documents edited since their last save; under a vendor-diff scope
+    /// they count as whole-file in scope (the disk diff no longer matches).
+    pub scope_dirty_docs: std::collections::HashSet<Url>,
 }
 
 impl LatencyRequestContext {
