@@ -11,10 +11,9 @@ pub(super) fn retryable_postgres_source() -> Arc<ExternalBaselineService> {
         schema: Some("bsl_search".to_owned()),
         vault_role_base: Some("prod/search/bsl-analyzer".to_owned()),
         credential_helper: SearchPostgresCredentialHelperConfig {
-            program: Some("python3".to_owned()),
+            program: Some("echo".to_owned()),
             args: vec![
-                "-c".to_owned(),
-                "import json; print(json.dumps({'protocol':'bsl-analyzer.postgres-helper.v1','ok':True,'url':'postgres://127.0.0.1:1/bsl_search'}))".to_owned(),
+                r#"{"protocol":"bsl-analyzer.postgres-helper.v1","ok":true,"url":"postgres://127.0.0.1:1/bsl_search"}"#.to_owned(),
             ],
         },
     };
