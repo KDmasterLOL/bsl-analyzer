@@ -581,17 +581,23 @@ pub struct ProjectConfig {
     pub output: OutputConfig,
 }
 
+/// The conventional project-config file names at a workspace root, in load
+/// precedence order. Watchers and drift fingerprints must treat exactly this
+/// set as "the config", so a change to any of them re-derives the project.
+pub const CONFIG_FILE_NAMES: [&str; 3] =
+    ["bsl-analyzer.toml", ".bsl-analyzer.json", ".bsl-language-server.json"];
+
 impl ProjectConfig {
     /// Loads the project config from the conventional file names under `root`.
     /// `Ok(None)` means no config file exists (callers default); a file that
     /// exists but cannot be read or parsed is an error — falling back to a
     /// default config would silently analyze a differently-shaped project.
     pub fn load(root: &Path) -> Result<Option<Self>, ConfigLoadError> {
-        let toml_path = root.join("bsl-analyzer.toml");
+        let toml_path = root.join(CONFIG_FILE_NAMES[0]);
         if toml_path.exists() {
             return Self::load_from_file(&toml_path).map(Some);
         }
-        for filename in [".bsl-analyzer.json", ".bsl-language-server.json"] {
+        for filename in [CONFIG_FILE_NAMES[1], CONFIG_FILE_NAMES[2]] {
             let config_path = root.join(filename);
             if config_path.exists() {
                 let config = Self::load_from_file(&config_path)?;

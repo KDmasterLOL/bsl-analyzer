@@ -203,18 +203,23 @@ impl GraphDb {
     /// from the file's own `meta`, so a served response's revision/staleness always
     /// describe the exact build being served (never a torn mix where a concurrent
     /// reload renamed a newer file in after the generation was captured elsewhere).
-    /// `force_stale` defaults to false when absent.
-    pub fn freshness_token(&self) -> anyhow::Result<(u64, u64, bool)> {
+    /// Both fingerprint components are required rows (`schema_version` gates out
+    /// builds that predate `topology_fp`); `force_stale` defaults to false when absent.
+    pub fn freshness_token(&self) -> anyhow::Result<(u64, crate::graph_db::GraphFp, bool)> {
         let revision = self
             .meta("revision")?
             .and_then(|v| v.parse().ok())
             .context("graph database meta.revision missing or unparsable")?;
-        let fingerprint = self
+        let files = self
             .meta("fingerprint")?
             .and_then(|v| v.parse().ok())
             .context("graph database meta.fingerprint missing or unparsable")?;
+        let topology = self
+            .meta("topology_fp")?
+            .and_then(|v| v.parse().ok())
+            .context("graph database meta.topology_fp missing or unparsable")?;
         let force_stale = self.meta("force_stale")?.map(|v| v == "1").unwrap_or(false);
-        Ok((revision, fingerprint, force_stale))
+        Ok((revision, crate::graph_db::GraphFp { files, topology }, force_stale))
     }
 
     /// The indexed `.bsl` file count recorded at build time, for status display.
@@ -1099,7 +1104,7 @@ mod tests {
             .unwrap()
             .finalize(&GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files: 0,
                 built_at: "t".to_string(),
             })

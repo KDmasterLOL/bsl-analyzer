@@ -9,7 +9,7 @@ use crate::graph_query::GraphDb;
 
 #[cfg(test)]
 use super::input::GRAPH_SOURCE_ROOT;
-use super::scan::{classify_changes, scan_file_stats, workspace_fingerprint};
+use super::scan::{classify_changes, workspace_fingerprint};
 use super::state::{lock_recover, GraphState, Published, ReloadState};
 use super::types::GraphStatus;
 
@@ -36,17 +36,32 @@ impl GraphState {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             build_and_publish_graph_file(&workspace_root, generation, Some(&mut sink))
         }));
-        let (files, fp_pre, force_stale) = match outcome {
+        let built = match outcome {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => return Err(e),
             Err(_) => anyhow::bail!("fused graph build panicked"),
         };
-        if force_stale {
+        if built.force_stale {
             tracing::warn!("fused graph build straddled a disk write; snapshot marked stale");
         }
-        self.adopt_prebuilt(generation, fp_pre, files);
+        self.adopt_prebuilt(generation, built.fp_pre, built.files);
+        self.ensure_hub_roots(&built.scan_roots);
         self.notify_published(build_start_seq);
         Ok(())
+    }
+
+    /// After a successful (re)build, re-point the daemon's change hub at the build
+    /// snapshot's scan roots. A topology reload that added or dropped an extension
+    /// root would otherwise leave the hub watching the old universe — events in a
+    /// new extension would never be delivered, and every consumer would coast on
+    /// its reconcile interval. A no-op when the roots did not change.
+    pub(super) fn ensure_hub_roots(&self, scan_roots: &[std::path::PathBuf]) {
+        let (Some(hub), Some(root)) = (&self.change_hub, self.workspace_root.as_deref()) else {
+            return;
+        };
+        if !hub.ensure_roots(&crate::change_hub::watch_targets_for(root, scan_roots)) {
+            tracing::warn!("graph rebuild could not re-arm the change hub onto new roots");
+        }
     }
 
     /// Build (or rebuild) the database off-thread and publish it coherently.
@@ -100,8 +115,8 @@ impl GraphState {
         }));
 
         match outcome {
-            Ok(Ok((files, fp_pre, force_stale))) => {
-                if force_stale {
+            Ok(Ok(built)) => {
+                if built.force_stale {
                     tracing::warn!(
                         is_reload,
                         "graph build straddled a disk write; marking snapshot stale to force reload"
@@ -115,14 +130,20 @@ impl GraphState {
                     let mut inner = lock_recover(&self.inner);
                     inner.published = Some(Published {
                         generation,
-                        fingerprint: fp_pre,
+                        fingerprint: built.fp_pre,
                         stale: false,
                         reload: ReloadState::Idle,
                     });
-                    inner.status = GraphStatus::Ready { files };
+                    inner.status = GraphStatus::Ready { files: built.files };
                 }
+                self.ensure_hub_roots(&built.scan_roots);
                 self.notify_published(build_start_seq);
-                tracing::info!(files, generation, is_reload, "graph database build complete");
+                tracing::info!(
+                    files = built.files,
+                    generation,
+                    is_reload,
+                    "graph database build complete"
+                );
             }
             Ok(Err(e)) => {
                 let msg = e.to_string();
@@ -155,7 +176,19 @@ impl GraphState {
         if stored_fp.is_empty() {
             return false; // no per-file record (older build) → full rebuild
         }
-        let diff = classify_changes(&stored_fp, &scan_file_stats(workspace_root));
+        // ONE project snapshot serves the eligibility diff, the topology gate, the
+        // patch and the straddle bracket, so a config edit mid-operation cannot mix
+        // two topologies.
+        let project = crate::graph::ProjectSnapshot::load(workspace_root);
+        // A topology change re-shapes visibility for ANY module even when only
+        // `.bsl` bodies drifted on disk — never body-patch across it.
+        match GraphDb::open(&db_path).and_then(|g| g.freshness_token()) {
+            Ok((_, stored_token, _))
+                if stored_token.topology == super::scan::topology_u64(&project.configs) => {}
+            _ => return false,
+        }
+        let diff =
+            classify_changes(&stored_fp, &super::scan::scan_stats_over_roots(&project.scan_roots));
 
         // Body-only shape: at least one `.bsl` modified, nothing added/removed, no
         // metadata drift (an `.xml` change can flip visibility for any module).
@@ -235,9 +268,6 @@ impl GraphState {
 
         // Bracket the patch with fingerprint scans, mirroring the full build's
         // straddle detection: a write landing mid-patch marks the snapshot stale.
-        // ONE project snapshot serves the pre-scan, the patch and the post-scan,
-        // so a config edit mid-operation cannot mix two topologies.
-        let project = crate::graph::ProjectSnapshot::load(workspace_root);
         let fp_pre = super::scan::workspace_fingerprint_over(&project);
         let tmp_path = db_path.with_extension("db.building");
         let built_at = chrono::Utc::now().to_rfc3339();
@@ -412,12 +442,12 @@ impl GraphState {
 /// database until the swap, never a half-written one. Shared by the lazy loader
 /// ([`GraphState::run_load`]) and the fused cold build; when `chunk_sink` is present,
 /// the search index's chunks are streamed from the same parse pass. Returns
-/// `(files, fp_pre, force_stale)`.
+/// a [`PublishedBuild`].
 fn build_and_publish_graph_file(
     workspace_root: &Path,
     generation: u64,
     chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
-) -> anyhow::Result<(usize, u64, bool)> {
+) -> anyhow::Result<PublishedBuild> {
     // ONE project snapshot serves the pre-scan, the build and the post-scan.
     let project = crate::graph::ProjectSnapshot::load(workspace_root);
     let fp_pre = super::scan::workspace_fingerprint_over(&project);
@@ -459,7 +489,22 @@ fn build_and_publish_graph_file(
         )?;
     }
     std::fs::rename(&tmp_path, &out_path)?;
-    Ok((summary.modules, fp_pre, force_stale))
+    Ok(PublishedBuild {
+        files: summary.modules,
+        fp_pre,
+        force_stale,
+        scan_roots: project.scan_roots,
+    })
+}
+
+/// The outcome of one full build+publish pass: what was published, the identity it
+/// was published under, and the scan roots of the snapshot that built it (for the
+/// post-publish hub re-arm).
+struct PublishedBuild {
+    files: usize,
+    fp_pre: crate::graph_db::GraphFp,
+    force_stale: bool,
+    scan_roots: Vec<PathBuf>,
 }
 
 /// Translates the graph pass's [`ide::ChunkRow`] stream into the search store for the
@@ -607,10 +652,11 @@ pub(crate) fn read_stored_sig_hashes(
 #[cfg(test)]
 mod tests {
     use super::super::input::{enumerate_bsl_files, load_workspace_db, scan_roots};
-    use super::super::scan::{scan_stats_over_roots, FileStat, WorkspaceDiff};
+    use super::super::scan::{scan_file_stats, scan_stats_over_roots, FileStat, WorkspaceDiff};
     use super::super::snapshot::fold_fingerprint_entries;
     use super::super::test_support::{
         meta_string, sample_workspace, seed_cache, wait_ready, write, write_common_module,
+        write_extension_config, write_extension_workspace,
     };
     use super::*;
     use crate::graph_db::{build_graph_database, update_graph_database_bodies};
@@ -695,7 +741,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         sample_workspace(root);
-        seed_cache(root, workspace_fingerprint(root).wrapping_add(1));
+        seed_cache(root, {
+            let mut fp = workspace_fingerprint(root);
+            fp.files = fp.files.wrapping_add(1);
+            fp
+        });
 
         let graph = GraphState::for_workspace(root.to_path_buf());
         graph.ensure_loading();
@@ -731,14 +781,17 @@ mod tests {
         sample_workspace(root);
 
         let walk = workspace_fingerprint(root);
-        let mut entries: Vec<(String, u128, u64)> =
-            scan_file_stats(root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let mut entries: Vec<(String, u128, u64)> = scan_stats_over_roots(&project.scan_roots)
+            .into_iter()
+            .map(|s| (s.path, s.mtime, s.len))
+            .collect();
         entries.sort();
         let map: std::collections::BTreeMap<String, (u128, u64)> =
             entries.into_iter().map(|(p, m, l)| (p, (m, l))).collect();
         let via_map: Vec<(String, u128, u64)> =
             map.iter().map(|(p, (m, l))| (p.clone(), *m, *l)).collect();
-        assert_eq!(fold_fingerprint_entries(&via_map), walk, "map fold == walk fold");
+        assert_eq!(fold_fingerprint_entries(&via_map), walk.files, "map fold == walk fold");
     }
 
     /// A cached build flagged `force_stale` (it straddled a disk write and was never
@@ -784,7 +837,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -871,7 +924,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files: 0,
                 built_at: "t".to_string(),
             },
@@ -943,7 +996,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -980,7 +1033,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1072,7 +1125,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1112,7 +1165,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1195,7 +1248,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1279,7 +1332,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1438,7 +1491,7 @@ mod tests {
             100,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1528,7 +1581,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1596,7 +1649,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1667,6 +1720,57 @@ mod tests {
         assert_ne!(after_bsl, after_xml, "a .xml metadata edit must change the fingerprint");
     }
 
+    /// A `dependsOn`-only config edit touches no file the stats fold sees, so the
+    /// topology component is the ONLY channel that can report it. If the fold were
+    /// files-only, this drift would be invisible forever.
+    #[test]
+    fn fingerprint_topology_component_tracks_a_depends_on_only_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_extension_workspace(root, false);
+        let base = workspace_fingerprint(root);
+
+        write_extension_config(root, true);
+        let after = workspace_fingerprint(root);
+        assert_eq!(base.files, after.files, "no scanned file moved");
+        assert_ne!(base.topology, after.topology, "the dependency edge changed the topology");
+    }
+
+    /// An extension appearing through zero-config auto-discovery (no analyzer config
+    /// file exists at all) must flow into the topology component too — visibility
+    /// re-shapes without a single config-file stat to observe.
+    #[test]
+    fn an_auto_discovered_extension_changes_the_topology_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let base = workspace_fingerprint(root);
+
+        write(root, "src/cfe/NewExt/Configuration.xml", "<Configuration/>");
+        let after = workspace_fingerprint(root);
+        assert_ne!(base.topology, after.topology, "discovery must reshape the topology");
+    }
+
+    /// A cached on-disk graph built under one dependency graph is dead the moment the
+    /// declared topology changes, even though not one indexed file moved.
+    #[test]
+    fn cached_build_is_not_reused_after_a_topology_only_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_extension_workspace(root, false);
+        seed_cache(root, workspace_fingerprint(root));
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        assert!(graph.try_publish_cached(root, 0), "an unchanged workspace reuses the cache");
+
+        write_extension_config(root, true);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        assert!(
+            !graph.try_publish_cached(root, 0),
+            "a dependsOn-only edit must invalidate the cached graph"
+        );
+    }
+
     /// A build persists a per-file fingerprint for every `.bsl` AND `.xml` file, so
     /// a later reload can classify drift granularly. `sig_hash` is NULL for now.
     #[test]
@@ -1683,7 +1787,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files: 0,
                 built_at: "t".to_string(),
             },
@@ -1743,7 +1847,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -1978,7 +2082,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -2061,7 +2165,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -2126,7 +2230,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -2203,7 +2307,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -2298,7 +2402,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -2372,7 +2476,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -2453,7 +2557,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -2521,7 +2625,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -2649,7 +2753,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -2717,7 +2821,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -2762,7 +2866,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -2818,7 +2922,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -2883,7 +2987,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -2978,7 +3082,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -3054,7 +3158,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -3138,7 +3242,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -3193,7 +3297,7 @@ mod tests {
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files: 0,
                 built_at: "t".to_string(),
             },

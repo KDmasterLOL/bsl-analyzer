@@ -54,7 +54,7 @@ pub(super) struct Published {
     /// holds), marks must not be cleared against this snapshot.
     pub(super) stale: bool,
     pub(super) generation: u64,
-    pub(super) fingerprint: u64,
+    pub(super) fingerprint: crate::graph_db::GraphFp,
     pub(super) reload: ReloadState,
 }
 
@@ -410,7 +410,12 @@ impl GraphState {
     /// cache and sets `published` + `Ready`. `force_stale` is already stamped into the
     /// file's meta (read back by a snapshot's freshness token), so it is not tracked
     /// here. Call only after a successful [`Self::try_begin_external_build`] + rename.
-    pub(crate) fn adopt_prebuilt(&self, generation: u64, fingerprint: u64, files: usize) {
+    pub(crate) fn adopt_prebuilt(
+        &self,
+        generation: u64,
+        fingerprint: crate::graph_db::GraphFp,
+        files: usize,
+    ) {
         *lock_recover(&self.scan) = None;
         let mut inner = lock_recover(&self.inner);
         inner.published =
@@ -650,7 +655,7 @@ mod tests {
             inner.status = GraphStatus::Ready { files: 0 };
             inner.published = Some(Published {
                 generation: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Idle,
             });
@@ -685,7 +690,7 @@ mod tests {
             inner.status = GraphStatus::Ready { files: 0 };
             inner.published = Some(Published {
                 generation: 1,
-                fingerprint: 1,
+                fingerprint: crate::graph_db::GraphFp { files: 1, topology: 1 },
                 stale: false,
                 reload: ReloadState::Idle,
             });
@@ -721,7 +726,7 @@ mod tests {
             let mut inner = lock_recover(&graph.inner);
             inner.published = Some(Published {
                 generation: 7,
-                fingerprint: 1,
+                fingerprint: crate::graph_db::GraphFp { files: 1, topology: 1 },
                 stale: true,
                 reload: ReloadState::Failed("catch-up failed".to_owned()),
             });
@@ -752,7 +757,7 @@ mod tests {
             // fingerprint 0 can never match the real disk scan → a drift is always seen.
             inner.published = Some(Published {
                 generation: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Idle,
             });
@@ -787,7 +792,7 @@ mod tests {
             inner.status = GraphStatus::Ready { files: 0 };
             inner.published = Some(Published {
                 generation: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Running,
             });

@@ -25,16 +25,28 @@ pub struct BackendKey {
     version: &'static str,
     /// Fold of the embedding-related environment — see [`embedding_config_fingerprint`].
     config_fp: u64,
+    /// Fold of the project's extension topology — see
+    /// [`workspace_topology_fingerprint`]. Without it, the same source dir with a
+    /// changed dependency graph would rendezvous with (and silently reuse) a daemon
+    /// whose caches were built for the old graph.
+    topology_fp: u64,
 }
 
 impl BackendKey {
     /// Build a key for the current process. `config_fp` should come from
     /// [`embedding_config_fingerprint`] so a backend serving one embedding model is
-    /// never silently reused by a client expecting another.
-    pub fn new(source_dir: impl Into<PathBuf>, profile: McpProfile, config_fp: u64) -> Self {
+    /// never silently reused by a client expecting another; `topology_fp` from
+    /// [`workspace_topology_fingerprint`] so a dependency-graph change forks a fresh
+    /// backend (the old one drains by idle).
+    pub fn new(
+        source_dir: impl Into<PathBuf>,
+        profile: McpProfile,
+        config_fp: u64,
+        topology_fp: u64,
+    ) -> Self {
         let source_dir = source_dir.into();
         let source_dir = std::fs::canonicalize(&source_dir).unwrap_or(source_dir);
-        Self { source_dir, profile, version: env!("CARGO_PKG_VERSION"), config_fp }
+        Self { source_dir, profile, version: env!("CARGO_PKG_VERSION"), config_fp, topology_fp }
     }
 
     /// Stable 128-bit identity digest as 32 lowercase hex chars. Short enough to fit
@@ -48,6 +60,8 @@ impl BackendKey {
         hasher.update(self.version.as_bytes());
         hasher.update(b"\0");
         hasher.update(&self.config_fp.to_le_bytes());
+        hasher.update(b"\0");
+        hasher.update(&self.topology_fp.to_le_bytes());
         let hex = hasher.finalize().to_hex();
         hex[..32].to_owned()
     }
@@ -258,6 +272,24 @@ pub fn embedding_config_fingerprint() -> u64 {
     u64::from_le_bytes(bytes.as_bytes()[..8].try_into().expect("blake3 yields >= 8 bytes"))
 }
 
+/// Stable 64-bit identity of the project's extension topology at `source_dir`, for
+/// backend keying: a daemon whose graph/search/diagnostics caches were built for
+/// one dependency graph must not be reused by a client whose config now declares
+/// another. Proxy and daemon both derive it through this one function (from the
+/// same `--source-dir`), so they agree by construction. An invalid or unloadable
+/// project folds as `0` on both sides — still one rendezvous, just untagged.
+pub fn workspace_topology_fingerprint(source_dir: &Path) -> u64 {
+    match project_model::Project::new(source_dir) {
+        Ok(project) => crate::graph::scan::topology_hex_u64(
+            &project.extension_topology().fingerprint().to_hex(),
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, "broker key: project topology unavailable, folding as 0");
+            0
+        }
+    }
+}
+
 /// Cross-platform rendezvous name for a backend.
 ///
 /// Unix uses the filesystem socket path ([`BackendKey::socket_path`]) so we own
@@ -283,7 +315,13 @@ mod tests {
 
     fn key(dir: &str, profile: McpProfile, fp: u64) -> BackendKey {
         // Bypass `new`'s canonicalize (the path need not exist in unit tests).
-        BackendKey { source_dir: PathBuf::from(dir), profile, version: "test", config_fp: fp }
+        BackendKey {
+            source_dir: PathBuf::from(dir),
+            profile,
+            version: "test",
+            config_fp: fp,
+            topology_fp: 0,
+        }
     }
 
     #[test]
@@ -305,6 +343,14 @@ mod tests {
         let mut bumped = key("/srv/erp", McpProfile::Workspace, 7);
         bumped.version = "test-next";
         assert_ne!(base, bumped.digest(), "version");
+
+        let mut retopologized = key("/srv/erp", McpProfile::Workspace, 7);
+        retopologized.topology_fp = 1;
+        assert_ne!(
+            base,
+            retopologized.digest(),
+            "same dir with a different dependency graph must land on a different socket"
+        );
     }
 
     #[test]

@@ -298,6 +298,7 @@ fn run_mcp_broker(
         &source_dir,
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
+        mcp_server::broker::workspace_topology_fingerprint(&source_dir),
     );
 
     let mut cmd = std::process::Command::new(env::current_exe()?);
@@ -362,6 +363,7 @@ fn run_mcp_daemon(
         &source_dir,
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
+        mcp_server::broker::workspace_topology_fingerprint(&source_dir),
     );
 
     // Build only after the daemon wins the bind, so a race loser never starts a

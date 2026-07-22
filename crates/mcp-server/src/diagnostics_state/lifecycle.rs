@@ -11,10 +11,11 @@ use crate::change_hub::{Health, SinkCursor, WorkspaceChangeHub};
 use crate::graph::input::{
     build_source_root, db_for_files_lazy, enumerate_bsl_files, ProjectSnapshot,
 };
-use crate::graph::scan::scan_file_stats;
+use crate::graph::scan::scan_stats_over_roots;
 
 use super::drift::{
-    compute_freshness, config_fingerprint, reconcile_interval, ScanCache, DRIFT_CHECK_INTERVAL,
+    compute_freshness, config_identity, config_identity_now, reconcile_interval, ScanCache,
+    DRIFT_CHECK_INTERVAL,
 };
 use super::resident::{canonical_key, DiagnosticsResident, ResidentVfs};
 use super::types::{DiagnosticsStatus, ReloadState, ResidentOutcome, StatusReport, WatchReport};
@@ -25,6 +26,16 @@ const IDLE_EVICTION: Duration = Duration::from_secs(600);
 
 /// How often the idle sweeper wakes to check the last-access time.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// One resident build's output: the resident itself, the drift baseline and the
+/// config identity (all derived from the SAME project snapshot), plus that
+/// snapshot's scan roots for the post-publish hub re-arm.
+struct ResidentBuild {
+    resident: DiagnosticsResident,
+    stats: HashMap<String, u64>,
+    config_fp: u64,
+    scan_roots: Vec<PathBuf>,
+}
 
 /// Everything mutable about the resident db, guarded by one `Mutex`. The lock is held
 /// for the duration of a per-file query or an incremental/full reload, so the two are
@@ -359,13 +370,13 @@ impl DiagnosticsState {
         self.resubscribe_cursor();
         tracing::info!(?root, "diagnostics resident db build started");
         match Self::catch_build(|| Self::build_resident(&root)) {
-            Ok((resident, stats, config_fp)) => {
-                let files = resident.file_count();
+            Ok(built) => {
+                let files = built.resident.file_count();
                 {
                     let mut inner = lock_recover(&self.inner);
-                    inner.resident = Some(resident);
-                    inner.stats = stats;
-                    inner.config_fp = config_fp;
+                    inner.resident = Some(built.resident);
+                    inner.stats = built.stats;
+                    inner.config_fp = built.config_fp;
                     inner.generation += 1;
                     inner.reload = ReloadState::Idle;
                     inner.loading_since = None;
@@ -373,6 +384,8 @@ impl DiagnosticsState {
                 }
                 *lock_recover(&self.scan) = None;
                 tracing::info!(files, "diagnostics resident db ready");
+                self.ensure_hub_roots(&built.scan_roots);
+                self.recheck_config_identity_after_publish();
             }
             Err(msg) => {
                 tracing::warn!("diagnostics resident db build failed: {msg}");
@@ -380,6 +393,22 @@ impl DiagnosticsState {
                 inner.loading_since = None;
                 inner.status = DiagnosticsStatus::Failed(msg);
             }
+        }
+    }
+
+    /// A config/topology edit landing while a resident build ran is invisible to the
+    /// published baseline — baseline and resident deliberately derive from the build's
+    /// own project snapshot. One cheap re-derivation (config-file stats plus a fresh
+    /// project load; no tree walk) right after publication closes that window by
+    /// kicking the reload again when the identity moved mid-build.
+    fn recheck_config_identity_after_publish(&self) {
+        let Some(root) = self.workspace_root.as_deref() else {
+            return;
+        };
+        let current = config_identity_now(root);
+        if current != lock_recover(&self.inner).config_fp {
+            tracing::info!("project config/topology changed during the resident build; reloading");
+            self.kick_full_reload();
         }
     }
 
@@ -394,18 +423,20 @@ impl DiagnosticsState {
         // the new resident, events before it are covered by the rebuild's baseline scan.
         self.resubscribe_cursor();
         match Self::catch_build(|| Self::build_resident(&root)) {
-            Ok((resident, stats, config_fp)) => {
-                let files = resident.file_count();
+            Ok(built) => {
+                let files = built.resident.file_count();
                 let mut inner = lock_recover(&self.inner);
-                inner.resident = Some(resident);
-                inner.stats = stats;
-                inner.config_fp = config_fp;
+                inner.resident = Some(built.resident);
+                inner.stats = built.stats;
+                inner.config_fp = built.config_fp;
                 inner.generation += 1;
                 inner.reload = ReloadState::Idle;
                 inner.status = DiagnosticsStatus::Ready { files };
                 drop(inner);
                 *lock_recover(&self.scan) = None;
                 tracing::info!(files, "diagnostics resident db reloaded");
+                self.ensure_hub_roots(&built.scan_roots);
+                self.recheck_config_identity_after_publish();
             }
             Err(msg) => {
                 tracing::warn!("diagnostics resident db reload failed: {msg}");
@@ -438,9 +469,7 @@ impl DiagnosticsState {
     /// Build a resident db over every workspace `.bsl`, with the same Salsa inputs the
     /// LSP server registers (source root, per-file source root + text, all config
     /// paths). Returns the resident, the per-file drift baseline, and the config fp.
-    fn build_resident(
-        root: &Path,
-    ) -> anyhow::Result<(DiagnosticsResident, HashMap<String, u64>, u64)> {
+    fn build_resident(root: &Path) -> anyhow::Result<ResidentBuild> {
         // Load the project ONCE: the scan universe, the config roots (with their
         // dependency closures) and the `[diagnostics]` settings all derive from
         // this single snapshot, so a reload can never mix two project states.
@@ -487,20 +516,44 @@ impl DiagnosticsState {
         for (file_id, path) in &files {
             by_path.insert(canonical_key(path), *file_id);
         }
-        let stats: HashMap<String, u64> = scan_file_stats(root)
+        // The drift baseline and the config identity derive from the SAME snapshot
+        // that built the resident — a re-derived project here could reflect a
+        // topology edit that landed mid-build, and comparing later scans against
+        // that newer baseline would report the stale resident as fresh forever.
+        let stats: HashMap<String, u64> = scan_stats_over_roots(&snapshot.scan_roots)
             .into_iter()
             .map(|s| {
                 let fp = s.fingerprint();
                 (s.path, fp)
             })
             .collect();
-        let config_fp = config_fingerprint(root);
+        let config_fp = config_identity(root, &snapshot.configs);
 
-        Ok((
-            DiagnosticsResident { db, vfs, by_path, config, workspace_root: root.to_path_buf() },
+        Ok(ResidentBuild {
+            resident: DiagnosticsResident {
+                db,
+                vfs,
+                by_path,
+                config,
+                workspace_root: root.to_path_buf(),
+            },
             stats,
             config_fp,
-        ))
+            scan_roots: snapshot.scan_roots,
+        })
+    }
+
+    /// After a successful (re)build, re-point the daemon's change hub at the build
+    /// snapshot's scan roots (no-op when unchanged): a topology reload that added
+    /// an extension root must start receiving its events instead of leaving that
+    /// subtree to the periodic reconciler.
+    fn ensure_hub_roots(&self, scan_roots: &[PathBuf]) {
+        let (Some(hub), Some(root)) = (&self.change_hub, self.workspace_root.as_deref()) else {
+            return;
+        };
+        if !hub.ensure_roots(&crate::change_hub::watch_targets_for(root, scan_roots)) {
+            tracing::warn!("resident rebuild could not re-arm the change hub onto new roots");
+        }
     }
 
     /// Drop the throttled scan cache so the next [`Self::read`] re-scans immediately, even

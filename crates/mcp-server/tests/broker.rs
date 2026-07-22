@@ -26,7 +26,7 @@ fn reference_server() -> McpServer {
 #[cfg(any(unix, windows))]
 fn key_for(src: &TempDir) -> BackendKey {
     // Profile here only names the socket; the served profile is the passed server.
-    BackendKey::new(src.path(), McpProfile::Workspace, 0)
+    BackendKey::new(src.path(), McpProfile::Workspace, 0, 0)
 }
 
 #[cfg(any(unix, windows))]

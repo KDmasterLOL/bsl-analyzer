@@ -37,9 +37,7 @@ pub(crate) use input::{
     unused_imports,
     reason = "the stable graph facade preserves crate::graph scan paths while leaf consumers import directly"
 )]
-pub(crate) use scan::{
-    classify_changes, file_fingerprint, scan_file_stats, FileStat, WorkspaceDiff,
-};
+pub(crate) use scan::{classify_changes, file_fingerprint, FileStat, WorkspaceDiff};
 #[allow(
     unused_imports,
     reason = "the stable graph facade preserves crate::graph snapshot paths while implementation stays private"

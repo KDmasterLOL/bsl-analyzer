@@ -59,6 +59,7 @@ impl ProjectSnapshot {
 
 /// The configuration source directory plus every extension directory — the file
 /// universe both the loader and the drift scan must agree on.
+#[cfg(test)]
 pub(super) fn scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
     ProjectSnapshot::load(workspace_root).scan_roots
 }

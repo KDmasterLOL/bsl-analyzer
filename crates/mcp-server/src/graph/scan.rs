@@ -6,8 +6,6 @@ use std::time::UNIX_EPOCH;
 
 use walkdir::WalkDir;
 
-use super::input::scan_roots;
-
 /// One graph-relevant file's stat-only identity: canonical `/`-normalised path,
 /// mtime in nanos, and length. Produced once per scan and shared by the
 /// whole-workspace fingerprint (which folds them) and the per-file `files` table
@@ -31,7 +29,7 @@ impl FileStat {
 }
 
 /// The drift fingerprint of a single file on disk, matching the per-file value
-/// [`scan_file_stats`] produces, or `None` if it is absent or not a regular file.
+/// the stats scan produces, or `None` if it is absent or not a regular file.
 /// Lets the event-driven drift path re-stat only the changed paths instead of
 /// walking the whole workspace — events are hints, this stat is the truth.
 pub(crate) fn file_fingerprint(path: &Path) -> Option<u64> {
@@ -54,8 +52,11 @@ pub(crate) fn file_fingerprint(path: &Path) -> Option<u64> {
 /// module text. Uses `(canonical path, mtime, len)` — stat only, no file reads —
 /// and mirrors the loader's scan roots and symlink/canonicalization policy so it
 /// compares the same file universe (otherwise it would report phantom drift).
+/// Retained as the test-side wrapper (production callers derive the roots from an
+/// explicit `ProjectSnapshot` so stats and topology come from one project state).
+#[cfg(test)]
 pub(crate) fn scan_file_stats(workspace_root: &Path) -> Vec<FileStat> {
-    scan_stats_over_roots(&scan_roots(workspace_root))
+    scan_stats_over_roots(&super::input::scan_roots(workspace_root))
 }
 
 /// The parallel scan over an explicit set of roots (each a directory, or occasionally a
@@ -159,23 +160,51 @@ fn canonical_file_path(
     }
 }
 
-/// A cheap, order-independent fingerprint of the graph-relevant files on disk.
-/// Folds every file's `(path, mtime, len)` into one `u64`; B4 cache reuse compares
-/// it for an exact whole-workspace match.
-pub(super) fn workspace_fingerprint(workspace_root: &Path) -> u64 {
+/// A cheap fingerprint of the workspace identity: the order-independent fold of
+/// every graph-relevant file's `(path, mtime, len)` plus the extension-topology
+/// hash. Cache reuse compares it for an exact whole-workspace match.
+pub(super) fn workspace_fingerprint(workspace_root: &Path) -> crate::graph_db::GraphFp {
     workspace_fingerprint_over(&super::input::ProjectSnapshot::load(workspace_root))
 }
 
 /// The fingerprint over an already-loaded project snapshot, so an operation
 /// that brackets a build with pre/post scans stats the SAME root universe both
-/// times instead of re-deriving the project mid-operation.
-pub(crate) fn workspace_fingerprint_over(project: &super::input::ProjectSnapshot) -> u64 {
+/// times instead of re-deriving the project mid-operation. This is the ONE fold
+/// point for graph identity — the build/adoption bracket and the live query-path
+/// freshness check both go through it, so a topology-only change (a `dependsOn`
+/// edit, an auto-discovered extension) can never be fresh on one path and stale
+/// on the other.
+pub(crate) fn workspace_fingerprint_over(
+    project: &super::input::ProjectSnapshot,
+) -> crate::graph_db::GraphFp {
     let mut entries: Vec<(String, u128, u64)> = scan_stats_over_roots(&project.scan_roots)
         .into_iter()
         .map(|s| (s.path, s.mtime, s.len))
         .collect();
     entries.sort();
-    super::snapshot::fold_fingerprint_entries(&entries)
+    crate::graph_db::GraphFp {
+        files: super::snapshot::fold_fingerprint_entries(&entries),
+        topology: topology_u64(&project.configs),
+    }
+}
+
+/// Stable 64-bit hash of a snapshot's extension-topology fingerprint. BLAKE3 of
+/// the full hex digest (not `DefaultHasher`), so the value persisted in a graph's
+/// meta survives a toolchain upgrade. `None` — legacy path-only registration or
+/// the invalid-project fallback — hashes as the empty input, distinct from every
+/// real digest.
+pub(crate) fn topology_u64(configs: &ide::WorkspaceConfigsSnapshot) -> u64 {
+    topology_hex_u64(configs.fingerprint.as_deref().unwrap_or(""))
+}
+
+/// The BLAKE3-based 64-bit fold shared by every consumer that reduces the
+/// topology hex digest to one word (graph freshness, broker identity), so the
+/// same topology always reduces to the same value everywhere.
+pub(crate) fn topology_hex_u64(hex: &str) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(hex.as_bytes());
+    let bytes = hasher.finalize();
+    u64::from_le_bytes(bytes.as_bytes()[..8].try_into().expect("blake3 yields >= 8 bytes"))
 }
 
 /// Granular drift between a built graph's stored per-file fingerprints and the

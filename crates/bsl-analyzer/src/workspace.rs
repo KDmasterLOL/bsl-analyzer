@@ -102,13 +102,12 @@ impl GlobalState {
 
         self.vfs_progress_config_version += 1;
 
-        let config_files: Vec<paths::AbsPathBuf> =
-            ["bsl-analyzer.toml", ".bsl-analyzer.json", ".bsl-language-server.json"]
-                .iter()
-                .map(|name| root.join(name))
-                .filter(|p| p.exists())
-                .map(paths::AbsPathBuf::assert_utf8)
-                .collect();
+        let config_files: Vec<paths::AbsPathBuf> = project_model::CONFIG_FILE_NAMES
+            .iter()
+            .map(|name| root.join(name))
+            .filter(|p| p.exists())
+            .map(paths::AbsPathBuf::assert_utf8)
+            .collect();
 
         let mut include = vec![paths::AbsPathBuf::assert_utf8(source_path)];
 
