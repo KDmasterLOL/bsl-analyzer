@@ -324,6 +324,10 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
         DiagnosticCode::UnknownFieldInQuery,
         "SDBL field resolution diagnostic; requires configuration metadata fixture",
     ),
+    (
+        DiagnosticCode::UnlimitedLengthStringUsageInQuery,
+        "SDBL field-type diagnostic; requires configuration metadata fixture",
+    ),
     (DiagnosticCode::RefOveruse, "SDBL reference-overuse policy; not BSL identifier parity"),
     (DiagnosticCode::SelectTopWithoutOrderBy, "SDBL ordering policy; not BSL identifier parity"),
     (DiagnosticCode::UnionAll, "SDBL union policy; not BSL identifier parity"),
@@ -593,7 +597,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 188, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 189, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]

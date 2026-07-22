@@ -100,6 +100,7 @@ const SDBL_HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::QueryNestedFieldsByDot,
     DiagnosticCode::QueryToMissingMetadata,
     DiagnosticCode::UnknownFieldInQuery,
+    DiagnosticCode::UnlimitedLengthStringUsageInQuery,
     DiagnosticCode::RefOveruse,
     DiagnosticCode::SelectTopWithoutOrderBy,
     DiagnosticCode::UnionAll,
@@ -490,6 +491,10 @@ const SDBL_DISPATCH: &[(DiagnosticCode, crate::sdbl_utils::SdblDispatchFn)] = &[
     (DiagnosticCode::QueryNestedFieldsByDot, handlers::query_nested_fields_by_dot::dispatch),
     (DiagnosticCode::QueryToMissingMetadata, handlers::query_to_missing_metadata::dispatch),
     (DiagnosticCode::UnknownFieldInQuery, handlers::unknown_field_in_query::dispatch),
+    (
+        DiagnosticCode::UnlimitedLengthStringUsageInQuery,
+        handlers::unlimited_length_string_usage_in_query::dispatch,
+    ),
     (DiagnosticCode::RefOveruse, handlers::ref_overuse::dispatch),
     (DiagnosticCode::SelectTopWithoutOrderBy, handlers::select_top_without_order_by::dispatch),
     (DiagnosticCode::UnionAll, handlers::union_all::dispatch),

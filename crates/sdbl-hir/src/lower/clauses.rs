@@ -1,5 +1,5 @@
 use crate::diagnostics::SdblDiagnostic;
-use crate::hir::{ExprHir, SelectHir};
+use crate::hir::{ExprHir, FieldHir, SelectHir};
 use stdx::case::CaseExt;
 use syntax::ast::AstNode;
 
@@ -38,6 +38,39 @@ impl LoweringContext<'_> {
             self.lower_expr(&expr)
         } else {
             ExprHir::Missing { range: where_clause.syntax().text_range() }
+        }
+    }
+
+    pub(super) fn lower_having_clause(
+        &mut self,
+        having_clause: &syntax::ast::SdblHavingClause,
+    ) -> ExprHir {
+        self.record_keyword_by_text(
+            having_clause.syntax(),
+            "HAVING",
+            "ИМЕЮЩИЕ",
+            crate::source_map::TokenCategory::ClauseKeyword,
+        );
+
+        let expr_node = having_clause.syntax().children().find(|n| {
+            matches!(
+                n.kind(),
+                syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                    | syntax::SyntaxKind::SDBL_LOGICAL_AND_EXPR
+                    | syntax::SyntaxKind::SDBL_NOT_EXPR
+                    | syntax::SyntaxKind::SDBL_COMPARISON_EXPR
+                    | syntax::SyntaxKind::SDBL_COLUMN_REF
+                    | syntax::SyntaxKind::SDBL_LITERAL
+                    | syntax::SyntaxKind::SDBL_MULTI_STRING
+                    | syntax::SyntaxKind::SDBL_FUNCTION_CALL
+                    | syntax::SyntaxKind::SDBL_PAREN_EXPR
+            )
+        });
+
+        if let Some(expr) = expr_node {
+            self.lower_expr(&expr)
+        } else {
+            ExprHir::Missing { range: having_clause.syntax().text_range() }
         }
     }
 
@@ -170,7 +203,7 @@ impl LoweringContext<'_> {
         );
 
         for child in index_clause.children() {
-            if let Some(column_ref) = simple_selected_output_ref(&child, select) {
+            if let Some((column_ref, _)) = simple_selected_output_ref(&child, select) {
                 if let Some(token) =
                     column_ref.children_with_tokens().find_map(|it| it.into_token())
                 {
@@ -219,7 +252,8 @@ impl LoweringContext<'_> {
                 }
                 syntax::NodeOrToken::Node(node) if is_sdbl_clause_expr(&node) => {
                     if after_by {
-                        if let Some(column_ref) = simple_selected_output_ref(&node, select) {
+                        if let Some((column_ref, field)) = simple_selected_output_ref(&node, select)
+                        {
                             if let Some(token) =
                                 column_ref.children_with_tokens().find_map(|it| it.into_token())
                             {
@@ -228,11 +262,25 @@ impl LoweringContext<'_> {
                                     crate::source_map::TokenCategory::FieldAlias,
                                 );
                             }
+                            if field.ty.is_unlimited_string() {
+                                self.diagnostics.push(SdblDiagnostic::UnlimitedStringUsage {
+                                    field_name: field.alias_or_name().map(|name| name.to_string()),
+                                    context:
+                                        crate::diagnostics::UnlimitedStringUsageContext::TotalsBy,
+                                    range: column_ref.text_range(),
+                                });
+                            }
                             continue;
                         }
                     }
 
-                    self.lower_expr(&node);
+                    let expr = self.lower_expr(&node);
+                    if after_by {
+                        self.flag_unlimited_string(
+                            &expr,
+                            crate::diagnostics::UnlimitedStringUsageContext::TotalsBy,
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -301,10 +349,10 @@ fn is_sdbl_clause_expr(node: &syntax::SyntaxNode) -> bool {
     )
 }
 
-fn simple_selected_output_ref(
+fn simple_selected_output_ref<'a>(
     node: &syntax::SyntaxNode,
-    select: &SelectHir,
-) -> Option<syntax::SyntaxNode> {
+    select: &'a SelectHir,
+) -> Option<(syntax::SyntaxNode, &'a FieldHir)> {
     let mut column_refs =
         node.descendants().filter(|child| child.kind() == syntax::SyntaxKind::SDBL_COLUMN_REF);
     let column_ref = column_refs.next()?;
@@ -327,11 +375,11 @@ fn simple_selected_output_ref(
         return None;
     }
 
-    let matches_output = select
-        .fields
-        .iter()
-        .filter_map(|field| field.alias_or_name())
-        .any(|output_name| output_name.fold_lower() == name.fold_lower());
+    let matched_field = select.fields.iter().find(|field| {
+        field
+            .alias_or_name()
+            .is_some_and(|output_name| output_name.fold_lower() == name.fold_lower())
+    })?;
 
-    matches_output.then_some(column_ref)
+    Some((column_ref, matched_field))
 }

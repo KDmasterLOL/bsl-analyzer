@@ -87,8 +87,11 @@ pub fn lower_sdbl_to_hir_with_resolver(
         if let Some(main_query) = subquery.main_query() {
             ctx.scope.push_frame();
 
-            let query_hir = ctx.lower_query(&main_query, has_union_siblings, true);
+            let mut query_hir = ctx.lower_query(&main_query, has_union_siblings, true);
             ctx.lower_totals_by_clause(select_query.syntax(), &query_hir.select);
+            // Диагностики, возникшие при лоуверинге ИТОГИ, иначе достанутся
+            // следующему запросу пакета или потеряются на последнем.
+            query_hir.diagnostics.extend(std::mem::take(&mut ctx.diagnostics));
             let range = select_query.syntax().text_range();
 
             tracing::debug!(
@@ -243,6 +246,7 @@ impl LoweringContext<'_> {
         let select = self.lower_field_list(query.field_list(), distinct, top);
 
         let where_clause = query.where_clause().map(|w| self.lower_where_clause(&w));
+        let having = query.having_clause().map(|h| self.lower_having_clause(&h));
 
         let group_by = query.group_by_clause().map(|g| self.lower_group_by(&g));
 
@@ -277,7 +281,7 @@ impl LoweringContext<'_> {
             joins,
             where_clause,
             group_by,
-            having: None,
+            having,
             order_by,
             unions: vec![],
             diagnostics: std::mem::take(&mut self.diagnostics),
@@ -293,6 +297,8 @@ impl LoweringContext<'_> {
         self.check_nested_fields_by_dot(&hir);
 
         self.check_ref_overuse(&hir);
+
+        self.check_unlimited_string_usage(&hir);
 
         hir.diagnostics.extend(std::mem::take(&mut self.diagnostics));
 

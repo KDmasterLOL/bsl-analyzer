@@ -808,4 +808,163 @@ impl LoweringContext<'_> {
             }
         }
     }
+
+    pub(super) fn check_unlimited_string_usage(&mut self, hir: &SdblHir) {
+        use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+        for field in &hir.select.fields {
+            if hir.select.distinct {
+                self.flag_unlimited_string(&field.expr, Ctx::Distinct);
+            }
+            self.check_expr_for_unlimited_string(&field.expr);
+        }
+
+        if let Some(ref where_expr) = hir.where_clause {
+            self.check_expr_for_unlimited_string(where_expr);
+        }
+
+        if let Some(ref group_by) = hir.group_by {
+            for expr in &group_by.exprs {
+                self.flag_unlimited_string(expr, Ctx::GroupBy);
+                self.check_expr_for_unlimited_string(expr);
+            }
+        }
+
+        if let Some(ref having) = hir.having {
+            self.check_expr_for_unlimited_string(having);
+        }
+
+        if let Some(ref order_by) = hir.order_by {
+            for item in &order_by.items {
+                self.flag_unlimited_string(&item.expr, Ctx::OrderBy);
+                self.check_expr_for_unlimited_string(&item.expr);
+            }
+        }
+
+        for join in &hir.joins {
+            if let Some(ref cond) = join.condition {
+                self.check_expr_for_unlimited_string(cond);
+            }
+        }
+
+        for union in &hir.unions {
+            self.check_unlimited_string_usage(&union.query);
+        }
+    }
+
+    fn check_expr_for_unlimited_string(&mut self, expr: &ExprHir) {
+        use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+        match expr {
+            ExprHir::BinaryOp { lhs, op, rhs, .. } => {
+                if op.is_comparison() {
+                    self.flag_unlimited_string(lhs, Ctx::Comparison);
+                    self.flag_unlimited_string(rhs, Ctx::Comparison);
+                }
+                self.check_expr_for_unlimited_string(lhs);
+                self.check_expr_for_unlimited_string(rhs);
+            }
+
+            ExprHir::UnaryOp { expr: inner, .. } => {
+                self.check_expr_for_unlimited_string(inner);
+            }
+
+            ExprHir::FunctionCall { args, .. } => {
+                for arg in args {
+                    self.check_expr_for_unlimited_string(arg);
+                }
+            }
+
+            ExprHir::Case { operand, when_clauses, else_expr, .. } => {
+                if let Some(op) = operand {
+                    self.check_expr_for_unlimited_string(op);
+                }
+                for clause in when_clauses {
+                    self.check_expr_for_unlimited_string(&clause.condition);
+                    self.check_expr_for_unlimited_string(&clause.result);
+                }
+                if let Some(else_e) = else_expr {
+                    self.check_expr_for_unlimited_string(else_e);
+                }
+            }
+
+            // Вложенные запросы проходят через lower_query и проверяются при
+            // построении собственного SdblHir — повторный обход даёт дубликаты.
+            ExprHir::Subquery { .. } => {}
+
+            ExprHir::In { expr: inner, values, .. } => {
+                match inner.as_ref() {
+                    ExprHir::Tuple { elements, .. } => {
+                        for elem in elements {
+                            self.flag_unlimited_string(elem, Ctx::In);
+                        }
+                    }
+                    _ => self.flag_unlimited_string(inner, Ctx::In),
+                }
+                self.check_expr_for_unlimited_string(inner);
+                if let crate::hir::InValues::List(items) = values {
+                    for item in items {
+                        self.flag_unlimited_string(item, Ctx::In);
+                        self.check_expr_for_unlimited_string(item);
+                    }
+                }
+            }
+
+            ExprHir::Between { expr: inner, low, high, .. } => {
+                self.flag_unlimited_string(inner, Ctx::Between);
+                self.flag_unlimited_string(low, Ctx::Between);
+                self.flag_unlimited_string(high, Ctx::Between);
+                self.check_expr_for_unlimited_string(inner);
+                self.check_expr_for_unlimited_string(low);
+                self.check_expr_for_unlimited_string(high);
+            }
+
+            // ПОДОБНО платформа разрешает для полей неограниченной длины.
+            ExprHir::Like { expr: inner, pattern, escape, .. } => {
+                self.check_expr_for_unlimited_string(inner);
+                self.check_expr_for_unlimited_string(pattern);
+                if let Some(esc) = escape {
+                    self.check_expr_for_unlimited_string(esc);
+                }
+            }
+
+            ExprHir::IsNull { expr: inner, .. } => {
+                self.check_expr_for_unlimited_string(inner);
+            }
+
+            ExprHir::Tuple { elements, .. } => {
+                for elem in elements {
+                    self.check_expr_for_unlimited_string(elem);
+                }
+            }
+
+            ExprHir::ColumnRef { .. }
+            | ExprHir::Literal { .. }
+            | ExprHir::Parameter { .. }
+            | ExprHir::Missing { .. } => {}
+        }
+    }
+
+    pub(super) fn flag_unlimited_string(
+        &mut self,
+        expr: &ExprHir,
+        context: crate::diagnostics::UnlimitedStringUsageContext,
+    ) {
+        if !expr.ty().is_unlimited_string() {
+            return;
+        }
+
+        let field_name = match expr {
+            ExprHir::ColumnRef { parts, .. } => {
+                Some(parts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("."))
+            }
+            _ => None,
+        };
+
+        self.diagnostics.push(SdblDiagnostic::UnlimitedStringUsage {
+            field_name,
+            context,
+            range: expr.range(),
+        });
+    }
 }

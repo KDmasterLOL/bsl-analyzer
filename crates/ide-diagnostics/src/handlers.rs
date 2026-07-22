@@ -157,6 +157,7 @@ pub mod unavailable_in_environment;
 pub mod union_all;
 pub mod unknown_field_in_query;
 pub mod unknown_preprocessor_symbol;
+pub mod unlimited_length_string_usage_in_query;
 pub mod unreachable_code;
 pub mod unresolved_field;
 pub mod unresolved_method_call;
@@ -396,6 +397,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::QueryParseError => Some(&query_parse_error::METADATA),
         DiagnosticCode::QueryToMissingMetadata => Some(&query_to_missing_metadata::METADATA),
         DiagnosticCode::UnknownFieldInQuery => Some(&unknown_field_in_query::METADATA),
+        DiagnosticCode::UnlimitedLengthStringUsageInQuery => {
+            Some(&unlimited_length_string_usage_in_query::METADATA)
+        }
         DiagnosticCode::RefOveruse => Some(&ref_overuse::METADATA),
         DiagnosticCode::SelectTopWithoutOrderBy => Some(&select_top_without_order_by::METADATA),
         DiagnosticCode::UnionAll => Some(&union_all::METADATA),

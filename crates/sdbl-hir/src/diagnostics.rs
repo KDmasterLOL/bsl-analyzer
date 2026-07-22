@@ -118,6 +118,39 @@ pub enum SdblDiagnostic {
         has_where: bool,
         range: TextRange,
     },
+
+    UnlimitedStringUsage {
+        field_name: Option<String>,
+        context: UnlimitedStringUsageContext,
+        range: TextRange,
+    },
+}
+
+/// Позиция запроса, в которой платформа запрещает поля неограниченной длины
+/// (ошибка исполнения «Нельзя сравнивать поля неограниченной длины…»).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnlimitedStringUsageContext {
+    Comparison,
+    In,
+    Between,
+    GroupBy,
+    OrderBy,
+    Distinct,
+    TotalsBy,
+}
+
+impl UnlimitedStringUsageContext {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Comparison => "в операции сравнения",
+            Self::In => "в операторе В",
+            Self::Between => "в операторе МЕЖДУ",
+            Self::GroupBy => "в предложении СГРУППИРОВАТЬ ПО",
+            Self::OrderBy => "в предложении УПОРЯДОЧИТЬ ПО",
+            Self::Distinct => "в выборке с ключевым словом РАЗЛИЧНЫЕ",
+            Self::TotalsBy => "в предложении ИТОГИ ПО",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +290,17 @@ impl SdblDiagnostic {
             Self::SelectTopWithoutOrderBy { .. } => {
                 "Измените запрос, добавив сортировку".to_string()
             }
+            Self::UnlimitedStringUsage { field_name, context, .. } => {
+                let subject = match field_name {
+                    Some(name) => format!("Поле неограниченной длины \"{}\"", name),
+                    None => "Значение типа \"строка неограниченной длины\"".to_string(),
+                };
+                format!(
+                    "{} нельзя использовать {}. Приведите значение к ограниченной длине: ВЫРАЗИТЬ(... КАК СТРОКА(N))",
+                    subject,
+                    context.describe()
+                )
+            }
         }
     }
 
@@ -284,6 +328,7 @@ impl SdblDiagnostic {
             Self::UnionWithoutAll { range } => *range,
             Self::LikeUsage { range, .. } => *range,
             Self::SelectTopWithoutOrderBy { range, .. } => *range,
+            Self::UnlimitedStringUsage { range, .. } => *range,
         }
     }
 
@@ -313,6 +358,7 @@ impl SdblDiagnostic {
             Self::LikeUsage { kind: LikeUsageKind::Allowed, .. } => false,
             Self::LikeUsage { kind: LikeUsageKind::Incorrect, .. } => true,
             Self::SelectTopWithoutOrderBy { .. } => false,
+            Self::UnlimitedStringUsage { .. } => true,
         }
     }
 }
