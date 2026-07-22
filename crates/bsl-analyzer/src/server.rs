@@ -52,7 +52,15 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     let workspace_root = extract_workspace_root(&initialize_params);
     let workspace_diagnostics_scope = workspace_root
         .as_ref()
-        .and_then(|root| project_model::ProjectConfig::load(root))
+        .and_then(|root| match project_model::ProjectConfig::load(root) {
+            Ok(config) => config,
+            Err(e) => {
+                // Capability advertisement only; the workspace load below
+                // rejects the broken config loudly.
+                tracing::warn!(error = %e, "project config unreadable; capabilities use defaults");
+                None
+            }
+        })
         .map(|config| config.features.workspace_diagnostics)
         .unwrap_or_default();
 
@@ -101,7 +109,15 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     }
 
     if let Some(ref root) = workspace_root {
-        state.set_workspace_root(root.clone());
+        if let Err(e) = state.set_workspace_root(root.clone()) {
+            state.show_error_message(format!(
+                "bsl-analyzer: invalid project, analysis unavailable: {e}"
+            ));
+            // Mirror the no-workspace path: nothing will load, so diagnostics
+            // must not stay deferred behind a boot window that never closes.
+            state.update_diagnostics_config();
+            state.vfs_done = true;
+        }
     } else {
         tracing::warn!("No workspace root provided by client");
         state.update_diagnostics_config();

@@ -48,7 +48,10 @@ fn stage_workspace() -> TempDir {
 /// A workspace-profile server reachable over an in-memory duplex, exactly how the daemon
 /// serves a proxy from one `SharedState` (mirrors the broker concurrency test).
 async fn workspace_client(root: &Path) -> Client {
-    let server = McpServer::new(McpProfile::Workspace, SharedState::workspace(root.to_path_buf()));
+    let server = McpServer::new(
+        McpProfile::Workspace,
+        SharedState::workspace(root.to_path_buf()).expect("valid workspace project"),
+    );
     // The buffer must exceed the largest single response: an in-process duplex has no kernel
     // backpressure, so an oversized frame would wedge the pipe (a harness artifact, not the
     // socket transport the daemon uses).

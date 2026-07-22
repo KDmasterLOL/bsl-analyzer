@@ -332,8 +332,10 @@ async fn workspace_backend_serves_concurrent_sessions_without_deadlock() {
     ];
 
     let ws = TempDir::new().unwrap();
-    let server =
-        McpServer::new(McpProfile::Workspace, SharedState::workspace(ws.path().to_path_buf()));
+    let server = McpServer::new(
+        McpProfile::Workspace,
+        SharedState::workspace(ws.path().to_path_buf()).expect("valid workspace project"),
+    );
 
     let mut clients = Vec::new();
     for _ in 0..SESSIONS {

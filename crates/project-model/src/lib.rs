@@ -1,13 +1,85 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod extension_topology;
 pub mod file_role;
+pub use extension_topology::{
+    ExtensionNode, ExtensionNodeSpec, ExtensionTopology, NodeId, TopologyError,
+    TopologyFingerprint, TOPOLOGY_FORMAT_VERSION,
+};
 pub use file_role::{
     file_role, is_bsl_source_path, is_common_module_body_path, is_metadata_path,
     is_substrate_listed_body_path, FileRole, METADATA_WATCHED_EXTENSIONS, SOURCE_EXTENSIONS,
 };
+
+/// A config file exists but cannot be read or parsed. Deliberately not folded
+/// into a default config: a broken file silently reverting to auto-discovery
+/// would analyze a different project than the one configured.
+#[derive(Debug, Clone)]
+pub struct ConfigLoadError {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl fmt::Display for ConfigLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "failed to load config {}: {}", self.path.display(), self.message)
+    }
+}
+
+impl std::error::Error for ConfigLoadError {}
+
+#[derive(Debug, Clone)]
+pub enum ProjectError {
+    ConfigLoad(ConfigLoadError),
+    Topology(TopologyError),
+    /// The extension dependency graph is declared and valid, but this version
+    /// does not yet apply dependency-aware visibility. Accepting the config
+    /// while ignoring the declared edges would analyze with visibility the
+    /// user explicitly asked to change, so it is rejected outright.
+    DependsOnNotSupported {
+        extension: String,
+    },
+}
+
+impl fmt::Display for ProjectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProjectError::ConfigLoad(err) => err.fmt(f),
+            ProjectError::Topology(err) => err.fmt(f),
+            ProjectError::DependsOnNotSupported { extension } => write!(
+                f,
+                "extension '{extension}' declares dependsOn, but dependency-aware extension \
+                 visibility is not supported yet; remove the dependsOn entries for now"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProjectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ProjectError::ConfigLoad(err) => Some(err),
+            ProjectError::Topology(err) => Some(err),
+            ProjectError::DependsOnNotSupported { .. } => None,
+        }
+    }
+}
+
+impl From<ConfigLoadError> for ProjectError {
+    fn from(err: ConfigLoadError) -> Self {
+        ProjectError::ConfigLoad(err)
+    }
+}
+
+impl From<TopologyError> for ProjectError {
+    fn from(err: TopologyError) -> Self {
+        ProjectError::Topology(err)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -15,23 +87,39 @@ pub struct Project {
     pub config: ProjectConfig,
     source_path: Option<PathBuf>,
     extension_paths: Vec<(String, PathBuf)>,
+    topology: ExtensionTopology,
 }
 
 impl Project {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self, ProjectError> {
         let root = root.into();
-        let config = ProjectConfig::load(&root).unwrap_or_default();
+        let config = ProjectConfig::load(&root)?.unwrap_or_default();
         Self::with_config(root, config)
     }
 
     /// Like [`Project::new`] but with an already-resolved config, so a caller that
     /// loaded the config from an explicit path (e.g. the CLI `--config` flag) keeps
     /// it instead of having `bsl-analyzer.toml` re-discovered under `root`.
-    pub fn with_config(root: impl Into<PathBuf>, config: ProjectConfig) -> Self {
+    pub fn with_config(
+        root: impl Into<PathBuf>,
+        config: ProjectConfig,
+    ) -> Result<Self, ProjectError> {
         let root = root.into();
         let source_path = Self::discover_source_path(&root, &config);
-        let extension_paths = Self::resolve_extensions(&root, &config);
-        Self { root, config, source_path, extension_paths }
+        let specs = Self::resolve_extension_specs(&root, &config)?;
+        let base_path = source_path.as_deref().unwrap_or(&root);
+        let canonical_base =
+            std::fs::canonicalize(base_path).unwrap_or_else(|_| base_path.to_path_buf());
+        let topology = ExtensionTopology::build(&canonical_base, specs)?;
+        if let Some(node) = topology.nodes().iter().find(|node| !node.depends_on().is_empty()) {
+            return Err(ProjectError::DependsOnNotSupported { extension: node.name().to_string() });
+        }
+        let extension_paths = topology
+            .nodes()
+            .iter()
+            .map(|node| (node.name().to_string(), node.path().to_path_buf()))
+            .collect();
+        Ok(Self { root, config, source_path, extension_paths, topology })
     }
 
     pub fn source_path(&self) -> &Path {
@@ -88,43 +176,142 @@ impl Project {
         &self.extension_paths
     }
 
+    /// The validated extension dependency topology. Holding a `Project` implies
+    /// the topology is valid — invalid graphs fail construction instead.
+    pub fn extension_topology(&self) -> &ExtensionTopology {
+        &self.topology
+    }
+
+    /// Test-visible projection of [`Self::resolve_extension_specs`] onto the
+    /// legacy `(name, path)` pairs.
+    #[cfg(test)]
+    fn resolve_extensions(
+        root: &Path,
+        config: &ProjectConfig,
+    ) -> Result<Vec<(String, PathBuf)>, TopologyError> {
+        let specs = Self::resolve_extension_specs(root, config)?;
+        Ok(specs.into_iter().map(|spec| (spec.name, spec.path)).collect())
+    }
+
     /// Resolves the extension source roots. With no `extensions` configured this
     /// auto-discovers the conventional `src/cfe/*` layout (mirroring how the main
     /// configuration is found under `src/cf` without any setting); an explicit list
-    /// — entries may use a final-segment `*` glob — takes over and disables discovery.
-    fn resolve_extensions(root: &Path, config: &ProjectConfig) -> Vec<(String, PathBuf)> {
-        let candidates: Vec<PathBuf> = match &config.extensions {
+    /// takes over and disables discovery. Bare string entries (a final-segment `*`
+    /// glob allowed) keep their historical lenient semantics: a missing or
+    /// non-extension path is skipped with a warning and textual path variants
+    /// collapse silently. Structured entries carry a user-declared identity, so
+    /// for them every such degradation is an error instead.
+    fn resolve_extension_specs(
+        root: &Path,
+        config: &ProjectConfig,
+    ) -> Result<Vec<ExtensionNodeSpec>, TopologyError> {
+        enum Candidate {
+            Legacy(PathBuf),
+            Structured(StructuredExtensionDecl, PathBuf),
+        }
+
+        let mut candidates: Vec<Candidate> = Vec::new();
+        match &config.extensions {
             // Unset → mirror main-config zero-config discovery. An explicit list
             // (including an empty one, i.e. opt-out) is taken as authoritative.
-            None => Self::auto_discover_extensions(root),
+            None => {
+                candidates.extend(
+                    Self::auto_discover_extensions(root).into_iter().map(Candidate::Legacy),
+                );
+            }
             Some(list) => {
-                let mut c = Vec::new();
-                for ext_path_str in list {
-                    if ext_path_str.contains('*') {
-                        c.extend(expand_extension_glob(root, ext_path_str));
-                    } else {
-                        c.push(root.join(ext_path_str));
+                for decl in list {
+                    match decl {
+                        ExtensionDecl::Path(ext_path_str) => {
+                            if ext_path_str.contains('*') {
+                                candidates.extend(
+                                    expand_extension_glob(root, ext_path_str)
+                                        .into_iter()
+                                        .map(Candidate::Legacy),
+                                );
+                            } else {
+                                candidates.push(Candidate::Legacy(root.join(ext_path_str)));
+                            }
+                        }
+                        ExtensionDecl::Structured(structured) => {
+                            if structured.path.contains('*') {
+                                return Err(TopologyError::GlobInStructuredEntry {
+                                    name: structured.name.clone(),
+                                    pattern: structured.path.clone(),
+                                });
+                            }
+                            let path = root.join(&structured.path);
+                            candidates.push(Candidate::Structured(structured.clone(), path));
+                        }
                     }
                 }
-                c
-            }
-        };
-
-        let mut resolved: Vec<(String, PathBuf)> = Vec::new();
-        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        for path in candidates {
-            // Dedup on the real path so textual variants (`./src/cfe/Foo` and the
-            // glob-produced `src/cfe/Foo`) collapse to one source root.
-            let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-            if !seen.insert(key) {
-                continue;
-            }
-            let label = path.to_string_lossy().into_owned();
-            if let Some(entry) = Self::validate_extension(&label, path) {
-                resolved.push(entry);
             }
         }
-        resolved
+
+        let mut specs: Vec<ExtensionNodeSpec> = Vec::new();
+        let mut seen: std::collections::HashMap<PathBuf, usize> = std::collections::HashMap::new();
+        // Legacy candidates skipped by validation, so a repeated declaration of
+        // the same broken path stays silent instead of re-warning per variant.
+        let mut skipped: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for candidate in candidates {
+            match candidate {
+                Candidate::Legacy(path) => {
+                    let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                    if seen.contains_key(&canonical) || skipped.contains(&canonical) {
+                        continue;
+                    }
+                    let label = path.to_string_lossy().into_owned();
+                    let Some((name, path)) = Self::validate_extension(&label, path) else {
+                        skipped.insert(canonical);
+                        continue;
+                    };
+                    seen.insert(canonical.clone(), specs.len());
+                    specs.push(ExtensionNodeSpec {
+                        name,
+                        path,
+                        canonical_path: canonical,
+                        depends_on: Vec::new(),
+                        structured: false,
+                    });
+                }
+                Candidate::Structured(structured, path) => {
+                    if !path.exists() {
+                        return Err(TopologyError::StructuredPathMissing {
+                            name: structured.name,
+                            path,
+                        });
+                    }
+                    if !path.join("Configuration.xml").exists() {
+                        return Err(TopologyError::StructuredNotAnExtension {
+                            name: structured.name,
+                            path,
+                        });
+                    }
+                    let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                    if let Some(&first) = seen.get(&canonical) {
+                        return Err(TopologyError::DuplicatePath {
+                            path: canonical,
+                            first: specs[first].name.clone(),
+                            second: structured.name,
+                        });
+                    }
+                    tracing::info!(
+                        name = %structured.name,
+                        path = %path.display(),
+                        "resolved extension"
+                    );
+                    seen.insert(canonical.clone(), specs.len());
+                    specs.push(ExtensionNodeSpec {
+                        name: structured.name,
+                        path,
+                        canonical_path: canonical,
+                        depends_on: structured.depends_on,
+                        structured: true,
+                    });
+                }
+            }
+        }
+        Ok(specs)
     }
 
     /// Zero-config extension discovery: the first conventional extensions directory
@@ -275,6 +462,106 @@ fn search_configuration_xml_recursive(
     None
 }
 
+/// One entry of the `extensions` list: either a bare path string (legacy,
+/// independent extension) or a structured entry with a stable name and
+/// declared dependencies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionDecl {
+    Path(String),
+    Structured(StructuredExtensionDecl),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredExtensionDecl {
+    pub name: String,
+    pub path: String,
+    pub depends_on: Vec<String>,
+}
+
+impl From<&str> for ExtensionDecl {
+    fn from(path: &str) -> Self {
+        ExtensionDecl::Path(path.to_string())
+    }
+}
+
+impl From<String> for ExtensionDecl {
+    fn from(path: String) -> Self {
+        ExtensionDecl::Path(path)
+    }
+}
+
+// Hand-written instead of `#[serde(untagged)]`: the derived untagged impl
+// discards each variant's real error and reports only "data did not match any
+// variant", which turns a typo inside a table into an unusable message. The
+// two shapes are disjoint (string vs table), so dispatching in a visitor keeps
+// serde's precise unknown-field / missing-field / wrong-type errors.
+impl<'de> Deserialize<'de> for ExtensionDecl {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct DeclVisitor;
+
+        const FIELDS: &[&str] = &["name", "path", "dependsOn", "depends_on"];
+
+        impl<'de> serde::de::Visitor<'de> for DeclVisitor {
+            type Value = ExtensionDecl;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an extension path string or a table { name, path, dependsOn = [...] }")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(ExtensionDecl::Path(value.to_string()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(ExtensionDecl::Path(value))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                use serde::de::Error as _;
+                let mut name: Option<String> = None;
+                let mut path: Option<String> = None;
+                let mut depends_on: Option<Vec<String>> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "name" => {
+                            if name.is_some() {
+                                return Err(A::Error::duplicate_field("name"));
+                            }
+                            name = Some(map.next_value()?);
+                        }
+                        "path" => {
+                            if path.is_some() {
+                                return Err(A::Error::duplicate_field("path"));
+                            }
+                            path = Some(map.next_value()?);
+                        }
+                        "dependsOn" | "depends_on" => {
+                            if depends_on.is_some() {
+                                return Err(A::Error::duplicate_field("dependsOn"));
+                            }
+                            depends_on = Some(map.next_value()?);
+                        }
+                        other => return Err(A::Error::unknown_field(other, FIELDS)),
+                    }
+                }
+                Ok(ExtensionDecl::Structured(StructuredExtensionDecl {
+                    name: name.ok_or_else(|| A::Error::missing_field("name"))?,
+                    path: path.ok_or_else(|| A::Error::missing_field("path"))?,
+                    depends_on: depends_on.unwrap_or_default(),
+                }))
+            }
+        }
+
+        deserializer.deserialize_any(DeclVisitor)
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
@@ -295,9 +582,10 @@ pub struct ProjectConfig {
 
     /// Configuration extensions. `None` (unset) auto-discovers the conventional
     /// `src/cfe/*` layout; `Some([])` is an explicit opt-out (no extensions);
-    /// a non-empty list is taken verbatim (entries may use a final-segment `*` glob).
+    /// a non-empty list is taken verbatim (string entries may use a
+    /// final-segment `*` glob; structured entries add a name and dependencies).
     #[serde(default)]
-    pub extensions: Option<Vec<String>>,
+    pub extensions: Option<Vec<ExtensionDecl>>,
 
     #[serde(default)]
     pub search: SearchConfig,
@@ -310,96 +598,48 @@ pub struct ProjectConfig {
 }
 
 impl ProjectConfig {
-    pub fn load(root: &Path) -> Option<Self> {
+    /// Loads the project config from the conventional file names under `root`.
+    /// `Ok(None)` means no config file exists (callers default); a file that
+    /// exists but cannot be read or parsed is an error — falling back to a
+    /// default config would silently analyze a differently-shaped project.
+    pub fn load(root: &Path) -> Result<Option<Self>, ConfigLoadError> {
         let toml_path = root.join("bsl-analyzer.toml");
         if toml_path.exists() {
-            return Self::try_load_toml_file(&toml_path);
+            return Self::load_from_file(&toml_path).map(Some);
         }
-        Self::try_load(root, ".bsl-analyzer.json")
-            .or_else(|| Self::try_load(root, ".bsl-language-server.json"))
-    }
-
-    fn try_load_toml_file(config_path: &Path) -> Option<Self> {
-        let content = match std::fs::read_to_string(config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(path = %config_path.display(), error = %e, "failed to read TOML config");
-                return None;
-            }
-        };
-        match toml::from_str::<TomlConfig>(&content) {
-            Ok(toml_config) => {
-                let config = ProjectConfig::from(toml_config);
+        for filename in [".bsl-analyzer.json", ".bsl-language-server.json"] {
+            let config_path = root.join(filename);
+            if config_path.exists() {
+                let config = Self::load_from_file(&config_path)?;
                 tracing::info!(
                     path = %config_path.display(),
                     diagnostics_has_content = !config.diagnostics.is_null(),
-                    "loaded TOML project config"
+                    "loaded project config"
                 );
-                Some(config)
-            }
-            Err(e) => {
-                tracing::error!(
-                    path = %config_path.display(),
-                    error = %e,
-                    "bsl-analyzer.toml exists but failed to parse; JSON fallback is disabled"
-                );
-                None
+                return Ok(Some(config));
             }
         }
+        Ok(None)
     }
 
-    pub fn load_from_file(path: &Path) -> Option<Self> {
+    pub fn load_from_file(path: &Path) -> Result<Self, ConfigLoadError> {
+        let err = |message: String| ConfigLoadError { path: path.to_path_buf(), message };
         if !path.exists() {
-            return None;
+            return Err(err("file not found".to_string()));
         }
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "failed to read config file");
-                return None;
-            }
-        };
+        let content = std::fs::read_to_string(path).map_err(|e| err(e.to_string()))?;
         if path.extension().is_some_and(|ext| ext == "toml") {
-            match toml::from_str::<TomlConfig>(&content) {
-                Ok(toml_config) => Some(ProjectConfig::from(toml_config)),
-                Err(e) => {
-                    tracing::error!(path = %path.display(), error = %e, "failed to parse TOML config");
-                    None
-                }
-            }
+            let toml_config =
+                toml::from_str::<TomlConfig>(&content).map_err(|e| err(e.to_string()))?;
+            let config = ProjectConfig::from(toml_config);
+            tracing::info!(
+                path = %path.display(),
+                diagnostics_has_content = !config.diagnostics.is_null(),
+                "loaded TOML project config"
+            );
+            Ok(config)
         } else {
-            match serde_json::from_str(&content) {
-                Ok(config) => Some(config),
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "failed to parse config file");
-                    None
-                }
-            }
-        }
-    }
-
-    fn try_load(root: &Path, filename: &str) -> Option<Self> {
-        let config_path = root.join(filename);
-        if config_path.exists() {
-            match Self::load_from_file(&config_path) {
-                Some(config) => {
-                    tracing::info!(
-                        path = %config_path.display(),
-                        diagnostics_has_content = !config.diagnostics.is_null(),
-                        "loaded project config"
-                    );
-                    Some(config)
-                }
-                None => {
-                    tracing::warn!(
-                        path = %config_path.display(),
-                        "config file exists but failed to parse"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
+            serde_json::from_str(&content).map_err(|e| err(e.to_string()))
         }
     }
 
@@ -1018,7 +1258,7 @@ struct TomlSourceConfig {
     #[serde(default)]
     root: Option<String>,
     #[serde(default)]
-    extensions: Option<Vec<String>>,
+    extensions: Option<Vec<ExtensionDecl>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1523,10 +1763,11 @@ mod tests {
     use super::{
         branch_pattern_matches, current_git_branch, current_git_commit,
         evaluate_workspace_baseline_support, is_publish_branch_allowed, parse_timestamp_utc,
-        resolve_postgres_url, resolve_workspace_branch_policy, wildcard_matches, FeaturesConfig,
-        PostgresAccessMode, Project, ProjectConfig, ResolvePostgresUrlError, SearchBaselineBackend,
-        SearchBaselinePolicyConfig, SearchBaselineSupportState, SearchPostgresConfig,
-        SearchPostgresCredentialHelperConfig, WorkspaceDiagnosticsScope,
+        resolve_postgres_url, resolve_workspace_branch_policy, wildcard_matches, ExtensionDecl,
+        FeaturesConfig, PostgresAccessMode, Project, ProjectConfig, ProjectError,
+        ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
+        SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
+        StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
     };
     use chrono::{Duration, TimeZone, Utc};
     use std::fs;
@@ -1850,7 +2091,7 @@ extensions = ["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"]
         assert_eq!(project.configuration_root.as_deref(), Some("src/cf"));
         assert_eq!(
             project.extensions,
-            Some(vec!["src/cfe/BMS_RU_UT".to_string(), "src/cfe/YAxUnit".to_string()])
+            Some(vec!["src/cfe/BMS_RU_UT".into(), "src/cfe/YAxUnit".into()])
         );
     }
 
@@ -1875,6 +2116,221 @@ root = "src/cf"
         std::fs::write(dir.join("Configuration.xml"), "<xml/>").unwrap();
     }
 
+    fn structured(name: &str, path: &str, deps: &[&str]) -> ExtensionDecl {
+        ExtensionDecl::Structured(StructuredExtensionDecl {
+            name: name.to_string(),
+            path: path.to_string(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    #[test]
+    fn toml_mixed_extension_entries_parse() {
+        let toml_str = r#"
+[source]
+root = "src/cf"
+extensions = [
+  "vendor/legacy",
+  { name = "yaxunit", path = "vendor/yaxunit" },
+  { name = "TESTS", path = "src/cfe/TESTS", dependsOn = ["yaxunit"] },
+]
+"#;
+        let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
+        let project = ProjectConfig::from(config);
+        assert_eq!(
+            project.extensions,
+            Some(vec![
+                "vendor/legacy".into(),
+                structured("yaxunit", "vendor/yaxunit", &[]),
+                structured("TESTS", "src/cfe/TESTS", &["yaxunit"]),
+            ])
+        );
+    }
+
+    #[test]
+    fn toml_depends_on_accepts_snake_case_alias() {
+        let toml_str = r#"
+[source]
+extensions = [{ name = "T", path = "src/cfe/T", depends_on = ["Y"] }]
+"#;
+        let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
+        let project = ProjectConfig::from(config);
+        assert_eq!(project.extensions, Some(vec![structured("T", "src/cfe/T", &["Y"])]));
+    }
+
+    #[test]
+    fn toml_structured_entry_rejects_unknown_field_with_its_name() {
+        let toml_str = r#"
+[source]
+extensions = [{ name = "T", path = "src/cfe/T", dependson = ["Y"] }]
+"#;
+        let err = toml::from_str::<super::TomlConfig>(toml_str).unwrap_err().to_string();
+        assert!(err.contains("dependson"), "the offending key must be named: {err}");
+    }
+
+    #[test]
+    fn toml_structured_entry_rejects_missing_path() {
+        let toml_str = r#"
+[source]
+extensions = [{ name = "T" }]
+"#;
+        let err = toml::from_str::<super::TomlConfig>(toml_str).unwrap_err().to_string();
+        assert!(err.contains("path"), "the missing field must be named: {err}");
+    }
+
+    #[test]
+    fn json_structured_extension_entries_parse() {
+        let json = r#"{
+            "extensions": [
+                "vendor/legacy",
+                { "name": "TESTS", "path": "src/cfe/TESTS", "dependsOn": ["yaxunit"] }
+            ]
+        }"#;
+        let config: ProjectConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.extensions,
+            Some(vec!["vendor/legacy".into(), structured("TESTS", "src/cfe/TESTS", &["yaxunit"]),])
+        );
+    }
+
+    #[test]
+    fn structured_entry_with_glob_path_is_rejected() {
+        let dir = tempdir().unwrap();
+        let config = ProjectConfig {
+            extensions: Some(vec![structured("T", "src/cfe/*", &[])]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::GlobInStructuredEntry { .. })),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn structured_entry_with_missing_path_is_rejected() {
+        let dir = tempdir().unwrap();
+        let config = ProjectConfig {
+            extensions: Some(vec![structured("T", "src/cfe/T", &[])]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::StructuredPathMissing { .. })),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn structured_entry_without_configuration_xml_is_rejected() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/cfe/T")).unwrap();
+        let config = ProjectConfig {
+            extensions: Some(vec![structured("T", "src/cfe/T", &[])]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::StructuredNotAnExtension { .. })),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn structured_entry_duplicating_a_path_is_rejected() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "src/cfe/Ext");
+        let config = ProjectConfig {
+            extensions: Some(vec!["src/cfe/Ext".into(), structured("Named", "./src/cfe/Ext", &[])]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::DuplicatePath { .. })),
+            "textual path variants must collide on the canonical path: {err}"
+        );
+    }
+
+    #[test]
+    fn depends_on_is_rejected_until_visibility_lands() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "vendor/yaxunit");
+        touch_extension(dir.path(), "src/cfe/TESTS");
+        let config = ProjectConfig {
+            extensions: Some(vec![
+                structured("yaxunit", "vendor/yaxunit", &[]),
+                structured("TESTS", "src/cfe/TESTS", &["yaxunit"]),
+            ]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(&err, ProjectError::DependsOnNotSupported { extension } if extension == "TESTS"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn depends_on_unknown_name_reports_the_specific_error() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "src/cfe/TESTS");
+        // The dependency target exists on disk but is skipped (no
+        // Configuration.xml), so the edge must dangle into a hard error.
+        std::fs::create_dir_all(dir.path().join("vendor/yaxunit")).unwrap();
+        let config = ProjectConfig {
+            extensions: Some(vec![
+                "vendor/yaxunit".into(),
+                structured("TESTS", "src/cfe/TESTS", &["yaxunit"]),
+            ]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::UnknownDependency { .. })),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn structured_entries_without_depends_on_resolve_like_legacy() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "vendor/yaxunit");
+        touch_extension(dir.path(), "src/cfe/TESTS");
+        let config = ProjectConfig {
+            extensions: Some(vec![
+                structured("named-yaxunit", "vendor/yaxunit", &[]),
+                "src/cfe/TESTS".into(),
+            ]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config).unwrap();
+        let names: Vec<&str> = project.extension_paths().iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["named-yaxunit", "TESTS"],
+            "structured entries keep the declared name; legacy entries derive it from the dir"
+        );
+        let topology = project.extension_topology();
+        assert_eq!(topology.nodes().len(), 2);
+        assert!(topology.nodes().iter().all(|n| n.closure().is_empty()));
+    }
+
+    #[test]
+    fn topology_fingerprint_changes_when_an_extension_is_added() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "src/cfe/A");
+        touch_extension(dir.path(), "src/cfe/B");
+        let fingerprint = |exts: &[&str]| {
+            let config = ProjectConfig {
+                extensions: Some(exts.iter().map(|s| ExtensionDecl::from(*s)).collect()),
+                ..Default::default()
+            };
+            Project::with_config(dir.path(), config).unwrap().extension_topology().fingerprint()
+        };
+        assert_eq!(fingerprint(&["src/cfe/A"]), fingerprint(&["src/cfe/A"]));
+        assert_ne!(fingerprint(&["src/cfe/A"]), fingerprint(&["src/cfe/A", "src/cfe/B"]));
+    }
+
     #[test]
     fn extension_glob_expands_to_all_subdirs_with_configuration_xml() {
         let dir = tempdir().unwrap();
@@ -1885,8 +2341,8 @@ root = "src/cf"
         std::fs::create_dir_all(root.join("src/cfe/NotAnExtension")).unwrap();
 
         let config =
-            ProjectConfig { extensions: Some(vec!["src/cfe/*".to_string()]), ..Default::default() };
-        let resolved = Project::resolve_extensions(root, &config);
+            ProjectConfig { extensions: Some(vec!["src/cfe/*".into()]), ..Default::default() };
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
 
         let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["BMS_RU_UT", "YAxUnit"]);
@@ -1900,10 +2356,10 @@ root = "src/cf"
         touch_extension(root, "src/cfe/YAxUnit");
 
         let config = ProjectConfig {
-            extensions: Some(vec!["src/cfe/БУС_*".to_string()]),
+            extensions: Some(vec!["src/cfe/БУС_*".into()]),
             ..Default::default()
         };
-        let resolved = Project::resolve_extensions(root, &config);
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
 
         let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["БУС_ОбменДанными"]);
@@ -1916,10 +2372,10 @@ root = "src/cf"
         touch_extension(root, "src/cfe/BMS_RU_UT");
 
         let config = ProjectConfig {
-            extensions: Some(vec!["src/cfe/*".to_string(), "src/cfe/BMS_RU_UT".to_string()]),
+            extensions: Some(vec!["src/cfe/*".into(), "src/cfe/BMS_RU_UT".into()]),
             ..Default::default()
         };
-        let resolved = Project::resolve_extensions(root, &config);
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
         assert_eq!(resolved.len(), 1, "the same extension must not be added twice");
     }
 
@@ -1933,7 +2389,7 @@ root = "src/cf"
 
         // No `extensions` setting at all → discover every src/cfe child with Configuration.xml.
         let config = ProjectConfig::default();
-        let resolved = Project::resolve_extensions(root, &config);
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
 
         let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["BMS_RU_UT", "YAxUnit"]);
@@ -1945,7 +2401,7 @@ root = "src/cf"
         let root = dir.path();
         touch_extension(root, "cfe/SomeExt");
 
-        let resolved = Project::resolve_extensions(root, &ProjectConfig::default());
+        let resolved = Project::resolve_extensions(root, &ProjectConfig::default()).unwrap();
         let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["SomeExt"]);
     }
@@ -1959,10 +2415,10 @@ root = "src/cf"
 
         // An explicit list must win, even when it points elsewhere — no src/cfe sweep.
         let config = ProjectConfig {
-            extensions: Some(vec!["src/cfe/YAxUnit".to_string()]),
+            extensions: Some(vec!["src/cfe/YAxUnit".into()]),
             ..Default::default()
         };
-        let resolved = Project::resolve_extensions(root, &config);
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
         let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["YAxUnit"]);
     }
@@ -1975,7 +2431,7 @@ root = "src/cf"
 
         // `extensions = []` is an explicit opt-out and must NOT auto-discover src/cfe.
         let config = ProjectConfig { extensions: Some(vec![]), ..Default::default() };
-        let resolved = Project::resolve_extensions(root, &config);
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
         assert!(resolved.is_empty(), "explicit empty list must disable auto-discovery");
     }
 
@@ -1995,7 +2451,7 @@ root = "src/cf"
         let root = dir.path();
         touch_extension(root, "src/cf"); // main config only, no extensions dir
 
-        let resolved = Project::resolve_extensions(root, &ProjectConfig::default());
+        let resolved = Project::resolve_extensions(root, &ProjectConfig::default()).unwrap();
         assert!(resolved.is_empty());
     }
 
@@ -2008,9 +2464,8 @@ root = "src/cf"
         // Trailing slash (empty final segment) and parent-segment wildcards are
         // unsupported and must resolve nothing rather than silently misbehave.
         for pat in ["src/cfe/*/", "src/*/BMS_RU_UT"] {
-            let config =
-                ProjectConfig { extensions: Some(vec![pat.to_string()]), ..Default::default() };
-            let resolved = Project::resolve_extensions(root, &config);
+            let config = ProjectConfig { extensions: Some(vec![pat.into()]), ..Default::default() };
+            let resolved = Project::resolve_extensions(root, &config).unwrap();
             assert!(resolved.is_empty(), "pattern {pat} must resolve no extensions");
         }
     }
@@ -2022,10 +2477,10 @@ root = "src/cf"
         touch_extension(root, "src/cfe/BMS_RU_UT");
 
         let config = ProjectConfig {
-            extensions: Some(vec!["src/cfe/*".to_string(), "./src/cfe/BMS_RU_UT".to_string()]),
+            extensions: Some(vec!["src/cfe/*".into(), "./src/cfe/BMS_RU_UT".into()]),
             ..Default::default()
         };
-        let resolved = Project::resolve_extensions(root, &config);
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
         assert_eq!(resolved.len(), 1, "`./`-prefixed literal must dedup against the glob result");
     }
 
@@ -2119,7 +2574,7 @@ LineLength = { maxLineLength = 120 }
             .unwrap();
         fs::write(dir.path().join(".bsl-analyzer.json"), r#"{"configurationRoot": "from-json"}"#)
             .unwrap();
-        let config = ProjectConfig::load(dir.path()).unwrap();
+        let config = ProjectConfig::load(dir.path()).unwrap().unwrap();
         assert_eq!(config.configuration_root.as_deref(), Some("from-toml"));
     }
 
@@ -2128,7 +2583,7 @@ LineLength = { maxLineLength = 120 }
         let dir = tempdir().unwrap();
         fs::write(dir.path().join(".bsl-analyzer.json"), r#"{"configurationRoot": "from-json"}"#)
             .unwrap();
-        let config = ProjectConfig::load(dir.path()).unwrap();
+        let config = ProjectConfig::load(dir.path()).unwrap().unwrap();
         assert_eq!(config.configuration_root.as_deref(), Some("from-json"));
     }
 
@@ -2139,7 +2594,10 @@ LineLength = { maxLineLength = 120 }
         fs::write(dir.path().join(".bsl-analyzer.json"), r#"{"configurationRoot": "from-json"}"#)
             .unwrap();
         let config = ProjectConfig::load(dir.path());
-        assert!(config.is_none());
+        assert!(
+            config.is_err(),
+            "an existing but broken TOML must be a load error, not a fallback"
+        );
     }
 
     #[test]
@@ -2414,7 +2872,8 @@ type_narrowing = false
         .unwrap();
 
         let config = ProjectConfig::load(dir.path())
-            .expect("ProjectConfig::load must succeed for a well-formed TOML");
+            .expect("ProjectConfig::load must succeed for a well-formed TOML")
+            .expect("the written TOML must be found");
         assert!(
             !config.features.type_narrowing,
             "`[features] type_narrowing = false` in TOML must round-trip to FeaturesConfig"

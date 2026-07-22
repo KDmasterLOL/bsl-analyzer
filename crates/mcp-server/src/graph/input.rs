@@ -13,17 +13,33 @@ pub(crate) const GRAPH_SOURCE_ROOT: SourceRootId = SourceRootId(0);
 /// The configuration source directory plus every extension directory — the file
 /// universe both the loader and the drift scan must agree on.
 pub(super) fn scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
-    let project = project_model::Project::new(workspace_root);
-    let mut roots = vec![project.source_path().to_path_buf()];
-    roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
-    roots
+    // Graph passes run only after the daemon bootstrap validated the project;
+    // a config broken by a mid-session edit restricts the scan to the
+    // workspace root (loud in logs) instead of walking a wrong universe.
+    match project_model::Project::new(workspace_root) {
+        Ok(project) => {
+            let mut roots = vec![project.source_path().to_path_buf()];
+            roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
+            roots
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "invalid project; graph scan restricted to workspace root");
+            vec![workspace_root.to_path_buf()]
+        }
+    }
 }
 
 /// The configuration source + extension metadata paths the resolver needs for
 /// visibility checks, registered on every database (full or per-batch) just like
 /// the LSP workspace loader does.
 pub(crate) fn config_metadata_paths(workspace_root: &Path) -> Vec<(Option<String>, PathBuf)> {
-    project_config_paths(&project_model::Project::new(workspace_root))
+    match project_model::Project::new(workspace_root) {
+        Ok(project) => project_config_paths(&project),
+        Err(e) => {
+            tracing::error!(error = %e, "invalid project; no config roots registered");
+            Vec::new()
+        }
+    }
 }
 
 /// The config/metadata paths for an already-loaded project: the configuration source

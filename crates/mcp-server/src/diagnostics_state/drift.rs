@@ -1670,7 +1670,7 @@ mod tests {
         );
 
         // Build the hub over the SAME roots the scan sees (source + extensions), as production does.
-        let project = project_model::Project::new(root);
+        let project = project_model::Project::new(root).expect("valid test project");
         let mut roots = vec![project.source_path().to_path_buf()];
         roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
         assert!(roots.len() >= 2, "the extension root must be discovered: {roots:?}");

@@ -3,23 +3,42 @@ use std::{error::Error, fmt::Write as _, io};
 pub fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing::info!("Checking configuration: {:?}", config);
 
-    let project_config = project_model::ProjectConfig::load_from_file(&config).ok_or_else(|| {
+    let project_config = project_model::ProjectConfig::load_from_file(&config).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "failed to parse configuration file '{}'; expected a valid bsl-analyzer.toml, .bsl-analyzer.json, or .bsl-language-server.json",
-                config.display()
+                "failed to parse configuration file '{}': {}; expected a valid bsl-analyzer.toml, .bsl-analyzer.json, or .bsl-language-server.json",
+                config.display(),
+                e.message
             ),
         )
     })?;
     let diagnostics_config = diagnostics_config_from_project(&project_config)?;
     let diagnostics =
         mcp_server::resolve_project_baseline_diagnostics(config.parent(), &project_config);
-    let report =
-        build_check_config_report(&config, &project_config, &diagnostics_config, &diagnostics);
+    let project_root = match config.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => std::path::Path::new("."),
+        Some(parent) => parent,
+        None => std::path::Path::new("."),
+    };
+    let project = project_model::Project::with_config(project_root, project_config.clone());
+    let report = build_check_config_report(
+        &config,
+        &project_config,
+        &project,
+        &diagnostics_config,
+        &diagnostics,
+    );
 
     print!("{report}");
 
+    if let Err(e) = &project {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("configuration is invalid: {e}"),
+        )
+        .into());
+    }
     if baseline_diagnostics_have_issues(&diagnostics) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -63,6 +82,7 @@ fn baseline_diagnostics_have_issues(
 fn build_check_config_report(
     config_path: &std::path::Path,
     project_config: &project_model::ProjectConfig,
+    project: &Result<project_model::Project, project_model::ProjectError>,
     diagnostics_config: &ide::DiagnosticsConfig,
     baseline_diagnostics: &mcp_server::BaselineConfigDiagnostics,
 ) -> String {
@@ -70,7 +90,11 @@ fn build_check_config_report(
     let _ = writeln!(
         out,
         "Configuration is {}.",
-        if baseline_diagnostics_have_issues(baseline_diagnostics) { "invalid" } else { "valid" }
+        if baseline_diagnostics_have_issues(baseline_diagnostics) || project.is_err() {
+            "invalid"
+        } else {
+            "valid"
+        }
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "Config file: {}", config_path.display());
@@ -96,11 +120,66 @@ fn build_check_config_report(
         match &project_config.extensions {
             None => "auto-discovery (src/cfe/*)".to_owned(),
             Some(list) if list.is_empty() => "none".to_owned(),
-            Some(list) => list.join(", "),
+            Some(list) => list
+                .iter()
+                .map(|decl| match decl {
+                    project_model::ExtensionDecl::Path(path) => path.clone(),
+                    project_model::ExtensionDecl::Structured(entry)
+                        if entry.depends_on.is_empty() =>
+                        format!("{} ({})", entry.name, entry.path),
+                    project_model::ExtensionDecl::Structured(entry) => format!(
+                        "{} ({}, dependsOn: {})",
+                        entry.name,
+                        entry.path,
+                        entry.depends_on.join(", ")
+                    ),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     );
     let _ =
         writeln!(out, "  Language:    {}", project_config.language.as_deref().unwrap_or("default"));
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Extension topology:");
+    match project {
+        Ok(project) => {
+            let topology = project.extension_topology();
+            if topology.nodes().is_empty() {
+                let _ = writeln!(out, "  no extensions resolved");
+            } else {
+                for node in topology.nodes() {
+                    let deps = if node.depends_on().is_empty() {
+                        "independent".to_owned()
+                    } else {
+                        format!(
+                            "dependsOn: {}",
+                            node.depends_on()
+                                .iter()
+                                .map(|id| topology.node(*id).name())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    let _ = writeln!(out, "  {} — {} ({deps})", node.name(), node.path().display());
+                }
+                let _ = writeln!(
+                    out,
+                    "  Order:       {}",
+                    topology
+                        .topological_order()
+                        .iter()
+                        .map(|id| topology.node(*id).name())
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                );
+                let _ = writeln!(out, "  Fingerprint: {}", topology.fingerprint().to_hex());
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(out, "  invalid: {e}");
+        }
+    }
     let _ = writeln!(out);
     let _ = writeln!(out, "Diagnostics:");
     let _ = writeln!(out, "  ordinaryAppSupport: {}", diagnostics_config.ordinary_app_support);
@@ -367,9 +446,12 @@ backend = "postgres"
             &project_config,
         );
 
+        let project =
+            project_model::Project::with_config(std::env::temp_dir(), project_config.clone());
         let report = build_check_config_report(
             std::path::Path::new("bsl-analyzer.toml"),
             &project_config,
+            &project,
             &diag_config,
             &baseline,
         );

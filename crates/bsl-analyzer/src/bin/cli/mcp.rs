@@ -588,7 +588,8 @@ fn build_server(
                 )
             })?;
             let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
-            let mut state = mcp_server::SharedState::workspace(source_dir);
+            let mut state = mcp_server::SharedState::workspace(source_dir)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
             if let Some(ref url) = onec_url {
                 tracing::info!(%url, "Configuring 1C HTTP client");
                 state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));

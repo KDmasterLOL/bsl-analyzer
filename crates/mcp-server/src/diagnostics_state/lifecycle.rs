@@ -445,7 +445,8 @@ impl DiagnosticsState {
         // Load the project once: its config paths feed the db inputs, and its
         // `[diagnostics]` settings + locale become the resident's effective config, so
         // `file`/`workspace` honour the same project rules as LSP and CLI.
-        let project = project_model::Project::new(root);
+        let project = project_model::Project::new(root)
+            .map_err(|e| anyhow::anyhow!("invalid project at {}: {e}", root.display()))?;
         // Canonicalise the config roots so a module back-link the metadata substrate
         // resolves (`root.join("CommonModules/X/Ext/Module.bsl")`) matches the
         // canonical `.bsl` path `enumerate_bsl_files` produced — otherwise the reverse

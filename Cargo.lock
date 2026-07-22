@@ -3049,11 +3049,13 @@ name = "project-model"
 version = "0.2.60"
 dependencies = [
  "base-db",
+ "blake3",
  "bsl-metadata",
  "chrono",
  "expect-test",
  "serde",
  "serde_json",
+ "stdx",
  "tempfile",
  "toml",
  "tracing",

@@ -175,9 +175,9 @@ fn analyze_salsa(
 
     tracing::info!("Loading project configuration");
     let proj_config = if let Some(ref cfg) = config_path {
-        project_model::ProjectConfig::load_from_file(cfg).unwrap_or_default()
+        project_model::ProjectConfig::load_from_file(cfg)?
     } else {
-        project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
+        project_model::ProjectConfig::load(&source_dir)?.unwrap_or_default()
     };
 
     let _metadata = proj_config.load_metadata(&source_dir);
@@ -186,7 +186,7 @@ fn analyze_salsa(
     // Scope the file walk to the configuration source root (+ extension roots)
     // instead of the raw `-s` dir, so vendored/build copies such as
     // `.build/vendor` are not analyzed as a duplicate configuration.
-    let project = project_model::Project::with_config(&source_dir, proj_config.clone());
+    let project = project_model::Project::with_config(&source_dir, proj_config.clone())?;
     let source_roots = project.source_roots();
 
     tracing::info!("Creating database");

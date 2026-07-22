@@ -401,7 +401,9 @@ pub(crate) fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String
     state.init_empty_source_root();
 
     let start = Instant::now();
-    state.set_workspace_root(args.source_dir.clone());
+    if let Err(e) = state.set_workspace_root(args.source_dir.clone()) {
+        return Err(format!("invalid project at {}: {e}", args.source_dir.display()));
+    }
 
     let safety = args.budgets.boot_vfs_done_ms.saturating_mul(4).saturating_add(60_000);
     let deadline = start + Duration::from_millis(safety);

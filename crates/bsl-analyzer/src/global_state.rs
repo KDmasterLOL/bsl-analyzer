@@ -540,6 +540,14 @@ impl GlobalState {
     /// it is opened: if the batch had published diagnostics for it, clear them so the
     /// open document is the sole owner (pull, or push for a non-pull client) and the
     /// two streams never double-report the same file.
+    /// `window/showMessage` with error severity — for failures the user must
+    /// see without digging through server logs (e.g. a broken project config).
+    pub fn show_error_message(&self, message: String) {
+        let params = lsp_types::ShowMessageParams { typ: lsp_types::MessageType::ERROR, message };
+        let notification = lsp_server::Notification::new("window/showMessage".to_string(), params);
+        let _ = self.sender.send(notification.into());
+    }
+
     pub fn clear_batch_push_for(&mut self, uri: &Url) {
         if self.batch_pushed.remove(uri).is_some() {
             let params =
@@ -794,7 +802,7 @@ mod vfs_race_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
 
         // Initial load (vfs_done = false): the gate closes until the finalize.
-        state.set_workspace_root(tmp.path().to_path_buf());
+        state.set_workspace_root(tmp.path().to_path_buf()).expect("valid test workspace");
         assert!(
             !state.analysis_host.raw_database().workspace_load_complete(),
             "the initial load must close the whole-config loader gate"
@@ -803,7 +811,7 @@ mod vfs_race_tests {
         // A live reload (vfs_done = true) must not degrade running analysis.
         state.vfs_done = true;
         state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
-        state.set_workspace_root(tmp.path().to_path_buf());
+        state.set_workspace_root(tmp.path().to_path_buf()).expect("valid test workspace");
         assert!(
             state.analysis_host.raw_database().workspace_load_complete(),
             "a live workspace reload must keep the gate open"
@@ -915,11 +923,15 @@ mod vfs_race_tests {
     fn call_hierarchy_workspace_changes_journal_bodies_and_supersede_structure() {
         use crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId;
 
-        // Given: a loaded source root with an active compact-index build.
+        // Given: a loaded source root with an active compact-index build. The
+        // workspace root must exist and be valid: a config-file change only
+        // counts as structural after its project reload succeeds.
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let mut state = GlobalState::new(sender);
         state.vfs_done = true;
         state.init_empty_source_root();
+        let tmp = tempfile::tempdir().unwrap();
+        state.set_workspace_root(tmp.path().to_path_buf()).expect("valid empty workspace");
         let module_path = vfs::VfsPath::new("/cf/CommonModules/М/Ext/Module.bsl");
         state.vfs.write().set_file_contents(
             module_path.clone(),

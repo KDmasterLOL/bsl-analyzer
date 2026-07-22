@@ -106,7 +106,7 @@ type_narrowing = false
         )
         .unwrap();
 
-        let project = Project::new(dir.path());
+        let project = Project::new(dir.path()).expect("valid test project");
         assert!(
             !project.config.features.type_narrowing,
             "Project::new must surface the disabled flag from the TOML"
@@ -139,7 +139,7 @@ checked_environments = ["ТонкийКлиент", "Server", "Неизвест�
         )
         .unwrap();
 
-        let project = Project::new(dir.path());
+        let project = Project::new(dir.path()).expect("valid test project");
         let mut db = RootDatabaseImpl::new();
         apply_features_to_db(&mut db, &resolve_features(Some(&project)));
         // The unknown name is skipped with a warning; the rest form the mask.
