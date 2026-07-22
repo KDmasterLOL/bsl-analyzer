@@ -1,7 +1,13 @@
 use std::path::{Path, PathBuf};
 
 pub fn find_configuration_path(workspace_root: &Path) -> Option<PathBuf> {
-    let project = project_model::Project::new(workspace_root);
+    let project = match project_model::Project::new(workspace_root) {
+        Ok(project) => project,
+        Err(e) => {
+            tracing::error!(root = %workspace_root.display(), error = %e, "invalid project");
+            return None;
+        }
+    };
     project.configuration_path().map(|p| p.to_path_buf())
 }
 

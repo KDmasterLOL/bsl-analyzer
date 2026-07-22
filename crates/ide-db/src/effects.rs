@@ -68,13 +68,6 @@ pub struct ModuleSecurityState {
 }
 
 impl ModuleSecurityState {
-    pub(crate) fn from_methods_with_module_level(
-        methods: FxHashMap<u32, Arc<DataflowResult<SecurityModeState>>>,
-        module_level: Option<Arc<DataflowResult<SecurityModeState>>>,
-    ) -> Self {
-        Self { methods, module_level }
-    }
-
     pub fn get(&self, local_id: u32) -> Option<Arc<DataflowResult<SecurityModeState>>> {
         self.methods.get(&local_id).cloned()
     }

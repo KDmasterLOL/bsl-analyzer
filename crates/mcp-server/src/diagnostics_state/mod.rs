@@ -48,4 +48,4 @@ pub(crate) use types::{DiagnosticsStatus, Freshness, ResidentOutcome, StatusRepo
     unused_imports,
     reason = "the stable diagnostics facade preserves crate::diagnostics_state workspace sweep paths"
 )]
-pub(crate) use workspace_sweep::{CodeAggregate, SweepOptions, WorkspaceSweep};
+pub(crate) use workspace_sweep::{CodeAggregate, SweepCancel, SweepOptions, WorkspaceSweep};

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+	<Catalog uuid="ec000004-0002-0000-0000-000000000004">
+		<Properties>
+			<Name>Товары</Name>
+			<Synonym/>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="ec000004-0003-0000-0000-000000000004">
+				<Properties>
+					<Name>Вес</Name>
+					<Synonym/>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:string</v8:Type>
+					</Type>
+				</Properties>
+			</Attribute>
+		</ChildObjects>
+	</Catalog>
+</MetaDataObject>

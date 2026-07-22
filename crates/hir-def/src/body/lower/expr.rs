@@ -1,4 +1,5 @@
 use bsl_platform::capability::{Category as CapabilityCategory, EntryKind as CapabilityEntryKind};
+use intern::NormName;
 use parser_error::{ParseError, RecoveryKind};
 use stdx::case::CaseExt;
 use syntax::ast_utils::field_tail_name_token;
@@ -79,7 +80,7 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprIdx {
                 is_call_expr_callee, is_field_access_field, is_this_form_identifier,
             };
             if is_this_form_identifier(&text)
-                && !ctx.param_names.contains(&text.fold_lower())
+                && !ctx.param_names.contains(&NormName::intern(&text))
                 && !is_call_expr_callee(node)
                 && !is_field_access_field(node)
             {
@@ -518,8 +519,8 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             });
         }
 
-        let name_lower = name.fold_lower();
-        if !ctx.local_vars.contains_key(&name_lower) && !ctx.param_names.contains(&name_lower) {
+        let name_norm = NormName::intern(&name);
+        if !ctx.local_vars.contains_key(&name_norm) && !ctx.param_names.contains(&name_norm) {
             ctx.diagnostics.push(BodyDiagnostic::DeprecatedMethodCall {
                 callee: name,
                 module: None,
@@ -560,7 +561,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         if idents.len() == 2 {
             let module_name = idents[0].text();
             let method_name_str = idents[1].text();
-            let key = module_name.fold_lower();
+            let key = NormName::intern(module_name);
 
             if !ctx.local_vars.contains_key(&key) && !ctx.param_names.contains(&key) {
                 ctx.external_refs.push(crate::body::ExternalRef::QualifiedCall {
@@ -828,7 +829,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         let callee_name = actual_callee.text().to_string();
 
         let is_local = {
-            let key = callee_name.fold_lower();
+            let key = NormName::intern(&callee_name);
             ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key)
         };
 
@@ -1140,7 +1141,7 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
             .last()
             .map(|tok| tok.text().to_string())?;
 
-        let key = mdo_type.fold_lower();
+        let key = NormName::intern(&mdo_type);
         if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
             return None;
         }
@@ -1171,7 +1172,7 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
 
     let module = module_name?;
 
-    let key = module.fold_lower();
+    let key = NormName::intern(&module);
     if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
         return None;
     }
@@ -1495,7 +1496,7 @@ fn check_using_external_code_tools(
     let receiver_name = idents[0].text();
     let method_name = idents[1].text();
 
-    let receiver_key = receiver_name.fold_lower();
+    let receiver_key = NormName::intern(receiver_name);
     let is_local =
         ctx.local_vars.contains_key(&receiver_key) || ctx.param_names.contains(&receiver_key);
 

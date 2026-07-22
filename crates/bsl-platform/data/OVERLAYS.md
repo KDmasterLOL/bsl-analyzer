@@ -33,6 +33,34 @@ out-of-range parameter indices, invalid bounds, and duplicate type-list
 members. Applying an override changes only the selected parameter type list;
 method IDs and method ordering remain those of the extracted data.
 
+## Type property addition schema
+
+```json
+{
+  "schema_version": 1,
+  "type_property_additions": [
+    {
+      "canonical_type": "ClientApplicationForm",
+      "russian_name": "РусскоеИмяСвойства",
+      "english_name": "EnglishPropertyName",
+      "property_types": ["ТипЗначения"],
+      "is_readonly": false,
+      "min_version": "8.2",
+      "evidence_source": "source identifying the platform contract",
+      "rationale": "why the extracted data omits or misfiles this property"
+    }
+  ]
+}
+```
+
+Adds a standard property the help extract omits or files under a misleading name
+— for example the managed-form `РежимОткрытияОкна`, whose help page ships under
+its enum type `FormWindowOpeningMode`. `canonical_type` must be a known platform
+type; the (type, name) pair must not already exist (that is a correction, not an
+addition, and is rejected). `is_readonly` defaults to `false` and `min_version`
+is optional. The property receives a synthetic id so documentation lookups do
+not alias an existing property.
+
 ## Method-local scope
 
 Overlays are deliberately method-local. For example, a DOM `appendChild` correction

@@ -34,7 +34,7 @@ dataflow.
 - Набор диагностик качества кода BSL
 - LSP — поддержка Language Server Protocol для IDE
 - MCP — встроенный сервер Model Context Protocol для AI-агентов
-- SonarQube — отчёты SARIF, потоковый режим для крупных проектов
+- SonarQube — отчёты SARIF и JSONL для CI/CD
 - Конфигурация проекта через `bsl-analyzer.toml`
 - Linux, Windows, macOS (Apple Silicon)
 

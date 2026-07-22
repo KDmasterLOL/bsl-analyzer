@@ -12,7 +12,16 @@ use bsl_config::VisibleConfig;
 
 #[salsa::db]
 pub trait ConfigsDatabase: DefDatabase {
+    /// The configurations VISIBLE to `file_id` as separate entries (no merge):
+    /// base first, then the file's dependency chain in order (own extension
+    /// last). Never includes an unrelated sibling extension.
     fn configurations(&self, file_id: FileId) -> Vec<VisibleConfig>;
+
+    /// EVERY configured root (base + all extensions) — the inventory view for
+    /// index/graph builders covering the whole workspace. Deliberately ignores
+    /// per-file dependency-scoped visibility; semantic resolution must use
+    /// [`Self::configurations`].
+    fn configurations_inventory(&self) -> Vec<VisibleConfig>;
 
     fn merged_visible_configuration(&self, file_id: FileId) -> Option<Arc<Configuration>>;
 

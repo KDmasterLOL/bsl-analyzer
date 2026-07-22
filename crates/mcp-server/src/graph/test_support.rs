@@ -63,11 +63,38 @@ pub(super) fn wait_ready(graph: &GraphState) {
     panic!("graph did not become ready");
 }
 
-pub(super) fn seed_cache(root: &Path, fingerprint: u64) {
+/// A workspace with two declared extensions; `depends_on` toggles the one
+/// dependency edge without touching any `.bsl`/`.xml` file.
+pub(super) fn write_extension_workspace(root: &Path, depends_on: bool) {
+    sample_workspace(root);
+    // The base marker keeps the configured `root = "."` resolving to ROOT itself;
+    // without it source discovery walks on and picks the first extension dir.
+    write(root, "Configuration.xml", "<Configuration/>");
+    write(root, "ext/a/Configuration.xml", "<Configuration/>");
+    write(root, "ext/b/Configuration.xml", "<Configuration/>");
+    write_extension_config(root, depends_on);
+}
+
+/// Rewrite ONLY the analyzer config — the drift under test must never come from
+/// a scanned file's stat moving.
+pub(super) fn write_extension_config(root: &Path, depends_on: bool) {
+    let deps = if depends_on { ", dependsOn = [\"a\"]" } else { "" };
+    fs::write(
+        root.join("bsl-analyzer.toml"),
+        format!(
+            "[source]\nroot = \".\"\nextensions = [\n  \
+             {{ name = \"a\", path = \"ext/a\" }},\n  \
+             {{ name = \"b\", path = \"ext/b\"{deps} }},\n]\n"
+        ),
+    )
+    .unwrap();
+}
+
+pub(super) fn seed_cache(root: &Path, fingerprint: crate::graph_db::GraphFp) {
     let out = graph_db_path(root);
     fs::create_dir_all(out.parent().unwrap()).unwrap();
     build_graph_database(
-        root,
+        &crate::graph::ProjectSnapshot::load(root),
         &out,
         GRAPH_BUILD_BATCH,
         &crate::graph_db::GraphMeta {

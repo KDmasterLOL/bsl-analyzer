@@ -10,6 +10,7 @@ mod utils;
 #[cfg(test)]
 mod tests;
 
+use intern::NormName;
 use line_index::LineIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -27,11 +28,11 @@ pub(crate) struct LoweringCtx {
     pub(crate) diagnostics: Vec<BodyDiagnostic>,
     pub(crate) is_function: bool,
 
-    pub(crate) local_vars: FxHashMap<String, (Name, TextRange)>,
+    pub(crate) local_vars: FxHashMap<NormName, (Name, TextRange)>,
 
-    pub(crate) param_names: FxHashSet<String>,
+    pub(crate) param_names: FxHashSet<NormName>,
 
-    pub(crate) by_ref_param_names: FxHashSet<String>,
+    pub(crate) by_ref_param_names: FxHashSet<NormName>,
 
     pub(crate) by_value_params: FxHashMap<String, BindingIdx>,
 
@@ -41,7 +42,7 @@ pub(crate) struct LoweringCtx {
 
     pub(crate) loop_depth: usize,
 
-    pub(crate) query_vars: FxHashMap<String, QueryVarType>,
+    pub(crate) query_vars: FxHashMap<NormName, QueryVarType>,
 
     pub(crate) foreach_collections: Vec<(ExprIdx, String)>,
 
@@ -150,11 +151,11 @@ impl LoweringCtx {
     }
 
     pub(crate) fn register_param(&mut self, name: &str) {
-        self.param_names.insert(name.fold_lower());
+        self.param_names.insert(NormName::intern(name));
     }
 
     pub(crate) fn register_local_var(&mut self, name: Name, range: TextRange) {
-        let key = name.as_str().fold_lower();
+        let key = NormName::intern(name.as_str());
         self.local_vars.insert(key, (name, range));
     }
 
@@ -205,11 +206,11 @@ impl LoweringCtx {
     }
 
     pub(crate) fn register_query_var(&mut self, name: String, var_type: QueryVarType) {
-        self.query_vars.insert(name.fold_lower(), var_type);
+        self.query_vars.insert(NormName::intern(&name), var_type);
     }
 
     pub(crate) fn get_query_var_type(&self, name: &str) -> Option<QueryVarType> {
-        self.query_vars.get(&name.fold_lower()).copied()
+        self.query_vars.get(&NormName::intern(name)).copied()
     }
 
     pub(crate) fn is_query_var(&self, name: &str) -> bool {
@@ -610,33 +611,33 @@ pub fn lower_module_code(root: &SyntaxNode, line_index: Option<Arc<LineIndex>>) 
     }
 }
 
-fn collect_referenced_externals(body: &Body) -> FxHashSet<String> {
+fn collect_referenced_externals(body: &Body) -> FxHashSet<NormName> {
     let mut referenced = FxHashSet::default();
     let mut declared = FxHashSet::default();
 
     for &param_id in body.params.iter() {
         let binding = &body.bindings[param_id];
-        declared.insert(binding.name.as_str().fold_lower());
+        declared.insert(NormName::intern(binding.name.as_str()));
     }
 
-    fn collect_declared(body: &Body, stmt_id: StmtIdx, declared: &mut FxHashSet<String>) {
+    fn collect_declared(body: &Body, stmt_id: StmtIdx, declared: &mut FxHashSet<NormName>) {
         match body.stmt_idx(stmt_id) {
             Stmt::VarDecl { bindings } => {
                 for &binding_id in bindings.iter() {
                     let binding = &body.bindings[binding_id];
-                    declared.insert(binding.name.as_str().fold_lower());
+                    declared.insert(NormName::intern(binding.name.as_str()));
                 }
             }
             Stmt::For { var, body: loop_body, .. } => {
                 let binding = &body.bindings[*var];
-                declared.insert(binding.name.as_str().fold_lower());
+                declared.insert(NormName::intern(binding.name.as_str()));
                 for &s in loop_body.iter() {
                     collect_declared(body, s, declared);
                 }
             }
             Stmt::ForEach { var, body: loop_body, .. } => {
                 let binding = &body.bindings[*var];
-                declared.insert(binding.name.as_str().fold_lower());
+                declared.insert(NormName::intern(binding.name.as_str()));
                 for &s in loop_body.iter() {
                     collect_declared(body, s, declared);
                 }
@@ -679,7 +680,7 @@ fn collect_referenced_externals(body: &Body) -> FxHashSet<String> {
 
     for (_, expr) in body.exprs.iter() {
         if let Expr::Path(name) = expr {
-            referenced.insert(name.as_str().fold_lower());
+            referenced.insert(NormName::intern(name.as_str()));
         }
     }
 

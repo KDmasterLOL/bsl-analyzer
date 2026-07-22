@@ -34,6 +34,22 @@ impl HTTPService {
     ) -> impl Iterator<Item = (&HTTPServiceURLTemplate, &HTTPServiceMethod)> {
         self.url_templates.iter().flat_map(|t| t.methods.iter().map(move |m| (t, m)))
     }
+
+    /// Heap bytes owned by this service, memoised by `ide-db`'s
+    /// `parse_http_service_query` for Salsa's `heap_size` hook: its name/URL
+    /// strings plus the URL-template vec and each template's own owned payload.
+    /// New heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.root_url.capacity()
+            + self.uri.as_ref().map_or(0, String::capacity)
+            + stdx::heap::vec_bytes::<HTTPServiceURLTemplate>(self.url_templates.len())
+            + self
+                .url_templates
+                .iter()
+                .map(HTTPServiceURLTemplate::estimated_heap_size)
+                .sum::<usize>()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +74,15 @@ impl HTTPServiceURLTemplate {
 
     pub fn methods(&self) -> &[HTTPServiceMethod] {
         &self.methods
+    }
+
+    /// Heap bytes owned by this template: its name/template strings plus the
+    /// method vec and each method's own owned payload.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.template.capacity()
+            + stdx::heap::vec_bytes::<HTTPServiceMethod>(self.methods.len())
+            + self.methods.iter().map(HTTPServiceMethod::estimated_heap_size).sum::<usize>()
     }
 }
 
@@ -87,6 +112,11 @@ impl HTTPServiceMethod {
 
     pub fn is_handler_empty(&self) -> bool {
         self.handler.is_empty()
+    }
+
+    /// Heap bytes owned by this method: its name/HTTP-verb/handler strings.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity() + self.http_method.capacity() + self.handler.capacity()
     }
 }
 

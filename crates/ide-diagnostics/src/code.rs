@@ -187,6 +187,7 @@ pub enum DiagnosticCode {
     QueryParseError,
     QueryToMissingMetadata,
     UnknownFieldInQuery,
+    UnlimitedLengthStringUsageInQuery,
     RefOveruse,
     SelectTopWithoutOrderBy,
     UnionAll,

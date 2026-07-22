@@ -13,6 +13,7 @@ uuid = { version = "1.0", features = ["serde", "v4"] }
 thiserror = "2.0"
 tracing = { workspace = true }
 rustc-hash = { workspace = true }
+intern = { workspace = true }
 stdx = { workspace = true }
 rayon = { workspace = true }
 bsl-platform = { path = "../bsl-platform" }

@@ -22,5 +22,19 @@
       "evidence_source": "platform_data.json: DOMDocument.AppendChild (id 2231) and HTMLDocument.AppendChild (id 3464)",
       "rationale": "The generic HTML document path returns HTMLElement; the comparable HTML AppendChild contract documents the HTML node categories accepted alongside the DOMDocument contract."
     }
+  ],
+  "type_property_additions": [
+    {
+      "canonical_type": "ClientApplicationForm",
+      "russian_name": "РежимОткрытияОкна",
+      "english_name": "WindowOpeningMode",
+      "property_types": [
+        "РежимОткрытияОкнаФормы"
+      ],
+      "is_readonly": false,
+      "min_version": "8.2",
+      "evidence_source": "1C vendor standard v8std #std742 (https://its.1c.ru/db/v8std#content:742): the managed-form window mode is set as `РежимОткрытияОкна = БлокироватьОкноВладельца`.",
+      "rationale": "shcntx_ru.hbk files this writable managed-form property under its enum type name (FormWindowOpeningMode / РежимОткрытияОкнаФормы), so the extracted data lacks ClientApplicationForm.РежимОткрытияОкна and the unused-local check reports every `РежимОткрытияОкна = …` form-context write as a dead local."
+    }
   ]
 }

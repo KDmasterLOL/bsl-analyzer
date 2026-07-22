@@ -1,9 +1,307 @@
 use bsl_metadata::Configuration;
+use intern::NormName;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use stdx::case::CaseExt;
 
-#[salsa::interned(debug)]
+/// Heap-size estimators for Salsa's `memory_usage` introspection, wrapping each
+/// metadata substrate's own `estimated_heap_size` so it reads `None` (a query
+/// that found nothing) as zero.
+pub(crate) mod heap_estimate {
+    use std::sync::Arc;
+
+    pub(crate) fn mdo_heap(v: &Option<Arc<bsl_metadata::MetadataObject>>) -> usize {
+        v.as_ref().map_or(0, |m| m.estimated_heap_size())
+    }
+
+    pub(crate) fn register_heap(v: &Option<Arc<bsl_metadata::Register>>) -> usize {
+        v.as_ref().map_or(0, |r| r.estimated_heap_size())
+    }
+
+    pub(crate) fn defined_type_heap(v: &Option<Arc<bsl_metadata::DefinedType>>) -> usize {
+        v.as_ref().map_or(0, |dt| dt.estimated_heap_size())
+    }
+
+    pub(crate) fn common_module_heap(v: &Option<Arc<bsl_metadata::CommonModule>>) -> usize {
+        v.as_ref().map_or(0, |m| m.estimated_heap_size())
+    }
+
+    pub(crate) fn http_service_heap(v: &Option<Arc<bsl_metadata::HTTPService>>) -> usize {
+        v.as_ref().map_or(0, |s| s.estimated_heap_size())
+    }
+
+    pub(crate) fn web_service_heap(v: &Option<Arc<bsl_metadata::WebService>>) -> usize {
+        v.as_ref().map_or(0, |s| s.estimated_heap_size())
+    }
+
+    pub(crate) fn integration_service_heap(
+        v: &Option<Arc<bsl_metadata::IntegrationService>>,
+    ) -> usize {
+        v.as_ref().map_or(0, |s| s.estimated_heap_size())
+    }
+
+    pub(crate) fn event_subscription_heap(
+        v: &Option<Arc<bsl_metadata::EventSubscription>>,
+    ) -> usize {
+        v.as_ref().map_or(0, |s| s.estimated_heap_size())
+    }
+
+    pub(crate) fn scheduled_job_heap(v: &Option<Arc<bsl_metadata::ScheduledJob>>) -> usize {
+        v.as_ref().map_or(0, |j| j.estimated_heap_size())
+    }
+
+    pub(crate) fn role_heap(v: &Option<Arc<bsl_metadata::Role>>) -> usize {
+        v.as_ref().map_or(0, |r| r.estimated_heap_size())
+    }
+
+    pub(crate) fn subsystem_heap(v: &Option<Arc<bsl_metadata::Subsystem>>) -> usize {
+        v.as_ref().map_or(0, |s| s.estimated_heap_size())
+    }
+
+    pub(crate) fn configuration_heap(v: &Arc<bsl_metadata::Configuration>) -> usize {
+        v.estimated_heap_size()
+    }
+
+    /// Heap of a [`super::ConfigurationPathInput`]: the `path` string's own bytes
+    /// (`root_revision` is `Copy`). The estimator receives the tuple of ALL
+    /// declared fields in order, per the fork's `heap_size = path` convention for
+    /// interned structs.
+    pub(crate) fn configuration_path_input_heap((path, _root_revision): &(String, u32)) -> usize {
+        path.capacity()
+    }
+
+    /// Heap of a [`super::WorkspaceConfigsInput`]: the snapshot's path vecs
+    /// (declared + canonical) with their owned labels and roots, the closure
+    /// index vecs, and the optional fingerprint string.
+    pub(crate) fn workspace_configs_input_heap(
+        (snapshot,): &(std::sync::Arc<super::WorkspaceConfigsSnapshot>,),
+    ) -> usize {
+        let paths = &snapshot.paths;
+        stdx::heap::vec_bytes::<(Option<String>, std::path::PathBuf)>(paths.len())
+            + paths
+                .iter()
+                .map(|(label, root)| label.as_ref().map_or(0, String::capacity) + root.capacity())
+                .sum::<usize>()
+            + stdx::heap::vec_bytes::<std::path::PathBuf>(snapshot.canonical_paths.len())
+            + snapshot.canonical_paths.iter().map(|p| p.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<Vec<usize>>(snapshot.closures.len())
+            + snapshot
+                .closures
+                .iter()
+                .map(|c| stdx::heap::vec_bytes::<usize>(c.len()))
+                .sum::<usize>()
+            + snapshot.fingerprint.as_ref().map_or(0, String::capacity)
+    }
+
+    /// Heap of a [`super::MetadataListingInput`]: the ten per-family `Arc<Vec<_>>`
+    /// entry lists plus each entry's owned name string (the other entry fields —
+    /// `FileId`s, the MDO kind — are `Copy`). New heap-owning listing families
+    /// must be added here too.
+    #[allow(clippy::type_complexity)] // mirrors MetadataListingInput's field tuple exactly
+    pub(crate) fn metadata_listing_input_heap(
+        fields: &(
+            Arc<Vec<super::MdoEntry>>,
+            Arc<Vec<super::DefinedTypeEntry>>,
+            Arc<Vec<super::CommonModuleEntry>>,
+            Arc<Vec<super::EventSubscriptionEntry>>,
+            Arc<Vec<super::ScheduledJobEntry>>,
+            Arc<Vec<super::RoleEntry>>,
+            Arc<Vec<super::HTTPServiceEntry>>,
+            Arc<Vec<super::WebServiceEntry>>,
+            Arc<Vec<super::IntegrationServiceEntry>>,
+            Arc<Vec<super::SubsystemEntry>>,
+        ),
+    ) -> usize {
+        let (
+            entries,
+            defined_types,
+            common_modules,
+            event_subscriptions,
+            scheduled_jobs,
+            roles,
+            http_services,
+            web_services,
+            integration_services,
+            subsystems,
+        ) = fields;
+
+        stdx::heap::vec_bytes::<super::MdoEntry>(entries.len())
+            + entries.iter().map(|e| e.name.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<super::DefinedTypeEntry>(defined_types.len())
+            + defined_types.iter().map(|e| e.name.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<super::CommonModuleEntry>(common_modules.len())
+            + common_modules.iter().map(|e| e.name.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<super::EventSubscriptionEntry>(event_subscriptions.len())
+            + event_subscriptions.iter().map(|e| e.name.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<super::ScheduledJobEntry>(scheduled_jobs.len())
+            + scheduled_jobs.iter().map(|e| e.name.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<super::RoleEntry>(roles.len())
+            + roles.iter().map(|e| e.name.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<super::HTTPServiceEntry>(http_services.len())
+            + http_services.iter().map(|e| e.name.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<super::WebServiceEntry>(web_services.len())
+            + web_services.iter().map(|e| e.name.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<super::IntegrationServiceEntry>(integration_services.len())
+            + integration_services.iter().map(|e| e.name.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<super::SubsystemEntry>(subsystems.len())
+            + subsystems.iter().map(|e| e.name.capacity()).sum::<usize>()
+    }
+
+    /// A `resolve_metadata_object` result is a clone of an `Arc` owned by
+    /// `parse_mdo_query`; the payload is counted there once.
+    pub(crate) fn shared_mdo_heap(_v: &Option<Arc<bsl_metadata::MetadataObject>>) -> usize {
+        0
+    }
+
+    /// A `resolve_register`/`resolve_register_by_name` result is a clone of an
+    /// `Arc` owned by `parse_register_query`; the payload is counted there once.
+    pub(crate) fn shared_register_heap(_v: &Option<Arc<bsl_metadata::Register>>) -> usize {
+        0
+    }
+
+    /// A `resolve_common_module`/`resolve_common_module_by_file` result is a
+    /// clone of an `Arc` owned by `parse_common_module_query`; the payload is
+    /// counted there once.
+    pub(crate) fn shared_common_module_heap(_v: &Option<Arc<bsl_metadata::CommonModule>>) -> usize {
+        0
+    }
+
+    /// A `resolve_http_service`/`resolve_http_service_by_file` result is a clone
+    /// of an `Arc` owned by `parse_http_service_query`; the payload is counted
+    /// there once.
+    pub(crate) fn shared_http_service_heap(_v: &Option<Arc<bsl_metadata::HTTPService>>) -> usize {
+        0
+    }
+
+    /// A `resolve_web_service`/`resolve_web_service_by_file` result is a clone of
+    /// an `Arc` owned by `parse_web_service_query`; the payload is counted there
+    /// once.
+    pub(crate) fn shared_web_service_heap(_v: &Option<Arc<bsl_metadata::WebService>>) -> usize {
+        0
+    }
+
+    /// A `resolve_integration_service`/`resolve_integration_service_by_file`
+    /// result is a clone of an `Arc` owned by `parse_integration_service_query`;
+    /// the payload is counted there once.
+    pub(crate) fn shared_integration_service_heap(
+        _v: &Option<Arc<bsl_metadata::IntegrationService>>,
+    ) -> usize {
+        0
+    }
+
+    /// A `resolve_event_subscription` result is a clone of an `Arc` owned by
+    /// `parse_event_subscription_query`; the payload is counted there once.
+    pub(crate) fn shared_event_subscription_heap(
+        _v: &Option<Arc<bsl_metadata::EventSubscription>>,
+    ) -> usize {
+        0
+    }
+
+    /// A `resolve_scheduled_job` result is a clone of an `Arc` owned by
+    /// `parse_scheduled_job_query`; the payload is counted there once.
+    pub(crate) fn shared_scheduled_job_heap(_v: &Option<Arc<bsl_metadata::ScheduledJob>>) -> usize {
+        0
+    }
+
+    /// A `resolve_role` result is a clone of an `Arc` owned by `parse_role_query`;
+    /// the payload is counted there once.
+    pub(crate) fn shared_role_heap(_v: &Option<Arc<bsl_metadata::Role>>) -> usize {
+        0
+    }
+
+    /// A `resolve_subsystem` result is a clone of an `Arc` owned by
+    /// `parse_subsystem_query`; the payload is counted there once.
+    pub(crate) fn shared_subsystem_heap(_v: &Option<Arc<bsl_metadata::Subsystem>>) -> usize {
+        0
+    }
+
+    /// Unlike the other `resolve_*` accessors, `resolve_defined_type` projects to
+    /// the defined type's *underlying* type via a fresh `Arc::new(...)` — it does
+    /// NOT alias `parse_defined_type_query`'s memo — so its payload must be
+    /// counted here for real.
+    pub(crate) fn defined_type_projection_heap(
+        v: &Option<Arc<bsl_metadata::AttributeType>>,
+    ) -> usize {
+        v.as_ref().map_or(0, |t| t.estimated_heap_size())
+    }
+
+    /// Heap of a `HashMap<String, V>` name index: the table plus each key's owned
+    /// string bytes.
+    fn string_key_map_heap<V>(map: &std::collections::HashMap<String, V>) -> usize {
+        stdx::heap::map_table_bytes::<String, V>(map.len())
+            + map.keys().map(String::capacity).sum::<usize>()
+    }
+
+    /// Heap of the `by_name` / `by_module_file` / `module_file_by_name` triple
+    /// shared by [`super::CommonModuleIndex`], [`super::HTTPServiceIndex`],
+    /// [`super::WebServiceIndex`], and [`super::IntegrationServiceIndex`]: each
+    /// table plus the name strings each of the three separately owns (a fresh
+    /// `fold_lower()` allocation per table, not shared across them).
+    fn triple_name_index_heap(
+        by_name: &std::collections::HashMap<String, vfs::FileId>,
+        by_module_file: &std::collections::HashMap<vfs::FileId, String>,
+        module_file_by_name: &std::collections::HashMap<String, vfs::FileId>,
+    ) -> usize {
+        string_key_map_heap(by_name)
+            + stdx::heap::map_table_bytes::<vfs::FileId, String>(by_module_file.len())
+            + by_module_file.values().map(String::capacity).sum::<usize>()
+            + string_key_map_heap(module_file_by_name)
+    }
+
+    // `NormName` keys are `Copy` ids into the global intern pool: the table
+    // itself is the whole cost, unlike the `String`-keyed indexes below whose
+    // key bytes are each table's own allocation.
+    pub(crate) fn config_index_heap(v: &Arc<super::ConfigIndex>) -> usize {
+        let by_name_bytes = stdx::heap::map_table_bytes::<
+            (bsl_metadata::MdoType, intern::NormName),
+            super::MdoFileIds,
+        >(v.by_name.len());
+        let register_bytes = stdx::heap::map_table_bytes::<
+            intern::NormName,
+            (bsl_metadata::MdoType, super::MdoFileIds),
+        >(v.register_by_name.len());
+        by_name_bytes + register_bytes
+    }
+
+    pub(crate) fn defined_type_index_heap(v: &Arc<super::DefinedTypeIndex>) -> usize {
+        stdx::heap::map_table_bytes::<intern::NormName, vfs::FileId>(v.by_name.len())
+    }
+
+    pub(crate) fn common_module_index_heap(v: &Arc<super::CommonModuleIndex>) -> usize {
+        triple_name_index_heap(&v.by_name, &v.by_module_file, &v.module_file_by_name)
+    }
+
+    pub(crate) fn event_subscription_index_heap(v: &Arc<super::EventSubscriptionIndex>) -> usize {
+        string_key_map_heap(&v.by_name)
+    }
+
+    pub(crate) fn scheduled_job_index_heap(v: &Arc<super::ScheduledJobIndex>) -> usize {
+        string_key_map_heap(&v.by_name)
+    }
+
+    pub(crate) fn role_index_heap(v: &Arc<super::RoleIndex>) -> usize {
+        string_key_map_heap(&v.by_name)
+    }
+
+    pub(crate) fn http_service_index_heap(v: &Arc<super::HTTPServiceIndex>) -> usize {
+        triple_name_index_heap(&v.by_name, &v.by_module_file, &v.module_file_by_name)
+    }
+
+    pub(crate) fn web_service_index_heap(v: &Arc<super::WebServiceIndex>) -> usize {
+        triple_name_index_heap(&v.by_name, &v.by_module_file, &v.module_file_by_name)
+    }
+
+    pub(crate) fn integration_service_index_heap(v: &Arc<super::IntegrationServiceIndex>) -> usize {
+        triple_name_index_heap(&v.by_name, &v.by_module_file, &v.module_file_by_name)
+    }
+
+    pub(crate) fn subsystem_index_heap(v: &Arc<super::SubsystemIndex>) -> usize {
+        string_key_map_heap(&v.by_name)
+    }
+}
+
+#[salsa::interned(debug, heap_size = heap_estimate::configuration_path_input_heap)]
 pub struct ConfigurationPathInput {
     pub path: String,
     #[returns(copy)]
@@ -24,7 +322,7 @@ pub fn intern_configuration_path<'db>(
 /// inside a tracked query) record a dependency on the specific root. Bumping one
 /// root's revision then invalidates only the queries that touched that root,
 /// instead of a single global counter invalidating every configuration.
-#[salsa::input(debug)]
+#[salsa::input(debug, heap_size = stdx::heap::zero)]
 pub struct ConfigRevisionInput {
     #[returns(copy)]
     pub revision: u32,
@@ -43,10 +341,81 @@ pub(crate) fn canonicalize_configuration_path(raw_path: &str) -> String {
     }
 }
 
-#[salsa::input(singleton, debug)]
+/// Atomic description of the workspace's config roots and their dependency
+/// topology. ONE input field holds the whole value because Salsa tracks input
+/// FIELDS independently (a revision per setter): splitting paths, closures and
+/// fingerprint across fields would let a reload be observed half-applied.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceConfigsSnapshot {
+    /// Config roots in declaration order; exactly one `None` label (the base).
+    pub paths: Vec<(Option<String>, PathBuf)>,
+    /// Canonicalized counterpart of `paths` (same order) — what per-file
+    /// longest-prefix matching uses, so a symlinked workspace still matches.
+    pub canonical_paths: Vec<PathBuf>,
+    /// Per entry: ordered transitive dependency chain (indices into `paths`,
+    /// dependencies first, the entry itself excluded). Empty for the base and
+    /// for independent extensions — which keeps the pre-dependency semantics:
+    /// a file sees the base plus its own extension only.
+    pub closures: Vec<Vec<usize>>,
+    /// Topology fingerprint (full hex digest) when built from a validated
+    /// project; `None` for legacy path-only registration.
+    pub fingerprint: Option<String>,
+}
+
+impl WorkspaceConfigsSnapshot {
+    /// Legacy shape: bare roots, no dependency edges. Every extension is
+    /// independent, exactly the pre-`dependsOn` visibility.
+    pub fn from_paths(paths: Vec<(Option<String>, PathBuf)>) -> Self {
+        let canonical_paths = paths
+            .iter()
+            .map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+            .collect();
+        let closures = vec![Vec::new(); paths.len()];
+        Self { paths, canonical_paths, closures, fingerprint: None }
+    }
+
+    /// The full shape from a validated project: base first, then extensions in
+    /// declaration order, each carrying its ordered transitive dependency
+    /// chain and the topology fingerprint.
+    pub fn from_project(project: &project_model::Project) -> Self {
+        let topology = project.extension_topology();
+        let base = project.source_path().to_path_buf();
+        let canonical_base = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
+        let mut paths: Vec<(Option<String>, PathBuf)> = vec![(None, base)];
+        let mut canonical_paths = vec![canonical_base];
+        let mut closures: Vec<Vec<usize>> = vec![Vec::new()];
+        for node in topology.nodes() {
+            paths.push((Some(node.name().to_string()), node.path().to_path_buf()));
+            canonical_paths.push(node.canonical_path().to_path_buf());
+            // Topology node indices are 0-based over extensions; snapshot slot 0
+            // is the base root, so every index shifts by one.
+            closures.push(node.closure().iter().map(|id| id.index() + 1).collect());
+        }
+        Self {
+            paths,
+            canonical_paths,
+            closures,
+            fingerprint: Some(topology.fingerprint().to_hex()),
+        }
+    }
+
+    /// Replace each configured root spelling with its canonical form. For hosts
+    /// whose file universe is enumerated canonically (the MCP resident/graph
+    /// scans): substrate back-links join a root against a canonical `.bsl`
+    /// path, so the registered roots must be canonical too or the reverse
+    /// lookup misses on a symlinked workspace.
+    pub fn canonicalized(mut self) -> Self {
+        for (idx, (_, path)) in self.paths.iter_mut().enumerate() {
+            *path = self.canonical_paths[idx].clone();
+        }
+        self
+    }
+}
+
+#[salsa::input(singleton, debug, heap_size = heap_estimate::workspace_configs_input_heap)]
 pub struct WorkspaceConfigsInput {
     #[returns(clone)]
-    pub paths: Vec<(Option<String>, PathBuf)>,
+    pub snapshot: Arc<WorkspaceConfigsSnapshot>,
 }
 
 /// Fallback revision counter for files that match no registered config root
@@ -54,7 +423,7 @@ pub struct WorkspaceConfigsInput {
 /// dependency here; coarse "everything changed" events bump it. A separate type
 /// from the per-root [`ConfigRevisionInput`] so it can be a Salsa singleton:
 /// there is exactly one global fallback per database.
-#[salsa::input(singleton, debug)]
+#[salsa::input(singleton, debug, heap_size = stdx::heap::zero)]
 pub struct GlobalConfigRevisionInput {
     #[returns(copy)]
     pub revision: u32,
@@ -71,7 +440,7 @@ pub struct GlobalConfigRevisionInput {
 /// even fully on disk in the VFS yet. The flag is a Salsa input (not a plain
 /// field) so the read inside a calling query records a dependency: the finalize
 /// flip then invalidates anything that resolved against the gated stub.
-#[salsa::input(singleton, debug)]
+#[salsa::input(singleton, debug, heap_size = stdx::heap::zero)]
 pub struct WorkspaceLoadStateInput {
     #[returns(copy)]
     pub complete: bool,
@@ -84,7 +453,11 @@ pub struct WorkspaceLoadStateInput {
 // re-enter the metadata loader's `rayon::scope` inside a worker thread), so an eviction
 // under the cap would let that load run in parallel and break the build's concurrency
 // invariant. 1024 is far above any real extension count while still bounded.
-#[salsa::tracked(lru = 1024, returns(clone))]
+#[salsa::tracked(
+    lru = 1024,
+    heap_size = heap_estimate::configuration_heap,
+    returns(clone)
+)]
 pub fn load_configuration<'db>(
     db: &'db dyn salsa::Database,
     path_input: ConfigurationPathInput<'db>,
@@ -117,7 +490,11 @@ pub fn load_configuration<'db>(
 /// heavily-extended project. Keyed on the two path inputs (which carry the config-root
 /// revisions), so the merge runs once per extension and re-runs only when a config
 /// actually changes. The result is identical to the inline merge, just shared.
-#[salsa::tracked(lru = 1024, returns(clone))]
+#[salsa::tracked(
+    lru = 1024,
+    heap_size = heap_estimate::configuration_heap,
+    returns(clone)
+)]
 pub fn merged_configuration<'db>(
     db: &'db dyn MetadataDb,
     main_input: ConfigurationPathInput<'db>,
@@ -132,11 +509,51 @@ pub fn merged_configuration<'db>(
     Arc::new(main.merged_with_extension(&extension))
 }
 
+/// An ordered visibility chain of config roots: the base first, then the
+/// file's transitive extension dependencies, then its own extension last.
+/// Interned so equal chains (every file of one extension) share one query key,
+/// and so the recursive prefix of a chain is itself a chain.
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
+pub struct ConfigChainInput<'db> {
+    #[returns(ref)]
+    pub inputs: Vec<ConfigurationPathInput<'db>>,
+}
+
+/// The whole-config merge of an ordered visibility chain, composed FORWARD:
+/// each overlay is applied onto the accumulated configuration, so dependencies
+/// apply before their dependents and the file's own extension wins last. The
+/// recursion memoizes every prefix — the chain `[base, d1, own]` reuses
+/// `[base, d1]`, which is exactly the chain of `d1`'s own files. Memoized
+/// entries are bounded by the number of unique prefixes: at most the sum of
+/// all chain lengths, far below the LRU cap for realistic extension counts.
+#[salsa::tracked(
+    lru = 1024,
+    heap_size = heap_estimate::configuration_heap,
+    returns(clone)
+)]
+pub fn chain_configuration<'db>(
+    db: &'db dyn MetadataDb,
+    chain: ConfigChainInput<'db>,
+) -> Arc<Configuration> {
+    let _span = tracing::info_span!("chain_configuration").entered();
+    let inputs = chain.inputs(db.as_dyn_database());
+    match inputs.split_last() {
+        None => Arc::new(Configuration::new("Configuration")),
+        Some((only, [])) => db.load_configuration(*only),
+        Some((last, prefix)) => {
+            let prefix_chain = ConfigChainInput::new(db.as_dyn_database(), prefix.to_vec());
+            let base = chain_configuration(db, prefix_chain);
+            let overlay = db.load_configuration(*last);
+            Arc::new(base.merged_with_extension(&overlay))
+        }
+    }
+}
+
 /// The composing files of a single metadata object: the main `<Name>.xml` and an
 /// optional `Ext/Predefined.xml`, plus the kind that selects the parser. Interned
 /// so [`parse_mdo_query`] keys on the file identities; the per-file content
 /// revisions drive invalidation, so editing one MDO's XML re-parses only it.
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct MdoFiles<'db> {
     #[returns(copy)]
     pub mdo_type: bsl_metadata::MdoType,
@@ -177,7 +594,7 @@ fn warn_on_stem_name_divergence(kind: &str, stem_key: &str, xml_name: &str) {
 /// VFS (`file_text`). Memoised per MDO and backdated on an unchanged object, so a
 /// reload re-parses only the files that actually changed and only that object's
 /// consumers are invalidated.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::mdo_heap, returns(clone))]
 pub fn parse_mdo_query<'db>(
     db: &'db dyn base_db::SourceDatabase,
     files: MdoFiles<'db>,
@@ -320,7 +737,7 @@ pub struct MetadataListingData {
 /// another. `entries` (MDOs + registers), `defined_types`, and `common_modules` are
 /// separate fields, so a structure change to one family does not invalidate the
 /// indexes derived from the others.
-#[salsa::input(debug)]
+#[salsa::input(debug, heap_size = heap_estimate::metadata_listing_input_heap)]
 pub struct MetadataListingInput {
     pub entries: Arc<Vec<MdoEntry>>,
     pub defined_types: Arc<Vec<DefinedTypeEntry>>,
@@ -346,23 +763,23 @@ pub struct MdoFileIds {
 /// structure input, so a content edit leaves it memoised.
 #[derive(Default, PartialEq, Eq, Debug)]
 pub struct ConfigIndex {
-    by_name: std::collections::HashMap<(bsl_metadata::MdoType, String), MdoFileIds>,
+    by_name: FxHashMap<(bsl_metadata::MdoType, NormName), MdoFileIds>,
     /// Registers keyed by name alone (no kind), for callers that know only the
     /// register name (e.g. a `Движения.<Register>` movement touch). A register
     /// name is unique within a config root, so this carries its kind alongside.
-    register_by_name: std::collections::HashMap<String, (bsl_metadata::MdoType, MdoFileIds)>,
+    register_by_name: FxHashMap<NormName, (bsl_metadata::MdoType, MdoFileIds)>,
 }
 
 impl ConfigIndex {
     pub fn lookup(&self, kind: bsl_metadata::MdoType, name: &str) -> Option<MdoFileIds> {
-        self.by_name.get(&(kind, name.fold_lower())).copied()
+        self.by_name.get(&(kind, NormName::intern(name))).copied()
     }
 
     pub fn lookup_register_by_name(
         &self,
         name: &str,
     ) -> Option<(bsl_metadata::MdoType, MdoFileIds)> {
-        self.register_by_name.get(&name.fold_lower()).copied()
+        self.register_by_name.get(&NormName::intern(name)).copied()
     }
 
     pub fn len(&self) -> usize {
@@ -377,7 +794,7 @@ impl ConfigIndex {
 /// Build a config root's name lookup from its structure listing. Tracked on the
 /// listing input alone, so it re-runs only on a structure change (add/remove/
 /// rename), not on a content edit — those flow through [`parse_mdo_query`].
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(heap_size = heap_estimate::config_index_heap, returns(ref))]
 pub fn config_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -385,13 +802,14 @@ pub fn config_index(
     let _span = tracing::info_span!("config_index").entered();
 
     let entries = listing.entries(db);
-    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
-    let mut register_by_name = std::collections::HashMap::new();
+    let mut by_name: FxHashMap<_, _> =
+        FxHashMap::with_capacity_and_hasher(entries.len(), Default::default());
+    let mut register_by_name = FxHashMap::default();
     for entry in entries.iter() {
         let ids = MdoFileIds { main: entry.main, predefined: entry.predefined };
-        by_name.insert((entry.kind, entry.name.fold_lower()), ids);
+        by_name.insert((entry.kind, NormName::intern(&entry.name)), ids);
         if entry.kind.is_register() {
-            register_by_name.insert(entry.name.fold_lower(), (entry.kind, ids));
+            register_by_name.insert(NormName::intern(&entry.name), (entry.kind, ids));
         }
     }
     Arc::new(ConfigIndex { by_name, register_by_name })
@@ -404,7 +822,7 @@ pub fn config_index(
 /// resolutions in the same root stay memoised. An add/remove re-runs
 /// `config_index`, so an absent-name miss correctly invalidates when the MDO later
 /// appears. Extension overlay across roots is composed by callers, not here.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_mdo_heap, returns(clone))]
 pub fn resolve_metadata_object(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -426,7 +844,7 @@ pub fn resolve_metadata_object(
 /// [`MdoFiles`] (registers have no predefined sidecar) but a separate tracked fn,
 /// so a register and an object never share a memo. Backdates on an unchanged
 /// register.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::register_heap, returns(clone))]
 pub fn parse_register_query(
     db: &dyn base_db::SourceDatabase,
     files: MdoFiles<'_>,
@@ -441,7 +859,7 @@ pub fn parse_register_query(
 /// [`resolve_metadata_object`]. Shares [`config_index`] (the listing carries
 /// register entries too) but parses via [`parse_register_query`]. Extension
 /// overlay across roots is composed by callers.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_register_heap, returns(clone))]
 pub fn resolve_register(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -464,7 +882,7 @@ pub fn resolve_register(
 /// [`parse_register_query`]. Same per-MDO granularity and absent-name
 /// invalidation as [`resolve_register`]; extension overlay across roots is
 /// composed by callers.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_register_heap, returns(clone))]
 pub fn resolve_register_by_name(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -483,7 +901,7 @@ pub fn resolve_register_by_name(
 /// The main XML file of a single defined type, interned so
 /// [`parse_defined_type_query`] keys on the file identity; its content revision
 /// drives invalidation, so editing one defined type re-parses only it.
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct DefinedTypeFile<'db> {
     #[returns(copy)]
     pub main: vfs::FileId,
@@ -494,7 +912,7 @@ pub struct DefinedTypeFile<'db> {
 /// so [`resolve_defined_type`] can flag a stem-vs-`<Name>` divergence, then projects
 /// to the underlying type (the resolution unit; an extension overlay replaces it
 /// wholesale). Backdates on an unchanged defined type.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::defined_type_heap, returns(clone))]
 pub fn parse_defined_type_query(
     db: &dyn base_db::SourceDatabase,
     file: DefinedTypeFile<'_>,
@@ -511,17 +929,17 @@ pub fn parse_defined_type_query(
 /// invalidate it.
 #[derive(Default, PartialEq, Eq, Debug)]
 pub struct DefinedTypeIndex {
-    by_name: std::collections::HashMap<String, vfs::FileId>,
+    by_name: FxHashMap<NormName, vfs::FileId>,
 }
 
 impl DefinedTypeIndex {
     pub fn lookup(&self, name: &str) -> Option<vfs::FileId> {
-        self.by_name.get(&name.fold_lower()).copied()
+        self.by_name.get(&NormName::intern(name)).copied()
     }
 }
 
 /// Build a config root's defined-type name lookup from its structure listing.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(heap_size = heap_estimate::defined_type_index_heap, returns(ref))]
 pub fn defined_type_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -529,9 +947,10 @@ pub fn defined_type_index(
     let _span = tracing::info_span!("defined_type_index").entered();
 
     let entries = listing.defined_types(db);
-    let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+    let mut by_name: FxHashMap<_, _> =
+        FxHashMap::with_capacity_and_hasher(entries.len(), Default::default());
     for entry in entries.iter() {
-        by_name.insert(entry.name.fold_lower(), entry.main);
+        by_name.insert(NormName::intern(&entry.name), entry.main);
     }
     Arc::new(DefinedTypeIndex { by_name })
 }
@@ -540,7 +959,7 @@ pub fn defined_type_index(
 /// per-defined-type Salsa granularity. The defined-type counterpart of
 /// [`resolve_metadata_object`]; extension overlay across roots is composed by
 /// callers (an extension replaces the underlying type wholesale).
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::defined_type_projection_heap, returns(clone))]
 pub fn resolve_defined_type(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -559,7 +978,7 @@ pub fn resolve_defined_type(
 /// The main XML file of a single common module, interned so
 /// [`parse_common_module_query`] keys on the file identity; its content revision
 /// drives invalidation, so editing one common module re-parses only it.
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct CommonModuleFile<'db> {
     #[returns(copy)]
     pub main: vfs::FileId,
@@ -569,7 +988,7 @@ pub struct CommonModuleFile<'db> {
 /// VFS. The common-module counterpart of [`parse_defined_type_query`]; only metadata
 /// (flags + name) is read — the module body is resolved through the symbol tree.
 /// Backdates on unchanged metadata.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::common_module_heap, returns(clone))]
 pub fn parse_common_module_query(
     db: &dyn base_db::SourceDatabase,
     file: CommonModuleFile<'_>,
@@ -612,7 +1031,7 @@ impl CommonModuleIndex {
 }
 
 /// Build a config root's common-module lookup from its structure listing.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(heap_size = heap_estimate::common_module_index_heap, returns(ref))]
 pub fn common_module_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -637,7 +1056,7 @@ pub fn common_module_index(
 /// per-common-module Salsa granularity. The common-module counterpart of
 /// [`resolve_defined_type`]; extension overlay across roots is composed by callers
 /// (an extension replaces the module wholesale).
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_common_module_heap, returns(clone))]
 pub fn resolve_common_module(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -657,7 +1076,7 @@ pub fn resolve_common_module(
 /// Resolve the common module whose `Ext/Module.bsl` is `module_file` within one
 /// config root. Answers "which common module owns this `.bsl`?" via the reverse
 /// index, then parses that module's metadata at per-common-module granularity.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_common_module_heap, returns(clone))]
 pub fn resolve_common_module_by_file(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -678,13 +1097,13 @@ fn service_name_from_main_file(db: &dyn crate::RootDatabase, main: vfs::FileId) 
         .unwrap_or_default()
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct HTTPServiceFile<'db> {
     #[returns(copy)]
     pub main: vfs::FileId,
 }
 
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::http_service_heap, returns(clone))]
 pub fn parse_http_service_query(
     db: &dyn crate::RootDatabase,
     file: HTTPServiceFile<'_>,
@@ -718,7 +1137,7 @@ impl HTTPServiceIndex {
     }
 }
 
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(heap_size = heap_estimate::http_service_index_heap, returns(ref))]
 pub fn http_service_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -739,7 +1158,7 @@ pub fn http_service_index(
     Arc::new(HTTPServiceIndex { by_name, by_module_file, module_file_by_name })
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_http_service_heap, returns(clone))]
 pub fn resolve_http_service(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -753,7 +1172,7 @@ pub fn resolve_http_service(
     parse_http_service_query(db, file)
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_http_service_heap, returns(clone))]
 pub fn resolve_http_service_by_file(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -768,13 +1187,13 @@ pub fn resolve_http_service_by_file(
     parse_http_service_query(db, file)
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct WebServiceFile<'db> {
     #[returns(copy)]
     pub main: vfs::FileId,
 }
 
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::web_service_heap, returns(clone))]
 pub fn parse_web_service_query(
     db: &dyn crate::RootDatabase,
     file: WebServiceFile<'_>,
@@ -808,7 +1227,7 @@ impl WebServiceIndex {
     }
 }
 
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(heap_size = heap_estimate::web_service_index_heap, returns(ref))]
 pub fn web_service_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -829,7 +1248,7 @@ pub fn web_service_index(
     Arc::new(WebServiceIndex { by_name, by_module_file, module_file_by_name })
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_web_service_heap, returns(clone))]
 pub fn resolve_web_service(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -843,7 +1262,7 @@ pub fn resolve_web_service(
     parse_web_service_query(db, file)
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_web_service_heap, returns(clone))]
 pub fn resolve_web_service_by_file(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -858,13 +1277,13 @@ pub fn resolve_web_service_by_file(
     parse_web_service_query(db, file)
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct IntegrationServiceFile<'db> {
     #[returns(copy)]
     pub main: vfs::FileId,
 }
 
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::integration_service_heap, returns(clone))]
 pub fn parse_integration_service_query(
     db: &dyn crate::RootDatabase,
     file: IntegrationServiceFile<'_>,
@@ -898,7 +1317,7 @@ impl IntegrationServiceIndex {
     }
 }
 
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(heap_size = heap_estimate::integration_service_index_heap, returns(ref))]
 pub fn integration_service_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -919,7 +1338,7 @@ pub fn integration_service_index(
     Arc::new(IntegrationServiceIndex { by_name, by_module_file, module_file_by_name })
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_integration_service_heap, returns(clone))]
 pub fn resolve_integration_service(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -933,7 +1352,7 @@ pub fn resolve_integration_service(
     parse_integration_service_query(db, file)
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_integration_service_heap, returns(clone))]
 pub fn resolve_integration_service_by_file(
     db: &dyn crate::RootDatabase,
     listing: MetadataListingInput,
@@ -951,7 +1370,7 @@ pub fn resolve_integration_service_by_file(
 /// The main XML file of a single event subscription, interned so
 /// [`parse_event_subscription_query`] keys on the file identity; its content
 /// revision drives invalidation, so editing one subscription re-parses only it.
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct EventSubscriptionFile<'db> {
     #[returns(copy)]
     pub main: vfs::FileId,
@@ -959,7 +1378,7 @@ pub struct EventSubscriptionFile<'db> {
 
 /// Parse one event subscription from its main XML, read through the versioned VFS.
 /// Backdates on unchanged metadata.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::event_subscription_heap, returns(clone))]
 pub fn parse_event_subscription_query(
     db: &dyn base_db::SourceDatabase,
     file: EventSubscriptionFile<'_>,
@@ -986,7 +1405,7 @@ impl EventSubscriptionIndex {
 }
 
 /// Build a config root's event-subscription name lookup from its structure listing.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(heap_size = heap_estimate::event_subscription_index_heap, returns(ref))]
 pub fn event_subscription_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1004,7 +1423,7 @@ pub fn event_subscription_index(
 /// Resolve a single event subscription's metadata by name within one config root,
 /// at per-event-subscription Salsa granularity. Extension overlay across roots is
 /// composed by callers (an extension replaces the subscription wholesale).
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_event_subscription_heap, returns(clone))]
 pub fn resolve_event_subscription(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1023,7 +1442,7 @@ pub fn resolve_event_subscription(
 /// The main XML file of a single scheduled job, interned so
 /// [`parse_scheduled_job_query`] keys on the file identity; its content revision
 /// drives invalidation, so editing one scheduled job re-parses only it.
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct ScheduledJobFile<'db> {
     #[returns(copy)]
     pub main: vfs::FileId,
@@ -1032,7 +1451,7 @@ pub struct ScheduledJobFile<'db> {
 /// Parse one scheduled job from its main XML, read through the versioned VFS. The
 /// scheduled-job counterpart of [`parse_event_subscription_query`]; backdates on
 /// unchanged metadata.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::scheduled_job_heap, returns(clone))]
 pub fn parse_scheduled_job_query(
     db: &dyn base_db::SourceDatabase,
     file: ScheduledJobFile<'_>,
@@ -1059,7 +1478,7 @@ impl ScheduledJobIndex {
 }
 
 /// Build a config root's scheduled-job name lookup from its structure listing.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(heap_size = heap_estimate::scheduled_job_index_heap, returns(ref))]
 pub fn scheduled_job_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1078,7 +1497,7 @@ pub fn scheduled_job_index(
 /// per-scheduled-job Salsa granularity. The scheduled-job counterpart of
 /// [`resolve_event_subscription`]; extension overlay across roots is composed by
 /// callers (an extension replaces the job wholesale).
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_scheduled_job_heap, returns(clone))]
 pub fn resolve_scheduled_job(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1094,7 +1513,7 @@ pub fn resolve_scheduled_job(
     Some(job)
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct RoleFiles<'db> {
     #[returns(copy)]
     pub main: vfs::FileId,
@@ -1102,7 +1521,7 @@ pub struct RoleFiles<'db> {
     pub rights: Option<vfs::FileId>,
 }
 
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::role_heap, returns(clone))]
 pub fn parse_role_query(
     db: &dyn base_db::SourceDatabase,
     files: RoleFiles<'_>,
@@ -1131,7 +1550,7 @@ impl RoleIndex {
     }
 }
 
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(heap_size = heap_estimate::role_index_heap, returns(ref))]
 pub fn role_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1149,7 +1568,7 @@ pub fn role_index(
     Arc::new(RoleIndex { by_name })
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_role_heap, returns(clone))]
 pub fn resolve_role(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1169,7 +1588,7 @@ pub fn resolve_role(
 /// [`parse_subsystem_query`] keys on the file identity; its content revision
 /// drives invalidation, so editing one subsystem re-parses only it. The
 /// subsystem counterpart of [`ScheduledJobFile`].
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct SubsystemFile<'db> {
     #[returns(copy)]
     pub main: vfs::FileId,
@@ -1178,7 +1597,7 @@ pub struct SubsystemFile<'db> {
 /// Parse one subsystem from its main XML, read through the versioned VFS. The
 /// subsystem counterpart of [`parse_scheduled_job_query`]; backdates on
 /// unchanged metadata.
-#[salsa::tracked(lru = 8192, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::subsystem_heap, returns(clone))]
 pub fn parse_subsystem_query(
     db: &dyn base_db::SourceDatabase,
     file: SubsystemFile<'_>,
@@ -1205,7 +1624,7 @@ impl SubsystemIndex {
 }
 
 /// Build a config root's subsystem name lookup from its structure listing.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(heap_size = heap_estimate::subsystem_index_heap, returns(ref))]
 pub fn subsystem_index(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,
@@ -1225,7 +1644,7 @@ pub fn subsystem_index(
 /// [`resolve_scheduled_job`]; extension overlay across roots is composed by
 /// callers (an extension adds to a same-name base via
 /// [`bsl_metadata::Subsystem::merge_from`]).
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(heap_size = heap_estimate::shared_subsystem_heap, returns(clone))]
 pub fn resolve_subsystem(
     db: &dyn base_db::SourceDatabase,
     listing: MetadataListingInput,

@@ -30,7 +30,44 @@ pub struct TaskPool<T> {
 pub struct Handle<T> {
     pub pool: TaskPool<T>,
     pub receiver: Receiver<T>,
-    _workers: Vec<std::thread::JoinHandle<()>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl<T: Send + 'static> Handle<T> {
+    /// Run `f` once on every worker thread. A barrier rendezvous parks each worker
+    /// that ran its copy until all of them have, so one worker cannot consume
+    /// several of the jobs while another never sees one. For clearing per-thread
+    /// state — e.g. the parser's thread-local green-node cache — that the event
+    /// loop cannot reach across threads.
+    ///
+    /// All-or-nothing: the jobs are enqueued only when the queue has room for
+    /// every one of them, so a partially-spawned rendezvous can never park a
+    /// subset of the workers forever (the check is race-free because the event
+    /// loop is the queue's single producer). Meant for quiescent moments: while
+    /// the rendezvous forms, parked workers serve no other jobs.
+    pub fn try_broadcast(&self, f: impl Fn() + Send + Sync + 'static) -> Result<(), TrySpawnError> {
+        let workers = self.workers.len();
+        let slack = self
+            .pool
+            .job_sender
+            .capacity()
+            .map(|cap| cap.saturating_sub(self.pool.job_sender.len()))
+            .unwrap_or(usize::MAX);
+        if slack < workers {
+            return Err(TrySpawnError::Full);
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+        let f = std::sync::Arc::new(f);
+        for _ in 0..workers {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let f = std::sync::Arc::clone(&f);
+            self.pool.try_spawn_detached(move || {
+                f();
+                barrier.wait();
+            })?;
+        }
+        Ok(())
+    }
 }
 
 impl<T: Send + 'static> TaskPool<T> {
@@ -56,7 +93,7 @@ impl<T: Send + 'static> TaskPool<T> {
             handles.push(handle);
         }
 
-        Handle { pool: TaskPool { sender, job_sender }, receiver, _workers: handles }
+        Handle { pool: TaskPool { sender, job_sender }, receiver, workers: handles }
     }
 
     /// Enqueue a job without ever blocking the caller. The job queue is bounded
@@ -81,6 +118,24 @@ impl<T: Send + 'static> TaskPool<T> {
             Err(crossbeam_channel::TrySendError::Full(_)) => Err(TrySpawnError::Full),
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
                 tracing::warn!("task pool job channel closed; dropping task");
+                Err(TrySpawnError::Disconnected)
+            }
+        }
+    }
+
+    /// Enqueue a raw job that posts no completion message back to the event loop.
+    /// For thread-maintenance work (clearing a worker's thread-local caches) whose
+    /// completion must not count as loop activity — a result `T` would wake the
+    /// loop and reset the idle clock that scheduled the job in the first place.
+    fn try_spawn_detached<F>(&self, job: F) -> Result<(), TrySpawnError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        match self.job_sender.try_send(Box::new(job)) {
+            Ok(()) => Ok(()),
+            Err(crossbeam_channel::TrySendError::Full(_)) => Err(TrySpawnError::Full),
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                tracing::warn!("task pool job channel closed; dropping detached job");
                 Err(TrySpawnError::Disconnected)
             }
         }
@@ -180,6 +235,56 @@ mod tests {
             }
         }
         assert_eq!(counter.load(Ordering::SeqCst), jobs);
+    }
+
+    #[test]
+    fn try_broadcast_reaches_every_worker_exactly_once() {
+        let workers = 4;
+        let handle = TaskPool::<usize>::new_with_workers(workers);
+        let (tx, rx) = unbounded();
+        handle
+            .try_broadcast(move || {
+                let _ = tx.send(std::thread::current().id());
+            })
+            .expect("an idle pool accepts a broadcast");
+
+        let ids: std::collections::HashSet<_> = (0..workers)
+            .map(|_| {
+                rx.recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("every worker runs its copy")
+            })
+            .collect();
+        assert_eq!(ids.len(), workers, "the barrier must fan the job out to distinct workers");
+
+        // The rendezvous released: the pool still serves ordinary jobs.
+        handle.pool.try_spawn(|| 7).expect("pool alive after broadcast");
+        assert_eq!(
+            handle.receiver.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(7),
+            "workers must be released after the rendezvous"
+        );
+    }
+
+    #[test]
+    fn try_broadcast_refuses_partial_spawn_when_queue_lacks_room() {
+        let handle = TaskPool::<usize>::new_with_workers(1);
+        // Park the single worker so enqueued jobs stay queued.
+        let (gate_tx, gate_rx) = bounded::<()>(0);
+        handle
+            .pool
+            .try_spawn(move || {
+                let _ = gate_rx.recv();
+                0
+            })
+            .expect("first job fits");
+        while handle.pool.try_spawn(|| 1).is_ok() {}
+
+        assert_eq!(
+            handle.try_broadcast(|| ()).unwrap_err(),
+            TrySpawnError::Full,
+            "a full queue must refuse the whole broadcast, not enqueue part of it"
+        );
+        drop(gate_tx);
     }
 
     #[test]

@@ -88,6 +88,16 @@ impl CommonModule {
     pub fn is_privileged(&self) -> bool {
         self.privileged
     }
+
+    /// Heap bytes owned by this module, memoised by `ide-db`'s
+    /// `parse_common_module_query` for Salsa's `heap_size` hook: its name plus
+    /// the optional comment/URI strings. New heap-owning fields must be added
+    /// here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.comment.as_ref().map_or(0, String::capacity)
+            + self.uri.as_ref().map_or(0, String::capacity)
+    }
 }
 
 impl MdObject for CommonModule {

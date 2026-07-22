@@ -51,12 +51,23 @@ impl GlobalState {
         tracing::debug!("initialized empty SourceRoot(0) before event loop");
     }
 
-    pub fn set_workspace_root(&mut self, root: PathBuf) {
+    /// On an invalid project (unparseable config, invalid extension topology)
+    /// the state is left untouched: the initial load then has no workspace at
+    /// all, and a live reload keeps serving the last valid project. The caller
+    /// surfaces the error to the client.
+    pub fn set_workspace_root(&mut self, root: PathBuf) -> Result<(), project_model::ProjectError> {
         let start = Instant::now();
         tracing::info!(?root, "setting workspace root");
-        self.supersede_call_hierarchy_index(base_db::SourceRootId(0));
 
-        let project = project_model::Project::new(&root);
+        let project = match project_model::Project::new(&root) {
+            Ok(project) => project,
+            Err(e) => {
+                tracing::error!(error = %e, "invalid project; workspace root not set");
+                return Err(e);
+            }
+        };
+
+        self.supersede_call_hierarchy_index(base_db::SourceRootId(0));
 
         let source_path = project.source_path().to_path_buf();
         let extensions: Vec<(String, PathBuf)> = project.extension_paths().to_vec();
@@ -68,18 +79,15 @@ impl GlobalState {
             "loaded project, scanning source path"
         );
 
+        let configs_snapshot = ide_db::metadata::WorkspaceConfigsSnapshot::from_project(&project);
+
         self.workspace_root = Some(root.clone());
         self.project = Some(project);
 
         {
-            let mut all_paths: Vec<(Option<String>, std::path::PathBuf)> = Vec::new();
-            all_paths.push((None, source_path.clone()));
-            for (name, ext_path) in &extensions {
-                all_paths.push((Some(name.clone()), ext_path.clone()));
-            }
             self.analysis_host.request_cancellation();
             let db = self.analysis_host.raw_database_mut();
-            db.set_all_config_paths(all_paths);
+            db.set_workspace_configs_snapshot(configs_snapshot);
             // Close the whole-config loader gate for the INITIAL load only: the
             // vfs_done finalize reopens it before the metadata bootstrap and
             // warm-up. A live reload (config file edit) must not degrade
@@ -94,13 +102,12 @@ impl GlobalState {
 
         self.vfs_progress_config_version += 1;
 
-        let config_files: Vec<paths::AbsPathBuf> =
-            ["bsl-analyzer.toml", ".bsl-analyzer.json", ".bsl-language-server.json"]
-                .iter()
-                .map(|name| root.join(name))
-                .filter(|p| p.exists())
-                .map(paths::AbsPathBuf::assert_utf8)
-                .collect();
+        let config_files: Vec<paths::AbsPathBuf> = project_model::CONFIG_FILE_NAMES
+            .iter()
+            .map(|name| root.join(name))
+            .filter(|p| p.exists())
+            .map(paths::AbsPathBuf::assert_utf8)
+            .collect();
 
         let mut include = vec![paths::AbsPathBuf::assert_utf8(source_path)];
 
@@ -143,6 +150,7 @@ impl GlobalState {
             elapsed_ms = start.elapsed().as_millis() as u64,
             "set_workspace_root complete (loader running async)",
         );
+        Ok(())
     }
 
     pub fn process_changes(&mut self, suppress_metadata_bump: bool) -> ChangeOutcome {
@@ -202,8 +210,10 @@ impl GlobalState {
                     "bsl-analyzer.toml" | ".bsl-analyzer.json" | ".bsl-language-server.json"
                 ) {
                     tracing::info!(path = %path_path.display(), "config file changed");
+                    // Whether this is structural is decided after the reload
+                    // attempt below: only a successful reload changes the
+                    // effective project.
                     config_file_changed = true;
-                    call_hierarchy_structural_change = true;
                 }
                 if project_model::is_metadata_path(path_path) {
                     tracing::info!(path = %path_path.display(), "metadata XML file changed");
@@ -290,8 +300,13 @@ impl GlobalState {
         if config_file_changed {
             if suppress_metadata_bump {
                 tracing::debug!("suppressing project reload during initial sync");
+            } else if self.reload_project_config() {
+                call_hierarchy_structural_change = true;
             } else {
-                self.reload_project_config();
+                // The edit produced an invalid config: the last-good project
+                // stays in effect, so nothing downstream (call-hierarchy
+                // index, batch diagnostics) may be torn down over it.
+                config_file_changed = false;
             }
         }
 
@@ -409,7 +424,12 @@ impl GlobalState {
             return false;
         };
         tracing::info!("reloading project config");
-        self.set_workspace_root(root);
+        if let Err(e) = self.set_workspace_root(root) {
+            // Keep serving the last valid project; the config edit that broke
+            // the file must not tear down a working workspace.
+            self.show_error_message(format!("bsl-analyzer: project config reload failed: {e}"));
+            return false;
+        }
         self.prune_stale_workspace_files();
         true
     }

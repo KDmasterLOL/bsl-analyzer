@@ -92,6 +92,12 @@ impl SharedState {
                 "workspace change hub overflowed; re-marking all workspace .bsl paths dirty for the search overlay"
             );
             Self::rewalk_workspace_bsl_dirty(engine, watch_root);
+            // The dropped (or re-arm-superseded) detail may have included an
+            // analyzer-config edit no scan of file bodies can reconstruct — treat
+            // the rescan like a config change: conservative whole-collection mark
+            // plus a graph nudge.
+            Self::mark_all_context_dirty(engine);
+            graph.nudge_rebuild();
             return;
         }
 
@@ -121,9 +127,49 @@ impl SharedState {
             graph.nudge_rebuild();
         }
 
+        // An analyzer-config change can re-shape the extension topology, and with it the
+        // graph context of EVERY module — with no `.xml` stat moving at all. Mark the
+        // whole collection and nudge; the topology-triggered rebuild's publish then
+        // re-renders exactly these marks (they carry seqs below the build's start).
+        let config_changed = entries.iter().any(|e| {
+            let is_config = |p: &Path| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| project_model::CONFIG_FILE_NAMES.contains(&n))
+            };
+            is_config(&e.canonical) || is_config(&e.raw)
+        });
+        if config_changed {
+            // The nudge must NOT be gated on the marking succeeding: with the
+            // engine not yet published the mark is impossible, but the graph must
+            // still catch up — its topology-changed publish then requests the
+            // whole-collection re-render through the hook.
+            if !Self::mark_all_context_dirty(engine) {
+                tracing::debug!(
+                    "config change before the search engine published; relying on the                      graph's topology-changed publish for the context re-render"
+                );
+            }
+            graph.nudge_rebuild();
+        }
+
         // A subtree removal lost the descendant list → reconsider the whole tree.
         if class.structural_rescan {
             Self::rewalk_workspace_bsl_dirty(engine, watch_root);
+        }
+    }
+
+    /// Mark every workspace document's stored graph context stale. Used for a
+    /// topology-shaping change (an analyzer-config edit) where no per-object
+    /// resolution is possible: any module's visibility chain may have moved.
+    fn mark_all_context_dirty(engine: &SharedSearchEngine) -> bool {
+        let Ok(guard) = engine.lock() else { return false };
+        let Some(engine) = guard.as_ref() else { return false };
+        match engine.mark_workspace_context_dirty() {
+            Ok(count) => count > 0,
+            Err(e) => {
+                tracing::warn!("failed to mark collection context dirty on config change: {e}");
+                false
+            }
         }
     }
 
@@ -817,6 +863,120 @@ mod tests {
         assert!(snapshot.is_empty(), "an xml edit marks no body dirty and triggers no walk");
     }
 
+    /// An analyzer-config edit (`dependsOn` and friends) can re-shape the extension
+    /// topology with not a single `.xml` touched — the graph context of EVERY indexed
+    /// document may be stale, so the sink must mark the whole collection dirty.
+    /// Revert-proof: drop the config-file branch in `apply_search_drift` and nothing
+    /// is marked (the classifier ignores non-`.bsl`/`.xml` paths).
+    #[test]
+    fn search_sink_config_edit_marks_whole_collection_context_dirty() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        engine
+            .sync_indexed_documents_in_collection(
+                "code",
+                &[IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "CommonModules/А/Ext/Module.bsl".to_owned(),
+                    symbol_name: "П".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 0,
+                    line_end: 1,
+                    text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                    content_hash: "h".to_owned(),
+                    graph_context: None,
+                }],
+                None,
+            )
+            .unwrap();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let toml = workspace.join("bsl-analyzer.toml");
+        fs::write(&toml, "[source]\nroot = \".\"\n").unwrap();
+        let entry = ChangeEntry {
+            canonical: toml.clone(),
+            raw: toml,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &workspace,
+            &[entry],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        let dirty = engine.context_dirty_paths("code").unwrap();
+        assert!(
+            dirty.contains("CommonModules/А/Ext/Module.bsl"),
+            "a config edit must mark every indexed document context-dirty: {dirty:?}",
+        );
+    }
+
+    /// A hub rescan (overflow / re-arm) destroyed per-path detail — a config edit
+    /// may be among the lost events, so the sink must conservatively mark the whole
+    /// collection context-dirty, not only re-mark `.bsl` bodies.
+    #[test]
+    fn search_sink_rescan_marks_whole_collection_context_dirty() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+
+        // The module exists on disk: the rescan's `.bsl` rewalk prunes store rows
+        // whose file is gone, and a pruned row cannot carry a context mark.
+        let on_disk = workspace.join("CommonModules/Б/Ext/Module.bsl");
+        fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+        fs::write(&on_disk, "Процедура П()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        engine
+            .sync_indexed_documents_in_collection(
+                "code",
+                &[IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "CommonModules/Б/Ext/Module.bsl".to_owned(),
+                    symbol_name: "П".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 0,
+                    line_end: 1,
+                    text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                    content_hash: "h".to_owned(),
+                    graph_context: None,
+                }],
+                None,
+            )
+            .unwrap();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &workspace,
+            &[],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        let dirty = engine.context_dirty_paths("code").unwrap();
+        assert!(
+            dirty.contains("CommonModules/Б/Ext/Module.bsl"),
+            "a rescan must conservatively mark every indexed document context-dirty: {dirty:?}",
+        );
+    }
+
     /// A metadata `.xml` edit marks BOTH the object's owned modules (path convention) AND the
     /// REFERENCING modules — those whose `graph_context` embeds a read of the object — resolved
     /// through the persisted graph's inbound read edges. A module that references nothing about
@@ -869,19 +1029,19 @@ mod tests {
         let out = crate::cache::graph_db_path(&workspace);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         let summary = crate::graph_db::build_graph_database(
-            &workspace,
+            &crate::graph::ProjectSnapshot::load(&workspace),
             &out,
             100,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files: 0,
                 built_at: "t".to_owned(),
             },
         )
         .expect("graph builds");
         let graph = crate::graph::GraphState::for_workspace(workspace.clone());
-        graph.adopt_prebuilt(1, 0, summary.modules);
+        graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules);
 
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(workspace.clone());

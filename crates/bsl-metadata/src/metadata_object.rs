@@ -353,12 +353,31 @@ pub struct EnumValue {
     pub uuid: String,
 }
 
+impl EnumValue {
+    /// Heap bytes owned by this value: its name strings plus the `uuid` text
+    /// (stored as a plain `String`, unlike the parsed [`uuid::Uuid`] elsewhere).
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.name_en.as_ref().map_or(0, String::capacity)
+            + self.uuid.capacity()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PredefinedItem {
     pub name: String,
     #[serde(default)]
     pub name_en: Option<String>,
     pub uuid: String,
+}
+
+impl PredefinedItem {
+    /// Heap bytes owned by this item: its name strings plus the `uuid` text.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.name_en.as_ref().map_or(0, String::capacity)
+            + self.uuid.capacity()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +414,16 @@ pub struct Attribute {
     #[serde(default)]
     pub name_en: Option<String>,
     pub attr_type: AttributeType,
+}
+
+impl Attribute {
+    /// Heap bytes owned by this attribute: its name strings plus its type's own
+    /// owned payload.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.name_en.as_ref().map_or(0, String::capacity)
+            + self.attr_type.estimated_heap_size()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -614,6 +643,34 @@ pub enum AttributeType {
     /// (`v8ui:`, `mxl:`, `d5p1:`, …) and looking the local name up there.
     PlatformNamed(String),
     Unknown,
+}
+
+impl AttributeType {
+    /// Heap bytes owned by this type: the `name`/`types` payload of the
+    /// name-carrying and composite variants; every other variant is a plain enum
+    /// discriminant (plus `Copy` payloads) and owns no heap.
+    pub fn estimated_heap_size(&self) -> usize {
+        match self {
+            Self::Ref { name, .. } | Self::DefinedType { name } | Self::PlatformNamed(name) => {
+                name.capacity()
+            }
+            Self::Composite { types } => {
+                stdx::heap::vec_bytes::<AttributeType>(types.len())
+                    + types.iter().map(AttributeType::estimated_heap_size).sum::<usize>()
+            }
+            Self::String { .. }
+            | Self::Number { .. }
+            | Self::Boolean
+            | Self::Date
+            | Self::DateTime
+            | Self::AnyRef
+            | Self::AnyObjectRef { .. }
+            | Self::Uuid
+            | Self::ValueStorage
+            | Self::Platform(_)
+            | Self::Unknown => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -878,6 +935,34 @@ impl MetadataObject {
             stdx::case::eq_ignore_case(&pi.name, name)
                 || pi.name_en.as_ref().is_some_and(|en| stdx::case::eq_ignore_case(en, name))
         })
+    }
+
+    /// Heap bytes owned by this object, memoised by `ide-db`'s `parse_mdo_query`
+    /// for Salsa's `heap_size` hook: its own name strings plus every owned
+    /// collection, recursing into nested attributes, tabular sections, and
+    /// children. New heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        let mut bytes = self.name.capacity();
+        bytes += self.name_en.as_ref().map_or(0, String::capacity);
+        bytes += stdx::heap::vec_bytes::<Attribute>(self.attributes.len())
+            + self.attributes.iter().map(Attribute::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<crate::tabular_section::TabularSection>(
+            self.tabular_sections.len(),
+        ) + self
+            .tabular_sections
+            .iter()
+            .map(crate::tabular_section::TabularSection::estimated_heap_size)
+            .sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<MetadataObject>(self.children.len())
+            + self.children.iter().map(MetadataObject::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<EnumValue>(self.enum_values.len())
+            + self.enum_values.iter().map(EnumValue::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<PredefinedItem>(self.predefined_items.len())
+            + self.predefined_items.iter().map(PredefinedItem::estimated_heap_size).sum::<usize>();
+        bytes += self.constant_type.as_ref().map_or(0, AttributeType::estimated_heap_size);
+        bytes += stdx::heap::vec_bytes::<(MdoType, Name)>(self.register_records.len())
+            + self.register_records.iter().map(|(_, name)| name.capacity()).sum::<usize>();
+        bytes
     }
 }
 
@@ -1149,6 +1234,26 @@ mod tests {
 
         let enum_ref = AttributeType::AnyObjectRef { mdo_type: MdoType::Enum };
         assert_eq!(enum_ref.to_string(), "Перечисление");
+    }
+
+    #[test]
+    fn metadata_object_heap_counts_attributes_and_children() {
+        let mut obj = MetadataObject::new(MdoType::Catalog, "Номенклатура");
+        let attr = Attribute {
+            name: "Артикул".to_string(),
+            name_en: Some("Code".to_string()),
+            attr_type: AttributeType::String { length: Some(25) },
+        };
+        let owned_strings =
+            attr.name.capacity() + attr.name_en.as_ref().unwrap().capacity() + obj.name.capacity();
+        obj.add_attribute(attr);
+        obj.add_child(MetadataObject::new(MdoType::Catalog, "ВложеннаяГруппа"));
+
+        let bytes = obj.estimated_heap_size();
+        // At least the owned name/attribute strings plus the child's own name;
+        // well under a kilobyte for two small entries.
+        assert!(bytes > owned_strings);
+        assert!(bytes < 1024);
     }
 
     #[test]

@@ -24,6 +24,24 @@ pub(crate) struct MethodParameterOverride {
     pub(crate) replacement_type_list: Vec<String>,
 }
 
+/// A standard property the extracted help archive omits or files under a
+/// misleading name (e.g. the managed-form `РежимОткрытияОкна`, whose help page
+/// is stored as the enum type `FormWindowOpeningMode`). The addition attaches
+/// the property to `canonical_type` so name resolution and the unused-local
+/// check recognise it.
+#[derive(Debug)]
+pub(crate) struct TypePropertyAddition {
+    pub(crate) canonical_type: String,
+    pub(crate) russian_name: String,
+    pub(crate) english_name: String,
+    pub(crate) property_types: Vec<String>,
+    pub(crate) is_readonly: bool,
+    pub(crate) min_version: Option<String>,
+}
+
+const OVERLAY_ROOT_FIELDS: &[&str] =
+    &["schema_version", "method_parameter_overrides", "type_property_additions"];
+
 pub(crate) fn parse_overrides(
     overlay_source: &str,
 ) -> Result<Vec<MethodParameterOverride>, OverlayError> {
@@ -32,7 +50,40 @@ pub(crate) fn parse_overrides(
     let object = root
         .as_object()
         .ok_or_else(|| OverlayError("overlay root must be an object".to_owned()))?;
-    require_only_fields(object, &["schema_version", "method_parameter_overrides"], "overlay root")?;
+    require_only_fields(object, OVERLAY_ROOT_FIELDS, "overlay root")?;
+    validate_schema_version(object)?;
+    let entries =
+        object.get("method_parameter_overrides").and_then(Value::as_array).ok_or_else(|| {
+            OverlayError("overlay method_parameter_overrides must be an array".to_owned())
+        })?;
+
+    entries.iter().enumerate().map(|(index, entry)| parse_override(index, entry)).collect()
+}
+
+/// Parses the optional `type_property_additions` section. An absent section
+/// yields no additions; the root schema is validated the same way as
+/// [`parse_overrides`].
+pub(crate) fn parse_property_additions(
+    overlay_source: &str,
+) -> Result<Vec<TypePropertyAddition>, OverlayError> {
+    let root: Value = serde_json::from_str(overlay_source)
+        .map_err(|error| OverlayError(format!("malformed overlay JSON: {error}")))?;
+    let object = root
+        .as_object()
+        .ok_or_else(|| OverlayError("overlay root must be an object".to_owned()))?;
+    require_only_fields(object, OVERLAY_ROOT_FIELDS, "overlay root")?;
+    validate_schema_version(object)?;
+    let entries = match object.get("type_property_additions") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(value) => value.as_array().ok_or_else(|| {
+            OverlayError("overlay type_property_additions must be an array".to_owned())
+        })?,
+    };
+
+    entries.iter().enumerate().map(|(index, entry)| parse_property_addition(index, entry)).collect()
+}
+
+fn validate_schema_version(object: &Map<String, Value>) -> Result<(), OverlayError> {
     let schema_version = object
         .get("schema_version")
         .and_then(Value::as_u64)
@@ -42,12 +93,94 @@ pub(crate) fn parse_overrides(
             "unsupported overlay schema_version {schema_version}; expected 1"
         )));
     }
-    let entries =
-        object.get("method_parameter_overrides").and_then(Value::as_array).ok_or_else(|| {
-            OverlayError("overlay method_parameter_overrides must be an array".to_owned())
-        })?;
+    Ok(())
+}
 
-    entries.iter().enumerate().map(|(index, entry)| parse_override(index, entry)).collect()
+fn parse_property_addition(
+    index: usize,
+    entry: &Value,
+) -> Result<TypePropertyAddition, OverlayError> {
+    let object = entry
+        .as_object()
+        .ok_or_else(|| OverlayError(format!("type property addition {index} must be an object")))?;
+    require_only_fields(
+        object,
+        &[
+            "canonical_type",
+            "russian_name",
+            "english_name",
+            "property_types",
+            "is_readonly",
+            "min_version",
+            "evidence_source",
+            "rationale",
+        ],
+        &format!("type property addition {index}"),
+    )?;
+    let canonical_type = required_string(object, "canonical_type", index)?;
+    let russian_name = required_string(object, "russian_name", index)?;
+    let english_name = required_string(object, "english_name", index)?;
+    let property_types = object
+        .get("property_types")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            OverlayError(format!("type property addition {index} property_types must be an array"))
+        })?
+        .iter()
+        .map(|value| {
+            value.as_str().filter(|name| !name.trim().is_empty()).map(str::to_owned).ok_or_else(
+                || {
+                    OverlayError(format!(
+                        "type property addition {index} property_types must contain non-empty strings"
+                    ))
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if property_types.is_empty() {
+        return Err(OverlayError(format!(
+            "type property addition {index} property_types must not be empty"
+        )));
+    }
+    let unique_types: HashSet<&str> = property_types.iter().map(String::as_str).collect();
+    if unique_types.len() != property_types.len() {
+        return Err(OverlayError(format!(
+            "type property addition {index} property_types contains duplicate types"
+        )));
+    }
+    let is_readonly = match object.get("is_readonly") {
+        None | Some(Value::Null) => false,
+        Some(value) => value.as_bool().ok_or_else(|| {
+            OverlayError(format!("type property addition {index} is_readonly must be a boolean"))
+        })?,
+    };
+    let min_version = match object.get("min_version") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => {
+            if parse_version(value).is_none() {
+                return Err(OverlayError(format!(
+                    "type property addition {index} min_version must be a dotted numeric version"
+                )));
+            }
+            Some(value.clone())
+        }
+        Some(_) => {
+            return Err(OverlayError(format!(
+            "type property addition {index} min_version must be a dotted numeric version or null"
+        )))
+        }
+    };
+    required_string(object, "evidence_source", index)?;
+    required_string(object, "rationale", index)?;
+
+    Ok(TypePropertyAddition {
+        canonical_type,
+        russian_name,
+        english_name,
+        property_types,
+        is_readonly,
+        min_version,
+    })
 }
 
 pub(crate) fn validate_version_bounds(

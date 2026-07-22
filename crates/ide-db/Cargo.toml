@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 stdx.workspace = true
+intern.workspace = true
 parser.workspace = true
 hir.workspace = true
 sdbl-hir.workspace = true
@@ -26,8 +27,6 @@ indexmap.workspace = true
 tracing.workspace = true
 line-index.workspace = true
 parking_lot.workspace = true
-crossbeam-channel.workspace = true
-crossbeam-utils.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 

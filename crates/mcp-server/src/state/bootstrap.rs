@@ -48,8 +48,11 @@ impl SharedState {
         }
     }
 
-    pub fn workspace(source_dir: PathBuf) -> Self {
-        let project = project_model::Project::new(&source_dir);
+    /// Errors when the project config or its extension topology is invalid: a
+    /// daemon must not come up analyzing a differently-shaped project than the
+    /// one configured.
+    pub fn workspace(source_dir: PathBuf) -> Result<Self, project_model::ProjectError> {
+        let project = project_model::Project::new(&source_dir)?;
         let config_path = project.source_path();
         let source_root = config_path.to_path_buf();
 
@@ -79,9 +82,12 @@ impl SharedState {
         // config source root plus every extension root — so diagnostics/graph drift in
         // extensions is event-delivered, not left to the reconciler. Search subscribes as a
         // sink and preserves its prior behavior (mark only source-root `.bsl` paths dirty).
-        let mut watch_roots = vec![config_path.to_path_buf()];
-        watch_roots.extend(project.extension_paths().iter().map(|(_, path)| path.clone()));
-        let change_hub = WorkspaceChangeHub::start(watch_roots);
+        let mut scan_roots = vec![config_path.to_path_buf()];
+        scan_roots.extend(project.extension_paths().iter().map(|(_, path)| path.clone()));
+        let change_hub = WorkspaceChangeHub::start_targets(crate::change_hub::watch_targets_for(
+            &project.root,
+            &scan_roots,
+        ));
 
         // Created before the search-init thread so it can own the workspace graph: for
         // a local SQLite workspace the search-init drives a single fused parse pass
@@ -142,7 +148,7 @@ impl SharedState {
             graph.clone(),
         );
 
-        Self {
+        Ok(Self {
             workspace_root: Some(source_dir),
             source_root: Some(source_root),
             onec_client: None,
@@ -158,7 +164,7 @@ impl SharedState {
             change_hub: Some(change_hub),
             background_indexers,
             embed_flight,
-        }
+        })
     }
 
     // Each argument is a distinct shared handle the spawned init thread must own (engine,
@@ -351,7 +357,18 @@ impl SharedState {
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let background_indexers = Arc::new(AtomicUsize::new(0));
-        let project_config = project_root.as_deref().and_then(project_model::ProjectConfig::load);
+        let project_config = project_root.as_deref().and_then(|root| {
+            match project_model::ProjectConfig::load(root) {
+                Ok(config) => config,
+                Err(e) => {
+                    // The reference profile only mines the config for baseline
+                    // settings; a broken file loses those settings but must not
+                    // keep the reference daemon from serving.
+                    tracing::error!(error = %e, "reference profile ignores unreadable project config");
+                    None
+                }
+            }
+        });
         // Same deferral as the workspace profile: the PG/Vault connect runs off-thread
         // so a reference daemon's socket comes up immediately.
         let baseline = match BaselineRuntime::reference_bootstrap(project_config.as_ref()) {
@@ -612,7 +629,15 @@ impl SharedState {
         crate::cache::ensure_workspace_cache_dir(workspace_root).ok();
         let db_path = crate::cache::search_db_path(workspace_root);
 
-        let project = project_model::Project::new(workspace_root);
+        // The daemon only reaches this after `workspace()` validated the project;
+        // a config broken by a mid-session edit keeps search down, loudly.
+        let project = match project_model::Project::new(workspace_root) {
+            Ok(project) => project,
+            Err(e) => {
+                tracing::error!(error = %e, "invalid project; workspace search stays offline");
+                return None;
+            }
+        };
         let source_path = project.source_path().to_path_buf();
 
         // Branch by the configured MODE, never by baseline presence: in Postgres mode a
@@ -1458,7 +1483,7 @@ mod tests {
             .unwrap();
         fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
 
-        let state = SharedState::workspace(ws.to_path_buf());
+        let state = SharedState::workspace(ws.to_path_buf()).expect("valid workspace project");
         let source_root =
             state.source_root().cloned().expect("source_root is set for a workspace profile");
         assert!(
@@ -1504,7 +1529,7 @@ mod tests {
         );
         let module = workspace.join("CommonModules").join("Сервер").join("Ext").join("Module.bsl");
 
-        let state = SharedState::workspace(workspace.clone());
+        let state = SharedState::workspace(workspace.clone()).expect("valid workspace project");
 
         // Wait for the background init to publish the engine (the overlay is initialized just
         // before publish, so a visible engine already has it online).

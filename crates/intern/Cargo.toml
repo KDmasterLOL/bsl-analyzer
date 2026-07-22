@@ -6,6 +6,15 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+boxcar.workspace = true
 dashmap.workspace = true
 rustc-hash.workspace = true
-once_cell.workspace = true
+smol_str.workspace = true
+stdx.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "norm_name"
+harness = false

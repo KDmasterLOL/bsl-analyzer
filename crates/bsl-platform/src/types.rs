@@ -37,6 +37,25 @@ impl From<&RawPlatformType> for PlatformType {
     }
 }
 
+impl PlatformType {
+    /// Heap bytes owned by this type, memoised by `bsl-platform`'s
+    /// `platform_type_query` for Salsa's `heap_size` hook: its name/version/XDTO
+    /// `SmolStr`s (spilled ones only) plus the element-type vec. `context` is
+    /// `Copy` and owns no heap. New heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        stdx::heap::smol_str_bytes(self.name.len())
+            + stdx::heap::smol_str_bytes(self.english_name.len())
+            + self.min_version.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
+            + self.xdto_name.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
+            + stdx::heap::vec_bytes::<SmolStr>(self.iter_element_types.len())
+            + self
+                .iter_element_types
+                .iter()
+                .map(|s| stdx::heap::smol_str_bytes(s.len()))
+                .sum::<usize>()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformMethod {
     pub id: u32,
@@ -93,12 +112,42 @@ impl From<&RawPlatformMethod> for PlatformMethod {
     }
 }
 
+impl PlatformMethod {
+    /// Heap bytes owned by this method, memoised by `bsl-platform`'s
+    /// `platform_method_query`/`type_methods_query`/`manager_methods_query`/
+    /// `prefixed_method_query`/`global_member_method_query` for Salsa's
+    /// `heap_size` hook: its name/version `SmolStr`s plus the parameter and
+    /// overload-variant vecs. `id`/`context` are `Copy` and own no heap. New
+    /// heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        stdx::heap::smol_str_bytes(self.type_name.len())
+            + stdx::heap::smol_str_bytes(self.name.len())
+            + stdx::heap::smol_str_bytes(self.english_name.len())
+            + self.return_type.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
+            + stdx::heap::vec_bytes::<MethodParam>(self.parameters.len())
+            + self.parameters.iter().map(MethodParam::estimated_heap_size).sum::<usize>()
+            + stdx::heap::vec_bytes::<MethodVariant>(self.variants.len())
+            + self.variants.iter().map(MethodVariant::estimated_heap_size).sum::<usize>()
+            + self.min_version.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
+    }
+}
+
 impl From<&RawMethodVariant> for MethodVariant {
     fn from(raw: &RawMethodVariant) -> Self {
         Self {
             variant_name: raw.variant_name.map(SmolStr::from),
             parameters: raw.parameters.iter().map(MethodParam::from).collect(),
         }
+    }
+}
+
+impl MethodVariant {
+    /// Heap bytes owned by this overload variant: its name plus the parameter
+    /// vec and each parameter's own owned payload.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.variant_name.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
+            + stdx::heap::vec_bytes::<MethodParam>(self.parameters.len())
+            + self.parameters.iter().map(MethodParam::estimated_heap_size).sum::<usize>()
     }
 }
 
@@ -155,12 +204,39 @@ impl From<&RawGlobalFunction> for GlobalFunction {
     }
 }
 
+impl GlobalFunction {
+    /// Heap bytes owned by this global function, memoised by `bsl-platform`'s
+    /// `global_function_query` for Salsa's `heap_size` hook: its name/version
+    /// `SmolStr`s plus the parameter and overload-variant vecs. New
+    /// heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        stdx::heap::smol_str_bytes(self.name.len())
+            + stdx::heap::smol_str_bytes(self.english_name.len())
+            + self.return_type.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
+            + stdx::heap::vec_bytes::<MethodParam>(self.parameters.len())
+            + self.parameters.iter().map(MethodParam::estimated_heap_size).sum::<usize>()
+            + stdx::heap::vec_bytes::<GlobalFunctionVariant>(self.variants.len())
+            + self.variants.iter().map(GlobalFunctionVariant::estimated_heap_size).sum::<usize>()
+            + self.min_version.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
+    }
+}
+
 impl From<&RawGlobalFunctionVariant> for GlobalFunctionVariant {
     fn from(raw: &RawGlobalFunctionVariant) -> Self {
         Self {
             variant_name: raw.variant_name.map(SmolStr::from),
             parameters: raw.parameters.iter().map(MethodParam::from).collect(),
         }
+    }
+}
+
+impl GlobalFunctionVariant {
+    /// Heap bytes owned by this overload variant: its name plus the parameter
+    /// vec and each parameter's own owned payload.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.variant_name.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
+            + stdx::heap::vec_bytes::<MethodParam>(self.parameters.len())
+            + self.parameters.iter().map(MethodParam::estimated_heap_size).sum::<usize>()
     }
 }
 
@@ -195,6 +271,20 @@ impl From<&RawPlatformConstructor> for PlatformConstructor {
             min_version: raw.min_version.map(SmolStr::from),
             context: raw.context.as_ref().map(ContextAvailability::from),
         }
+    }
+}
+
+impl PlatformConstructor {
+    /// Heap bytes owned by this constructor overload, memoised by
+    /// `bsl-platform`'s `platform_constructors_query` for Salsa's `heap_size`
+    /// hook: its name/version `SmolStr`s plus the parameter vec. New
+    /// heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        stdx::heap::smol_str_bytes(self.type_name.len())
+            + self.variant_name.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
+            + stdx::heap::vec_bytes::<MethodParam>(self.parameters.len())
+            + self.parameters.iter().map(MethodParam::estimated_heap_size).sum::<usize>()
+            + self.min_version.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
     }
 }
 
@@ -238,6 +328,22 @@ impl From<&RawPlatformProperty> for PlatformProperty {
     }
 }
 
+impl PlatformProperty {
+    /// Heap bytes owned by this property, memoised by `bsl-platform`'s
+    /// `platform_property_query`/`type_properties_query`/`global_property_query`
+    /// for Salsa's `heap_size` hook: its name/version `SmolStr`s plus the
+    /// property-type vec. `id`/`is_readonly`/`context` are `Copy` and own no
+    /// heap. New heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        stdx::heap::smol_str_bytes(self.type_name.len())
+            + stdx::heap::smol_str_bytes(self.name.len())
+            + stdx::heap::smol_str_bytes(self.english_name.len())
+            + stdx::heap::vec_bytes::<SmolStr>(self.property_types.len())
+            + self.property_types.iter().map(|s| stdx::heap::smol_str_bytes(s.len())).sum::<usize>()
+            + self.min_version.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodParam {
     pub name: SmolStr,
@@ -263,6 +369,15 @@ impl From<&RawMethodParam> for MethodParam {
             is_optional: raw.is_optional,
             is_variadic: raw.is_variadic,
         }
+    }
+}
+
+impl MethodParam {
+    /// Heap bytes owned by this parameter: its name/type `SmolStr`s (spilled
+    /// ones only). `is_optional`/`is_variadic` are `Copy` and own no heap.
+    pub fn estimated_heap_size(&self) -> usize {
+        stdx::heap::smol_str_bytes(self.name.len())
+            + self.param_type.as_ref().map_or(0, |s| stdx::heap::smol_str_bytes(s.len()))
     }
 }
 
@@ -473,5 +588,46 @@ impl From<&RawKeywordDocs> for KeywordDocs {
             params: raw.params.iter().map(ParamDocs::from).collect(),
             min_version: raw.min_version.map(|v| v.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn platform_method_heap_counts_params_and_spilled_strings() {
+        let long_type_name = "ПользовательскийТипСДлиннымИменем";
+        let method = PlatformMethod {
+            id: 1,
+            type_name: SmolStr::new(long_type_name),
+            name: SmolStr::new("Метод"),
+            english_name: SmolStr::new("Method"),
+            return_type: Some(SmolStr::new(long_type_name)),
+            parameters: vec![
+                MethodParam {
+                    name: SmolStr::new("ПараметрСДлиннымИменемБезИнлайна"),
+                    param_type: Some(SmolStr::new(long_type_name)),
+                    is_optional: false,
+                    is_variadic: false,
+                },
+                MethodParam {
+                    name: SmolStr::new("Второй"),
+                    param_type: None,
+                    is_optional: true,
+                    is_variadic: false,
+                },
+            ],
+            variants: vec![],
+            min_version: None,
+            context: None,
+        };
+
+        let long_bytes = long_type_name.len();
+        let bytes = method.estimated_heap_size();
+        // At least the two spilled-`SmolStr` occurrences that appear verbatim
+        // (`type_name`/`return_type`); well under a kilobyte for two params.
+        assert!(bytes > long_bytes * 2);
+        assert!(bytes < 1024);
     }
 }

@@ -1148,6 +1148,10 @@ impl SdblQuery {
         self.0.children().find_map(SdblWhereClause::cast)
     }
 
+    pub fn having_clause(&self) -> Option<SdblHavingClause> {
+        self.0.children().find_map(SdblHavingClause::cast)
+    }
+
     pub fn group_by_clause(&self) -> Option<SdblGroupClause> {
         self.0.children().find_map(SdblGroupClause::cast)
     }
@@ -1478,6 +1482,27 @@ pub struct SdblWhereClause(SyntaxNode);
 impl AstNode for SdblWhereClause {
     fn can_cast(kind: SyntaxKind) -> bool {
         kind == SyntaxKind::SDBL_WHERE_CLAUSE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SdblHavingClause(SyntaxNode);
+
+impl AstNode for SdblHavingClause {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_HAVING_CLAUSE
     }
 
     fn cast(node: SyntaxNode) -> Option<Self> {

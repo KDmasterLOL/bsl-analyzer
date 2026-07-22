@@ -1,10 +1,45 @@
 use bsl_metadata::MdoType;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 use stdx::case::CaseExt;
 use vfs::FileId;
 
 use crate::body::{ExternalRef, ManagerType};
 use crate::Name;
+
+/// Approximate live heap bytes for Salsa's `memory_usage` report: each map's
+/// table plus its owned `String` keys (and, for `common_modules_display`, its
+/// owned `String` values too). New heap-owning fields must be added here too.
+pub(crate) fn module_index_heap(v: &Arc<ModuleIndex>) -> usize {
+    use crate::heap_estimate::map_table_bytes;
+
+    let idx = &**v;
+    let mut bytes = std::mem::size_of::<ModuleIndex>();
+
+    bytes += map_table_bytes::<String, FileId>(idx.common_modules.len());
+    bytes += idx.common_modules.keys().map(String::capacity).sum::<usize>();
+
+    bytes += map_table_bytes::<String, String>(idx.common_modules_display.len());
+    for (k, v) in &idx.common_modules_display {
+        bytes += k.capacity() + v.capacity();
+    }
+
+    bytes += map_table_bytes::<(ManagerType, String), FileId>(idx.managers.len());
+    bytes += idx.managers.keys().map(|(_, s)| s.capacity()).sum::<usize>();
+
+    bytes += map_table_bytes::<(MdoType, String), FileId>(idx.object_modules.len());
+    bytes += idx.object_modules.keys().map(|(_, s)| s.capacity()).sum::<usize>();
+
+    bytes += map_table_bytes::<(MdoType, String), FileId>(idx.record_set_modules.len());
+    bytes += idx.record_set_modules.keys().map(|(_, s)| s.capacity()).sum::<usize>();
+
+    bytes += map_table_bytes::<(Option<(MdoType, String)>, String), FileId>(idx.forms.len());
+    for (owner_key, form_name) in idx.forms.keys() {
+        bytes += owner_key.as_ref().map_or(0, |(_, s)| s.capacity()) + form_name.capacity();
+    }
+
+    bytes
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleIndex {

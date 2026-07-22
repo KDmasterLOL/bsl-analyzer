@@ -7,6 +7,12 @@ and this project adheres to [Date-based Versioning](docs/contributing/VERSIONING
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the deprecated `--streaming` CLI flag and the legacy streaming
+  analysis pipeline (`ide::streaming` / `ide_db::streaming`). Salsa is now
+  the only production analysis path for both LSP and CLI batch analysis.
+
 ### Project Setup
 
 - Initial project structure with 15 crates

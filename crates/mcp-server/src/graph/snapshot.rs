@@ -8,7 +8,6 @@ use crate::cache::graph_db_path;
 use crate::change_hub::{ChangeEntry, ChangeKind};
 use crate::graph_query::GraphDb;
 
-use super::scan::scan_file_stats;
 use super::state::{lock_recover, GraphState, ReloadState};
 use super::types::Freshness;
 
@@ -18,18 +17,23 @@ use super::types::Freshness;
 pub(super) const WALK_VERIFY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// `canonical path → (mtime nanos, len)` state maintained from hub deliveries and
-/// periodically re-anchored by a complete walk.
+/// periodically re-anchored by a complete walk. `topology` carries the topology
+/// hash observed at the last walk: hub deliveries patch only file stats, and a
+/// config-file delivery (which may change the topology) drops the whole map so
+/// the next check walks — and re-derives the project — instead of folding a
+/// stale topology under fresh file stats.
 #[derive(Default)]
 pub(super) struct FpMapState {
     pub(super) map: Option<std::collections::BTreeMap<String, (u128, u64)>>,
     pub(super) walked_at: Option<Instant>,
+    pub(super) topology: u64,
 }
 
 /// Throttled cache of the last on-disk fingerprint scan. Guarded by its own mutex
 /// held across the walk, so concurrent callers serialize onto one scan per window.
 pub(super) struct ScanCache {
     pub(super) at: Instant,
-    pub(super) disk_fp: u64,
+    pub(super) disk_fp: crate::graph_db::GraphFp,
 }
 
 /// Cap on idle pooled snapshot handles. Concurrent graph queries beyond it just open
@@ -39,7 +43,7 @@ const SNAPSHOT_POOL_CAP: usize = 4;
 /// A pooled idle read handle plus the freshness token it was opened under.
 pub(super) struct PooledSnapshotEntry {
     pub(super) generation: u64,
-    fingerprint: u64,
+    fingerprint: crate::graph_db::GraphFp,
     force_stale: bool,
     db: GraphDb,
 }
@@ -52,7 +56,7 @@ pub(super) struct PooledSnapshotEntry {
 pub(crate) struct GraphSnapshot {
     pub graph: PooledGraphDb,
     pub(super) generation: u64,
-    fingerprint: u64,
+    fingerprint: crate::graph_db::GraphFp,
     force_stale: bool,
 }
 
@@ -167,7 +171,7 @@ impl GraphState {
         Freshness { revision: snapshot.generation, stale, reload }
     }
 
-    pub(super) fn current_disk_fp(&self) -> Option<u64> {
+    pub(super) fn current_disk_fp(&self) -> Option<crate::graph_db::GraphFp> {
         let root = self.workspace_root.as_deref()?;
         self.invalidate_scan_on_hub_drift();
         let mut cache = lock_recover(&self.scan);
@@ -191,21 +195,33 @@ impl GraphState {
                 if walked_at.elapsed() < WALK_VERIFY_INTERVAL {
                     let entries: Vec<(String, u128, u64)> =
                         map.iter().map(|(p, (m, l))| (p.clone(), *m, *l)).collect();
-                    let fp = fold_fingerprint_entries(&entries);
+                    let fp = crate::graph_db::GraphFp {
+                        files: fold_fingerprint_entries(&entries),
+                        topology: fp_state.topology,
+                    };
                     *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp });
                     return Some(fp);
                 }
             }
         }
         self.scan_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // ONE project load serves both components: the roots the stats walk and
+        // the topology hash come from the same snapshot, so the fold can never
+        // pair one project state's files with another's topology.
+        let project = super::input::ProjectSnapshot::load(root);
         let mut entries: Vec<(String, u128, u64)> =
-            scan_file_stats(root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
+            super::scan::scan_stats_over_roots(&project.scan_roots)
+                .into_iter()
+                .map(|s| (s.path, s.mtime, s.len))
+                .collect();
         entries.sort();
-        let fp = fold_fingerprint_entries(&entries);
+        let topology = super::scan::topology_u64(&project.configs);
+        let fp = crate::graph_db::GraphFp { files: fold_fingerprint_entries(&entries), topology };
         {
             let mut fp_state = lock_recover(&self.fp_map);
             fp_state.map = Some(entries.into_iter().map(|(p, m, l)| (p, (m, l))).collect());
             fp_state.walked_at = Some(Instant::now());
+            fp_state.topology = topology;
         }
         *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp });
         Some(fp)
@@ -242,7 +258,12 @@ impl GraphState {
         }
         *lock_recover(&self.scan) = None;
         let mut fp_state = lock_recover(&self.fp_map);
-        if relevant.iter().any(|e| e.kind == ChangeKind::SubtreeRemoved) {
+        // A subtree removal invalidates paths the entry list cannot enumerate; a
+        // config-file change may alter the topology AND the scan-root universe.
+        // Either way the patched map would lie — drop it so the next check walks
+        // (and re-derives the project).
+        if relevant.iter().any(|e| e.kind == ChangeKind::SubtreeRemoved || entry_is_config_file(e))
+        {
             fp_state.map = None;
             fp_state.walked_at = None;
             return;
@@ -271,7 +292,19 @@ fn entry_touches_scan_universe(entry: &ChangeEntry) -> bool {
     let is_scan_ext = |path: &Path| {
         matches!(path.extension().and_then(|e| e.to_str()), Some("bsl") | Some("xml"))
     };
-    is_scan_ext(&entry.canonical) || is_scan_ext(&entry.raw)
+    is_scan_ext(&entry.canonical) || is_scan_ext(&entry.raw) || entry_is_config_file(entry)
+}
+
+/// Whether a delivered change is one of the analyzer config files — an edit there
+/// can change the extension topology (and with it the scan-root universe) without
+/// touching a single `.bsl`/`.xml`.
+fn entry_is_config_file(entry: &ChangeEntry) -> bool {
+    let is_config = |path: &Path| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| project_model::CONFIG_FILE_NAMES.contains(&n))
+    };
+    is_config(&entry.canonical) || is_config(&entry.raw)
 }
 
 pub(super) fn fold_fingerprint_entries(entries: &[(String, u128, u64)]) -> u64 {
@@ -415,6 +448,164 @@ mod tests {
         assert!(
             graph.freshness(&snap).stale,
             "a hub-delivered edit is seen without waiting out the drift throttle",
+        );
+    }
+
+    /// The full live-daemon chain for a topology-only change: a served graph must
+    /// read stale after a `dependsOn`-only config edit (no `.bsl`/`.xml` touched),
+    /// and the kicked reload must publish a fresh generation that reads clean.
+    #[test]
+    fn a_depends_on_only_edit_marks_a_served_graph_stale_and_reloads() {
+        use super::super::test_support::{write_extension_config, write_extension_workspace};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_extension_workspace(root, false);
+
+        let mut graph = GraphState::for_workspace(root.to_path_buf());
+        graph.drift_interval = Duration::ZERO;
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let snap = graph.snapshot().expect("ready graph snapshots");
+        assert!(!graph.freshness(&snap).stale, "a freshly built graph is not stale");
+
+        write_extension_config(root, true);
+        let drifted = graph.freshness(&snap);
+        assert!(drifted.stale, "a dependsOn-only edit must read as stale");
+        assert!(matches!(drifted.reload, "running" | "failed"));
+
+        let mut settled = None;
+        for _ in 0..500 {
+            let snap = graph.snapshot().expect("snapshot");
+            if snap.generation == 2 {
+                settled = Some(graph.freshness(&snap));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let settled = settled.expect("the topology-triggered reload did not publish");
+        assert!(!settled.stale, "the reloaded graph reflects the new topology");
+    }
+
+    /// End-to-end root re-arm: an extension root added by a topology reload lies
+    /// OUTSIDE the hub's original coverage, and after the reload publishes, events
+    /// under that root must be hub-delivered — proof the rebuild re-pointed the
+    /// live watcher instead of leaving the new subtree to the reconciler.
+    #[test]
+    fn a_topology_reload_rearms_the_hub_onto_the_new_extension_root() {
+        use super::super::test_support::write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ext_dir = tempfile::tempdir().unwrap();
+        let ext = ext_dir.path();
+        super::super::test_support::sample_workspace(root);
+        write(root, "Configuration.xml", "<Configuration/>");
+        write(ext, "Configuration.xml", "<Configuration/>");
+
+        let hub = WorkspaceChangeHub::start(vec![root.to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let mut graph = GraphState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
+        graph.drift_interval = Duration::ZERO;
+        graph.ensure_loading();
+        super::super::test_support::wait_ready(&graph);
+        let snap = graph.snapshot().expect("ready");
+        assert!(!graph.freshness(&snap).stale);
+
+        // Declare the out-of-tree extension: a topology-only reload trigger.
+        std::fs::write(
+            root.join("bsl-analyzer.toml"),
+            format!(
+                "[source]\nroot = \".\"\nextensions = [{{ name = \"a\", path = {:?} }}]\n",
+                ext.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        // Staleness lands once the hub delivers the config event (the throttled
+        // fast path deliberately serves the cached topology until then).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !graph.freshness(&snap).stale {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(graph.freshness(&snap).stale, "the new extension root must read as drift");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if graph.snapshot().map(|s| s.generation) == Some(2) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(graph.snapshot().map(|s| s.generation), Some(2), "reload published");
+
+        // The re-armed hub must deliver events under the NEW root. The write is
+        // repeated per poll so a delivery is observed even if the ack landed a
+        // moment after the generation became visible.
+        let cursor = hub.subscribe();
+        let file = ext.join("Новый.bsl");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut cursor = cursor;
+        let mut seen = false;
+        while Instant::now() < deadline {
+            std::fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            let batch = hub.drain(cursor);
+            cursor = batch.cursor;
+            if batch.entries.iter().any(|e| e.raw == file) {
+                seen = true;
+                break;
+            }
+        }
+        assert!(seen, "the hub must deliver events under the newly-added extension root");
+    }
+
+    /// A config-file change delivered by the hub must invalidate the throttled
+    /// fingerprint cache AND the event-maintained stat map immediately — the map
+    /// can only patch file stats, not the topology, so serving its fold after a
+    /// config edit would keep a stale topology fresh for up to the walk interval.
+    #[test]
+    fn graph_freshness_sees_a_config_edit_through_the_hub() {
+        use super::super::test_support::{write_extension_config, write_extension_workspace};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_extension_workspace(root, false);
+
+        let hub = WorkspaceChangeHub::start(vec![root.to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let mut graph = GraphState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
+        graph.drift_interval = Duration::from_secs(120);
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let snap = graph.snapshot().expect("ready");
+        assert!(!graph.freshness(&snap).stale, "a freshly built graph is not stale");
+
+        let mut observer = hub.subscribe();
+        std::thread::sleep(Duration::from_millis(10));
+        // Re-written per poll: under a fully parallel test run the inotify queue
+        // can lag well past a single write's event window.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut delivered = false;
+        while Instant::now() < deadline {
+            write_extension_config(root, true);
+            std::thread::sleep(Duration::from_millis(20));
+            let batch = hub.drain(observer);
+            observer = batch.cursor;
+            if batch.entries.iter().any(|e| e.raw.to_string_lossy().contains("bsl-analyzer.toml")) {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(
+            delivered,
+            "the hub delivered the config edit (events_seen={}, health={:?})",
+            hub.events_seen(),
+            hub.health(),
+        );
+        assert!(
+            graph.freshness(&snap).stale,
+            "a hub-delivered config edit is seen without waiting out the drift throttle",
         );
     }
 

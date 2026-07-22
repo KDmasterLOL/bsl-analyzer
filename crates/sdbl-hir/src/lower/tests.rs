@@ -3007,3 +3007,209 @@ fn nested_ref_navigation_resolves_final_attribute_type() {
          not the intermediate document reference"
     );
 }
+
+fn unlimited_string_test_config() -> std::sync::Arc<bsl_metadata::Configuration> {
+    use bsl_metadata::{Attribute, AttributeType, MdoType, MetadataObject};
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let mut catalog = MetadataObject::new(MdoType::Catalog, "Лог");
+    catalog.add_attribute(Attribute {
+        name: "Описание".to_string(),
+        name_en: None,
+        attr_type: AttributeType::String { length: Some(0) },
+    });
+    catalog.add_attribute(Attribute {
+        name: "Номер".to_string(),
+        name_en: None,
+        attr_type: AttributeType::String { length: Some(10) },
+    });
+    config.add_metadata_object(catalog);
+    std::sync::Arc::new(config)
+}
+
+fn unlimited_string_diags(code: &str) -> Vec<crate::diagnostics::SdblDiagnostic> {
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(unlimited_string_test_config()));
+    package
+        .all_diagnostics()
+        .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::UnlimitedStringUsage { .. }))
+        .cloned()
+        .collect()
+}
+
+fn unlimited_string_contexts(code: &str) -> Vec<crate::diagnostics::UnlimitedStringUsageContext> {
+    unlimited_string_diags(code)
+        .iter()
+        .map(|d| match d {
+            crate::diagnostics::SdblDiagnostic::UnlimitedStringUsage { context, .. } => *context,
+            _ => unreachable!(),
+        })
+        .collect()
+}
+
+#[test]
+fn unlimited_string_comparison_in_where() {
+    use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+    let contexts =
+        unlimited_string_contexts("ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т ГДЕ Т.Описание <> \"\"");
+    assert_eq!(contexts, vec![Ctx::Comparison]);
+}
+
+#[test]
+fn unlimited_string_comparison_in_join_condition() {
+    use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+    let contexts = unlimited_string_contexts(
+        "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т \
+         ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Лог КАК Т2 ПО Т.Описание = Т2.Описание",
+    );
+    assert_eq!(contexts, vec![Ctx::Comparison, Ctx::Comparison]);
+}
+
+#[test]
+fn unlimited_string_in_operator() {
+    use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+    let contexts = unlimited_string_contexts(
+        "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т ГДЕ Т.Описание В (\"а\", \"б\")",
+    );
+    assert_eq!(contexts, vec![Ctx::In]);
+}
+
+#[test]
+fn unlimited_string_between() {
+    use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+    let contexts = unlimited_string_contexts(
+        "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т ГДЕ Т.Описание МЕЖДУ \"а\" И \"б\"",
+    );
+    assert_eq!(contexts, vec![Ctx::Between]);
+}
+
+#[test]
+fn unlimited_string_order_by() {
+    use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+    let contexts = unlimited_string_contexts(
+        "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т УПОРЯДОЧИТЬ ПО Т.Описание",
+    );
+    assert_eq!(contexts, vec![Ctx::OrderBy]);
+}
+
+#[test]
+fn unlimited_string_distinct() {
+    use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+    let contexts =
+        unlimited_string_contexts("ВЫБРАТЬ РАЗЛИЧНЫЕ Т.Описание ИЗ Справочник.Лог КАК Т");
+    assert_eq!(contexts, vec![Ctx::Distinct]);
+}
+
+#[test]
+fn unlimited_string_totals_by_alias() {
+    use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+    let contexts = unlimited_string_contexts(
+        "ВЫБРАТЬ Т.Описание КАК Описание, Т.Номер ИЗ Справочник.Лог КАК Т \
+         ИТОГИ КОЛИЧЕСТВО(Номер) ПО Описание",
+    );
+    assert_eq!(contexts, vec![Ctx::TotalsBy]);
+}
+
+#[test]
+fn unlimited_string_aggregate_in_having() {
+    use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+    let contexts = unlimited_string_contexts(
+        "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т СГРУППИРОВАТЬ ПО Т.Номер \
+         ИМЕЮЩИЕ МАКСИМУМ(Т.Описание) <> \"\"",
+    );
+    assert_eq!(contexts, vec![Ctx::Comparison]);
+}
+
+#[test]
+fn unlimited_string_isnull_wrapper_still_flagged() {
+    use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+    let contexts = unlimited_string_contexts(
+        "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т ГДЕ ЕСТЬNULL(Т.Описание, \"\") <> \"\"",
+    );
+    assert_eq!(contexts, vec![Ctx::Comparison]);
+}
+
+#[test]
+fn unlimited_string_in_subquery_where() {
+    use crate::diagnostics::UnlimitedStringUsageContext as Ctx;
+
+    let contexts = unlimited_string_contexts(
+        "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т \
+         ГДЕ Т.Номер В (ВЫБРАТЬ Т2.Номер ИЗ Справочник.Лог КАК Т2 ГДЕ Т2.Описание <> \"\")",
+    );
+    assert_eq!(contexts, vec![Ctx::Comparison]);
+}
+
+#[test]
+fn unlimited_string_no_diagnostic_for_bounded_and_like() {
+    assert!(unlimited_string_diags("ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т ГДЕ Т.Номер <> \"\"")
+        .is_empty());
+    assert!(unlimited_string_diags(
+        "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т ГДЕ Т.Описание ПОДОБНО \"а%\""
+    )
+    .is_empty());
+    assert!(unlimited_string_diags(
+        "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т ГДЕ Т.Описание ЕСТЬ NULL"
+    )
+    .is_empty());
+}
+
+#[test]
+fn unlimited_string_cast_to_bounded_not_flagged() {
+    assert!(unlimited_string_diags(
+        "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т \
+         ГДЕ ВЫРАЗИТЬ(Т.Описание КАК СТРОКА(1000)) <> \"\""
+    )
+    .is_empty());
+}
+
+#[test]
+fn having_clause_runs_ref_overuse_check() {
+    let config = create_config_with_ref_attribute();
+
+    let code = "ВЫБРАТЬ КОЛИЧЕСТВО(Т.Файл) КАК Кол ИЗ Справочник.СлужебныеФайлы КАК Т \
+                ИМЕЮЩИЕ МАКСИМУМ(Т.Файл.Ссылка.Дата) > 0";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let ref_overuse_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::RefOveruse { .. }))
+        .collect();
+
+    assert_eq!(
+        ref_overuse_diags.len(),
+        1,
+        "избыточная Ссылка в ИМЕЮЩИЕ должна детектироваться так же, как в ГДЕ"
+    );
+}
+
+#[test]
+fn having_clause_runs_nested_fields_check() {
+    let config = create_config_with_ref_attribute();
+
+    let code = "ВЫБРАТЬ КОЛИЧЕСТВО(*) КАК Кол ИЗ Справочник.СлужебныеФайлы КАК Т \
+                ИМЕЮЩИЕ МАКСИМУМ(Т.Файл.Код) > 0";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let nested_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::QueryNestedFieldsByDot { .. }))
+        .collect();
+
+    assert_eq!(
+        nested_diags.len(),
+        1,
+        "разыменование через точку в ИМЕЮЩИЕ должно детектироваться так же, как в ГДЕ"
+    );
+}

@@ -9,7 +9,7 @@ use crate::graph_query::GraphDb;
 
 #[cfg(test)]
 use super::input::GRAPH_SOURCE_ROOT;
-use super::scan::{classify_changes, scan_file_stats, workspace_fingerprint};
+use super::scan::{classify_changes, workspace_fingerprint};
 use super::state::{lock_recover, GraphState, Published, ReloadState};
 use super::types::GraphStatus;
 
@@ -36,17 +36,43 @@ impl GraphState {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             build_and_publish_graph_file(&workspace_root, generation, Some(&mut sink))
         }));
-        let (files, fp_pre, force_stale) = match outcome {
+        let built = match outcome {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => return Err(e),
             Err(_) => anyhow::bail!("fused graph build panicked"),
         };
-        if force_stale {
+        if built.force_stale {
             tracing::warn!("fused graph build straddled a disk write; snapshot marked stale");
         }
-        self.adopt_prebuilt(generation, fp_pre, files);
-        self.notify_published(build_start_seq);
+        self.adopt_prebuilt(generation, built.fp_pre, built.files);
+        self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
+        // The fused sink just wrote every indexed document's context from THIS
+        // build — nothing persisted predates it, so no whole-collection re-render.
+        self.notify_published(build_start_seq, false);
         Ok(())
+    }
+
+    /// After a successful (re)build, re-point the daemon's change hub at the build
+    /// snapshot's scan roots. A topology reload that added or dropped an extension
+    /// root would otherwise leave the hub watching the old universe — events in a
+    /// new extension would never be delivered, and every consumer would coast on
+    /// its reconcile interval. A no-op when the roots did not change.
+    pub(super) fn ensure_hub_roots(&self, scan_roots: &[std::path::PathBuf], built_topology: u64) {
+        let (Some(hub), Some(root)) = (&self.change_hub, self.workspace_root.as_deref()) else {
+            return;
+        };
+        // A slow build finishing after a newer topology reload must not roll the
+        // shared hub back onto its older root set: re-derive the live topology
+        // (config parse + discovery, no tree walk) and skip when this build's
+        // snapshot is already superseded — the fresher build re-arms instead.
+        let live = crate::graph::ProjectSnapshot::load(root);
+        if super::scan::topology_u64(&live.configs) != built_topology {
+            tracing::info!("skipping hub re-arm: the built snapshot's topology is superseded");
+            return;
+        }
+        if !hub.ensure_roots(&crate::change_hub::watch_targets_for(root, scan_roots)) {
+            tracing::warn!("graph rebuild could not re-arm the change hub onto new roots");
+        }
     }
 
     /// Build (or rebuild) the database off-thread and publish it coherently.
@@ -100,8 +126,8 @@ impl GraphState {
         }));
 
         match outcome {
-            Ok(Ok((files, fp_pre, force_stale))) => {
-                if force_stale {
+            Ok(Ok(built)) => {
+                if built.force_stale {
                     tracing::warn!(
                         is_reload,
                         "graph build straddled a disk write; marking snapshot stale to force reload"
@@ -111,18 +137,36 @@ impl GraphState {
                 // freshness check re-scans against the new snapshot rather than a
                 // pre-reload cached fingerprint.
                 *lock_recover(&self.scan) = None;
+                let topology_changed;
                 {
                     let mut inner = lock_recover(&self.inner);
+                    // Only a WITNESSED transition (a previously published topology
+                    // differing from this build's) requests the whole-collection
+                    // re-render. `None` deliberately reads as unchanged: a cold
+                    // build must keep the boot invariant that an early publish
+                    // clears no pre-existing context marks — the offline-edit
+                    // warm start is covered by the stale-adopt -> catch-up chain,
+                    // which publishes the old topology first and transitions here.
+                    topology_changed = inner
+                        .published
+                        .as_ref()
+                        .is_some_and(|p| p.fingerprint.topology != built.fp_pre.topology);
                     inner.published = Some(Published {
                         generation,
-                        fingerprint: fp_pre,
+                        fingerprint: built.fp_pre,
                         stale: false,
                         reload: ReloadState::Idle,
                     });
-                    inner.status = GraphStatus::Ready { files };
+                    inner.status = GraphStatus::Ready { files: built.files };
                 }
-                self.notify_published(build_start_seq);
-                tracing::info!(files, generation, is_reload, "graph database build complete");
+                self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
+                self.notify_published(build_start_seq, topology_changed);
+                tracing::info!(
+                    files = built.files,
+                    generation,
+                    is_reload,
+                    "graph database build complete"
+                );
             }
             Ok(Err(e)) => {
                 let msg = e.to_string();
@@ -155,7 +199,19 @@ impl GraphState {
         if stored_fp.is_empty() {
             return false; // no per-file record (older build) → full rebuild
         }
-        let diff = classify_changes(&stored_fp, &scan_file_stats(workspace_root));
+        // ONE project snapshot serves the eligibility diff, the topology gate, the
+        // patch and the straddle bracket, so a config edit mid-operation cannot mix
+        // two topologies.
+        let project = crate::graph::ProjectSnapshot::load(workspace_root);
+        // A topology change re-shapes visibility for ANY module even when only
+        // `.bsl` bodies drifted on disk — never body-patch across it.
+        match GraphDb::open(&db_path).and_then(|g| g.freshness_token()) {
+            Ok((_, stored_token, _))
+                if stored_token.topology == super::scan::topology_u64(&project.configs) => {}
+            _ => return false,
+        }
+        let diff =
+            classify_changes(&stored_fp, &super::scan::scan_stats_over_roots(&project.scan_roots));
 
         // Body-only shape: at least one `.bsl` modified, nothing added/removed, no
         // metadata drift (an `.xml` change can flip visibility for any module).
@@ -235,12 +291,12 @@ impl GraphState {
 
         // Bracket the patch with fingerprint scans, mirroring the full build's
         // straddle detection: a write landing mid-patch marks the snapshot stale.
-        let fp_pre = workspace_fingerprint(workspace_root);
-        let tmp_path = db_path.with_extension("db.building");
+        let fp_pre = super::scan::workspace_fingerprint_over(&project);
+        let tmp_path = db_path.with_extension(format!("db.building.{}", std::process::id()));
         let built_at = chrono::Utc::now().to_rfc3339();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let summary = crate::graph_db::update_graph_database_bodies(
-                workspace_root,
+                &project,
                 &db_path,
                 &tmp_path,
                 &changed_paths,
@@ -252,7 +308,9 @@ impl GraphState {
                     built_at,
                 },
             )?;
-            let fp_post = workspace_fingerprint(workspace_root);
+            let fp_post = super::scan::workspace_fingerprint_over(
+                &crate::graph::ProjectSnapshot::load(workspace_root),
+            );
             let force_stale = fp_pre != fp_post;
             {
                 let conn = rusqlite::Connection::open(&tmp_path)?;
@@ -283,7 +341,8 @@ impl GraphState {
                     });
                     inner.status = GraphStatus::Ready { files };
                 }
-                self.notify_published(build_start_seq);
+                // The body-only gate proved the stored topology unchanged.
+                self.notify_published(build_start_seq, false);
                 tracing::info!(
                     files,
                     generation,
@@ -336,7 +395,9 @@ impl GraphState {
         });
         inner.status = GraphStatus::Ready { files };
         drop(inner);
-        self.notify_published(build_start_seq);
+        // Exact fingerprint match (files AND topology): the persisted search
+        // contexts were rendered against this same workspace state.
+        self.notify_published(build_start_seq, false);
         tracing::info!(files, revision, "reused cached graph database (workspace unchanged)");
         true
     }
@@ -409,15 +470,20 @@ impl GraphState {
 /// database until the swap, never a half-written one. Shared by the lazy loader
 /// ([`GraphState::run_load`]) and the fused cold build; when `chunk_sink` is present,
 /// the search index's chunks are streamed from the same parse pass. Returns
-/// `(files, fp_pre, force_stale)`.
+/// a [`PublishedBuild`].
 fn build_and_publish_graph_file(
     workspace_root: &Path,
     generation: u64,
     chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
-) -> anyhow::Result<(usize, u64, bool)> {
-    let fp_pre = workspace_fingerprint(workspace_root);
+) -> anyhow::Result<PublishedBuild> {
+    // ONE project snapshot serves the pre-scan, the build and the post-scan.
+    let project = crate::graph::ProjectSnapshot::load(workspace_root);
+    let fp_pre = super::scan::workspace_fingerprint_over(&project);
     let out_path = graph_db_path(workspace_root);
-    let tmp_path = out_path.with_extension("db.building");
+    // Pid-suffixed temp: two daemons over the same workspace (an old topology
+    // generation draining while a new one starts) must not interleave writes into
+    // one temp file — each builds its own and the atomic rename decides.
+    let tmp_path = out_path.with_extension(format!("db.building.{}", std::process::id()));
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -430,20 +496,22 @@ fn build_and_publish_graph_file(
     };
     let summary = match chunk_sink {
         Some(sink) => crate::graph_db::build_graph_database_fused(
-            workspace_root,
+            &project,
             &tmp_path,
             GRAPH_BUILD_BATCH,
             &meta,
             sink,
         )?,
-        None => crate::graph_db::build_graph_database(
-            workspace_root,
-            &tmp_path,
-            GRAPH_BUILD_BATCH,
-            &meta,
-        )?,
+        None => {
+            crate::graph_db::build_graph_database(&project, &tmp_path, GRAPH_BUILD_BATCH, &meta)?
+        }
     };
-    let fp_post = workspace_fingerprint(workspace_root);
+    // The post-scan derives a FRESH project snapshot: the straddle check must see
+    // the world as it is now, or a topology/root change landing mid-build would
+    // compare the frozen snapshot against itself and publish clean.
+    let fp_post = super::scan::workspace_fingerprint_over(&crate::graph::ProjectSnapshot::load(
+        workspace_root,
+    ));
     let force_stale = fp_pre != fp_post;
     {
         let conn = rusqlite::Connection::open(&tmp_path)?;
@@ -457,7 +525,22 @@ fn build_and_publish_graph_file(
         )?;
     }
     std::fs::rename(&tmp_path, &out_path)?;
-    Ok((summary.modules, fp_pre, force_stale))
+    Ok(PublishedBuild {
+        files: summary.modules,
+        fp_pre,
+        force_stale,
+        scan_roots: project.scan_roots,
+    })
+}
+
+/// The outcome of one full build+publish pass: what was published, the identity it
+/// was published under, and the scan roots of the snapshot that built it (for the
+/// post-publish hub re-arm).
+struct PublishedBuild {
+    files: usize,
+    fp_pre: crate::graph_db::GraphFp,
+    force_stale: bool,
+    scan_roots: Vec<PathBuf>,
 }
 
 /// Translates the graph pass's [`ide::ChunkRow`] stream into the search store for the
@@ -605,10 +688,11 @@ pub(crate) fn read_stored_sig_hashes(
 #[cfg(test)]
 mod tests {
     use super::super::input::{enumerate_bsl_files, load_workspace_db, scan_roots};
-    use super::super::scan::{scan_stats_over_roots, FileStat, WorkspaceDiff};
+    use super::super::scan::{scan_file_stats, scan_stats_over_roots, FileStat, WorkspaceDiff};
     use super::super::snapshot::fold_fingerprint_entries;
     use super::super::test_support::{
         meta_string, sample_workspace, seed_cache, wait_ready, write, write_common_module,
+        write_extension_config, write_extension_workspace,
     };
     use super::*;
     use crate::graph_db::{build_graph_database, update_graph_database_bodies};
@@ -693,7 +777,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         sample_workspace(root);
-        seed_cache(root, workspace_fingerprint(root).wrapping_add(1));
+        seed_cache(root, {
+            let mut fp = workspace_fingerprint(root);
+            fp.files = fp.files.wrapping_add(1);
+            fp
+        });
 
         let graph = GraphState::for_workspace(root.to_path_buf());
         graph.ensure_loading();
@@ -729,14 +817,17 @@ mod tests {
         sample_workspace(root);
 
         let walk = workspace_fingerprint(root);
-        let mut entries: Vec<(String, u128, u64)> =
-            scan_file_stats(root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let mut entries: Vec<(String, u128, u64)> = scan_stats_over_roots(&project.scan_roots)
+            .into_iter()
+            .map(|s| (s.path, s.mtime, s.len))
+            .collect();
         entries.sort();
         let map: std::collections::BTreeMap<String, (u128, u64)> =
             entries.into_iter().map(|(p, m, l)| (p, (m, l))).collect();
         let via_map: Vec<(String, u128, u64)> =
             map.iter().map(|(p, (m, l))| (p.clone(), *m, *l)).collect();
-        assert_eq!(fold_fingerprint_entries(&via_map), walk, "map fold == walk fold");
+        assert_eq!(fold_fingerprint_entries(&via_map), walk.files, "map fold == walk fold");
     }
 
     /// A cached build flagged `force_stale` (it straddled a disk write and was never
@@ -777,12 +868,12 @@ mod tests {
         let out = root.join(".build/bsl-graph.db");
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         let summary = build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -864,12 +955,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files: 0,
                 built_at: "t".to_string(),
             },
@@ -936,12 +1027,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -973,12 +1064,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1065,12 +1156,12 @@ mod tests {
         let out = root.join(".build/bsl-graph.db");
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1105,12 +1196,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1188,12 +1279,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1272,12 +1363,12 @@ mod tests {
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         let mut sink = CollectingSink::default();
         crate::graph_db::build_graph_database_fused(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1431,12 +1522,12 @@ mod tests {
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         // A batch_size far above the module count puts every module in one batch.
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             100,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1521,12 +1612,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1585,16 +1676,16 @@ mod tests {
             "Процедура Создать() Экспорт\nСправочники.Номенклатура.СоздатьЭлемент();\nКонецПроцедуры",
         );
 
-        let files = enumerate_bsl_files(root).len();
+        let files = enumerate_bsl_files(&crate::graph::ProjectSnapshot::load(root)).len();
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -1665,6 +1756,99 @@ mod tests {
         assert_ne!(after_bsl, after_xml, "a .xml metadata edit must change the fingerprint");
     }
 
+    /// A `dependsOn`-only config edit touches no file the stats fold sees, so the
+    /// topology component is the ONLY channel that can report it. If the fold were
+    /// files-only, this drift would be invisible forever.
+    #[test]
+    fn fingerprint_topology_component_tracks_a_depends_on_only_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_extension_workspace(root, false);
+        let base = workspace_fingerprint(root);
+
+        write_extension_config(root, true);
+        let after = workspace_fingerprint(root);
+        assert_eq!(base.files, after.files, "no scanned file moved");
+        assert_ne!(base.topology, after.topology, "the dependency edge changed the topology");
+    }
+
+    /// An extension appearing through zero-config auto-discovery (no analyzer config
+    /// file exists at all) must flow into the topology component too — visibility
+    /// re-shapes without a single config-file stat to observe.
+    #[test]
+    fn an_auto_discovered_extension_changes_the_topology_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let base = workspace_fingerprint(root);
+
+        write(root, "src/cfe/NewExt/Configuration.xml", "<Configuration/>");
+        let after = workspace_fingerprint(root);
+        assert_ne!(base.topology, after.topology, "discovery must reshape the topology");
+    }
+
+    /// The offline-edit warm start (daemon down while `dependsOn` changed): the
+    /// stale cache is served, and the catch-up publish must hand its hook
+    /// `topology_changed = true` — that request is what re-renders persisted
+    /// search contexts built under the old topology. A files-only drift must NOT
+    /// raise it.
+    #[test]
+    fn a_topology_only_warm_start_requests_a_whole_collection_context_refresh() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_extension_workspace(root, false);
+        seed_cache(root, workspace_fingerprint(root));
+        write_extension_config(root, true); // offline dependsOn edit
+
+        let requested = Arc::new(AtomicBool::new(false));
+        let hook = {
+            let requested = Arc::clone(&requested);
+            Arc::new(move |signal: crate::graph::GraphPublishSignal| {
+                if signal.topology_changed {
+                    requested.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                true
+            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+        };
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline
+            && !requested.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            requested.load(std::sync::atomic::Ordering::SeqCst),
+            "the catch-up publish after a topology-only warm start must request the refresh",
+        );
+    }
+
+    /// A cached on-disk graph built under one dependency graph is dead the moment the
+    /// declared topology changes, even though not one indexed file moved.
+    #[test]
+    fn cached_build_is_not_reused_after_a_topology_only_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_extension_workspace(root, false);
+        seed_cache(root, workspace_fingerprint(root));
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        assert!(graph.try_publish_cached(root, 0), "an unchanged workspace reuses the cache");
+
+        write_extension_config(root, true);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        assert!(
+            !graph.try_publish_cached(root, 0),
+            "a dependsOn-only edit must invalidate the cached graph"
+        );
+    }
+
     /// A build persists a per-file fingerprint for every `.bsl` AND `.xml` file, so
     /// a later reload can classify drift granularly. `sig_hash` is NULL for now.
     #[test]
@@ -1676,12 +1860,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files: 0,
                 built_at: "t".to_string(),
             },
@@ -1741,7 +1925,7 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
@@ -1756,7 +1940,8 @@ mod tests {
                 .unwrap()
         };
 
-        build_graph_database(root, &out, 1, &meta()).expect("builds");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &out, 1, &meta())
+            .expect("builds");
         let base = server_sig(&out);
 
         // Body-only edit: same signature `Функция Считать() Экспорт`, new body.
@@ -1765,7 +1950,8 @@ mod tests {
             "CommonModules/Сервер/Ext/Module.bsl",
             "&НаСервере\nФункция Считать() Экспорт\nА = 1; Возврат А;\nКонецФункции",
         );
-        build_graph_database(root, &out, 1, &meta()).expect("rebuilds");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &out, 1, &meta())
+            .expect("rebuilds");
         assert_eq!(server_sig(&out), base, "a body-only edit leaves the signature hash unchanged");
 
         // Signature edit: rename the function. The hash must move.
@@ -1774,7 +1960,8 @@ mod tests {
             "CommonModules/Сервер/Ext/Module.bsl",
             "&НаСервере\nФункция Считать2() Экспорт КонецФункции",
         );
-        build_graph_database(root, &out, 1, &meta()).expect("rebuilds");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &out, 1, &meta())
+            .expect("rebuilds");
         assert_ne!(server_sig(&out), base, "renaming a method changes the signature hash");
     }
 
@@ -1973,13 +2160,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         // Body-only edit of Бета: same signature `Процедура ШагБ() Экспорт`. Drops the
         // Контрагенты manager-create (orphaning that catalog's Mdo node) and adds a
@@ -1993,11 +2181,19 @@ mod tests {
         let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
-            .expect("incremental update");
+        update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        )
+        .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild of edited tree");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
+            .expect("full rebuild of edited tree");
 
         let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
         let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
@@ -2042,12 +2238,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -2112,13 +2308,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         // Body-only edit of the form module: same handler signature, different body.
         let module_rel = "Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
@@ -2130,11 +2327,19 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
-            .expect("incremental update");
+        update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        )
+        .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
+            .expect("full rebuild");
 
         let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
         let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
@@ -2175,12 +2380,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -2275,13 +2480,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         let module_rel = "Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
         write(
@@ -2292,11 +2498,19 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
-            .expect("incremental update");
+        update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        )
+        .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
+            .expect("full rebuild");
 
         let (inc_nodes, inc_edges, ..) = dump_data(&db_inc);
         let (full_nodes, full_edges, ..) = dump_data(&db_full);
@@ -2335,12 +2549,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -2421,13 +2635,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         let module_rel = "CommonModules/Альфа/Ext/Module.bsl";
         write(
@@ -2438,11 +2653,19 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
-            .expect("incremental update");
+        update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        )
+        .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
+            .expect("full rebuild");
 
         let (inc_nodes, inc_edges, inc_indeg, ..) = dump_data(&db_inc);
         let (full_nodes, full_edges, full_indeg, ..) = dump_data(&db_full);
@@ -2475,12 +2698,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files,
                 built_at: "t".to_string(),
             },
@@ -2608,13 +2831,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         let module_rel = "Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
         write(
@@ -2625,11 +2849,19 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
-            .expect("incremental update");
+        update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        )
+        .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
+            .expect("full rebuild");
 
         let (inc_nodes, inc_edges, ..) = dump_data(&db_inc);
         let (full_nodes, full_edges, ..) = dump_data(&db_full);
@@ -2667,13 +2899,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         // Бета references the SAME catalog with a different spelling.
         write(
@@ -2684,7 +2917,14 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        let result = update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta());
+        let result = update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        );
         assert!(result.is_err(), "casing drift must bail to full rebuild, got {result:?}");
     }
 
@@ -2704,13 +2944,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         // Бета drops its query; Альфа still references Номенклатура (it survives).
         write(
@@ -2720,7 +2961,14 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        let result = update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta());
+        let result = update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        );
         assert!(result.is_err(), "dropping a shared aux ref must bail, got {result:?}");
     }
 
@@ -2752,13 +3000,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         // The build recorded the inconsistent casing.
         let variants: String = Connection::open(&db_pre)
@@ -2780,7 +3029,14 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Альфа/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        let result = update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta());
+        let result = update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        );
         assert!(result.is_err(), "touching a recorded casing variant must bail, got {result:?}");
     }
 
@@ -2809,13 +3065,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         // Both modules now reference Товары with inconsistent casing.
         write(
@@ -2835,8 +3092,15 @@ mod tests {
             root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap(),
         ];
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
-            .expect("multi-file body-only update succeeds (current result is still correct)");
+        update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        )
+        .expect("multi-file body-only update succeeds (current result is still correct)");
 
         // The newly-introduced inconsistency is now persisted, so a later reload bails.
         let variants: String = Connection::open(&db_inc)
@@ -2850,7 +3114,8 @@ mod tests {
 
         // And the incremental DB is still byte-identical to a full rebuild of this tree.
         let db_full = root.join(".build/full.db");
-        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
+            .expect("full rebuild");
         let (inc_nodes, inc_edges, _, inc_unres) = dump_data(&db_inc);
         let (full_nodes, full_edges, _, full_unres) = dump_data(&db_full);
         assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
@@ -2895,13 +3160,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         // Remove Ядро.М (keep Н) — a signature change that only shrinks the resolvable
         // surface, so it is caller-delta-safe.
@@ -2926,11 +3192,19 @@ mod tests {
         let mut changed = vec![core_path];
         changed.extend(callers);
         let db_inc = root.join(".build/inc.db");
-        crate::graph_db::update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
-            .expect("caller-delta update");
+        crate::graph_db::update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        )
+        .expect("caller-delta update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
+            .expect("full rebuild");
         let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
         let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
         assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
@@ -2962,13 +3236,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         // The build recorded Алиса's unresolved call to Ядро.Новый, and stored no edge.
         let (_, pre_edges, _, pre_unres) = dump_data(&db_pre);
@@ -2998,11 +3273,19 @@ mod tests {
         let mut changed = vec![core_path];
         changed.extend(callers);
         let db_inc = root.join(".build/inc.db");
-        crate::graph_db::update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
-            .expect("caller-delta update");
+        crate::graph_db::update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        )
+        .expect("caller-delta update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
+            .expect("full rebuild");
         let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
         let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
         assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
@@ -3037,13 +3320,14 @@ mod tests {
 
         let meta = || crate::graph_db::GraphMeta {
             revision: 1,
-            fingerprint: 0,
+            fingerprint: crate::graph_db::GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("pre build");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("pre build");
 
         // Body-only edit (ШагА signature unchanged): add a call to the missing Ядро.Завтра.
         write(
@@ -3053,11 +3337,19 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Алиса/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        crate::graph_db::update_graph_database_bodies(root, &db_pre, &db_inc, &changed, 1, &meta())
-            .expect("body-only update");
+        crate::graph_db::update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_inc,
+            &changed,
+            1,
+            &meta(),
+        )
+        .expect("body-only update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
+            .expect("full rebuild");
         let (_, _, _, inc_unres) = dump_data(&db_inc);
         let (_, _, _, full_unres) = dump_data(&db_full);
         assert!(
@@ -3078,12 +3370,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &out,
             1,
             &crate::graph_db::GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 files: 0,
                 built_at: "t".to_string(),
             },

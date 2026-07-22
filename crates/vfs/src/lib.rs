@@ -39,6 +39,13 @@ impl VfsPath {
     pub fn join(&self, path: impl AsRef<Path>) -> Self {
         Self(self.0.join(path))
     }
+
+    /// Heap bytes owned by this path's inner buffer (a `PathBuf`, i.e.
+    /// `OsString` storage) — the per-path payload [`FileSet::estimated_heap_size`]
+    /// sums over its entries.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 impl From<PathBuf> for VfsPath {

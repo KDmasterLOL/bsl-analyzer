@@ -50,6 +50,23 @@ impl FileSet {
         Arc::make_mut(&mut self.files).remove(&path);
         Some(path)
     }
+
+    /// Approximate live heap bytes owned by this file set: both lookup tables
+    /// (`files`, `paths`) plus each entry's own [`VfsPath`] buffer. Each path is
+    /// stored — and counted — once per table, since `files` and `paths` hold
+    /// independent `VfsPath` clones rather than sharing one allocation.
+    ///
+    /// The two `Arc`s may be shared across `SourceRoot` clones (see the struct
+    /// doc comment above), so summing this per Salsa memo over-counts a `FileSet`
+    /// shared by many inputs — an accepted over-count, not a bug, per the
+    /// workspace `heap_size` convention (count owned payloads, ignore sharing).
+    pub fn estimated_heap_size(&self) -> usize {
+        let files_bytes = stdx::heap::map_table_bytes::<VfsPath, FileId>(self.files.len())
+            + self.files.keys().map(VfsPath::estimated_heap_size).sum::<usize>();
+        let paths_bytes = stdx::heap::map_table_bytes::<FileId, VfsPath>(self.paths.len())
+            + self.paths.values().map(VfsPath::estimated_heap_size).sum::<usize>();
+        files_bytes + paths_bytes
+    }
 }
 
 #[cfg(test)]
@@ -139,6 +156,25 @@ mod tests {
         assert_eq!(set.file_for_path(&path), Some(&id2));
         assert_eq!(set.len(), 1);
         assert_eq!(set.iter().count(), 2);
+    }
+
+    #[test]
+    fn estimated_heap_size_counts_tables_and_paths() {
+        let mut set = FileSet::new();
+        set.insert(
+            FileId(0),
+            VfsPath::from(PathBuf::from("/Catalogs/Товары/Ext/ObjectModule.bsl")),
+        );
+        set.insert(FileId(1), VfsPath::from(PathBuf::from("/CommonModules/Общий/Module.bsl")));
+        set.insert(FileId(2), VfsPath::from(PathBuf::from("/test.bsl")));
+
+        let path_bytes: usize =
+            set.iter().map(|id| set.path_for_file(&id).unwrap().estimated_heap_size()).sum();
+        let bytes = set.estimated_heap_size();
+        // At least the three paths' own bytes counted in both tables; well under
+        // a few kilobytes for three short paths.
+        assert!(bytes > path_bytes * 2);
+        assert!(bytes < 4096);
     }
 
     #[test]

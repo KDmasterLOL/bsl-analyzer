@@ -1,3 +1,4 @@
+use intern::NormName;
 use rustc_hash::FxHashSet;
 use stdx::case::CaseExt;
 
@@ -101,6 +102,20 @@ fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> 
                 .into_iter()
                 .flat_map(|prop| [prop.name.fold_lower(), prop.english_name.fold_lower()])
                 .collect();
+
+            // The managed/ordinary base above omits per-MDO form-extension
+            // properties (`ВариантМодифицирован`,
+            // `ПользовательскиеНастройкиМодифицированы`, …): assigning one is
+            // still a write to the form context, not a dead local. Which
+            // extension a form pulls in depends on its owner MDO, which is not
+            // threaded here, so union every extension name; these are specific
+            // reserved identifiers, unlike a bare local.
+            names.extend(
+                bsl_platform::PlatformDataInner::instance()
+                    .form_extension_property_names()
+                    .iter()
+                    .map(|name| name.to_string()),
+            );
 
             if let Some(form) = &metadata.form {
                 for attr_name in form.attribute_names() {
@@ -368,14 +383,14 @@ fn check_module_var_declarations(
         return Vec::new();
     }
 
-    let mut all_referenced_externals: rustc_hash::FxHashSet<String> =
+    let mut all_referenced_externals: rustc_hash::FxHashSet<NormName> =
         rustc_hash::FxHashSet::default();
 
     for (_local_id, lower_result) in module_bodies.iter_lower_results() {
-        all_referenced_externals.extend(lower_result.referenced_externals.iter().cloned());
+        all_referenced_externals.extend(lower_result.referenced_externals.iter().copied());
     }
     if let Some(module_code_result) = module_bodies.module_code_result() {
-        all_referenced_externals.extend(module_code_result.referenced_externals.iter().cloned());
+        all_referenced_externals.extend(module_code_result.referenced_externals.iter().copied());
     }
 
     let mut diagnostics = Vec::new();
@@ -383,7 +398,7 @@ fn check_module_var_declarations(
         if var.is_export {
             continue;
         }
-        let key = var.name.fold_lower();
+        let key = NormName::intern(&var.name);
         if !all_referenced_externals.contains(&key) {
             diagnostics.push(create_diagnostic(&var.name, var.range, code, ctx));
         }
@@ -1094,11 +1109,15 @@ mod tests {
     }
 
     fn make_form_module_metadata(attribute_names: Vec<&str>) -> hir::ModuleMetadata {
-        let mut form = bsl_metadata::Form::new(
-            "ТестоваяФорма".to_string(),
-            bsl_metadata::FormType::Managed,
-            uuid::Uuid::nil(),
-        );
+        make_form_module_metadata_of(bsl_metadata::FormType::Managed, attribute_names)
+    }
+
+    fn make_form_module_metadata_of(
+        form_type: bsl_metadata::FormType,
+        attribute_names: Vec<&str>,
+    ) -> hir::ModuleMetadata {
+        let mut form =
+            bsl_metadata::Form::new("ТестоваяФорма".to_string(), form_type, uuid::Uuid::nil());
         form.attributes = attribute_names
             .into_iter()
             .map(|s| bsl_metadata::FormAttribute::new(s, bsl_metadata::AttributeType::Unknown))
@@ -1191,6 +1210,114 @@ mod tests {
             "Writable standard form properties must not be flagged as unused, got: {:?}",
             unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_window_opening_mode_not_flagged_in_form_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        // `РежимОткрытияОкна` is a writable managed-form property (v8std #std742),
+        // but the help archive files it under its enum type name, so it reaches
+        // the base contract only through the curated overlay. Writing it is a
+        // form-context side effect, not a dead local.
+        let metadata = make_form_module_metadata(vec![]);
+
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    РежимОткрытияОкна = РежимОткрытияОкнаФормы.БлокироватьОкноВладельца;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "РежимОткрытияОкна is a managed-form property, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_form_extension_property_not_flagged_in_form_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        // `ВариантМодифицирован` / `ПользовательскиеНастройкиМодифицированы` are
+        // standard properties of the report-form extension, absent from the base
+        // `ФормаКлиентскогоПриложения` contract. Assigning them writes the form
+        // context, so they must not be reported as dead locals.
+        let metadata = make_form_module_metadata(vec![]);
+
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    ВариантМодифицирован = Параметры.ВариантМодифицирован;
+    ПользовательскиеНастройкиМодифицированы = Параметры.ПользовательскиеНастройкиМодифицированы;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "Report-form extension properties must not be flagged as unused, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_managed_only_base_property_still_flagged_in_ordinary_form() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        // `КлючНазначенияИспользования` is a managed-form-only base property. In
+        // an ordinary form it is not part of the contract, so the base selection
+        // must not skip it — a dead store keeps being reported. This locks the
+        // fix that stopped unioning both form bases together.
+        let metadata = make_form_module_metadata_of(bsl_metadata::FormType::Ordinary, vec![]);
+
+        let code = r#"Процедура ПриОткрытии()
+    КлючНазначенияИспользования = "тест";
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "a managed-only base property is not part of the ordinary-form contract and must be flagged, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(unused_diags[0].message.contains("КлючНазначенияИспользования"));
+    }
+
+    #[test]
+    fn test_field_control_extension_property_still_flagged_in_form_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        // `Документ` is a property of the HTML-document *field* extension, not of
+        // the form context. It must stay reportable: a dead `Документ = …` local
+        // in a form module is a real unused variable, not a form-context write.
+        let metadata = make_form_module_metadata(vec![]);
+
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Документ = 42;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "a field-control extension property name is an ordinary local and must be flagged"
+        );
+        assert!(unused_diags[0].message.contains("Документ"));
     }
 
     #[test]

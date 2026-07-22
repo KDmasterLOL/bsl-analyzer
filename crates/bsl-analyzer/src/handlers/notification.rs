@@ -455,7 +455,12 @@ pub fn handle_cancel(state: &mut GlobalState, params: lsp_types::CancelParams) -
         lsp_types::NumberOrString::String(s) => lsp_server::RequestId::from(s),
     };
 
-    if let Some(token) = state.request_tokens.remove(&id) {
+    // Cancel but keep the token registered: the worker still holds its db snapshot
+    // until it posts `Task::RequestResult` (which removes the entry), and an early
+    // removal would let `interactive_analysis_quiescent` report quiescent while the
+    // cancelled worker is still unwinding — an LRU trim taken in that window blocks
+    // the event loop on the worker's snapshot.
+    if let Some(token) = state.request_tokens.get(&id) {
         tracing::debug!(request_id = ?id, "cancelling in-flight async request");
         token.cancel();
     } else {
@@ -899,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_cancel_cancels_and_evicts_token() {
+    fn handle_cancel_cancels_and_keeps_token() {
         let (mut state, _receiver) = create_test_state();
 
         let db = state.analysis_host.raw_database().clone();
@@ -911,7 +916,10 @@ mod tests {
         handle_cancel(&mut state, params).unwrap();
 
         assert!(token.is_cancelled(), "token must be cancelled after $/cancelRequest");
-        assert!(!state.request_tokens.contains_key(&id), "token must be evicted from map");
+        assert!(
+            state.request_tokens.contains_key(&id),
+            "the entry stays until the worker's RequestResult removes it"
+        );
     }
 
     #[test]
@@ -938,7 +946,7 @@ mod tests {
         handle_cancel(&mut state, params).unwrap();
 
         assert!(token.is_cancelled());
-        assert!(!state.request_tokens.contains_key(&id));
+        assert!(state.request_tokens.contains_key(&id));
     }
 
     #[test]
@@ -1000,5 +1008,33 @@ mod tests {
         .unwrap();
 
         assert!(!state.mem_docs.contains(&uri));
+    }
+
+    #[test]
+    fn cancel_keeps_request_token_until_worker_completes() {
+        use salsa::Database as _;
+
+        let (mut state, _receiver) = create_test_state();
+        let id = lsp_server::RequestId::from(7);
+        let token = state.analysis_host.raw_database().cancellation_token();
+        state.request_tokens.insert(id.clone(), token);
+
+        handle_cancel(
+            &mut state,
+            lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(7) },
+        )
+        .unwrap();
+
+        // The cancelled worker still owns its db snapshot until it posts its
+        // `RequestResult`; dropping the token here would let the quiescence gate
+        // green-light an LRU trim that blocks the event loop on that snapshot.
+        assert!(
+            state.request_tokens.contains_key(&id),
+            "cancellation must not unregister the in-flight request"
+        );
+        assert!(
+            !state.interactive_analysis_quiescent(),
+            "a cancelled-but-running request must still defer trims"
+        );
     }
 }

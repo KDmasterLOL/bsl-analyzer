@@ -36,8 +36,10 @@ pub fn decode_disk_bytes(bytes: &[u8]) -> Option<String> {
 
 /// Heap-size estimators for Salsa's `memory_usage` introspection.
 pub(crate) mod heap_estimate {
+    use std::collections::HashMap;
     use std::mem::{size_of, size_of_val};
-    use syntax::{NodeOrToken, Parse, SyntaxNode};
+    use std::sync::Arc;
+    use syntax::{NodeOrToken, Parse, SyntaxNode, TextRange};
 
     /// Rough live bytes of a parse result's rowan green tree, walked once.
     ///
@@ -59,6 +61,43 @@ pub(crate) mod heap_estimate {
         }
         bytes += size_of_val(parse.errors());
         bytes
+    }
+
+    /// Heap of a memoised file text: the `Arc<str>` payload bytes.
+    pub(crate) fn file_text_heap(text: &Arc<str>) -> usize {
+        text.len()
+    }
+
+    /// Heap of the API-region method map: the table itself plus the owned
+    /// region-name strings. New heap-owning fields in the value type must be
+    /// added here too.
+    pub(crate) fn method_regions_heap(map: &Arc<HashMap<TextRange, String>>) -> usize {
+        stdx::heap::map_table_bytes::<TextRange, String>(map.len())
+            + map.values().map(String::capacity).sum::<usize>()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn file_text_heap_counts_payload_bytes() {
+            let text: Arc<str> = Arc::from("Процедура Тест() КонецПроцедуры");
+            assert_eq!(file_text_heap(&text), text.len());
+        }
+
+        #[test]
+        fn method_regions_heap_counts_table_and_strings() {
+            let mut map = HashMap::new();
+            let name = "ПрограммныйИнтерфейс".to_string();
+            let name_capacity = name.capacity();
+            map.insert(TextRange::new(0.into(), 10.into()), name);
+            let bytes = method_regions_heap(&Arc::new(map));
+            // At least the owned string plus one table slot; well under a
+            // kilobyte for a single entry.
+            assert!(bytes > name_capacity);
+            assert!(bytes < 1024);
+        }
     }
 }
 
@@ -92,7 +131,7 @@ pub fn set_parse_lru_sweep_mode(db: &mut dyn SourceDatabase, sweep: bool) {
 /// is LRU-evictable and re-derives soundly. A mismatch (the file changed under a
 /// running analysis, or a deleted/unreadable file) is a hard error, never a
 /// silently-mixed result.
-#[salsa::tracked(lru = 512, returns(ref))]
+#[salsa::tracked(lru = 512, heap_size = crate::queries::heap_estimate::file_text_heap, returns(ref))]
 pub fn file_text_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) -> Arc<str> {
     let _span = tracing::info_span!("file_text").entered();
     let file_id = input.file_id(db);
@@ -132,7 +171,11 @@ fn disk_path(db: &dyn SourceDatabase, file_id: FileId) -> PathBuf {
     vfs_path.as_path().to_path_buf()
 }
 
-#[salsa::tracked(lru = 256, returns(clone))]
+#[salsa::tracked(
+    lru = 256,
+    heap_size = crate::queries::heap_estimate::method_regions_heap,
+    returns(clone)
+)]
 pub fn method_regions_query<'db>(
     db: &'db dyn SourceDatabase,
     input: FileIdInput<'db>,
@@ -193,7 +236,7 @@ fn is_api_region(name: &str) -> bool {
     API_REGIONS.contains(&name.fold_lower().as_str())
 }
 
-#[salsa::tracked(lru = 256, returns(copy))]
+#[salsa::tracked(lru = 256, heap_size = stdx::heap::zero, returns(copy))]
 pub fn resolve_vfs_path_query(
     db: &dyn salsa::Database,
     source_root_input: SourceRootInput,

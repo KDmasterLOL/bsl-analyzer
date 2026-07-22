@@ -39,10 +39,33 @@ pub struct StructureParamSummary {
     pub per_param: FxHashMap<u32, Arc<Projection>>,
 }
 
+/// Approximate live heap of a memoised summary, for salsa's `heap_size` hook (otherwise only
+/// the `Arc` pointer is visible in the memory report): the boxed struct, the per-param table,
+/// and each projection's field slice with its owned field names. A projection `Arc` shared by
+/// several summaries is counted once per holder — over-approximate by design, consistent with
+/// the [`crate::infer::heap_estimate`] estimators.
+pub(crate) fn structure_param_summary_heap(v: &Arc<StructureParamSummary>) -> usize {
+    use std::mem::size_of;
+
+    let mut b = size_of::<StructureParamSummary>();
+    b += crate::infer::heap_estimate::map_table_bytes::<u32, Arc<Projection>>(v.per_param.len());
+    for projection in v.per_param.values() {
+        b += size_of::<Projection>();
+        b += projection.fields.len() * size_of::<bsl_types::kind::ProjectionField>();
+        for field in projection.fields.iter() {
+            b += field.name.capacity();
+        }
+        if let Some(raw) = &projection.raw_sdbl_types {
+            b += raw.len() * size_of::<bsl_types::facet::SdblTypeShadowFacet>();
+        }
+    }
+    b
+}
+
 /// Memoised per-method summary. Acyclic in salsa: it never calls itself as a query — transitive
 /// forwarding is resolved by [`compute_summary`]'s manual visited-set recursion — so a caller that
 /// is itself a fixpoint query (inference) reads a stable value.
-#[salsa::tracked(lru = 262144, returns(ref))]
+#[salsa::tracked(lru = 262144, heap_size = structure_param_summary_heap, returns(ref))]
 pub fn structure_param_keys_query<'db>(
     db: &'db dyn HirDatabase,
     method: MethodIdInput<'db>,

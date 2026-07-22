@@ -103,6 +103,33 @@ mod heap_estimate {
         }
         bytes
     }
+
+    fn resolved_target_name_heap(target: &crate::call_graph::ResolvedTarget) -> usize {
+        use crate::call_graph::ResolvedTarget;
+        match target {
+            ResolvedTarget::Method(_) => 0,
+            ResolvedTarget::Mdo { object_name, .. } => name_bytes(object_name),
+            ResolvedTarget::Unresolved(t) => call_target_name_heap(t),
+        }
+    }
+
+    pub(super) fn resolved_module_summary_heap(
+        v: &Arc<crate::call_graph::ResolvedModuleSummary>,
+    ) -> usize {
+        use crate::call_graph::ResolvedCallEdge;
+
+        let s = &**v;
+        let mut bytes = std::mem::size_of::<crate::call_graph::ResolvedModuleSummary>();
+        bytes += vec_bytes::<ResolvedCallEdge>(s.edges.len());
+        for e in &s.edges {
+            bytes += resolved_target_name_heap(&e.target);
+        }
+        bytes
+    }
+
+    pub(super) fn file_dependencies_heap(v: &Arc<Vec<FileId>>) -> usize {
+        vec_bytes::<FileId>(v.len())
+    }
 }
 
 // Condensed per-module data (built from item_tree, no green-tree pin): on the
@@ -150,7 +177,7 @@ pub fn set_module_bodies_lru_sweep_mode(db: &mut dyn DefDatabase, sweep: bool) {
     module_bodies_query::set_lru_capacity(db, if sweep { SWEEP } else { INTERACTIVE });
 }
 
-#[salsa::tracked(lru = 16, returns(clone))]
+#[salsa::tracked(lru = 16, heap_size = crate::workspace::workspace_symbols_heap, returns(clone))]
 pub fn workspace_symbols_query(
     db: &dyn DefDatabase,
     source_root_input: base_db::SourceRootInput,
@@ -184,7 +211,11 @@ pub fn module_call_summary_query<'db>(
     Arc::new(crate::call_graph::extract_call_summary(item_tree, module_bodies, form_handlers))
 }
 
-#[salsa::tracked(lru = 256, returns(clone))]
+#[salsa::tracked(
+    lru = 256,
+    heap_size = heap_estimate::resolved_module_summary_heap,
+    returns(clone)
+)]
 pub fn resolved_module_summary_query<'db>(
     db: &'db dyn crate::configs::ConfigsDatabase,
     file_id_input: FileIdInput<'db>,
@@ -796,7 +827,11 @@ pub fn method_outbound_facts(
     MethodOutboundFacts { dispatch, callees, manager_refs, query_reads, query_attr_reads }
 }
 
-#[salsa::tracked(lru = 16, returns(clone))]
+#[salsa::tracked(
+    lru = 16,
+    heap_size = crate::call_graph::workspace_call_graph_heap,
+    returns(clone)
+)]
 pub fn workspace_call_graph_query(
     db: &dyn crate::configs::ConfigsDatabase,
     source_root_input: base_db::SourceRootInput,
@@ -912,7 +947,7 @@ pub fn file_external_refs_query<'db>(
     Arc::new(refs)
 }
 
-#[salsa::tracked(lru = 16, returns(clone))]
+#[salsa::tracked(lru = 16, heap_size = crate::module_index::module_index_heap, returns(clone))]
 pub fn module_index_query(
     _db: &dyn DefDatabase,
     source_root_input: base_db::SourceRootInput,
@@ -937,7 +972,7 @@ pub fn module_index_query(
     Arc::new(index)
 }
 
-#[salsa::tracked(lru = 512, returns(clone))]
+#[salsa::tracked(lru = 512, heap_size = heap_estimate::file_dependencies_heap, returns(clone))]
 pub fn file_dependencies_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,

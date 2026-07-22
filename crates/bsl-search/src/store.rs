@@ -574,10 +574,15 @@ impl Store {
     }
 
     /// Mark every indexed file in `collection` context-dirty (a configuration-root `.xml`
-    /// changed: conservatively assume any module's context could shift). Bounded by the
-    /// file count, one upsert per path, all stamped with a single mark `seq` (the whole
-    /// batch is one drift event). Returns the number of files marked.
-    pub fn mark_collection_context_dirty(&self, collection: &str) -> Result<usize, SearchError> {
+    /// or the extension topology changed: conservatively assume any module's context
+    /// could shift). Bounded by the file count, one upsert per path, all stamped with a
+    /// single mark `seq` (the whole batch is one drift event). Returns the number of
+    /// files marked and that shared `seq`, so a caller that immediately consumes the
+    /// batch can bound its clear to exactly these marks and nothing stamped later.
+    pub fn mark_collection_context_dirty(
+        &self,
+        collection: &str,
+    ) -> Result<(usize, i64), SearchError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -589,7 +594,7 @@ impl Store {
              ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?2, seq = ?3",
             params![collection, now, seq],
         )?;
-        Ok(count)
+        Ok((count, seq))
     }
 
     /// The set of paths currently marked context-dirty in `collection`, regardless of
@@ -1987,9 +1992,10 @@ mod tests {
             "marking context-dirty leaves the vector generation untouched",
         );
 
-        // A configuration-root edit marks every indexed file.
-        let marked = store.mark_collection_context_dirty("code").unwrap();
+        // A configuration-root edit marks every indexed file, all under ONE seq.
+        let (marked, batch_seq) = store.mark_collection_context_dirty("code").unwrap();
         assert_eq!(marked, 2);
+        assert!(batch_seq > 0, "the batch reports the shared mark seq it stamped");
         assert_eq!(store.context_dirty_paths("code").unwrap().len(), 2);
 
         store.clear_context_dirty("code", "Owned.bsl").unwrap();

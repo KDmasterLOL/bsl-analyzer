@@ -23,7 +23,7 @@ use ide::{
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
-use crate::diagnostics_state::{DiagnosticsResident, Freshness, StatusReport, SweepOptions};
+use crate::diagnostics_state::{DiagnosticsResident, Freshness, StatusReport, WorkspaceSweep};
 use crate::tools::response::{structured, trim_items_to_budget};
 
 /// Server-side cap on returned findings, honouring Anthropic's tool-response budget.
@@ -281,13 +281,13 @@ pub(crate) fn file_findings(
 /// The `workspace` action's result body: whole-config diagnostics aggregated per code
 /// (`{code, severity, count, files_affected}`), never per-finding — an opt-in, bounded
 /// overview. `result_id` is generation-keyed (no per-file content hash applies).
+/// Formats an already-computed sweep; the caller runs `workspace_aggregates` (with its
+/// cancellation bridge) and owns the cancel logging.
 pub(crate) fn workspace_findings(
-    resident: &DiagnosticsResident,
-    opts: &SweepOptions,
+    sweep: &WorkspaceSweep,
     generation: u64,
     max_output_tokens: Option<usize>,
 ) -> Value {
-    let sweep = resident.workspace_aggregates(resident.config(), opts);
     let mut aggregates: Vec<Value> = sweep
         .aggregates
         .iter()
@@ -609,7 +609,7 @@ mod tests {
     mod file_action {
         use super::*;
         use crate::diagnostics_state::{
-            DiagnosticsState, DiagnosticsStatus, ResidentOutcome, SweepOptions,
+            DiagnosticsState, DiagnosticsStatus, ResidentOutcome, SweepCancel, SweepOptions,
         };
         use std::fs;
         use std::path::{Path, PathBuf};
@@ -781,7 +781,12 @@ mod tests {
         }
 
         fn run_workspace(state: &DiagnosticsState, opts: &SweepOptions) -> Value {
-            match state.read(|resident, gen| workspace_findings(resident, opts, gen, None)) {
+            let outcome = state.read(|resident, gen| {
+                let sweep =
+                    resident.workspace_aggregates(resident.config(), opts, &SweepCancel::default());
+                workspace_findings(&sweep, gen, None)
+            });
+            match outcome {
                 ResidentOutcome::Ready(v, _) => v,
                 _ => panic!("expected Ready outcome"),
             }

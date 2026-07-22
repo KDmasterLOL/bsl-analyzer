@@ -26,7 +26,7 @@ fn reference_server() -> McpServer {
 #[cfg(any(unix, windows))]
 fn key_for(src: &TempDir) -> BackendKey {
     // Profile here only names the socket; the served profile is the passed server.
-    BackendKey::new(src.path(), McpProfile::Workspace, 0)
+    BackendKey::new(src.path(), McpProfile::Workspace, 0, 0)
 }
 
 #[cfg(any(unix, windows))]
@@ -332,8 +332,10 @@ async fn workspace_backend_serves_concurrent_sessions_without_deadlock() {
     ];
 
     let ws = TempDir::new().unwrap();
-    let server =
-        McpServer::new(McpProfile::Workspace, SharedState::workspace(ws.path().to_path_buf()));
+    let server = McpServer::new(
+        McpProfile::Workspace,
+        SharedState::workspace(ws.path().to_path_buf()).expect("valid workspace project"),
+    );
 
     let mut clients = Vec::new();
     for _ in 0..SESSIONS {

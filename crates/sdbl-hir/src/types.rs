@@ -132,6 +132,17 @@ impl SdblType {
         matches!(self, Self::Ref(_) | Self::AnyRef | Self::AnyObjectRef { .. })
     }
 
+    /// В выгрузке конфигурации неограниченная строка кодируется явным
+    /// квалификатором `Длина = 0`; `length: None` означает отсутствие
+    /// квалификатора (длина неизвестна) и неограниченной строкой не считается.
+    pub fn is_unlimited_string(&self) -> bool {
+        match self.unwrap_aggregate() {
+            Self::String { length: Some(0) } => true,
+            Self::DefinedType { underlying_type: Some(inner), .. } => inner.is_unlimited_string(),
+            _ => false,
+        }
+    }
+
     pub fn unwrap_aggregate(&self) -> &Self {
         match self {
             Self::Aggregate(inner) => inner.unwrap_aggregate(),

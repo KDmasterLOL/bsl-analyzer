@@ -9,6 +9,8 @@ use crate::role::Role;
 use crate::scheduled_job::ScheduledJob;
 use crate::traits::{MdObject, Module};
 use crate::web_service::WebService;
+use intern::NormName;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -66,37 +68,37 @@ pub struct Configuration {
     uri_lower_to_common_module: HashMap<String, usize>,
 
     #[serde(skip)]
-    name_to_common_module: HashMap<String, usize>,
+    name_to_common_module: FxHashMap<NormName, usize>,
 
     #[serde(skip)]
-    name_to_register: HashMap<String, usize>,
+    name_to_register: FxHashMap<NormName, usize>,
 
     #[serde(skip)]
-    name_to_event_subscription: HashMap<String, usize>,
+    name_to_event_subscription: FxHashMap<NormName, usize>,
 
     #[serde(skip)]
-    name_to_defined_type: HashMap<String, usize>,
+    name_to_defined_type: FxHashMap<NormName, usize>,
 
     #[serde(skip)]
-    name_to_scheduled_job: HashMap<String, usize>,
+    name_to_scheduled_job: FxHashMap<NormName, usize>,
 
     #[serde(skip)]
-    name_to_role: HashMap<String, usize>,
+    name_to_role: FxHashMap<NormName, usize>,
 
     #[serde(skip)]
-    name_to_http_service: HashMap<String, usize>,
+    name_to_http_service: FxHashMap<NormName, usize>,
 
     #[serde(skip)]
-    name_to_web_service: HashMap<String, usize>,
+    name_to_web_service: FxHashMap<NormName, usize>,
 
     #[serde(skip)]
-    name_to_integration_service: HashMap<String, usize>,
+    name_to_integration_service: FxHashMap<NormName, usize>,
 
     /// `(mdo_type, lowercased name) -> index`, so [`Configuration::find_metadata_object`]
     /// is O(1) instead of an O(all-objects) scan that lowercased every object's
     /// (Cyrillic) name on each lookup.
     #[serde(skip)]
-    metadata_objects_by_key: HashMap<(MdoType, String), usize>,
+    metadata_objects_by_key: FxHashMap<(MdoType, NormName), usize>,
 
     #[serde(skip)]
     recorders_by_register: HashMap<(MdoType, Name), Vec<Name>>,
@@ -145,16 +147,16 @@ impl Configuration {
             subsystems: Vec::new(),
             uri_to_module: HashMap::new(),
             uri_lower_to_common_module: HashMap::new(),
-            name_to_common_module: HashMap::new(),
-            name_to_register: HashMap::new(),
-            name_to_event_subscription: HashMap::new(),
-            name_to_defined_type: HashMap::new(),
-            name_to_scheduled_job: HashMap::new(),
-            name_to_role: HashMap::new(),
-            name_to_http_service: HashMap::new(),
-            name_to_web_service: HashMap::new(),
-            name_to_integration_service: HashMap::new(),
-            metadata_objects_by_key: HashMap::new(),
+            name_to_common_module: FxHashMap::default(),
+            name_to_register: FxHashMap::default(),
+            name_to_event_subscription: FxHashMap::default(),
+            name_to_defined_type: FxHashMap::default(),
+            name_to_scheduled_job: FxHashMap::default(),
+            name_to_role: FxHashMap::default(),
+            name_to_http_service: FxHashMap::default(),
+            name_to_web_service: FxHashMap::default(),
+            name_to_integration_service: FxHashMap::default(),
+            metadata_objects_by_key: FxHashMap::default(),
             recorders_by_register: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
@@ -240,7 +242,7 @@ impl Configuration {
         for (idx, object) in self.metadata_objects.iter().enumerate() {
             // First occurrence wins, matching the replaced `.iter().find()` scan.
             self.metadata_objects_by_key
-                .entry((object.mdo_type, object.name.fold_lower()))
+                .entry((object.mdo_type, NormName::intern(&object.name)))
                 .or_insert(idx);
         }
 
@@ -250,39 +252,40 @@ impl Configuration {
                 // First occurrence wins, matching the replaced `.iter().find()` scan.
                 self.uri_lower_to_common_module.entry(uri.fold_lower()).or_insert(idx);
             }
-            self.name_to_common_module.insert(module.name().fold_lower(), idx);
+            self.name_to_common_module.insert(NormName::intern(module.name()), idx);
         }
 
         for (idx, register) in self.registers.iter().enumerate() {
-            self.name_to_register.insert(register.name().fold_lower(), idx);
+            self.name_to_register.insert(NormName::intern(register.name()), idx);
         }
 
         for (idx, event_sub) in self.event_subscriptions.iter().enumerate() {
-            self.name_to_event_subscription.insert(event_sub.name().fold_lower(), idx);
+            self.name_to_event_subscription.insert(NormName::intern(event_sub.name()), idx);
         }
 
         for (idx, defined_type) in self.defined_types.iter().enumerate() {
-            self.name_to_defined_type.insert(defined_type.name().fold_lower(), idx);
+            self.name_to_defined_type.insert(NormName::intern(defined_type.name()), idx);
         }
 
         for (idx, scheduled_job) in self.scheduled_jobs.iter().enumerate() {
-            self.name_to_scheduled_job.insert(scheduled_job.name().fold_lower(), idx);
+            self.name_to_scheduled_job.insert(NormName::intern(scheduled_job.name()), idx);
         }
 
         for (idx, role) in self.roles.iter().enumerate() {
-            self.name_to_role.insert(role.name().fold_lower(), idx);
+            self.name_to_role.insert(NormName::intern(role.name()), idx);
         }
 
         for (idx, http_service) in self.http_services.iter().enumerate() {
-            self.name_to_http_service.insert(http_service.name().fold_lower(), idx);
+            self.name_to_http_service.insert(NormName::intern(http_service.name()), idx);
         }
 
         for (idx, web_service) in self.web_services.iter().enumerate() {
-            self.name_to_web_service.insert(web_service.name().fold_lower(), idx);
+            self.name_to_web_service.insert(NormName::intern(web_service.name()), idx);
         }
 
         for (idx, integration_service) in self.integration_services.iter().enumerate() {
-            self.name_to_integration_service.insert(integration_service.name().fold_lower(), idx);
+            self.name_to_integration_service
+                .insert(NormName::intern(integration_service.name()), idx);
         }
 
         for object in &self.metadata_objects {
@@ -303,8 +306,9 @@ impl Configuration {
     }
 
     pub fn find_common_module(&self, name: &str) -> Option<&CommonModule> {
-        let name_lower = name.fold_lower();
-        self.name_to_common_module.get(&name_lower).and_then(|&idx| self.common_modules.get(idx))
+        self.name_to_common_module
+            .get(&NormName::intern(name))
+            .and_then(|&idx| self.common_modules.get(idx))
     }
 
     /// Case-insensitive lookup by root-relative URI. `uri_lower` must already be
@@ -335,7 +339,7 @@ impl Configuration {
             // First occurrence wins, matching the replaced `.iter().find()` scan.
             self.uri_lower_to_common_module.entry(uri.fold_lower()).or_insert(idx);
         }
-        self.name_to_common_module.insert(module.name().fold_lower(), idx);
+        self.name_to_common_module.insert(NormName::intern(module.name()), idx);
 
         self.common_modules.push(module);
     }
@@ -367,7 +371,7 @@ impl Configuration {
         // later same-(type,name) object (e.g. a case-only-differing extension
         // overlay) must not shadow the base object the scan would have returned.
         self.metadata_objects_by_key
-            .entry((object.mdo_type, object.name.fold_lower()))
+            .entry((object.mdo_type, NormName::intern(&object.name)))
             .or_insert(idx);
         self.metadata_objects.push(object);
     }
@@ -453,7 +457,7 @@ impl Configuration {
     }
 
     pub fn find_metadata_object(&self, mdo_type: MdoType, name: &str) -> Option<&MetadataObject> {
-        let idx = *self.metadata_objects_by_key.get(&(mdo_type, name.fold_lower()))?;
+        let idx = *self.metadata_objects_by_key.get(&(mdo_type, NormName::intern(name)))?;
         self.metadata_objects.get(idx)
     }
 
@@ -467,8 +471,7 @@ impl Configuration {
     }
 
     pub fn find_register(&self, name: &str) -> Option<&Register> {
-        let name_lower = name.fold_lower();
-        self.name_to_register.get(&name_lower).and_then(|&idx| self.registers.get(idx))
+        self.name_to_register.get(&NormName::intern(name)).and_then(|&idx| self.registers.get(idx))
     }
 
     pub fn find_register_by_type_and_name(
@@ -476,9 +479,8 @@ impl Configuration {
         mdo_type: MdoType,
         name: &str,
     ) -> Option<&Register> {
-        let name_lower = name.fold_lower();
         self.name_to_register
-            .get(&name_lower)
+            .get(&NormName::intern(name))
             .and_then(|&idx| self.registers.get(idx).filter(|r| r.mdo_type() == mdo_type))
     }
 
@@ -489,7 +491,7 @@ impl Configuration {
 
     pub fn add_register(&mut self, register: Register) {
         let idx = self.registers.len();
-        self.name_to_register.insert(register.name().fold_lower(), idx);
+        self.name_to_register.insert(NormName::intern(register.name()), idx);
         self.registers.push(register);
     }
 
@@ -498,15 +500,14 @@ impl Configuration {
     }
 
     pub fn find_event_subscription(&self, name: &str) -> Option<&EventSubscription> {
-        let name_lower = name.fold_lower();
         self.name_to_event_subscription
-            .get(&name_lower)
+            .get(&NormName::intern(name))
             .and_then(|&idx| self.event_subscriptions.get(idx))
     }
 
     pub(crate) fn add_event_subscription(&mut self, subscription: EventSubscription) {
         let idx = self.event_subscriptions.len();
-        self.name_to_event_subscription.insert(subscription.name().fold_lower(), idx);
+        self.name_to_event_subscription.insert(NormName::intern(subscription.name()), idx);
         self.event_subscriptions.push(subscription);
     }
 
@@ -523,13 +524,14 @@ impl Configuration {
     }
 
     pub fn find_defined_type(&self, name: &str) -> Option<&DefinedType> {
-        let name_lower = name.fold_lower();
-        self.name_to_defined_type.get(&name_lower).and_then(|&idx| self.defined_types.get(idx))
+        self.name_to_defined_type
+            .get(&NormName::intern(name))
+            .and_then(|&idx| self.defined_types.get(idx))
     }
 
     pub fn add_defined_type(&mut self, defined_type: DefinedType) {
         let idx = self.defined_types.len();
-        self.name_to_defined_type.insert(defined_type.name().fold_lower(), idx);
+        self.name_to_defined_type.insert(NormName::intern(defined_type.name()), idx);
         self.defined_types.push(defined_type);
     }
 
@@ -538,13 +540,14 @@ impl Configuration {
     }
 
     pub fn find_scheduled_job(&self, name: &str) -> Option<&ScheduledJob> {
-        let name_lower = name.fold_lower();
-        self.name_to_scheduled_job.get(&name_lower).and_then(|&idx| self.scheduled_jobs.get(idx))
+        self.name_to_scheduled_job
+            .get(&NormName::intern(name))
+            .and_then(|&idx| self.scheduled_jobs.get(idx))
     }
 
     pub(crate) fn add_scheduled_job(&mut self, job: ScheduledJob) {
         let idx = self.scheduled_jobs.len();
-        self.name_to_scheduled_job.insert(job.name().fold_lower(), idx);
+        self.name_to_scheduled_job.insert(NormName::intern(job.name()), idx);
         self.scheduled_jobs.push(job);
     }
 
@@ -553,13 +556,12 @@ impl Configuration {
     }
 
     pub fn find_role(&self, name: &str) -> Option<&Role> {
-        let name_lower = name.fold_lower();
-        self.name_to_role.get(&name_lower).and_then(|&idx| self.roles.get(idx))
+        self.name_to_role.get(&NormName::intern(name)).and_then(|&idx| self.roles.get(idx))
     }
 
     pub fn add_role(&mut self, role: Role) {
         let idx = self.roles.len();
-        self.name_to_role.insert(role.name().fold_lower(), idx);
+        self.name_to_role.insert(NormName::intern(role.name()), idx);
         self.roles.push(role);
     }
 
@@ -568,13 +570,14 @@ impl Configuration {
     }
 
     pub fn find_http_service(&self, name: &str) -> Option<&HTTPService> {
-        let name_lower = name.fold_lower();
-        self.name_to_http_service.get(&name_lower).and_then(|&idx| self.http_services.get(idx))
+        self.name_to_http_service
+            .get(&NormName::intern(name))
+            .and_then(|&idx| self.http_services.get(idx))
     }
 
     pub(crate) fn add_http_service(&mut self, http_service: HTTPService) {
         let idx = self.http_services.len();
-        self.name_to_http_service.insert(http_service.name().fold_lower(), idx);
+        self.name_to_http_service.insert(NormName::intern(http_service.name()), idx);
         self.http_services.push(http_service);
     }
 
@@ -583,13 +586,14 @@ impl Configuration {
     }
 
     pub fn find_web_service(&self, name: &str) -> Option<&WebService> {
-        let name_lower = name.fold_lower();
-        self.name_to_web_service.get(&name_lower).and_then(|&idx| self.web_services.get(idx))
+        self.name_to_web_service
+            .get(&NormName::intern(name))
+            .and_then(|&idx| self.web_services.get(idx))
     }
 
     pub(crate) fn add_web_service(&mut self, web_service: WebService) {
         let idx = self.web_services.len();
-        self.name_to_web_service.insert(web_service.name().fold_lower(), idx);
+        self.name_to_web_service.insert(NormName::intern(web_service.name()), idx);
         self.web_services.push(web_service);
     }
 
@@ -601,9 +605,8 @@ impl Configuration {
         &self,
         name: &str,
     ) -> Option<&crate::integration_service::IntegrationService> {
-        let name_lower = name.fold_lower();
         self.name_to_integration_service
-            .get(&name_lower)
+            .get(&NormName::intern(name))
             .and_then(|&idx| self.integration_services.get(idx))
     }
 
@@ -612,9 +615,97 @@ impl Configuration {
         integration_service: crate::integration_service::IntegrationService,
     ) {
         let idx = self.integration_services.len();
-        self.name_to_integration_service.insert(integration_service.name().fold_lower(), idx);
+        self.name_to_integration_service.insert(NormName::intern(integration_service.name()), idx);
         self.integration_services.push(integration_service);
     }
+
+    /// Heap bytes owned by this configuration, memoised by `ide-db`'s
+    /// `load_configuration`/`merged_configuration` for Salsa's `heap_size` hook:
+    /// its name, every owned metadata-family vec (recursing into each entry's own
+    /// owned payload), and every `name -> index` lookup table `build_caches`
+    /// maintains alongside them. New heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        let mut bytes = self.name.capacity();
+
+        bytes += stdx::heap::vec_bytes::<CommonModule>(self.common_modules.len())
+            + self.common_modules.iter().map(CommonModule::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<MetadataObject>(self.metadata_objects.len())
+            + self.metadata_objects.iter().map(MetadataObject::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<Register>(self.registers.len())
+            + self.registers.iter().map(Register::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<EventSubscription>(self.event_subscriptions.len())
+            + self
+                .event_subscriptions
+                .iter()
+                .map(EventSubscription::estimated_heap_size)
+                .sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<DefinedType>(self.defined_types.len())
+            + self.defined_types.iter().map(DefinedType::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<ScheduledJob>(self.scheduled_jobs.len())
+            + self.scheduled_jobs.iter().map(ScheduledJob::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<Role>(self.roles.len())
+            + self.roles.iter().map(Role::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<crate::subsystem::Subsystem>(self.subsystems.len())
+            + self
+                .subsystems
+                .iter()
+                .map(crate::subsystem::Subsystem::estimated_heap_size)
+                .sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<HTTPService>(self.http_services.len())
+            + self.http_services.iter().map(HTTPService::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<WebService>(self.web_services.len())
+            + self.web_services.iter().map(WebService::estimated_heap_size).sum::<usize>();
+        bytes += stdx::heap::vec_bytes::<crate::integration_service::IntegrationService>(
+            self.integration_services.len(),
+        ) + self
+            .integration_services
+            .iter()
+            .map(crate::integration_service::IntegrationService::estimated_heap_size)
+            .sum::<usize>();
+
+        bytes += name_index_heap(&self.uri_to_module);
+        bytes += name_index_heap(&self.uri_lower_to_common_module);
+        bytes += norm_index_heap(&self.name_to_common_module);
+        bytes += norm_index_heap(&self.name_to_register);
+        bytes += norm_index_heap(&self.name_to_event_subscription);
+        bytes += norm_index_heap(&self.name_to_defined_type);
+        bytes += norm_index_heap(&self.name_to_scheduled_job);
+        bytes += norm_index_heap(&self.name_to_role);
+        bytes += norm_index_heap(&self.name_to_http_service);
+        bytes += norm_index_heap(&self.name_to_web_service);
+        bytes += norm_index_heap(&self.name_to_integration_service);
+
+        bytes += stdx::heap::map_table_bytes::<(MdoType, NormName), usize>(
+            self.metadata_objects_by_key.len(),
+        );
+
+        bytes += stdx::heap::map_table_bytes::<(MdoType, Name), Vec<Name>>(
+            self.recorders_by_register.len(),
+        ) + self
+            .recorders_by_register
+            .iter()
+            .map(|((_, key_name), recorders)| {
+                key_name.capacity()
+                    + stdx::heap::vec_bytes::<Name>(recorders.len())
+                    + recorders.iter().map(String::capacity).sum::<usize>()
+            })
+            .sum::<usize>();
+
+        bytes
+    }
+}
+
+/// Heap of a `name -> index` lookup table (every `Configuration` cache follows this
+/// shape): the table itself plus the owned lowercased-name keys.
+/// Heap of a `NormName -> index` lookup table: just the table itself — the
+/// interned key strings are owned by the global pool and counted once there.
+fn norm_index_heap(map: &FxHashMap<NormName, usize>) -> usize {
+    stdx::heap::map_table_bytes::<NormName, usize>(map.len())
+}
+
+fn name_index_heap(map: &HashMap<String, usize>) -> usize {
+    stdx::heap::map_table_bytes::<String, usize>(map.len())
+        + map.keys().map(String::capacity).sum::<usize>()
 }
 
 fn index_document_recorders(
@@ -670,6 +761,24 @@ mod tests {
         let found_uri = config.find_module_by_uri("CommonModules/TestModule/Ext/Module.bsl");
         assert!(found_uri.is_some());
         assert_eq!(found_uri.unwrap().name(), "TestModule");
+    }
+
+    #[test]
+    fn find_common_module_matches_every_case_variant_including_yo() {
+        // The name index is keyed by interned NormName, whose identity is
+        // eq_ignore_case — every spelling of the same name must hit, and Ё/Е
+        // must stay distinct (they are different letters, not case variants).
+        let mut config = Configuration::new("Test");
+        config.add_common_module(CommonModule::builder().name("ОбщегоНазначенияЁмкость").build());
+
+        for spelling in
+            ["ОбщегоНазначенияЁмкость", "общегоназначенияёмкость", "ОБЩЕГОНАЗНАЧЕНИЯЁМКОСТЬ"]
+        {
+            let found = config.find_common_module(spelling);
+            assert!(found.is_some(), "no match for {spelling:?}");
+            assert_eq!(found.unwrap().name(), "ОбщегоНазначенияЁмкость");
+        }
+        assert!(config.find_common_module("ОбщегоНазначенияЕмкость").is_none());
     }
 
     #[test]
@@ -968,6 +1077,36 @@ mod tests {
             &[doc_name.to_string()],
         );
         assert!(merged.recorders_for_register(MdoType::InformationRegister, "A").is_empty());
+    }
+
+    #[test]
+    fn configuration_heap_counts_objects_and_name_indexes() {
+        let mut config = Configuration::new("ТестоваяКонфигурация");
+        let name_capacity = config.name.capacity();
+
+        let mut catalog = MetadataObject::new(MdoType::Catalog, "Номенклатура");
+        catalog.add_attribute(crate::metadata_object::Attribute {
+            name: "Артикул".to_string(),
+            name_en: None,
+            attr_type: AttributeType::String { length: Some(25) },
+        });
+        let catalog_name_capacity = catalog.name.capacity();
+        config.add_metadata_object(catalog);
+
+        let module = CommonModule::builder().name("ОбщийМодуль1").global(true).build();
+        // `name` is private, so probe via the public accessor: `.len()` is a safe
+        // lower bound on the real (private) `.capacity()`.
+        let module_name_floor = module.name().len();
+        config.add_common_module(module);
+
+        let owned_floor = name_capacity + catalog_name_capacity + module_name_floor;
+
+        let bytes = config.estimated_heap_size();
+        // At least the owned name strings on the objects themselves (the name
+        // indexes and vec backing stores add further bytes on top); well under
+        // 8 KiB for two small entries plus their lookup-table entries.
+        assert!(bytes > owned_floor);
+        assert!(bytes < 8 * 1024);
     }
 
     #[test]

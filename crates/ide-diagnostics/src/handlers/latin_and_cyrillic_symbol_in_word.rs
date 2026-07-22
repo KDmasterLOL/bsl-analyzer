@@ -211,10 +211,9 @@ fn extract_region_name(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
         (n, "#область".len())
     } else if let Some(n) = first_line.strip_prefix("#Region") {
         (n, "#Region".len())
-    } else if let Some(n) = first_line.strip_prefix("#region") {
-        (n, "#region".len())
     } else {
-        return None;
+        let n = first_line.strip_prefix("#region")?;
+        (n, "#region".len())
     };
 
     let trimmed = name.trim();

@@ -12,7 +12,6 @@ pub mod queries;
 pub mod root_db;
 pub mod salsa_events;
 pub mod salsa_provider;
-pub mod streaming;
 pub mod type_kernel;
 pub mod types;
 pub(crate) mod vfs_helpers;
@@ -20,16 +19,11 @@ pub(crate) mod vfs_helpers;
 pub use hir::SdblHirEntries;
 pub use types::SymbolKind;
 
-pub use database::{GraphConfigCache, RootDatabaseImpl};
+pub use database::{GraphConfigCache, RootDatabaseImpl, VisibleRoots};
 pub use root_db::RootDatabase;
 
 pub use provider::AnalysisProvider;
 pub use salsa_provider::SalsaProvider;
-
-pub use streaming::{
-    ClaimResult, FileReader, FileStatus, GlobalContext, ProcessError, SharedState,
-    StreamingProvider,
-};
 
 pub use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 pub use queries::{

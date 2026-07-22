@@ -114,6 +114,16 @@ pub(crate) mod heap_estimate {
     pub(super) fn module_cyclomatic_heap(v: &Arc<ModuleCyclomatic>) -> usize {
         map_table_bytes::<u32, u32>(v.methods.len())
     }
+
+    pub(super) fn module_metadata_heap(v: &Arc<hir::ModuleMetadata>) -> usize {
+        std::mem::size_of::<hir::ModuleMetadata>() + v.estimated_heap_size()
+    }
+
+    /// A `method_hir_metrics` accessor result is a clone of an `Arc` owned by
+    /// `module_hir_metrics`; report only the (already-counted) pointer.
+    pub(super) fn shared_hir_metrics_heap(_v: &Arc<hir::metrics::HirMethodMetrics>) -> usize {
+        0
+    }
 }
 
 pub fn configuration_path_for_file<'db>(
@@ -185,7 +195,7 @@ pub fn weaving_target<'db>(
     Some(hir::WeavingModuleId::new(db, ext_file, base_file))
 }
 
-#[salsa::tracked(lru = 128, returns(clone))]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_metadata_heap, returns(clone))]
 pub fn module_metadata_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,
@@ -543,13 +553,6 @@ pub struct ModuleHirMetrics {
 }
 
 impl ModuleHirMetrics {
-    pub(crate) fn from_methods(
-        methods: rustc_hash::FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>>,
-        module_code: Option<Arc<hir::metrics::HirMethodMetrics>>,
-    ) -> Self {
-        Self { methods, module_code }
-    }
-
     pub fn get(&self, local_id: u32) -> Option<Arc<hir::metrics::HirMethodMetrics>> {
         self.methods.get(&local_id).cloned()
     }
@@ -582,10 +585,6 @@ pub struct ModuleCyclomatic {
 }
 
 impl ModuleCyclomatic {
-    pub(crate) fn from_methods(methods: rustc_hash::FxHashMap<u32, u32>) -> Self {
-        Self { methods }
-    }
-
     pub fn get(&self, local_id: u32) -> u32 {
         self.methods.get(&local_id).copied().unwrap_or(1)
     }
@@ -635,7 +634,7 @@ pub fn module_hir_metrics_query<'db>(
     Arc::new(ModuleHirMetrics { methods, module_code })
 }
 
-#[salsa::tracked(lru = 256, returns(clone))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_hir_metrics_heap, returns(clone))]
 pub fn method_hir_metrics_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
@@ -675,7 +674,7 @@ pub fn module_cyclomatic_query<'db>(
     Arc::new(ModuleCyclomatic { methods })
 }
 
-#[salsa::tracked(lru = 256, returns(copy))]
+#[salsa::tracked(lru = 256, heap_size = stdx::heap::zero, returns(copy))]
 pub fn method_cyclomatic_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,

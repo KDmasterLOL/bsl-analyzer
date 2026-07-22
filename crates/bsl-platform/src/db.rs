@@ -23,6 +23,10 @@ pub struct PlatformDataInner {
     /// Folded English type name → indices of that type's methods. Replaces the
     /// O(all-methods) per-call `to_lowercase` scan in [`get_type_methods`].
     methods_by_type: FxHashMap<SmolStr, Vec<usize>>,
+    /// Folded first segment of a dotted type name (the manager prefix) → indices
+    /// of methods on that manager's types. Replaces the O(all-methods) per-call
+    /// `to_lowercase` scan in [`get_manager_methods`].
+    manager_methods_by_prefix: FxHashMap<SmolStr, Vec<usize>>,
     global_functions: Vec<GlobalFunction>,
     global_functions_by_name: FxHashMap<SmolStr, usize>,
     method_docs_by_id: FxHashMap<u32, usize>,
@@ -47,6 +51,14 @@ pub struct PlatformDataInner {
     /// per-entry facts that differ between the homonyms (availability,
     /// deprecation) are unreliable for these names.
     ambiguous_type_names: rustc_hash::FxHashSet<SmolStr>,
+    /// Folded names (RU and EN) of every standard property contributed by a
+    /// per-MDO form extension (`… form extension …`), e.g. the report form's
+    /// `ВариантМодифицирован`. The base form contract is deliberately excluded
+    /// here — callers pick the managed/ordinary base themselves so an
+    /// ordinary-only property is not skipped in a managed form and vice versa.
+    /// Writing an extension property is a side effect on the form context, never
+    /// a dead local, so the unused-local-variable check skips these.
+    form_extension_property_names: rustc_hash::FxHashSet<SmolStr>,
 }
 
 impl PlatformDataInner {
@@ -110,6 +122,7 @@ impl PlatformDataInner {
 
         let mut methods_by_name = FxHashMap::default();
         let mut methods_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
+        let mut manager_methods_by_prefix: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
 
         let mut type_en_to_ru: FxHashMap<SmolStr, SmolStr> = FxHashMap::default();
         for ty in &types {
@@ -124,6 +137,9 @@ impl PlatformDataInner {
             let en_method_key: SmolStr = method.english_name.fold_lower().into();
 
             methods_by_type.entry(en_type_key.clone()).or_default().push(idx);
+            if let Some((manager_prefix, _)) = en_type_key.split_once('.') {
+                manager_methods_by_prefix.entry(manager_prefix.into()).or_default().push(idx);
+            }
             methods_by_name.insert((en_type_key.clone(), ru_method_key.clone()), idx);
             methods_by_name.insert((en_type_key.clone(), en_method_key.clone()), idx);
 
@@ -220,6 +236,25 @@ impl PlatformDataInner {
             global_properties_by_name.insert(en_key, idx);
         }
 
+        // `ВариантМодифицирован` and the rest of the per-MDO extension surface
+        // live on `… form extension …` types, not on the base form contract.
+        // Union every such extension property name so the unused-local check does
+        // not have to know which extension a given form pulls in; the base
+        // contract stays out so the caller's managed/ordinary base choice is
+        // preserved. `Form extension for a … field` types are field/control
+        // extensions, not form-context ones — their properties (`Документ`,
+        // `Ориентация`, …) are ordinary member names, so excluding them keeps a
+        // dead `Документ = …` local reportable.
+        let mut form_extension_property_names: rustc_hash::FxHashSet<SmolStr> =
+            rustc_hash::FxHashSet::default();
+        for prop in &properties {
+            let type_key = prop.type_name.fold_lower();
+            if type_key.contains("form extension") && !type_key.contains("form extension for a") {
+                form_extension_property_names.insert(prop.name.fold_lower().into());
+                form_extension_property_names.insert(prop.english_name.fold_lower().into());
+            }
+        }
+
         Self {
             types,
             types_by_name,
@@ -227,6 +262,7 @@ impl PlatformDataInner {
             methods,
             methods_by_name,
             methods_by_type,
+            manager_methods_by_prefix,
             global_functions,
             global_functions_by_name,
             method_docs_by_id,
@@ -241,6 +277,7 @@ impl PlatformDataInner {
             property_docs_by_id,
             global_properties_by_name,
             ambiguous_type_names,
+            form_extension_property_names,
         }
     }
 
@@ -285,8 +322,25 @@ impl PlatformDataInner {
     }
 
     pub fn get_manager_methods(&self, manager_prefix: &str) -> Vec<&PlatformMethod> {
-        let prefix = format!("{}.", manager_prefix.fold_lower());
-        self.methods.iter().filter(|m| m.type_name.fold_lower().starts_with(&prefix)).collect()
+        let folded = manager_prefix.fold_lower();
+        // The index is keyed by the segment before the first dot; a dotted
+        // prefix narrows the bucket with the original `starts_with` check.
+        let (head, dotted_rest) = match folded.split_once('.') {
+            Some((head, _)) => (head, true),
+            None => (folded.as_str(), false),
+        };
+        let Some(indices) = self.manager_methods_by_prefix.get(head) else {
+            return Vec::new();
+        };
+        if !dotted_rest {
+            return indices.iter().filter_map(|&idx| self.methods.get(idx)).collect();
+        }
+        let full_prefix = format!("{folded}.");
+        indices
+            .iter()
+            .filter_map(|&idx| self.methods.get(idx))
+            .filter(|m| m.type_name.fold_lower().starts_with(&full_prefix))
+            .collect()
     }
 
     pub fn get_global_function(&self, name: &str) -> Option<&GlobalFunction> {
@@ -346,6 +400,15 @@ impl PlatformDataInner {
             Some(idxs) => idxs.iter().map(|&i| &self.properties[i]).collect(),
             None => Vec::new(),
         }
+    }
+
+    /// Folded names (RU and EN) of every standard property contributed by a
+    /// per-MDO form extension. The base form contract is not included — resolve
+    /// it via [`get_type_properties`] with the correct managed/ordinary form
+    /// type. Assigning an extension property from a form module writes the form
+    /// context, so the unused-local-variable check treats these as non-locals.
+    pub fn form_extension_property_names(&self) -> &rustc_hash::FxHashSet<SmolStr> {
+        &self.form_extension_property_names
     }
 
     pub fn get_manager_properties(&self, manager_prefix: &str) -> Vec<&PlatformProperty> {
@@ -666,24 +729,86 @@ fn get_keyword_docs_static(keyword: &str) -> Option<crate::types::KeywordDocs> {
 
 pub type PlatformData = PlatformDataInner;
 
-#[salsa::interned(debug)]
+/// `heap_size` estimators for Salsa's `memory_usage` report on the platform
+/// lookup queries. Each thinly wraps the target type's own `estimated_heap_size`
+/// (defined next to the type in `types.rs`) for the `Option`/`Arc<Vec<_>>`
+/// shape the query actually memoises.
+mod heap_estimate {
+    use std::sync::Arc;
+
+    use super::{
+        GlobalFunction, PlatformConstructor, PlatformMethod, PlatformProperty, PlatformType,
+    };
+
+    pub(super) fn platform_type_heap(v: &Option<PlatformType>) -> usize {
+        v.as_ref().map_or(0, PlatformType::estimated_heap_size)
+    }
+
+    pub(super) fn platform_method_heap(v: &Option<PlatformMethod>) -> usize {
+        v.as_ref().map_or(0, PlatformMethod::estimated_heap_size)
+    }
+
+    pub(super) fn method_vec_heap(v: &Arc<Vec<PlatformMethod>>) -> usize {
+        stdx::heap::vec_bytes::<PlatformMethod>(v.len())
+            + v.iter().map(PlatformMethod::estimated_heap_size).sum::<usize>()
+    }
+
+    pub(super) fn global_function_heap(v: &Option<GlobalFunction>) -> usize {
+        v.as_ref().map_or(0, GlobalFunction::estimated_heap_size)
+    }
+
+    pub(super) fn constructor_vec_heap(v: &Arc<Vec<PlatformConstructor>>) -> usize {
+        stdx::heap::vec_bytes::<PlatformConstructor>(v.len())
+            + v.iter().map(PlatformConstructor::estimated_heap_size).sum::<usize>()
+    }
+
+    pub(super) fn platform_property_heap(v: &Option<PlatformProperty>) -> usize {
+        v.as_ref().map_or(0, PlatformProperty::estimated_heap_size)
+    }
+
+    pub(super) fn property_vec_heap(v: &Arc<Vec<PlatformProperty>>) -> usize {
+        stdx::heap::vec_bytes::<PlatformProperty>(v.len())
+            + v.iter().map(PlatformProperty::estimated_heap_size).sum::<usize>()
+    }
+
+    /// Heap of a [`super::TypeNameInput`]: its `name` string's own bytes. The
+    /// estimator receives the tuple of ALL declared fields in order (a 1-tuple
+    /// here), per the fork's `heap_size = path` convention for interned structs.
+    pub(super) fn type_name_input_heap((name,): &(String,)) -> usize {
+        name.capacity()
+    }
+
+    /// Heap of a [`super::MethodLookupInput`]: both owned strings.
+    pub(super) fn method_lookup_input_heap((type_name, method_name): &(String, String)) -> usize {
+        type_name.capacity() + method_name.capacity()
+    }
+
+    /// Heap of a [`super::PrefixedMethodLookupInput`]: both owned strings.
+    pub(super) fn prefixed_method_lookup_input_heap(
+        (prefix, method_name): &(String, String),
+    ) -> usize {
+        prefix.capacity() + method_name.capacity()
+    }
+}
+
+#[salsa::interned(debug, heap_size = heap_estimate::type_name_input_heap)]
 pub struct TypeNameInput {
     pub name: String,
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = heap_estimate::method_lookup_input_heap)]
 pub struct MethodLookupInput {
     pub type_name: String,
     pub method_name: String,
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = heap_estimate::prefixed_method_lookup_input_heap)]
 pub struct PrefixedMethodLookupInput {
     pub prefix: String,
     pub method_name: String,
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_type_heap, returns(as_ref))]
 pub fn platform_type_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -693,7 +818,7 @@ pub fn platform_type_query<'db>(
     data.get_type(name).cloned()
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_method_heap, returns(as_ref))]
 pub fn platform_method_query<'db>(
     db: &'db dyn salsa::Database,
     input: MethodLookupInput<'db>,
@@ -704,7 +829,7 @@ pub fn platform_method_query<'db>(
     data.get_method(type_name, method_name).cloned()
 }
 
-#[salsa::tracked(lru = 128, returns(ref))]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::method_vec_heap, returns(ref))]
 pub fn type_methods_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -714,7 +839,7 @@ pub fn type_methods_query<'db>(
     Arc::new(data.get_type_methods(type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 128, returns(ref))]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::method_vec_heap, returns(ref))]
 pub fn manager_methods_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -724,7 +849,7 @@ pub fn manager_methods_query<'db>(
     Arc::new(data.get_manager_methods(prefix).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_method_heap, returns(as_ref))]
 pub fn prefixed_method_query<'db>(
     db: &'db dyn salsa::Database,
     input: PrefixedMethodLookupInput<'db>,
@@ -771,7 +896,7 @@ fn sort_and_deduplicate_methods(mut methods: Vec<PlatformMethod>) -> Vec<Platfor
     methods
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::global_function_heap, returns(as_ref))]
 pub fn global_function_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -781,7 +906,7 @@ pub fn global_function_query<'db>(
     data.get_global_function(name).cloned()
 }
 
-#[salsa::tracked(lru = 128, returns(ref))]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::constructor_vec_heap, returns(ref))]
 pub fn platform_constructors_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -791,7 +916,7 @@ pub fn platform_constructors_query<'db>(
     Arc::new(data.get_constructors(type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_property_heap, returns(as_ref))]
 pub fn platform_property_query<'db>(
     db: &'db dyn salsa::Database,
     input: MethodLookupInput<'db>,
@@ -802,7 +927,7 @@ pub fn platform_property_query<'db>(
     data.get_property(type_name, prop_name).cloned()
 }
 
-#[salsa::tracked(lru = 128, returns(ref))]
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::property_vec_heap, returns(ref))]
 pub fn type_properties_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -812,7 +937,7 @@ pub fn type_properties_query<'db>(
     Arc::new(data.get_type_properties(type_name).into_iter().cloned().collect())
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_property_heap, returns(as_ref))]
 pub fn global_property_query<'db>(
     db: &'db dyn salsa::Database,
     input: TypeNameInput<'db>,
@@ -822,7 +947,7 @@ pub fn global_property_query<'db>(
     data.get_global_property(name).cloned()
 }
 
-#[salsa::tracked(lru = 256, returns(as_ref))]
+#[salsa::tracked(lru = 256, heap_size = heap_estimate::platform_method_heap, returns(as_ref))]
 pub fn global_member_method_query<'db>(
     db: &'db dyn salsa::Database,
     input: MethodLookupInput<'db>,

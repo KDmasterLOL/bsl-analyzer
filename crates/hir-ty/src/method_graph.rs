@@ -19,6 +19,7 @@ use crate::infer::{BodyInferenceResult, InferenceContext};
 // the fixpoint that resolves mutually recursive return types.
 #[salsa::tracked(
     lru = 262144,
+    heap_size = stdx::heap::zero,
     cycle_fn = method_return_type_cycle,
     cycle_initial = method_return_type_initial,
     returns(copy),

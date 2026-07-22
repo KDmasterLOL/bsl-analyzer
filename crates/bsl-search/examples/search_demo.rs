@@ -24,7 +24,13 @@ fn main() {
         std::process::exit(1);
     }
 
-    let project = Project::new(&project_dir);
+    let project = match Project::new(&project_dir) {
+        Ok(project) => project,
+        Err(e) => {
+            eprintln!("Error: invalid project at {}: {e}", project_dir.display());
+            std::process::exit(1);
+        }
+    };
     let config_dir = project.source_path().to_path_buf();
 
     let base_url =

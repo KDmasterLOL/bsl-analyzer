@@ -1,5 +1,6 @@
 pub mod lower;
 
+use intern::NormName;
 use la_arena::Arena;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -443,7 +444,7 @@ pub struct LowerResult {
     pub body: Body,
     pub source_map: BodySourceMap,
     pub diagnostics: Vec<BodyDiagnostic>,
-    pub referenced_externals: rustc_hash::FxHashSet<String>,
+    pub referenced_externals: rustc_hash::FxHashSet<NormName>,
     pub external_refs: Vec<ExternalRef>,
     pub size_lines: u32,
 }

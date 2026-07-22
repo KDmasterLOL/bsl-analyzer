@@ -34,6 +34,14 @@ impl DefinedType {
     pub fn apply_extension_overlay(&mut self, overlay: &DefinedType) {
         self.underlying_type = overlay.underlying_type.clone();
     }
+
+    /// Heap bytes owned by this defined type, memoised by `ide-db`'s
+    /// `parse_defined_type_query` for Salsa's `heap_size` hook: its name plus its
+    /// underlying type's own owned payload. New heap-owning fields must be added
+    /// here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity() + self.underlying_type.estimated_heap_size()
+    }
 }
 
 #[derive(Default)]

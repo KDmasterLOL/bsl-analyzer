@@ -65,6 +65,18 @@ impl Dimension {
     pub fn set_attr_type(&mut self, attr_type: crate::metadata_object::AttributeType) {
         self.attr_type = Some(attr_type);
     }
+
+    /// Heap bytes owned by this dimension: its name/indexing/type-text strings
+    /// plus its resolved type's own owned payload.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.indexing.capacity()
+            + self.type_str.capacity()
+            + self
+                .attr_type
+                .as_ref()
+                .map_or(0, crate::metadata_object::AttributeType::estimated_heap_size)
+    }
 }
 
 #[derive(Debug, Default)]

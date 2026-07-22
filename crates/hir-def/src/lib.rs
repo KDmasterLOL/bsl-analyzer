@@ -172,7 +172,7 @@ pub struct MethodId {
     pub local_id: u32,
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
 pub struct MethodIdInput {
     #[returns(copy)]
     pub method_id: MethodId,
@@ -282,6 +282,65 @@ impl ModuleMetadata {
             web_service: None,
             integration_service: None,
         }
+    }
+
+    /// Heap bytes owned by this metadata snapshot, memoised by `ide-db`'s
+    /// `module_metadata_query` for Salsa's `heap_size` hook: each populated
+    /// `Arc<T>` payload counted as `size_of::<T>()` (the heap allocation the
+    /// `Arc` points at) plus `T`'s own `estimated_heap_size`. `module_type`/
+    /// `execution_context` are `Copy` enums and own no heap. New heap-owning
+    /// fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        let mut bytes = 0usize;
+        if let Some(cm) = &self.common_module {
+            bytes += std::mem::size_of::<bsl_metadata::CommonModule>() + cm.estimated_heap_size();
+        }
+        if let Some(mdo) = &self.mdo {
+            bytes +=
+                std::mem::size_of::<bsl_metadata::MetadataObject>() + mdo.estimated_heap_size();
+        }
+        if let Some(register) = &self.register {
+            bytes += std::mem::size_of::<bsl_metadata::Register>() + register.estimated_heap_size();
+        }
+        if let Some(form) = &self.form {
+            bytes += std::mem::size_of::<bsl_metadata::Form>() + form.estimated_heap_size();
+        }
+        if let Some(http_service) = &self.http_service {
+            bytes += std::mem::size_of::<bsl_metadata::HTTPService>()
+                + http_service.estimated_heap_size();
+        }
+        if let Some(web_service) = &self.web_service {
+            bytes +=
+                std::mem::size_of::<bsl_metadata::WebService>() + web_service.estimated_heap_size();
+        }
+        if let Some(integration_service) = &self.integration_service {
+            bytes += std::mem::size_of::<bsl_metadata::IntegrationService>()
+                + integration_service.estimated_heap_size();
+        }
+        bytes
+    }
+}
+
+#[cfg(test)]
+mod module_metadata_heap_tests {
+    use super::*;
+
+    #[test]
+    fn module_metadata_heap_counts_populated_common_module() {
+        let empty = ModuleMetadata::unknown(bsl_metadata::ModuleType::CommonModule);
+        assert_eq!(empty.estimated_heap_size(), 0);
+
+        let long_name = "ОбщийМодульСДлиннымИменемДляТеста".to_string();
+        let name_capacity = long_name.capacity();
+        let common_module = bsl_metadata::CommonModule::builder().name(long_name).build();
+        let mut with_module = empty;
+        with_module.common_module = Some(Arc::new(common_module));
+
+        let bytes = with_module.estimated_heap_size();
+        // At least the owned name string plus the boxed struct's own fields;
+        // well under a kilobyte for a single common module.
+        assert!(bytes > name_capacity);
+        assert!(bytes < 1024);
     }
 }
 
@@ -458,10 +517,9 @@ impl ModuleBodies {
             let mut b =
                 crate::body::body_heap(&r.body) + crate::body::source_map_heap(&r.source_map);
             b += vec_bytes::<BodyDiagnostic>(r.diagnostics.len());
-            b += map_table_bytes::<String, ()>(r.referenced_externals.len());
-            for s in &r.referenced_externals {
-                b += s.capacity();
-            }
+            // `NormName` keys are `Copy` ids into the global intern pool, so
+            // unlike the old `String` set there is no per-element byte sum.
+            b += map_table_bytes::<intern::NormName, ()>(r.referenced_externals.len());
             b += vec_bytes::<body::ExternalRef>(r.external_refs.len());
             for ext in &r.external_refs {
                 b += external_ref_name_heap(ext);

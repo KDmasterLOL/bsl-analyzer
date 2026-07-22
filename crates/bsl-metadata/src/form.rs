@@ -49,10 +49,25 @@ pub struct FormElement {
     pub parent_id: Option<u32>,
 }
 
+impl FormElement {
+    /// Heap bytes owned by this element: its name/data-path strings. `id`,
+    /// `kind`, `parent_id` are `Copy` and own no heap.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity() + self.data_path.as_ref().map_or(0, String::capacity)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormEventHandler {
     pub event_type: String,
     pub handler_name: String,
+}
+
+impl FormEventHandler {
+    /// Heap bytes owned by this handler: its event-type/handler-name strings.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.event_type.capacity() + self.handler_name.capacity()
+    }
 }
 
 impl FormElement {
@@ -81,6 +96,14 @@ pub struct FormAttributeColumn {
     pub attr_type: AttributeType,
 }
 
+impl FormAttributeColumn {
+    /// Heap bytes owned by this column: its name plus its type's own payload
+    /// (only the name-carrying/composite `AttributeType` variants own heap).
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity() + self.attr_type.estimated_heap_size()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormAttribute {
     pub name: String,
@@ -92,6 +115,16 @@ pub struct FormAttribute {
 impl FormAttribute {
     pub fn new(name: impl Into<String>, attr_type: AttributeType) -> Self {
         Self { name: name.into(), attr_type, is_main: false, columns: Vec::new() }
+    }
+
+    /// Heap bytes owned by this attribute: its name, its type's own payload,
+    /// and the tabular-section column vec. `is_main` is `Copy` and owns no
+    /// heap.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + self.attr_type.estimated_heap_size()
+            + stdx::heap::vec_bytes::<FormAttributeColumn>(self.columns.len())
+            + self.columns.iter().map(FormAttributeColumn::estimated_heap_size).sum::<usize>()
     }
 }
 
@@ -218,6 +251,23 @@ impl Form {
 
     pub fn command_handlers(&self) -> &[String] {
         &self.command_handlers
+    }
+
+    /// Heap bytes owned by this form, memoised by `ide-db`'s
+    /// `module_metadata_query` for Salsa's `heap_size` hook: its name plus the
+    /// element/handler/command-handler/attribute vecs and each entry's own
+    /// owned payload. `form_type`/`uuid` are `Copy` and own no heap. New
+    /// heap-owning fields must be added here too.
+    pub fn estimated_heap_size(&self) -> usize {
+        self.name.capacity()
+            + stdx::heap::vec_bytes::<FormElement>(self.elements.len())
+            + self.elements.iter().map(FormElement::estimated_heap_size).sum::<usize>()
+            + stdx::heap::vec_bytes::<FormEventHandler>(self.event_handlers.len())
+            + self.event_handlers.iter().map(FormEventHandler::estimated_heap_size).sum::<usize>()
+            + stdx::heap::vec_bytes::<String>(self.command_handlers.len())
+            + self.command_handlers.iter().map(String::capacity).sum::<usize>()
+            + stdx::heap::vec_bytes::<FormAttribute>(self.attributes.len())
+            + self.attributes.iter().map(FormAttribute::estimated_heap_size).sum::<usize>()
     }
 
     pub fn is_handler(&self, method_name: &str) -> bool {

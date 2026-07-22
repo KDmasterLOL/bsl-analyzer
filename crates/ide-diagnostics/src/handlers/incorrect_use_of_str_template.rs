@@ -3,7 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Expr, ExprId, IdConversion, Literal, MethodId, ModuleId, Stmt, StmtId};
 use ide_db::TextRange;
-use stdx::case::CaseExt;
+use stdx::case::{contains_ignore_case, eq_ignore_case};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -20,15 +20,11 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 fn has_str_template_calls(text: &str) -> bool {
-    const PATTERNS: &[&str] = &["стршаблон", "strtemplate"];
+    contains_ignore_case(text, "стршаблон") || contains_ignore_case(text, "strtemplate")
+}
 
-    let text_lower = text.fold_lower();
-    for pattern in PATTERNS {
-        if text_lower.contains(pattern) {
-            return true;
-        }
-    }
-    false
+fn is_str_template_call_name(name: &str) -> bool {
+    eq_ignore_case(name, "стршаблон") || eq_ignore_case(name, "strtemplate")
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -64,16 +60,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 let (method_name, args) = match expr {
                     Expr::Call { callee, args } => {
                         if let Expr::Path(name) = body.expr(ExprId::from_idx(*callee)) {
-                            (name.as_str().fold_lower(), args)
+                            (name.as_str(), args)
                         } else {
                             continue;
                         }
                     }
-                    Expr::MethodCall { method, args, .. } => (method.as_str().fold_lower(), args),
+                    Expr::MethodCall { method, args, .. } => (method.as_str(), args),
                     _ => continue,
                 };
 
-                if !matches!(method_name.as_str(), "strtemplate" | "стршаблон") {
+                if !is_str_template_call_name(method_name) {
                     continue;
                 }
 
