@@ -16,6 +16,7 @@ pub(crate) const GRAPH_SOURCE_ROOT: SourceRootId = SourceRootId(0);
 /// topology fingerprint) travel together, so no operation can mix the file
 /// enumeration of one project state with the config registration of another.
 pub(crate) struct ProjectSnapshot {
+    pub workspace_root: PathBuf,
     pub scan_roots: Vec<PathBuf>,
     pub configs: ide::WorkspaceConfigsSnapshot,
 }
@@ -33,6 +34,7 @@ impl ProjectSnapshot {
                     "invalid project; graph scan restricted to workspace root, no config roots"
                 );
                 Self {
+                    workspace_root: workspace_root.to_path_buf(),
                     scan_roots: vec![workspace_root.to_path_buf()],
                     configs: ide::WorkspaceConfigsSnapshot::default(),
                 }
@@ -43,7 +45,15 @@ impl ProjectSnapshot {
     pub(crate) fn from_project(project: &project_model::Project) -> Self {
         let mut scan_roots = vec![project.source_path().to_path_buf()];
         scan_roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
-        Self { scan_roots, configs: ide::WorkspaceConfigsSnapshot::from_project(project) }
+        // The MCP file universe is enumerated canonically (`enumerate_bsl_files`
+        // canonicalizes every `.bsl`), so the registered roots must be canonical
+        // too — a raw symlinked root would miss both prefix matching and the
+        // unbootstrapped root-join fallbacks.
+        Self {
+            workspace_root: project.root.clone(),
+            scan_roots,
+            configs: ide::WorkspaceConfigsSnapshot::from_project(project).canonicalized(),
+        }
     }
 }
 

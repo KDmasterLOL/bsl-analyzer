@@ -61,7 +61,7 @@ pub(crate) fn scan_file_stats(workspace_root: &Path) -> Vec<FileStat> {
 /// The parallel scan over an explicit set of roots (each a directory, or occasionally a
 /// single file for a misconfigured extension path). Split out so it can be exercised
 /// directly against the sequential reference in tests.
-pub(super) fn scan_stats_over_roots(roots: &[PathBuf]) -> Vec<FileStat> {
+pub(crate) fn scan_stats_over_roots(roots: &[PathBuf]) -> Vec<FileStat> {
     use rayon::prelude::*;
 
     // Work units: each top-level entry under each scan-root directory. Directories are
@@ -163,8 +163,17 @@ fn canonical_file_path(
 /// Folds every file's `(path, mtime, len)` into one `u64`; B4 cache reuse compares
 /// it for an exact whole-workspace match.
 pub(super) fn workspace_fingerprint(workspace_root: &Path) -> u64 {
-    let mut entries: Vec<(String, u128, u64)> =
-        scan_file_stats(workspace_root).into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
+    workspace_fingerprint_over(&super::input::ProjectSnapshot::load(workspace_root))
+}
+
+/// The fingerprint over an already-loaded project snapshot, so an operation
+/// that brackets a build with pre/post scans stats the SAME root universe both
+/// times instead of re-deriving the project mid-operation.
+pub(crate) fn workspace_fingerprint_over(project: &super::input::ProjectSnapshot) -> u64 {
+    let mut entries: Vec<(String, u128, u64)> = scan_stats_over_roots(&project.scan_roots)
+        .into_iter()
+        .map(|s| (s.path, s.mtime, s.len))
+        .collect();
     entries.sort();
     super::snapshot::fold_fingerprint_entries(&entries)
 }

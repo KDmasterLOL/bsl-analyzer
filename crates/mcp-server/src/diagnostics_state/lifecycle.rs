@@ -448,12 +448,9 @@ impl DiagnosticsState {
             .map_err(|e| anyhow::anyhow!("invalid project at {}: {e}", root.display()))?;
         let snapshot = ProjectSnapshot::from_project(&project);
         let files = enumerate_bsl_files(&snapshot);
-        // Canonicalise the registered roots so a module back-link the metadata
-        // substrate resolves (`root.join("CommonModules/X/Ext/Module.bsl")`) matches
-        // the canonical `.bsl` path `enumerate_bsl_files` produced — otherwise the
-        // reverse lookup would miss and silently drop the back-link on a symlinked
-        // workspace.
-        let configs = snapshot.configs.canonicalized();
+        // `ProjectSnapshot` already registers canonical roots, matching the
+        // canonical `.bsl` universe `enumerate_bsl_files` produces.
+        let configs = snapshot.configs.clone();
         let config = ide::DiagnosticsConfig::from_project_json(
             &project.config.diagnostics,
             project.config.output.resolve_locale().unwrap_or_default(),

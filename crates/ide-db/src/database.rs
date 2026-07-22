@@ -608,6 +608,20 @@ impl RootDatabaseImpl {
     /// no query can observe new paths with old closures or vice versa.
     pub fn set_workspace_configs_snapshot(&mut self, snapshot: metadata::WorkspaceConfigsSnapshot) {
         use salsa::Setter;
+        assert_eq!(
+            snapshot.paths.len(),
+            snapshot.canonical_paths.len(),
+            "workspace-configs snapshot: canonical_paths must parallel paths"
+        );
+        assert_eq!(
+            snapshot.paths.len(),
+            snapshot.closures.len(),
+            "workspace-configs snapshot: closures must parallel paths"
+        );
+        assert!(
+            snapshot.closures.iter().flatten().all(|&dep| dep < snapshot.paths.len()),
+            "workspace-configs snapshot: closure indices must point into paths"
+        );
         for (_, path) in &snapshot.paths {
             self.ensure_config_revision_input(&path.to_string_lossy());
         }
@@ -711,17 +725,28 @@ impl RootDatabaseImpl {
             snapshot.paths.iter().find_map(|(label, path)| label.is_none().then(|| path.clone()));
         // Longest-prefix match against BOTH the configured and the canonical
         // root spelling: enumerated file paths may arrive canonicalized (MCP)
-        // while the configured root is symlinked, or vice versa.
+        // while the configured root is symlinked, or vice versa. Ranking uses
+        // the length of the spelling that actually MATCHED — ranking by the
+        // configured spelling when only the canonical one matched could pick a
+        // less-specific root for nested symlinked extensions.
         let own = snapshot
             .paths
             .iter()
             .enumerate()
-            .filter(|(idx, (label, path))| {
-                label.is_some()
-                    && (file_path.starts_with(path)
-                        || file_path.starts_with(&snapshot.canonical_paths[*idx]))
+            .filter_map(|(idx, (label, path))| {
+                label.as_ref()?;
+                let mut matched_len: Option<usize> = None;
+                if file_path.starts_with(path) {
+                    matched_len = Some(path.as_os_str().len());
+                }
+                let canonical = &snapshot.canonical_paths[idx];
+                if file_path.starts_with(canonical) {
+                    let len = canonical.as_os_str().len();
+                    matched_len = Some(matched_len.map_or(len, |best| best.max(len)));
+                }
+                matched_len.map(|len| (idx, len))
             })
-            .max_by_key(|(_, (_, path))| path.as_os_str().len())
+            .max_by_key(|&(_, len)| len)
             .map(|(idx, _)| idx);
 
         let chain = own
@@ -890,26 +915,24 @@ impl RootDatabaseImpl {
         let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
             listing.and_then(|l| metadata::resolve_register_by_name(self, l, name.to_string()))
         };
-        // Same name along the chain: a borrowed register (same kind) merges into
-        // the accumulated one; a same-name register of a *different* kind is not
-        // a borrow, so the later (more-dependent) root's wins outright — mirroring
-        // `merge_extension_overlay` (which adds rather than merges on a kind
-        // mismatch, and `find_register` then returns the extension's).
-        let hits = std::iter::once(resolve_in(main_listing))
+        // Same name along the chain: the WINNING kind is the last (most
+        // dependent) hit's kind — a same-name register of a different kind is
+        // not a borrow, so the later root's replaces outright, mirroring
+        // `merge_extension_overlay`. All hits OF the winning kind then merge in
+        // chain order, so a base register still contributes its fields when an
+        // intervening dependency declared an unrelated kind under the name.
+        let hits: Vec<Arc<bsl_metadata::Register>> = std::iter::once(resolve_in(main_listing))
             .chain(chain_listings.into_iter().map(resolve_in))
-            .flatten();
-        let mut current: Option<Arc<bsl_metadata::Register>> = None;
-        for hit in hits {
-            current = Some(match current {
-                Some(acc) if acc.mdo_type() == hit.mdo_type() => {
-                    let mut merged = (*acc).clone();
-                    merged.apply_extension_overlay(&hit);
-                    Arc::new(merged)
-                }
-                _ => hit,
-            });
+            .flatten()
+            .collect();
+        let winning_kind = hits.last()?.mdo_type();
+        let mut same_kind = hits.iter().filter(|hit| hit.mdo_type() == winning_kind);
+        let first = same_kind.next()?.clone();
+        let mut merged: Option<bsl_metadata::Register> = None;
+        for overlay in same_kind {
+            merged.get_or_insert_with(|| (*first).clone()).apply_extension_overlay(overlay);
         }
-        current
+        Some(merged.map(Arc::new).unwrap_or(first))
     }
 
     /// The defined-type counterpart of [`resolve_metadata_object_for_file`]:
@@ -2342,6 +2365,14 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             [] => None,
             [only] => Some(self.load_configuration(*only)),
             _ => {
+                // Warm every prefix bottom-up so the recursive step inside
+                // `chain_configuration` always finds its sub-chain memoised:
+                // the recursion depth stays 1 regardless of chain length.
+                for prefix_len in 2..chain_inputs.len() {
+                    let prefix =
+                        metadata::ConfigChainInput::new(self, chain_inputs[..prefix_len].to_vec());
+                    let _ = metadata::chain_configuration(self, prefix);
+                }
                 let chain = metadata::ConfigChainInput::new(self, chain_inputs);
                 Some(metadata::chain_configuration(self, chain))
             }

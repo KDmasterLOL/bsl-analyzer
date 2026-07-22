@@ -67,7 +67,7 @@ pub(super) fn seed_cache(root: &Path, fingerprint: u64) {
     let out = graph_db_path(root);
     fs::create_dir_all(out.parent().unwrap()).unwrap();
     build_graph_database(
-        root,
+        &crate::graph::ProjectSnapshot::load(root),
         &out,
         GRAPH_BUILD_BATCH,
         &crate::graph_db::GraphMeta {

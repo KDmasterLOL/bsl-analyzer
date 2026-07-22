@@ -869,7 +869,7 @@ mod tests {
         let out = crate::cache::graph_db_path(&workspace);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         let summary = crate::graph_db::build_graph_database(
-            &workspace,
+            &crate::graph::ProjectSnapshot::load(&workspace),
             &out,
             100,
             &crate::graph_db::GraphMeta {

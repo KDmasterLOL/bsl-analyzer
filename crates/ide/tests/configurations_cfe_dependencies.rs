@@ -184,6 +184,77 @@ fn provider_visible_configurations_follow_the_dependency_matrix() {
     assert_eq!(names(files.independent), [None, Some("independent".to_string())]);
 }
 
+/// The full production path — `Project::with_config` → `ExtensionTopology` →
+/// `WorkspaceConfigsSnapshot::from_project` — with a TRANSITIVE chain
+/// (deep → tests → yaxunit): the two-edge closure must arrive in topological
+/// order, the diamond-shared dependency must appear once, and a same-name
+/// attribute redeclared by the most-dependent overlay must win (reversing the
+/// forward fold would keep the base declaration and fail this).
+#[test]
+fn project_built_snapshot_resolves_a_transitive_chain() {
+    use project_model::{ProjectConfig, StructuredExtensionDecl};
+    let decl = |name: &str, dir: &str, deps: &[&str]| {
+        project_model::ExtensionDecl::Structured(StructuredExtensionDecl {
+            name: name.to_string(),
+            path: format!("../bsl-metadata/fixtures/cfe_dependencies/{dir}"),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+        })
+    };
+    let config = ProjectConfig {
+        configuration_root: Some("../bsl-metadata/fixtures/cfe_dependencies/base".to_string()),
+        extensions: Some(vec![
+            decl("yaxunit", "yaxunit", &[]),
+            decl("tests", "tests_ext", &["yaxunit"]),
+            decl("deep", "deep", &["tests"]),
+        ]),
+        ..Default::default()
+    };
+    let project = project_model::Project::with_config(env!("CARGO_MANIFEST_DIR"), config)
+        .expect("fixture project builds");
+    let snapshot = WorkspaceConfigsSnapshot::from_project(&project);
+
+    let mut db = RootDatabaseImpl::new();
+    let deep_file = FileId::from_raw(1);
+    let mut file_set = FileSet::default();
+    file_set.insert(
+        deep_file,
+        VfsPath::new(
+            fixture_root("deep")
+                .join("CommonModules/МодульГлубокий/Ext/Module.bsl")
+                .to_string_lossy()
+                .to_string(),
+        ),
+    );
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(deep_file, SourceRootId(0));
+    db.set_file_text(deep_file, "Процедура Тест() КонецПроцедуры");
+    db.set_workspace_configs_snapshot(snapshot);
+
+    assert_eq!(
+        config_names(&db, deep_file),
+        [None, Some("yaxunit".to_string()), Some("tests".to_string()), Some("deep".to_string())],
+        "the two-edge transitive closure arrives in topological order, the \
+         diamond-shared yaxunit exactly once",
+    );
+    assert!(
+        db.resolve_common_module(deep_file, "МодульЮнит").is_some(),
+        "a transitive dependency's module resolves through two edges",
+    );
+
+    let merged = db.merged_visible_configuration(deep_file).expect("merged configuration for deep");
+    let goods = merged
+        .find_metadata_object(bsl_metadata::MdoType::Catalog, "Товары")
+        .expect("merged Товары");
+    let color =
+        goods.attributes.iter().find(|a| a.name == "Цвет").expect("Цвет present in merged view");
+    assert!(
+        matches!(color.attr_type, bsl_metadata::AttributeType::Number { .. }),
+        "the most-dependent overlay's redeclaration must win over the base \
+         (forward composition, own last); got {:?}",
+        color.attr_type,
+    );
+}
+
 #[test]
 fn editing_an_unrelated_extension_does_not_invalidate_the_chain() {
     let (mut db, files) = setup();

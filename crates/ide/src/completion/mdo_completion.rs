@@ -472,35 +472,28 @@ fn complete_predefined_items<DB: RootDatabase>(
     mdo_type: MdoType,
     object_name: &str,
 ) -> Vec<CompletionItem> {
-    let configs = db.get_all_configurations(file_id);
-    let name_lower = object_name.fold_lower();
-
-    for (_source_name, config) in &configs {
-        let mdo = config
-            .metadata_objects()
+    // The MERGED per-object view: overlays along the file's dependency chain
+    // may add or replace predefined items, so scanning the separate per-root
+    // configurations and stopping at the first hit would hide them.
+    if let Some(mdo) = db.resolve_metadata_object(file_id, mdo_type, object_name) {
+        let items: Vec<CompletionItem> = mdo
+            .predefined_items
             .iter()
-            .find(|obj| obj.mdo_type == mdo_type && obj.name.fold_lower() == name_lower);
+            .map(|pi| CompletionItem {
+                label: pi.name.clone(),
+                detail: Some(format!("{}.{}", mdo_type.russian_name(), object_name)),
+                kind: CompletionItemKind::Constant,
+                insert_text: pi.name.clone(),
+                documentation: None,
+                sort_text: Some(format!("1_{}", pi.name)),
+                filter_text: None,
+                source: None,
+            })
+            .collect();
 
-        if let Some(mdo) = mdo {
-            let items: Vec<CompletionItem> = mdo
-                .predefined_items
-                .iter()
-                .map(|pi| CompletionItem {
-                    label: pi.name.clone(),
-                    detail: Some(format!("{}.{}", mdo_type.russian_name(), object_name)),
-                    kind: CompletionItemKind::Constant,
-                    insert_text: pi.name.clone(),
-                    documentation: None,
-                    sort_text: Some(format!("1_{}", pi.name)),
-                    filter_text: None,
-                    source: None,
-                })
-                .collect();
+        tracing::debug!(object_name, count = items.len(), "Predefined items found");
 
-            tracing::debug!(object_name, count = items.len(), "Predefined items found");
-
-            return items;
-        }
+        return items;
     }
 
     Vec::new()
