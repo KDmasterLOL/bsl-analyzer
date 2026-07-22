@@ -1585,7 +1585,7 @@ mod tests {
             "Процедура Создать() Экспорт\nСправочники.Номенклатура.СоздатьЭлемент();\nКонецПроцедуры",
         );
 
-        let files = enumerate_bsl_files(root).len();
+        let files = enumerate_bsl_files(&crate::graph::ProjectSnapshot::load(root)).len();
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         build_graph_database(

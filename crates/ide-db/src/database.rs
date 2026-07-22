@@ -2611,6 +2611,10 @@ impl RootDatabase for RootDatabaseImpl {
         self
     }
 
+    fn visible_roots_for_file(&self, file_id: FileId) -> Option<VisibleRoots> {
+        RootDatabaseImpl::visible_roots_for_file(self, file_id)
+    }
+
     fn config_root_revision_for_path(&self, path: &Path) -> u32 {
         RootDatabaseImpl::config_root_revision_for_path(self, path)
     }

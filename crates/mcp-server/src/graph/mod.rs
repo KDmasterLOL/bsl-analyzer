@@ -30,8 +30,8 @@ pub(crate) use build::{read_stored_fingerprints, read_stored_sig_hashes};
     reason = "the stable graph facade preserves crate::graph helper paths while leaf consumers import directly"
 )]
 pub(crate) use input::{
-    build_source_root, config_metadata_paths, db_for_files, db_for_files_lazy, enumerate_bsl_files,
-    project_config_paths, GRAPH_SOURCE_ROOT,
+    build_source_root, db_for_files, db_for_files_lazy, enumerate_bsl_files, ProjectSnapshot,
+    GRAPH_SOURCE_ROOT,
 };
 #[allow(
     unused_imports,

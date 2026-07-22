@@ -398,6 +398,18 @@ impl WorkspaceConfigsSnapshot {
             fingerprint: Some(topology.fingerprint().to_hex()),
         }
     }
+
+    /// Replace each configured root spelling with its canonical form. For hosts
+    /// whose file universe is enumerated canonically (the MCP resident/graph
+    /// scans): substrate back-links join a root against a canonical `.bsl`
+    /// path, so the registered roots must be canonical too or the reverse
+    /// lookup misses on a symlinked workspace.
+    pub fn canonicalized(mut self) -> Self {
+        for (idx, (_, path)) in self.paths.iter_mut().enumerate() {
+            *path = self.canonical_paths[idx].clone();
+        }
+        self
+    }
 }
 
 #[salsa::input(singleton, debug, heap_size = heap_estimate::workspace_configs_input_heap)]

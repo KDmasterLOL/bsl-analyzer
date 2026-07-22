@@ -25,9 +25,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rustc_hash::FxHashMap;
 use vfs::FileId;
 
-use crate::graph::input::{
-    build_source_root, config_metadata_paths, db_for_files, enumerate_bsl_files,
-};
+use crate::graph::input::{build_source_root, db_for_files, enumerate_bsl_files};
 use crate::graph::scan::scan_file_stats;
 
 /// Bumped whenever the table layout OR the persisted edge/node content changes so a
@@ -615,8 +613,8 @@ fn build_graph_database_inner(
     meta: &GraphMeta,
     chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
 ) -> anyhow::Result<GraphBuildSummary> {
-    let files = enumerate_bsl_files(workspace_root);
-    let config_paths = config_metadata_paths(workspace_root);
+    let project = crate::graph::ProjectSnapshot::load(workspace_root);
+    let files = enumerate_bsl_files(&project);
     let modules: Vec<ModuleId> = files.iter().map(|(f, _)| ModuleId::new(*f)).collect();
     let paths: FxHashMap<FileId, String> =
         files.iter().map(|(f, p)| (*f, p.to_string_lossy().replace('\\', "/"))).collect();
@@ -650,7 +648,7 @@ fn build_graph_database_inner(
         let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
             let batch_files: Vec<(FileId, PathBuf)> =
                 batch.iter().map(|m| (m.file_id, file_paths[&m.file_id].clone())).collect();
-            db_for_files(&source_root, &batch_files, &config_paths, Some(&config_cache))
+            db_for_files(&source_root, &batch_files, &project.configs, Some(&config_cache))
         };
         let mut sink = |nodes: &[NodeRow],
                         edges: &[EdgeRow]|
@@ -921,8 +919,8 @@ pub fn update_graph_database_bodies(
     batch_size: usize,
     meta: &GraphMeta,
 ) -> anyhow::Result<GraphBuildSummary> {
-    let files = enumerate_bsl_files(workspace_root);
-    let config_paths = config_metadata_paths(workspace_root);
+    let project = crate::graph::ProjectSnapshot::load(workspace_root);
+    let files = enumerate_bsl_files(&project);
     let all_modules: Vec<ModuleId> = files.iter().map(|(f, _)| ModuleId::new(*f)).collect();
     let paths: FxHashMap<FileId, String> =
         files.iter().map(|(f, p)| (*f, p.to_string_lossy().replace('\\', "/"))).collect();
@@ -951,7 +949,7 @@ pub fn update_graph_database_bodies(
     let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
         let batch_files: Vec<(FileId, PathBuf)> =
             batch.iter().map(|m| (m.file_id, file_paths[&m.file_id].clone())).collect();
-        db_for_files(&source_root, &batch_files, &config_paths, Some(&config_cache))
+        db_for_files(&source_root, &batch_files, &project.configs, Some(&config_cache))
     };
 
     // The reprojection's index pass runs the same guarded batch runners as a full
@@ -1179,8 +1177,8 @@ pub fn recompute_module_profiles(
 ) -> anyhow::Result<FxHashMap<String, ModuleProfile>> {
     use ide::graph_index::GraphIndex;
 
-    let files = enumerate_bsl_files(workspace_root);
-    let config_paths = config_metadata_paths(workspace_root);
+    let project = crate::graph::ProjectSnapshot::load(workspace_root);
+    let files = enumerate_bsl_files(&project);
     let source_root = crate::graph::build_source_root(&files);
 
     let changed_set: std::collections::HashSet<&Path> =
@@ -1193,7 +1191,7 @@ pub fn recompute_module_profiles(
 
     let batch_files: Vec<(FileId, PathBuf)> =
         changed.iter().map(|(m, p)| (m.file_id, p.clone())).collect();
-    let db = db_for_files(&source_root, &batch_files, &config_paths, None);
+    let db = db_for_files(&source_root, &batch_files, &project.configs, None);
     let modules: Vec<ModuleId> = changed.iter().map(|(m, _)| *m).collect();
     let index = GraphIndex::build(&db, &modules);
 
@@ -1913,7 +1911,7 @@ mod tests {
         let source_root = std::env::var_os("BSL_SOURCE_ROOT").expect("BSL_SOURCE_ROOT is required");
         let graph_db = PathBuf::from(graph_db);
         let source_root = PathBuf::from(source_root);
-        let files = enumerate_bsl_files(&source_root);
+        let files = enumerate_bsl_files(&crate::graph::ProjectSnapshot::load(&source_root));
 
         // Given: the persisted graph and the exact BSL files in the anchor's source root.
         let digest = read_source_root_scoped_sqlite_method_call_digest(

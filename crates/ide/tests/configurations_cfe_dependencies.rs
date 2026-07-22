@@ -165,6 +165,25 @@ fn chain_merge_composes_forward_and_preserves_inherited_fields() {
     );
 }
 
+/// The diagnostics provider enumeration (`ProtectedModule`,
+/// `PrivilegedModuleMethodCall` and `MissedRequiredParameter` all iterate it)
+/// must follow the same per-file matrix — a registered but unrelated sibling
+/// extension must not contribute to a file's diagnostics.
+#[test]
+fn provider_visible_configurations_follow_the_dependency_matrix() {
+    use ide_db::AnalysisProvider;
+    let (db, files) = setup();
+    let provider = ide_db::SalsaProvider::new(&db, None);
+    let names = |file_id: FileId| -> Vec<Option<String>> {
+        provider.visible_configurations(file_id).into_iter().map(|vc| vc.config.name).collect()
+    };
+
+    assert_eq!(names(files.base), [None]);
+    assert_eq!(names(files.yaxunit), [None, Some("yaxunit".to_string())]);
+    assert_eq!(names(files.tests), [None, Some("yaxunit".to_string()), Some("tests".to_string())],);
+    assert_eq!(names(files.independent), [None, Some("independent".to_string())]);
+}
+
 #[test]
 fn editing_an_unrelated_extension_does_not_invalidate_the_chain() {
     let (mut db, files) = setup();

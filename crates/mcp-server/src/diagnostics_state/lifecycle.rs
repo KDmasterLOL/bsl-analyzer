@@ -9,7 +9,7 @@ use vfs::{Vfs, VfsPath};
 
 use crate::change_hub::{Health, SinkCursor, WorkspaceChangeHub};
 use crate::graph::input::{
-    build_source_root, db_for_files_lazy, enumerate_bsl_files, project_config_paths,
+    build_source_root, db_for_files_lazy, enumerate_bsl_files, ProjectSnapshot,
 };
 use crate::graph::scan::scan_file_stats;
 
@@ -441,20 +441,19 @@ impl DiagnosticsState {
     fn build_resident(
         root: &Path,
     ) -> anyhow::Result<(DiagnosticsResident, HashMap<String, u64>, u64)> {
-        let files = enumerate_bsl_files(root);
-        // Load the project once: its config paths feed the db inputs, and its
-        // `[diagnostics]` settings + locale become the resident's effective config, so
-        // `file`/`workspace` honour the same project rules as LSP and CLI.
+        // Load the project ONCE: the scan universe, the config roots (with their
+        // dependency closures) and the `[diagnostics]` settings all derive from
+        // this single snapshot, so a reload can never mix two project states.
         let project = project_model::Project::new(root)
             .map_err(|e| anyhow::anyhow!("invalid project at {}: {e}", root.display()))?;
-        // Canonicalise the config roots so a module back-link the metadata substrate
-        // resolves (`root.join("CommonModules/X/Ext/Module.bsl")`) matches the
-        // canonical `.bsl` path `enumerate_bsl_files` produced — otherwise the reverse
-        // lookup would miss and silently drop the back-link on a symlinked workspace.
-        let config_paths: Vec<(Option<String>, PathBuf)> = project_config_paths(&project)
-            .into_iter()
-            .map(|(label, path)| (label, path.canonicalize().unwrap_or(path)))
-            .collect();
+        let snapshot = ProjectSnapshot::from_project(&project);
+        let files = enumerate_bsl_files(&snapshot);
+        // Canonicalise the registered roots so a module back-link the metadata
+        // substrate resolves (`root.join("CommonModules/X/Ext/Module.bsl")`) matches
+        // the canonical `.bsl` path `enumerate_bsl_files` produced — otherwise the
+        // reverse lookup would miss and silently drop the back-link on a symlinked
+        // workspace.
+        let configs = snapshot.configs.canonicalized();
         let config = ide::DiagnosticsConfig::from_project_json(
             &project.config.diagnostics,
             project.config.output.resolve_locale().unwrap_or_default(),
@@ -464,7 +463,7 @@ impl DiagnosticsState {
         // whole-workspace resident is not pinned as salsa inputs (which OOMs on a large
         // config). `file_text_query` re-reads on demand under its LRU cap — the same
         // model the LSP server and CLI `analyze` use.
-        let mut db = db_for_files_lazy(&source_root, &files, &config_paths, None);
+        let mut db = db_for_files_lazy(&source_root, &files, &configs, None);
 
         // Pre-seed the VFS with the SAME FileIds the source root uses for each `.bsl`,
         // in enumerate order, so the interner assigns id `i` to `files[i]`. The metadata

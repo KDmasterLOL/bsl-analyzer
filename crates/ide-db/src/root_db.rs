@@ -111,4 +111,9 @@ pub trait RootDatabase:
     /// The Salsa-tracked config revision token for the root owning `path` (see
     /// [`RootDatabaseImpl::config_root_revision_for_path`](crate::RootDatabaseImpl::config_root_revision_for_path)).
     fn config_root_revision_for_path(&self, path: &std::path::Path) -> u32;
+
+    /// The config roots visible to `file_id`: the base plus the file's
+    /// dependency-ordered extension chain (own extension last). `None` when no
+    /// roots are registered or the file's path is unknown.
+    fn visible_roots_for_file(&self, file_id: FileId) -> Option<crate::VisibleRoots>;
 }

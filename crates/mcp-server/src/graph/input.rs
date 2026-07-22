@@ -10,62 +10,59 @@ use walkdir::WalkDir;
 /// The whole workspace is loaded into a single source root.
 pub(crate) const GRAPH_SOURCE_ROOT: SourceRootId = SourceRootId(0);
 
+/// One immutable projection of the validated project, loaded ONCE per
+/// operation (graph build, incremental update, resident build): the scan
+/// universe and the workspace-configs snapshot (roots + dependency closures +
+/// topology fingerprint) travel together, so no operation can mix the file
+/// enumeration of one project state with the config registration of another.
+pub(crate) struct ProjectSnapshot {
+    pub scan_roots: Vec<PathBuf>,
+    pub configs: ide::WorkspaceConfigsSnapshot,
+}
+
+impl ProjectSnapshot {
+    /// Graph passes run only after the daemon bootstrap validated the project;
+    /// a config broken by a mid-session edit restricts the scan to the
+    /// workspace root (loud in logs) instead of walking a wrong universe.
+    pub(crate) fn load(workspace_root: &Path) -> Self {
+        match project_model::Project::new(workspace_root) {
+            Ok(project) => Self::from_project(&project),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "invalid project; graph scan restricted to workspace root, no config roots"
+                );
+                Self {
+                    scan_roots: vec![workspace_root.to_path_buf()],
+                    configs: ide::WorkspaceConfigsSnapshot::default(),
+                }
+            }
+        }
+    }
+
+    pub(crate) fn from_project(project: &project_model::Project) -> Self {
+        let mut scan_roots = vec![project.source_path().to_path_buf()];
+        scan_roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
+        Self { scan_roots, configs: ide::WorkspaceConfigsSnapshot::from_project(project) }
+    }
+}
+
 /// The configuration source directory plus every extension directory — the file
 /// universe both the loader and the drift scan must agree on.
 pub(super) fn scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
-    // Graph passes run only after the daemon bootstrap validated the project;
-    // a config broken by a mid-session edit restricts the scan to the
-    // workspace root (loud in logs) instead of walking a wrong universe.
-    match project_model::Project::new(workspace_root) {
-        Ok(project) => {
-            let mut roots = vec![project.source_path().to_path_buf()];
-            roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
-            roots
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "invalid project; graph scan restricted to workspace root");
-            vec![workspace_root.to_path_buf()]
-        }
-    }
-}
-
-/// The configuration source + extension metadata paths the resolver needs for
-/// visibility checks, registered on every database (full or per-batch) just like
-/// the LSP workspace loader does.
-pub(crate) fn config_metadata_paths(workspace_root: &Path) -> Vec<(Option<String>, PathBuf)> {
-    match project_model::Project::new(workspace_root) {
-        Ok(project) => project_config_paths(&project),
-        Err(e) => {
-            tracing::error!(error = %e, "invalid project; no config roots registered");
-            Vec::new()
-        }
-    }
-}
-
-/// The config/metadata paths for an already-loaded project: the configuration source
-/// root plus every extension root. Split out so a caller that also needs the project's
-/// diagnostics settings loads [`project_model::Project`] only once.
-pub(crate) fn project_config_paths(
-    project: &project_model::Project,
-) -> Vec<(Option<String>, PathBuf)> {
-    let mut config_paths: Vec<(Option<String>, PathBuf)> =
-        vec![(None, project.source_path().to_path_buf())];
-    for (name, ext_path) in project.extension_paths() {
-        config_paths.push((Some(name.clone()), ext_path.clone()));
-    }
-    config_paths
+    ProjectSnapshot::load(workspace_root).scan_roots
 }
 
 /// Enumerate every `.bsl` file under the config + extension roots, assigning a
 /// stable [`FileId`] in walk order. No file text is read — this is the cheap
 /// file-id↔path map that lets the graph build load one batch of texts at a time
 /// while keeping ids consistent across batches.
-pub(crate) fn enumerate_bsl_files(workspace_root: &Path) -> Vec<(FileId, PathBuf)> {
+pub(crate) fn enumerate_bsl_files(project: &ProjectSnapshot) -> Vec<(FileId, PathBuf)> {
     let mut entries: Vec<(FileId, PathBuf)> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut next_id = 0u32;
-    for root in scan_roots(workspace_root) {
-        for entry in WalkDir::new(&root).follow_links(true) {
+    for root in &project.scan_roots {
+        for entry in WalkDir::new(root).follow_links(true) {
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
@@ -104,7 +101,7 @@ pub(crate) use ide_host_core::build_source_root;
 pub(crate) fn db_for_files(
     source_root: &SourceRoot,
     batch_files: &[(FileId, PathBuf)],
-    config_paths: &[(Option<String>, PathBuf)],
+    configs: &ide::WorkspaceConfigsSnapshot,
     config_cache: Option<&Arc<ide::GraphConfigCache>>,
 ) -> RootDatabaseImpl {
     let mut db = RootDatabaseImpl::default();
@@ -122,8 +119,8 @@ pub(crate) fn db_for_files(
             }
         }
     }
-    db.set_all_config_paths(config_paths.to_vec());
-    ide::warm_batch_config_roots(&db, batch_files, config_paths);
+    db.set_workspace_configs_snapshot(configs.clone());
+    ide::warm_batch_config_roots(&db, batch_files, &configs.paths);
     db
 }
 
@@ -143,7 +140,7 @@ pub(crate) fn db_for_files(
 pub(crate) fn db_for_files_lazy(
     source_root: &SourceRoot,
     all_files: &[(FileId, PathBuf)],
-    config_paths: &[(Option<String>, PathBuf)],
+    configs: &ide::WorkspaceConfigsSnapshot,
     config_cache: Option<&Arc<ide::GraphConfigCache>>,
 ) -> RootDatabaseImpl {
     let mut db = RootDatabaseImpl::default();
@@ -152,7 +149,7 @@ pub(crate) fn db_for_files_lazy(
     }
     db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
     ide_host_core::register_files_disk_backed(&mut db, GRAPH_SOURCE_ROOT, all_files);
-    db.set_all_config_paths(config_paths.to_vec());
+    db.set_workspace_configs_snapshot(configs.clone());
     db
 }
 
@@ -164,9 +161,9 @@ pub(crate) fn db_for_files_lazy(
 pub(super) fn load_workspace_db(
     workspace_root: &Path,
 ) -> anyhow::Result<(RootDatabaseImpl, usize)> {
-    let files = enumerate_bsl_files(workspace_root);
-    let config_paths = config_metadata_paths(workspace_root);
+    let project = ProjectSnapshot::load(workspace_root);
+    let files = enumerate_bsl_files(&project);
     let source_root = build_source_root(&files);
-    let db = db_for_files(&source_root, &files, &config_paths, None);
+    let db = db_for_files(&source_root, &files, &project.configs, None);
     Ok((db, files.len()))
 }

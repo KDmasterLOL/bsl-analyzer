@@ -36,13 +36,6 @@ impl std::error::Error for ConfigLoadError {}
 pub enum ProjectError {
     ConfigLoad(ConfigLoadError),
     Topology(TopologyError),
-    /// The extension dependency graph is declared and valid, but this version
-    /// does not yet apply dependency-aware visibility. Accepting the config
-    /// while ignoring the declared edges would analyze with visibility the
-    /// user explicitly asked to change, so it is rejected outright.
-    DependsOnNotSupported {
-        extension: String,
-    },
 }
 
 impl fmt::Display for ProjectError {
@@ -50,11 +43,6 @@ impl fmt::Display for ProjectError {
         match self {
             ProjectError::ConfigLoad(err) => err.fmt(f),
             ProjectError::Topology(err) => err.fmt(f),
-            ProjectError::DependsOnNotSupported { extension } => write!(
-                f,
-                "extension '{extension}' declares dependsOn, but dependency-aware extension \
-                 visibility is not supported yet; remove the dependsOn entries for now"
-            ),
         }
     }
 }
@@ -64,7 +52,6 @@ impl std::error::Error for ProjectError {
         match self {
             ProjectError::ConfigLoad(err) => Some(err),
             ProjectError::Topology(err) => Some(err),
-            ProjectError::DependsOnNotSupported { .. } => None,
         }
     }
 }
@@ -111,9 +98,6 @@ impl Project {
         let canonical_base =
             std::fs::canonicalize(base_path).unwrap_or_else(|_| base_path.to_path_buf());
         let topology = ExtensionTopology::build(&canonical_base, specs)?;
-        if let Some(node) = topology.nodes().iter().find(|node| !node.depends_on().is_empty()) {
-            return Err(ProjectError::DependsOnNotSupported { extension: node.name().to_string() });
-        }
         let extension_paths = topology
             .nodes()
             .iter()
@@ -2252,7 +2236,7 @@ extensions = [{ name = "T" }]
     }
 
     #[test]
-    fn depends_on_is_rejected_until_visibility_lands() {
+    fn depends_on_builds_a_project_with_the_declared_closure() {
         let dir = tempdir().unwrap();
         touch_extension(dir.path(), "vendor/yaxunit");
         touch_extension(dir.path(), "src/cfe/TESTS");
@@ -2263,11 +2247,13 @@ extensions = [{ name = "T" }]
             ]),
             ..Default::default()
         };
-        let err = Project::with_config(dir.path(), config).unwrap_err();
-        assert!(
-            matches!(&err, ProjectError::DependsOnNotSupported { extension } if extension == "TESTS"),
-            "got: {err}"
-        );
+        let project = Project::with_config(dir.path(), config).unwrap();
+        let topology = project.extension_topology();
+        let tests =
+            topology.nodes().iter().find(|n| n.name() == "TESTS").expect("TESTS node exists");
+        let closure_names: Vec<&str> =
+            tests.closure().iter().map(|id| topology.node(*id).name()).collect();
+        assert_eq!(closure_names, ["yaxunit"]);
     }
 
     #[test]
