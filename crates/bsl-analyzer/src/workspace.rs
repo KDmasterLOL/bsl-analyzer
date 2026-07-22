@@ -79,18 +79,15 @@ impl GlobalState {
             "loaded project, scanning source path"
         );
 
+        let configs_snapshot = ide_db::metadata::WorkspaceConfigsSnapshot::from_project(&project);
+
         self.workspace_root = Some(root.clone());
         self.project = Some(project);
 
         {
-            let mut all_paths: Vec<(Option<String>, std::path::PathBuf)> = Vec::new();
-            all_paths.push((None, source_path.clone()));
-            for (name, ext_path) in &extensions {
-                all_paths.push((Some(name.clone()), ext_path.clone()));
-            }
             self.analysis_host.request_cancellation();
             let db = self.analysis_host.raw_database_mut();
-            db.set_all_config_paths(all_paths);
+            db.set_workspace_configs_snapshot(configs_snapshot);
             // Close the whole-config loader gate for the INITIAL load only: the
             // vfs_done finalize reopens it before the metadata bootstrap and
             // warm-up. A live reload (config file edit) must not degrade

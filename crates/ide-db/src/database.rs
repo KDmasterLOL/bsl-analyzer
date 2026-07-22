@@ -24,6 +24,17 @@ use crate::type_kernel::TypeKernelInner;
 use crate::{metadata, queries, vfs_helpers, RootDatabase, SdblHirEntries};
 use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 
+/// The config roots visible to one file: the base configuration plus the
+/// file's dependency-ordered extension chain. `chain` holds `(name, path)`
+/// pairs — transitive dependencies in stable topological order, the file's
+/// own extension last. Forward iteration is overlay-composition order;
+/// reverse iteration is replacement/name-lookup precedence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleRoots {
+    pub main: Option<PathBuf>,
+    pub chain: Vec<(String, PathBuf)>,
+}
+
 #[salsa::db]
 pub struct RootDatabaseImpl {
     storage: salsa::Storage<Self>,
@@ -142,9 +153,11 @@ impl RootDatabaseImpl {
         // (the metadata chain) shallow-verifies in O(1) instead of re-walking its
         // dependency edges on each keystroke.
         use salsa::Durability;
-        let _ = metadata::WorkspaceConfigsInput::builder(Vec::new())
-            .durability(Durability::MEDIUM)
-            .new(&db);
+        let _ = metadata::WorkspaceConfigsInput::builder(Arc::new(
+            metadata::WorkspaceConfigsSnapshot::default(),
+        ))
+        .durability(Durability::MEDIUM)
+        .new(&db);
         let _ = metadata::WorkspaceLoadStateInput::builder(true)
             .durability(Durability::MEDIUM)
             .new(&db);
@@ -579,22 +592,35 @@ impl RootDatabaseImpl {
         global.set_revision(self).to(current.wrapping_add(1));
     }
 
-    /// Set the workspace config roots. Exactly ONE entry must carry the `None` label
-    /// (the base configuration); every other entry is an extension with a `Some(name)`
-    /// label. Consumers that split base from extensions (e.g.
-    /// [`Self::ordered_config_roots`], `metadata_listings_for_file`) rely on this: two
-    /// `None` entries would silently be treated as two bases, and zero would drop the base.
+    /// Set the workspace config roots without dependency topology (every
+    /// extension independent — the pre-`dependsOn` semantics). Exactly ONE entry
+    /// must carry the `None` label (the base configuration); every other entry is
+    /// an extension with a `Some(name)` label. Consumers that split base from
+    /// extensions (e.g. [`Self::ordered_config_roots`], `metadata_listings_for_file`)
+    /// rely on this: two `None` entries would silently be treated as two bases,
+    /// and zero would drop the base.
     pub fn set_all_config_paths(&mut self, paths: Vec<(Option<String>, std::path::PathBuf)>) {
+        self.set_workspace_configs_snapshot(metadata::WorkspaceConfigsSnapshot::from_paths(paths));
+    }
+
+    /// Set the full workspace-configs snapshot (roots + dependency closures +
+    /// topology fingerprint) as ONE input write, so a project reload is atomic:
+    /// no query can observe new paths with old closures or vice versa.
+    pub fn set_workspace_configs_snapshot(&mut self, snapshot: metadata::WorkspaceConfigsSnapshot) {
         use salsa::Setter;
-        for (_, path) in &paths {
+        for (_, path) in &snapshot.paths {
             self.ensure_config_revision_input(&path.to_string_lossy());
         }
         let input = self.workspace_configs();
-        input.set_paths(self).to(paths);
+        input.set_snapshot(self).to(Arc::new(snapshot));
+    }
+
+    pub fn workspace_configs_snapshot(&self) -> Arc<metadata::WorkspaceConfigsSnapshot> {
+        self.workspace_configs().snapshot(self)
     }
 
     pub fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
-        self.workspace_configs().paths(self)
+        self.workspace_configs().snapshot(self).paths.clone()
     }
 
     /// Set (or update) one config root's metadata structure listing. Must run
@@ -666,44 +692,94 @@ impl RootDatabaseImpl {
         self.metadata_listings.get(&key).map(|e| *e.value())
     }
 
-    /// For `file_id`: the structure listings of the main config root and the file's
-    /// applicable extension root (the longest extension path that is a prefix of the
-    /// file), plus whether the per-MDO substrate is populated (the bootstrap ran for
-    /// the roots this resolution touches). `None` if the file has no config root.
-    /// Shared by the object and register per-file resolvers so they pick the same
-    /// roots and make the same bootstrapped-vs-fallback decision.
+    /// The ONE per-file visibility resolver: the config roots a file may see.
+    /// `chain` lists the file's transitive extension dependencies in stable
+    /// topological order with the file's own extension LAST — so forward overlay
+    /// composition applies dependencies before dependents, and reverse iteration
+    /// gives replacement/name-lookup precedence (own first). A base-config file
+    /// gets an empty chain; without declared dependencies the chain is exactly
+    /// `[own]`, the pre-dependency semantics. `None` when no config roots are
+    /// registered or the file's path is unknown.
+    pub fn visible_roots_for_file(&self, file_id: FileId) -> Option<VisibleRoots> {
+        let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        let snapshot = RootDatabaseImpl::workspace_configs_snapshot(self);
+        if snapshot.paths.is_empty() {
+            return None;
+        }
+
+        let main =
+            snapshot.paths.iter().find_map(|(label, path)| label.is_none().then(|| path.clone()));
+        // Longest-prefix match against BOTH the configured and the canonical
+        // root spelling: enumerated file paths may arrive canonicalized (MCP)
+        // while the configured root is symlinked, or vice versa.
+        let own = snapshot
+            .paths
+            .iter()
+            .enumerate()
+            .filter(|(idx, (label, path))| {
+                label.is_some()
+                    && (file_path.starts_with(path)
+                        || file_path.starts_with(&snapshot.canonical_paths[*idx]))
+            })
+            .max_by_key(|(_, (_, path))| path.as_os_str().len())
+            .map(|(idx, _)| idx);
+
+        let chain = own
+            .map(|own_idx| {
+                let entry = |idx: usize| {
+                    let (label, path) = &snapshot.paths[idx];
+                    (label.clone().unwrap_or_default(), path.clone())
+                };
+                let mut chain: Vec<(String, PathBuf)> =
+                    snapshot.closures[own_idx].iter().map(|&dep| entry(dep)).collect();
+                chain.push(entry(own_idx));
+                chain
+            })
+            .unwrap_or_default();
+
+        Some(VisibleRoots { main, chain })
+    }
+
+    /// For `file_id`: the structure listing of the main config root and the
+    /// listings of the file's visibility chain (dependencies first, own extension
+    /// last), plus whether the per-MDO substrate is populated (the bootstrap ran
+    /// for the roots this resolution touches). `None` if the file has no config
+    /// root. Shared by the per-file resolvers so they pick the same roots and
+    /// make the same bootstrapped-vs-fallback decision.
     fn metadata_listings_for_file(
         &self,
         file_id: FileId,
     ) -> Option<(
         Option<metadata::MetadataListingInput>,
-        Option<metadata::MetadataListingInput>,
+        Vec<Option<metadata::MetadataListingInput>>,
         bool,
     )> {
-        let file_path = vfs_helpers::get_file_path(self, file_id)?;
-        let paths = RootDatabaseImpl::all_config_paths(self);
+        let roots = match self.visible_roots_for_file(file_id) {
+            Some(roots) => roots,
+            // No registered config roots (single-file / batch mode): report "not
+            // bootstrapped" with empty listings so callers reach their
+            // whole-config fallback, exactly as before the chain resolver.
+            // `None` overall remains reserved for a file with no known path.
+            None => {
+                vfs_helpers::get_file_path(self, file_id)?;
+                VisibleRoots { main: None, chain: Vec::new() }
+            }
+        };
 
-        let main_path = paths.iter().find_map(|(label, path)| label.is_none().then_some(path));
-        let extension_path = paths
-            .iter()
-            .filter(|(label, path)| label.is_some() && file_path.starts_with(path))
-            .max_by_key(|(_, path)| path.as_os_str().len())
-            .map(|(_, path)| path);
-
-        let main_listing = main_path.map(|p| self.metadata_listing(&p.to_string_lossy()));
-        let ext_listing = extension_path.map(|p| self.metadata_listing(&p.to_string_lossy()));
+        let main_listing = roots.main.as_ref().map(|p| self.metadata_listing(&p.to_string_lossy()));
+        let chain_listings: Vec<Option<metadata::MetadataListingInput>> =
+            roots.chain.iter().map(|(_, p)| self.metadata_listing(&p.to_string_lossy())).collect();
         // "Bootstrapped" requires the main root's listing to actually be set. When
-        // there is no main config root at all (`all_config_paths` empty — the batch
-        // / CLI path that never calls `set_workspace_configs`), `main_listing` is
-        // `None`, which must read as "not bootstrapped" so the caller falls back to
-        // the whole-config lookup. A main root present but without a listing
-        // (`Some(None)`, batch/graph/tests) is likewise not bootstrapped. Only a
-        // listing actually present (`Some(Some(_))`, the LSP bootstrap) — with no
-        // applicable extension root left unbootstrapped — enables the per-MDO path.
+        // there is no main config root at all (the batch / CLI path that never
+        // calls `set_workspace_configs`), `main_listing` is `None`, which must
+        // read as "not bootstrapped" so the caller falls back to the whole-config
+        // lookup. A root present but without a listing (batch/graph/tests) is
+        // likewise not bootstrapped — EVERY chain root must be listed, or the
+        // per-MDO path would silently drop a dependency's objects.
         let bootstrapped =
-            matches!(main_listing, Some(Some(_))) && !matches!(ext_listing, Some(None));
+            matches!(main_listing, Some(Some(_))) && chain_listings.iter().all(|l| l.is_some());
 
-        Some((main_listing.flatten(), ext_listing.flatten(), bootstrapped))
+        Some((main_listing.flatten(), chain_listings, bootstrapped))
     }
 
     /// Resolve a single metadata object visible to `file_id` at per-MDO Salsa
@@ -724,7 +800,8 @@ impl RootDatabaseImpl {
         mdo_type: bsl_metadata::MdoType,
         name: &str,
     ) -> Option<Arc<bsl_metadata::MetadataObject>> {
-        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+        let (main_listing, chain_listings, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
             use hir::ConfigsDatabase;
@@ -740,16 +817,17 @@ impl RootDatabaseImpl {
                 metadata::resolve_metadata_object(self, l, mdo_type, name.to_string())
             })
         };
-        match (resolve_in(main_listing), resolve_in(ext_listing)) {
-            (Some(main), Some(ext)) => {
-                let mut merged = (*main).clone();
-                merged.apply_extension_overlay(&ext);
-                Some(Arc::new(merged))
-            }
-            (Some(main), None) => Some(main),
-            (None, Some(ext)) => Some(ext),
-            (None, None) => None,
+        // Forward overlay composition: the base result first, then each chain
+        // root's overlay in dependency order, the file's own extension last.
+        let mut hits = std::iter::once(resolve_in(main_listing))
+            .chain(chain_listings.into_iter().map(resolve_in))
+            .flatten();
+        let first = hits.next()?;
+        let mut merged: Option<bsl_metadata::MetadataObject> = None;
+        for overlay in hits {
+            merged.get_or_insert_with(|| (*first).clone()).apply_extension_overlay(&overlay);
         }
+        Some(merged.map(Arc::new).unwrap_or(first))
     }
 
     /// The register counterpart of [`resolve_metadata_object_for_file`]: resolve a
@@ -763,7 +841,8 @@ impl RootDatabaseImpl {
         mdo_type: bsl_metadata::MdoType,
         name: &str,
     ) -> Option<Arc<bsl_metadata::Register>> {
-        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+        let (main_listing, chain_listings, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
             use hir::ConfigsDatabase;
@@ -777,16 +856,15 @@ impl RootDatabaseImpl {
         let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
             listing.and_then(|l| metadata::resolve_register(self, l, mdo_type, name.to_string()))
         };
-        match (resolve_in(main_listing), resolve_in(ext_listing)) {
-            (Some(main), Some(ext)) => {
-                let mut merged = (*main).clone();
-                merged.apply_extension_overlay(&ext);
-                Some(Arc::new(merged))
-            }
-            (Some(main), None) => Some(main),
-            (None, Some(ext)) => Some(ext),
-            (None, None) => None,
+        let mut hits = std::iter::once(resolve_in(main_listing))
+            .chain(chain_listings.into_iter().map(resolve_in))
+            .flatten();
+        let first = hits.next()?;
+        let mut merged: Option<bsl_metadata::Register> = None;
+        for overlay in hits {
+            merged.get_or_insert_with(|| (*first).clone()).apply_extension_overlay(&overlay);
         }
+        Some(merged.map(Arc::new).unwrap_or(first))
     }
 
     /// Resolve a register visible to `file_id` by NAME alone (its kind unknown to
@@ -797,7 +875,8 @@ impl RootDatabaseImpl {
         file_id: FileId,
         name: &str,
     ) -> Option<Arc<bsl_metadata::Register>> {
-        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+        let (main_listing, chain_listings, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
             use hir::ConfigsDatabase;
@@ -811,22 +890,26 @@ impl RootDatabaseImpl {
         let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
             listing.and_then(|l| metadata::resolve_register_by_name(self, l, name.to_string()))
         };
-        match (resolve_in(main_listing), resolve_in(ext_listing)) {
-            // Same name in base and extension: a borrowed register (same kind)
-            // merges; a same-name register of a *different* kind is not a borrow,
-            // so the extension's wins outright — mirroring `merge_extension_overlay`
-            // (which adds rather than merges on a kind mismatch, and `find_register`
-            // then returns the extension's).
-            (Some(main), Some(ext)) if main.mdo_type() == ext.mdo_type() => {
-                let mut merged = (*main).clone();
-                merged.apply_extension_overlay(&ext);
-                Some(Arc::new(merged))
-            }
-            (Some(_), Some(ext)) => Some(ext),
-            (Some(main), None) => Some(main),
-            (None, Some(ext)) => Some(ext),
-            (None, None) => None,
+        // Same name along the chain: a borrowed register (same kind) merges into
+        // the accumulated one; a same-name register of a *different* kind is not
+        // a borrow, so the later (more-dependent) root's wins outright — mirroring
+        // `merge_extension_overlay` (which adds rather than merges on a kind
+        // mismatch, and `find_register` then returns the extension's).
+        let hits = std::iter::once(resolve_in(main_listing))
+            .chain(chain_listings.into_iter().map(resolve_in))
+            .flatten();
+        let mut current: Option<Arc<bsl_metadata::Register>> = None;
+        for hit in hits {
+            current = Some(match current {
+                Some(acc) if acc.mdo_type() == hit.mdo_type() => {
+                    let mut merged = (*acc).clone();
+                    merged.apply_extension_overlay(&hit);
+                    Arc::new(merged)
+                }
+                _ => hit,
+            });
         }
+        current
     }
 
     /// The defined-type counterpart of [`resolve_metadata_object_for_file`]:
@@ -840,7 +923,8 @@ impl RootDatabaseImpl {
         file_id: FileId,
         name: &str,
     ) -> Option<bsl_metadata::AttributeType> {
-        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+        let (main_listing, chain_listings, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
             use bsl_metadata::MetadataResolver;
@@ -851,36 +935,44 @@ impl RootDatabaseImpl {
         let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
             listing.and_then(|l| metadata::resolve_defined_type(self, l, name.to_string()))
         };
-        resolve_in(ext_listing)
+        // Replacement semantics: own extension first, then dependencies from the
+        // closest to the base, the base last.
+        chain_listings
+            .into_iter()
+            .rev()
+            .find_map(resolve_in)
             .or_else(|| resolve_in(main_listing))
             .map(|underlying| (*underlying).clone())
     }
 
     /// The common-module counterpart of [`resolve_metadata_object_for_file`]:
     /// resolve a common module's metadata by name visible to `file_id` — the base
-    /// config plus the file's own extension, with the extension winning. A main-config
-    /// common module is visible everywhere; an extension's common module is visible
-    /// only within that extension (a *sibling* extension's modules are not), the same
-    /// scoping as metadata objects. Per-common-module when the substrate is populated,
-    /// falling back to a per-config scan otherwise — `merge_extension_overlay` does
-    /// not fold common modules into the merged configuration, so the fallback cannot
-    /// go through `merged_visible_configuration`.
+    /// config plus the file's visibility chain, the own extension winning. A
+    /// main-config common module is visible everywhere; an extension's common
+    /// module is visible within that extension and its dependents (an unrelated
+    /// extension's modules are not), the same scoping as metadata objects.
+    /// Per-common-module when the substrate is populated, falling back to a
+    /// per-config scan otherwise — `merge_extension_overlay` does not fold common
+    /// modules into the merged configuration, so the fallback cannot go through
+    /// `merged_visible_configuration`.
     pub fn resolve_common_module_for_file(
         &self,
         file_id: FileId,
         name: &str,
     ) -> Option<Arc<bsl_metadata::CommonModule>> {
-        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+        let (main_listing, chain_listings, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
 
         if bootstrapped {
             let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
                 listing.and_then(|l| metadata::resolve_common_module(self, l, name.to_string()))
             };
-            return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
+            return chain_listings
+                .into_iter()
+                .rev()
+                .find_map(resolve_in)
+                .or_else(|| resolve_in(main_listing));
         }
-
-        let file_path = vfs_helpers::get_file_path(self, file_id)?;
-        let paths = RootDatabaseImpl::all_config_paths(self);
 
         let find_in = |root: &std::path::Path| -> Option<Arc<bsl_metadata::CommonModule>> {
             let path_input = metadata::intern_configuration_path(
@@ -891,19 +983,18 @@ impl RootDatabaseImpl {
             self.load_configuration(path_input).find_common_module(name).cloned().map(Arc::new)
         };
 
-        if paths.is_empty() {
+        let Some(roots) = self.visible_roots_for_file(file_id) else {
+            let file_path = vfs_helpers::get_file_path(self, file_id)?;
             let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
             return find_in(&config_root);
-        }
+        };
 
-        let main_path = paths.iter().find_map(|(label, path)| label.is_none().then_some(path));
-        let extension_path = paths
+        roots
+            .chain
             .iter()
-            .filter(|(label, path)| label.is_some() && file_path.starts_with(path))
-            .max_by_key(|(_, path)| path.as_os_str().len())
-            .map(|(_, path)| path);
-
-        extension_path.and_then(|p| find_in(p)).or_else(|| main_path.and_then(|p| find_in(p)))
+            .rev()
+            .find_map(|(_, p)| find_in(p))
+            .or_else(|| roots.main.as_ref().and_then(|p| find_in(p)))
     }
 
     pub fn resolve_http_service_for_file(
@@ -1111,9 +1202,18 @@ impl RootDatabaseImpl {
             }
         }
 
-        RootDatabase::get_all_configurations(self, file_id)
+        // With no configured roots (single-file mode) the inventory is empty;
+        // fall back to the file's own discovered configuration like the per-file
+        // resolvers do.
+        let inventory = RootDatabase::all_configurations_inventory(self);
+        let configs: Vec<Arc<bsl_metadata::Configuration>> = if inventory.is_empty() {
+            self.get_configuration(file_id).into_iter().collect()
+        } else {
+            inventory.into_iter().map(|(_, config)| config).collect()
+        };
+        configs
             .into_iter()
-            .flat_map(|(_, config)| {
+            .flat_map(|config| {
                 config.event_subscriptions().iter().cloned().map(Arc::new).collect::<Vec<_>>()
             })
             .collect()
@@ -1239,11 +1339,18 @@ impl RootDatabaseImpl {
             }
         }
 
-        RootDatabase::get_all_configurations(self, file_id)
+        // With no configured roots (single-file mode) the inventory is empty;
+        // fall back to the file's own discovered configuration like the per-file
+        // resolvers do.
+        let inventory = RootDatabase::all_configurations_inventory(self);
+        let configs: Vec<Arc<bsl_metadata::Configuration>> = if inventory.is_empty() {
+            self.get_configuration(file_id).into_iter().collect()
+        } else {
+            inventory.into_iter().map(|(_, config)| config).collect()
+        };
+        configs
             .into_iter()
-            .flat_map(|(_, config)| {
-                config.roles().iter().cloned().map(Arc::new).collect::<Vec<_>>()
-            })
+            .flat_map(|config| config.roles().iter().cloned().map(Arc::new).collect::<Vec<_>>())
             .collect()
     }
 
@@ -1260,7 +1367,8 @@ impl RootDatabaseImpl {
         file_id: FileId,
         name: &str,
     ) -> Option<Arc<bsl_metadata::Subsystem>> {
-        let (main_listing, ext_listing, bootstrapped) = self.metadata_listings_for_file(file_id)?;
+        let (main_listing, chain_listings, bootstrapped) =
+            self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
             use hir::ConfigsDatabase;
@@ -1276,20 +1384,19 @@ impl RootDatabaseImpl {
         let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
             listing.and_then(|l| metadata::resolve_subsystem(self, l, name.to_string()))
         };
-        match (resolve_in(main_listing), resolve_in(ext_listing)) {
-            (Some(main), Some(ext)) => {
-                let mut merged = (*main).clone();
-                merged.merge_from(&ext);
-                Some(Arc::new(merged))
-            }
-            (Some(main), None) => Some(main),
-            (None, Some(ext)) => Some(ext),
-            (None, None) => None,
+        let mut hits = std::iter::once(resolve_in(main_listing))
+            .chain(chain_listings.into_iter().map(resolve_in))
+            .flatten();
+        let first = hits.next()?;
+        let mut merged: Option<bsl_metadata::Subsystem> = None;
+        for overlay in hits {
+            merged.get_or_insert_with(|| (*first).clone()).merge_from(&overlay);
         }
+        Some(merged.map(Arc::new).unwrap_or(first))
     }
 
     pub fn subsystem_names_for_file(&self, file_id: FileId) -> Vec<String> {
-        let Some((main_listing, ext_listing, bootstrapped)) =
+        let Some((main_listing, chain_listings, bootstrapped)) =
             self.metadata_listings_for_file(file_id)
         else {
             return Vec::new();
@@ -1307,7 +1414,7 @@ impl RootDatabaseImpl {
 
         let mut out = Vec::new();
         let mut seen = HashSet::new();
-        for listing in [main_listing, ext_listing].into_iter().flatten() {
+        for listing in std::iter::once(main_listing).chain(chain_listings).flatten() {
             for entry in listing.subsystems(self).iter() {
                 let name = entry.name.clone();
                 if seen.insert(name.fold_lower()) {
@@ -1323,7 +1430,7 @@ impl RootDatabaseImpl {
     /// counterpart of [`enumerate_roles_for_file`]: prefers all configured
     /// listings when all are bootstrapped, merging same-name subsystems
     /// deterministically (base first, then extension order); falls back to
-    /// [`RootDatabase::get_all_configurations`] only behind this enumeration API.
+    /// [`RootDatabase::all_configurations_inventory`] only behind this enumeration API.
     pub fn enumerate_subsystems_for_file(
         &self,
         file_id: FileId,
@@ -1367,9 +1474,18 @@ impl RootDatabaseImpl {
             }
         }
 
-        RootDatabase::get_all_configurations(self, file_id)
+        // With no configured roots (single-file mode) the inventory is empty;
+        // fall back to the file's own discovered configuration like the per-file
+        // resolvers do.
+        let inventory = RootDatabase::all_configurations_inventory(self);
+        let configs: Vec<Arc<bsl_metadata::Configuration>> = if inventory.is_empty() {
+            self.get_configuration(file_id).into_iter().collect()
+        } else {
+            inventory.into_iter().map(|(_, config)| config).collect()
+        };
+        configs
             .into_iter()
-            .flat_map(|(_, config)| {
+            .flat_map(|config| {
                 config.subsystems().iter().cloned().map(Arc::new).collect::<Vec<_>>()
             })
             .collect()
@@ -1527,7 +1643,7 @@ impl RootDatabaseImpl {
         &self,
         module_file_id: FileId,
     ) -> Option<Arc<bsl_metadata::CommonModule>> {
-        let (main_listing, ext_listing, bootstrapped) =
+        let (main_listing, chain_listings, bootstrapped) =
             self.metadata_listings_for_file(module_file_id)?;
 
         if bootstrapped {
@@ -1535,7 +1651,11 @@ impl RootDatabaseImpl {
                 listing
                     .and_then(|l| metadata::resolve_common_module_by_file(self, l, module_file_id))
             };
-            return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
+            return chain_listings
+                .into_iter()
+                .rev()
+                .find_map(resolve_in)
+                .or_else(|| resolve_in(main_listing));
         }
 
         let file_path = vfs_helpers::get_file_path(self, module_file_id)?;
@@ -1569,21 +1689,19 @@ impl RootDatabaseImpl {
             return find_in(&config_root);
         }
 
-        let main_path = paths.iter().find_map(|(name, path)| name.is_none().then_some(path));
-        let extension_path = paths
-            .iter()
-            .filter(|(name, path)| name.is_some() && file_path.starts_with(path))
-            .max_by_key(|(_, path)| path.as_os_str().len())
-            .map(|(_, path)| path);
-
-        main_path.and_then(|p| find_in(p)).or_else(|| extension_path.and_then(|p| find_in(p)))
+        let roots = self.visible_roots_for_file(module_file_id)?;
+        roots
+            .main
+            .as_ref()
+            .and_then(|p| find_in(p))
+            .or_else(|| roots.chain.iter().rev().find_map(|(_, p)| find_in(p)))
     }
 
     pub fn http_service_for_file_id(
         &self,
         module_file_id: FileId,
     ) -> Option<Arc<bsl_metadata::HTTPService>> {
-        let (main_listing, ext_listing, bootstrapped) =
+        let (main_listing, chain_listings, bootstrapped) =
             self.metadata_listings_for_file(module_file_id)?;
 
         if bootstrapped {
@@ -1591,7 +1709,11 @@ impl RootDatabaseImpl {
                 listing
                     .and_then(|l| metadata::resolve_http_service_by_file(self, l, module_file_id))
             };
-            return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
+            return chain_listings
+                .into_iter()
+                .rev()
+                .find_map(resolve_in)
+                .or_else(|| resolve_in(main_listing));
         }
 
         use hir::ConfigsDatabase;
@@ -1604,14 +1726,18 @@ impl RootDatabaseImpl {
         &self,
         module_file_id: FileId,
     ) -> Option<Arc<bsl_metadata::WebService>> {
-        let (main_listing, ext_listing, bootstrapped) =
+        let (main_listing, chain_listings, bootstrapped) =
             self.metadata_listings_for_file(module_file_id)?;
 
         if bootstrapped {
             let resolve_in = |listing: Option<metadata::MetadataListingInput>| {
                 listing.and_then(|l| metadata::resolve_web_service_by_file(self, l, module_file_id))
             };
-            return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
+            return chain_listings
+                .into_iter()
+                .rev()
+                .find_map(resolve_in)
+                .or_else(|| resolve_in(main_listing));
         }
 
         use hir::ConfigsDatabase;
@@ -1624,7 +1750,7 @@ impl RootDatabaseImpl {
         &self,
         module_file_id: FileId,
     ) -> Option<Arc<bsl_metadata::IntegrationService>> {
-        let (main_listing, ext_listing, bootstrapped) =
+        let (main_listing, chain_listings, bootstrapped) =
             self.metadata_listings_for_file(module_file_id)?;
 
         if bootstrapped {
@@ -1633,7 +1759,11 @@ impl RootDatabaseImpl {
                     metadata::resolve_integration_service_by_file(self, l, module_file_id)
                 })
             };
-            return resolve_in(ext_listing).or_else(|| resolve_in(main_listing));
+            return chain_listings
+                .into_iter()
+                .rev()
+                .find_map(resolve_in)
+                .or_else(|| resolve_in(main_listing));
         }
 
         use hir::ConfigsDatabase;
@@ -1649,7 +1779,7 @@ impl RootDatabaseImpl {
     /// `find_common_module_files_anywhere`: body ids come straight from the substrate
     /// when bootstrapped, otherwise from a scoped root-relative URI scan.
     pub fn resolve_common_module_files_for_file(&self, file_id: FileId, name: &str) -> Vec<FileId> {
-        let Some((main_listing, ext_listing, bootstrapped)) =
+        let Some((main_listing, chain_listings, bootstrapped)) =
             self.metadata_listings_for_file(file_id)
         else {
             return Vec::new();
@@ -1658,7 +1788,9 @@ impl RootDatabaseImpl {
         let mut out: Vec<FileId> = Vec::new();
 
         if bootstrapped {
-            for listing in [ext_listing, main_listing].into_iter().flatten() {
+            for listing in
+                chain_listings.iter().rev().cloned().chain(std::iter::once(main_listing)).flatten()
+            {
                 if let Some(fid) =
                     metadata::common_module_index(self, listing).lookup_module_file(name)
                 {
@@ -1698,14 +1830,10 @@ impl RootDatabaseImpl {
             return out;
         }
 
-        let main_path = paths.iter().find_map(|(label, path)| label.is_none().then_some(path));
-        let extension_path = paths
-            .iter()
-            .filter(|(label, path)| label.is_some() && file_path.starts_with(path))
-            .max_by_key(|(_, path)| path.as_os_str().len())
-            .map(|(_, path)| path);
-
-        for root in [extension_path, main_path].into_iter().flatten() {
+        let Some(roots) = self.visible_roots_for_file(file_id) else {
+            return out;
+        };
+        for root in roots.chain.iter().rev().map(|(_, p)| p).chain(roots.main.as_ref()) {
             if let Some(fid) = body_in(root) {
                 if !out.contains(&fid) {
                     out.push(fid);
@@ -2002,6 +2130,13 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             .collect()
     }
 
+    fn configurations_inventory(&self) -> Vec<hir::VisibleConfig> {
+        RootDatabase::all_configurations_inventory(self)
+            .into_iter()
+            .map(|(name, configuration)| hir::VisibleConfig { name, configuration })
+            .collect()
+    }
+
     fn resolve_metadata_object(
         &self,
         file_id: FileId,
@@ -2149,16 +2284,10 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             return false;
         };
 
-        let paths = RootDatabaseImpl::all_config_paths(self);
-        if paths.is_empty() {
-            return vfs_helpers::find_configuration_root(self, &file_path).is_some();
+        match self.visible_roots_for_file(file_id) {
+            Some(roots) => roots.main.is_some() || !roots.chain.is_empty(),
+            None => vfs_helpers::find_configuration_root(self, &file_path).is_some(),
         }
-
-        let has_main = paths.iter().any(|(name, _)| name.is_none());
-        let has_applicable_extension =
-            paths.iter().any(|(name, path)| name.is_some() && file_path.starts_with(path));
-
-        has_main || has_applicable_extension
     }
 
     fn recorders_for_register(
@@ -2185,30 +2314,6 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         &self,
         file_id: FileId,
     ) -> Option<Arc<bsl_metadata::Configuration>> {
-        let file_path = vfs_helpers::get_file_path(self, file_id)?;
-        let paths = RootDatabaseImpl::all_config_paths(self);
-
-        let load_at = |path: &std::path::Path| -> Arc<bsl_metadata::Configuration> {
-            let path_input = metadata::intern_configuration_path(
-                self,
-                &path.to_string_lossy(),
-                self.config_root_revision_for_path(path),
-            );
-            self.load_configuration(path_input)
-        };
-
-        if paths.is_empty() {
-            let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
-            return Some(load_at(&config_root));
-        }
-
-        let main_path = paths.iter().find_map(|(name, path)| name.is_none().then_some(path));
-        let extension_path = paths
-            .iter()
-            .filter(|(name, path)| name.is_some() && file_path.starts_with(path))
-            .max_by_key(|(_, path)| path.as_os_str().len())
-            .map(|(_, path)| path);
-
         let input_for = |path: &std::path::Path| -> metadata::ConfigurationPathInput<'_> {
             metadata::intern_configuration_path(
                 self,
@@ -2217,19 +2322,29 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             )
         };
 
-        match (main_path, extension_path) {
-            (Some(main_path), Some(extension_path)) => {
-                // Route through the memoised merge so the deep clone of the whole base
-                // configuration runs once per extension, not on every metadata lookup.
-                Some(metadata::merged_configuration(
-                    self,
-                    input_for(main_path),
-                    input_for(extension_path),
-                ))
+        let Some(roots) = self.visible_roots_for_file(file_id) else {
+            let file_path = vfs_helpers::get_file_path(self, file_id)?;
+            let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
+            return Some(self.load_configuration(input_for(&config_root)));
+        };
+
+        // Forward composition through the memoised chain query: the base, then
+        // each dependency's overlay in order, the file's own extension last. The
+        // deep clone of the accumulated configuration runs once per unique chain
+        // prefix, not on every metadata lookup.
+        let chain_inputs: Vec<metadata::ConfigurationPathInput<'_>> = roots
+            .main
+            .iter()
+            .map(|p| input_for(p))
+            .chain(roots.chain.iter().map(|(_, p)| input_for(p)))
+            .collect();
+        match chain_inputs.as_slice() {
+            [] => None,
+            [only] => Some(self.load_configuration(*only)),
+            _ => {
+                let chain = metadata::ConfigChainInput::new(self, chain_inputs);
+                Some(metadata::chain_configuration(self, chain))
             }
-            (Some(main_path), None) => Some(load_at(main_path)),
-            (None, Some(extension_path)) => Some(load_at(extension_path)),
-            (None, None) => None,
         }
     }
 
@@ -2342,13 +2457,31 @@ impl RootDatabase for RootDatabaseImpl {
         &self,
         file_id: FileId,
     ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)> {
-        let all_paths = RootDatabaseImpl::all_config_paths(self);
+        let load = |path: &std::path::Path| {
+            let path_input = metadata::intern_configuration_path(
+                self,
+                &path.to_string_lossy(),
+                self.config_root_revision_for_path(path),
+            );
+            self.load_configuration(path_input)
+        };
 
-        if all_paths.is_empty() {
+        let Some(roots) = self.visible_roots_for_file(file_id) else {
             return self.get_configuration(file_id).into_iter().map(|c| (None, c)).collect();
-        }
+        };
 
-        all_paths
+        roots
+            .main
+            .iter()
+            .map(|p| (None, load(p)))
+            .chain(roots.chain.iter().map(|(name, p)| (Some(name.clone()), load(p))))
+            .collect()
+    }
+
+    fn all_configurations_inventory(
+        &self,
+    ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)> {
+        RootDatabaseImpl::all_config_paths(self)
             .into_iter()
             .map(|(name, path)| {
                 let path_input = metadata::intern_configuration_path(

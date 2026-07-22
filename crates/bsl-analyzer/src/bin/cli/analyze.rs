@@ -193,18 +193,14 @@ fn analyze_salsa(
     let mut db = RootDatabaseImpl::default();
     bsl_analyzer::features_state::apply_features_to_db(&mut db, &project.config.features);
 
-    // Register the base + extension configuration roots so per-file resolution — and the
-    // `&ИзменениеИКонтроль` effective merge (`effective_target` → `pair_base_module_path`) —
-    // can pair an extension module to its base. Mirrors the LSP workspace loader; without
-    // this `all_config_paths` is empty and extension merging silently never activates.
-    {
-        let mut config_paths: Vec<(Option<String>, PathBuf)> =
-            vec![(None, project.source_path().to_path_buf())];
-        for (name, ext_path) in project.extension_paths() {
-            config_paths.push((Some(name.clone()), ext_path.clone()));
-        }
-        db.set_all_config_paths(config_paths);
-    }
+    // Register the base + extension configuration roots (with their dependency
+    // topology) so per-file resolution — and the `&ИзменениеИКонтроль` effective
+    // merge (`effective_target` → `pair_base_module_path`) — can pair an extension
+    // module to its base. Mirrors the LSP workspace loader; without this
+    // `all_config_paths` is empty and extension merging silently never activates.
+    db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot::from_project(
+        &project,
+    ));
 
     tracing::info!("Finding BSL files in {:?}", source_roots);
     let mut bsl_files = Vec::new();

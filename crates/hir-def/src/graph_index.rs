@@ -971,7 +971,7 @@ where
     // the pool. It is the only internally parallel query the build reaches (no type
     // inference), so this one warm-up closes the window.
     if let Some(first) = warm {
-        let _ = db.configurations(first.file_id);
+        let _ = db.configurations_inventory();
         let _ = db.module_metadata(first);
     }
 
@@ -1267,7 +1267,7 @@ struct CatalogObject {
 /// new ones.
 pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
     db: &DB,
-    representative: FileId,
+    _representative: FileId,
     state: &mut GraphBuildState,
 ) -> Vec<WorkspaceCallEdge> {
     // Platform standard attributes (Ссылка/Код/Наименование/…) are synthesised onto
@@ -1278,7 +1278,7 @@ pub fn project_workspace_catalog_edges<DB: ConfigsDatabase>(
     let is_standard = bsl_metadata::is_standard_attribute_name;
 
     let mut objects: Vec<CatalogObject> = Vec::new();
-    for visible in db.configurations(representative) {
+    for visible in db.configurations_inventory() {
         let config = &visible.configuration;
         for mdo in config.metadata_objects() {
             objects.push(CatalogObject {
@@ -1552,13 +1552,13 @@ fn subsystem_membership_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdg
 /// a string name into `РегистрыНакопления[…]` — only the first of which `register_movement` sees).
 pub fn project_workspace_register_records_edges<DB: ConfigsDatabase>(
     db: &DB,
-    representative: FileId,
+    _representative: FileId,
     state: &mut GraphBuildState,
 ) -> Vec<WorkspaceCallEdge> {
     // (document_name, register_type, register_name); gathered deterministically so
     // canonicalization sees a load-order-independent first-seen spelling.
     let mut records: Vec<(String, MdoType, String)> = Vec::new();
-    for visible in db.configurations(representative) {
+    for visible in db.configurations_inventory() {
         for object in visible.configuration.metadata_objects() {
             if object.mdo_type != MdoType::Document {
                 continue;

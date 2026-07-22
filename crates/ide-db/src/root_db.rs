@@ -12,9 +12,23 @@ pub trait RootDatabase:
 {
     fn get_configuration(&self, file_id: FileId) -> Option<Arc<bsl_metadata::Configuration>>;
 
+    /// The configurations VISIBLE to `file_id` as separate entries (no merge):
+    /// the base first, then the file's dependency chain in order (own extension
+    /// last). A base-config file sees only the base; an extension file sees the
+    /// base, its declared transitive dependencies and itself — never an
+    /// unrelated sibling.
     fn get_all_configurations(
         &self,
         file_id: FileId,
+    ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)>;
+
+    /// EVERY configured root (base + all extensions), regardless of any file's
+    /// visibility — the inventory view for index/graph builders that need the
+    /// whole workspace. Semantic per-file resolution must use
+    /// [`Self::get_all_configurations`] instead: this union deliberately ignores
+    /// dependency-scoped visibility.
+    fn all_configurations_inventory(
+        &self,
     ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)>;
 
     fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)>;
