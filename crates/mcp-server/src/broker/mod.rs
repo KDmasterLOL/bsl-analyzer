@@ -14,4 +14,5 @@ pub(crate) mod security;
 
 pub use name::{
     backend_name, embedding_config_fingerprint, workspace_topology_fingerprint, BackendKey,
+    TOPOLOGY_FP_ENV,
 };

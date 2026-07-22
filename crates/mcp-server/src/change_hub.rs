@@ -299,20 +299,21 @@ struct HubInner {
     /// dropped, so the hub thread must trigger a reconcile. Non-locking, so the
     /// callback never blocks.
     channel_overflow: AtomicBool,
-    /// Canonical form of the currently-armed watch roots, published by the hub
-    /// thread at setup and after every re-arm, so a consumer can compare a
-    /// project snapshot's roots against the live set without a control roundtrip.
-    watched_roots: Mutex<Vec<PathBuf>>,
+    /// `(canonical path, recursive)` of the currently-armed watch targets,
+    /// published by the hub thread at setup and after every re-arm, so a consumer
+    /// can compare a project snapshot's targets against the live set without a
+    /// control roundtrip.
+    watched_roots: Mutex<Vec<(PathBuf, bool)>>,
 }
 
 impl HubInner {
-    /// Publish the canonical form of the armed roots for cheap comparisons by
-    /// [`WorkspaceChangeHub::ensure_roots`]. Roots whose `watch()` failed are not
-    /// included, so a retry re-arms them.
-    fn publish_watched_roots(&self, armed: &[PathBuf]) {
-        let canonical: Vec<PathBuf> =
-            armed.iter().map(|r| r.canonicalize().unwrap_or_else(|_| r.clone())).collect();
-        *self.watched_roots.lock().unwrap_or_else(PoisonError::into_inner) = canonical;
+    /// Publish the armed targets' `(canonical-at-arm, recursive)` pairs for cheap
+    /// comparisons by [`WorkspaceChangeHub::ensure_roots`]. Targets whose
+    /// `watch()` failed are not included, so a retry re-arms them.
+    fn publish_watched_roots(&self, armed: &[(WatchTarget, PathBuf)]) {
+        let pairs: Vec<(PathBuf, bool)> =
+            armed.iter().map(|(t, canonical)| (canonical.clone(), t.recursive)).collect();
+        *self.watched_roots.lock().unwrap_or_else(PoisonError::into_inner) = pairs;
     }
 
     fn lock_acc(&self) -> std::sync::MutexGuard<'_, Accumulator> {
@@ -490,10 +491,12 @@ fn classify_path(path: &Path) -> Option<(PathBuf, ChangeKind)> {
 enum HubMsg {
     Event(Result<Event, notify::Error>),
     /// Re-point the watch set (see [`WorkspaceChangeHub::rearm`]). `ack` fires
-    /// once the new set is armed and every cursor is flagged to rescan.
+    /// once the new set is applied and every cursor is flagged to rescan; it
+    /// carries whether EVERY desired target is actually armed (partial coverage
+    /// must surface to the caller, not read as success).
     Rearm {
-        roots: Vec<PathBuf>,
-        ack: std::sync::mpsc::SyncSender<()>,
+        targets: Vec<WatchTarget>,
+        ack: std::sync::mpsc::SyncSender<bool>,
     },
     /// Exit the hub thread. Cursors keep draining the frozen stream.
     #[allow(
@@ -526,11 +529,19 @@ impl WorkspaceChangeHub {
     /// Nested roots are de-duplicated so a subtree is not double-watched. Use
     /// [`Self::wait_until_watching`] / [`Self::is_watching`] to observe setup completion;
     /// [`Self::health`] reports `Degraded(WatcherSetup)` if no root could be watched.
+    /// Test constructor: every root recursive. Production spawns via
+    /// [`Self::start_targets`] so the workspace root rides along non-recursively.
+    #[cfg(test)]
     pub(crate) fn start(roots: Vec<PathBuf>) -> Self {
-        Self::start_with_capacity(roots, DEFAULT_CAPACITY)
+        Self::start_targets(roots.into_iter().map(WatchTarget::recursive).collect())
     }
 
-    fn start_with_capacity(roots: Vec<PathBuf>, cap: usize) -> Self {
+    /// [`Self::start`] with explicit per-target modes (see [`watch_targets_for`]).
+    pub(crate) fn start_targets(targets: Vec<WatchTarget>) -> Self {
+        Self::start_with_capacity(targets, DEFAULT_CAPACITY)
+    }
+
+    fn start_with_capacity(targets: Vec<WatchTarget>, cap: usize) -> Self {
         let inner = Arc::new(HubInner {
             acc: Mutex::new(Accumulator::new(cap)),
             wake: Condvar::new(),
@@ -544,50 +555,90 @@ impl WorkspaceChangeHub {
         let event_tx = tx.clone();
         let thread = std::thread::Builder::new()
             .name("bsl-workspace-change-hub".to_owned())
-            .spawn(move || run_hub_thread(thread_inner, roots, event_tx, rx))
+            .spawn(move || run_hub_thread(thread_inner, targets, event_tx, rx))
             .ok();
 
         Self { inner, control: tx, thread: Arc::new(Mutex::new(thread)) }
     }
 
-    /// Ask the hub thread to re-point the watch set at `roots`, blocking until it
-    /// acknowledges (the new set is armed, every cursor is flagged to rescan) or
-    /// `timeout` elapses. The hub identity is stable across a re-arm: cursors,
-    /// health and all clonable handles keep working — only the covered subtrees
-    /// change. Returns whether the re-arm was acknowledged in time.
-    pub(crate) fn rearm(&self, roots: Vec<PathBuf>, timeout: Duration) -> bool {
+    /// Ask the hub thread to re-point the watch set at `targets`, blocking until it
+    /// acknowledges or `timeout` elapses. The hub identity is stable across a
+    /// re-arm: cursors, health and all clonable handles keep working — only the
+    /// covered subtrees change. `timeout` bounds the WHOLE call: the enqueue onto
+    /// a possibly-full channel and the wait for the acknowledgement share one
+    /// deadline. Returns whether every desired target is actually armed; `false`
+    /// for a timeout, a dead hub thread, or partial coverage (an unwatchable
+    /// target) — the caller must not treat any of those as covered.
+    pub(crate) fn rearm(&self, targets: Vec<WatchTarget>, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
         let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
-        if self.control.send(HubMsg::Rearm { roots, ack: ack_tx }).is_err() {
-            return false;
+        let mut msg = HubMsg::Rearm { targets, ack: ack_tx };
+        loop {
+            match self.control.try_send(msg) {
+                Ok(()) => break,
+                Err(std::sync::mpsc::TrySendError::Full(back)) => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    msg = back;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return false,
+            }
         }
-        ack_rx.recv_timeout(timeout).is_ok()
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ack_rx.recv_timeout(remaining).unwrap_or(false)
     }
 
-    /// Re-arm onto `roots` only when they differ from the live watch set
-    /// (canonical comparison), so a rebuild whose topology did not move never
-    /// costs consumers a rescan round. Returns whether the hub now covers
-    /// `roots` — `false` only when a needed re-arm was not acknowledged.
-    pub(crate) fn ensure_roots(&self, roots: &[PathBuf]) -> bool {
-        let desired: Vec<PathBuf> = dedup_nested_roots(roots.to_vec())
+    /// Re-arm onto `targets` only when they differ from the live watch set
+    /// (canonical + mode comparison), so a rebuild whose topology did not move
+    /// never costs consumers a rescan round. Returns whether the hub covers
+    /// `targets` — `false` when a needed re-arm was not acknowledged or left a
+    /// target unarmed.
+    pub(crate) fn ensure_roots(&self, targets: &[WatchTarget]) -> bool {
+        let mut desired: Vec<(PathBuf, bool)> = dedup_targets(targets.to_vec())
             .into_iter()
-            .map(|r| r.canonicalize().unwrap_or(r))
+            .map(|(t, canonical)| (canonical, t.recursive))
             .collect();
-        let current =
+        desired.sort();
+        let mut current =
             self.inner.watched_roots.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        if sorted(current) == sorted(desired) {
+        current.sort();
+        if current == desired {
             return true;
         }
-        tracing::info!(?roots, "workspace change hub re-arming onto new scan roots");
-        self.rearm(roots.to_vec(), REARM_ACK_TIMEOUT)
+        tracing::info!(?targets, "workspace change hub re-arming onto new scan roots");
+        self.rearm(targets.to_vec(), REARM_ACK_TIMEOUT)
     }
 
     /// Terminate the hub thread and join it. Cursors keep draining whatever was
-    /// accumulated; no further events arrive. Idempotent. A test seam today:
-    /// production daemons exit the process, but tests must be able to prove the
-    /// thread terminates instead of leaking a watcher per case.
+    /// accumulated; no further events arrive. Idempotent, and bounded: if the
+    /// control channel stays full past the enqueue deadline the hub is left
+    /// running (never a hang). A test seam today: production daemons exit the
+    /// process, but tests must be able to prove the thread terminates instead of
+    /// leaking a watcher per case.
     #[allow(dead_code, reason = "exercised by tests; no production teardown path needs it yet")]
     pub(crate) fn shutdown(&self) {
-        let _ = self.control.send(HubMsg::Shutdown);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut msg = HubMsg::Shutdown;
+        let sent = loop {
+            match self.control.try_send(msg) {
+                Ok(()) => break true,
+                Err(std::sync::mpsc::TrySendError::Full(back)) => {
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    msg = back;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // Already gone: joining below is safe and immediate.
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break true,
+            }
+        };
+        if !sent {
+            tracing::warn!("change hub shutdown could not be enqueued; leaving the thread running");
+            return;
+        }
         let handle = self.thread.lock().unwrap_or_else(PoisonError::into_inner).take();
         if let Some(handle) = handle {
             let _ = handle.join();
@@ -700,65 +751,81 @@ impl WorkspaceChangeHub {
     }
 }
 
-/// The full watch-target set for a workspace: the drift-scan roots plus the
-/// analyzer config files at the workspace root. The config files are targeted
-/// individually (a watch on a single file is effectively non-recursive) because
-/// in a nested layout the workspace root is NOT a scan root — without them a
-/// `dependsOn` edit would never be event-delivered and every consumer would
-/// coast on its walk/reconcile interval. Only files that exist are included; a
-/// target nested under a scan root is deduplicated at arm time.
-pub(crate) fn watch_targets_for(workspace_root: &Path, scan_roots: &[PathBuf]) -> Vec<PathBuf> {
-    let mut targets: Vec<PathBuf> = scan_roots.to_vec();
-    for name in project_model::CONFIG_FILE_NAMES {
-        let path = workspace_root.join(name);
-        if path.exists() {
-            targets.push(path);
+/// One watch target: a directory watched recursively (a scan root) or
+/// non-recursively (the workspace root, for the analyzer config files that live
+/// directly in it). Watching the DIRECTORY — never the config files themselves —
+/// is load-bearing twice over: an editor's atomic save replaces the file's inode
+/// (killing a file watch while the canonical set looks unchanged), and a config
+/// file that does not exist yet cannot be watched at all, so its creation would
+/// go unseen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WatchTarget {
+    pub(crate) path: PathBuf,
+    pub(crate) recursive: bool,
+}
+
+impl WatchTarget {
+    pub(crate) fn recursive(path: PathBuf) -> Self {
+        Self { path, recursive: true }
+    }
+
+    fn mode(&self) -> RecursiveMode {
+        if self.recursive {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
         }
     }
+}
+
+/// The full watch-target set for a workspace: the drift-scan roots (recursive)
+/// plus the workspace root itself, non-recursively, so config-file
+/// creation/edit/atomic-replace is event-delivered even in a nested layout
+/// where the workspace root is NOT a scan root. A non-recursive root already
+/// covered by a recursive scan root is deduplicated at arm time.
+pub(crate) fn watch_targets_for(workspace_root: &Path, scan_roots: &[PathBuf]) -> Vec<WatchTarget> {
+    let mut targets: Vec<WatchTarget> =
+        scan_roots.iter().cloned().map(WatchTarget::recursive).collect();
+    targets.push(WatchTarget { path: workspace_root.to_path_buf(), recursive: false });
     targets
 }
 
-/// Reduce a set of watch roots to the minimal cover: drop any root nested under another
-/// so a subtree is not watched twice (which some backends would report as duplicate
-/// events). Comparison is by canonical path; the RAW path is what gets watched, so event
-/// paths keep the spelling consumers strip against (the search sink strips the non-canonical
-/// source root).
-fn dedup_nested_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut pairs: Vec<(PathBuf, PathBuf)> = roots
+/// Reduce a set of watch targets to the minimal cover: drop any target nested under
+/// a RECURSIVE target (a non-recursive ancestor covers only its direct children, so
+/// it absorbs nothing), and collapse exact duplicates — a recursive duplicate wins
+/// over a non-recursive one. Comparison is by canonical path; the RAW path is what
+/// gets watched, so event paths keep the spelling consumers strip against (the
+/// search sink strips the non-canonical source root). Returns each kept target with
+/// the canonical path used for the decision.
+fn dedup_targets(targets: Vec<WatchTarget>) -> Vec<(WatchTarget, PathBuf)> {
+    let mut pairs: Vec<(PathBuf, WatchTarget)> = targets
         .into_iter()
-        .map(|raw| (raw.canonicalize().unwrap_or_else(|_| raw.clone()), raw))
+        .map(|t| (t.path.canonicalize().unwrap_or_else(|_| t.path.clone()), t))
         .collect();
-    // Sort by canonical path so a parent sorts before its descendants; dedup exact repeats.
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    // Parents sort before descendants; among equal canonicals the recursive one first.
+    pairs.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.recursive.cmp(&a.1.recursive)));
     pairs.dedup_by(|a, b| a.0 == b.0);
 
-    let mut kept_canonical: Vec<PathBuf> = Vec::new();
-    let mut kept_raw: Vec<PathBuf> = Vec::new();
-    for (canonical, raw) in pairs {
-        if kept_canonical.iter().any(|k| canonical.starts_with(k)) {
+    let mut kept: Vec<(WatchTarget, PathBuf)> = Vec::new();
+    for (canonical, target) in pairs {
+        if kept.iter().any(|(k, kc)| k.recursive && canonical.starts_with(kc)) {
             continue;
         }
-        kept_canonical.push(canonical);
-        kept_raw.push(raw);
+        kept.push((target, canonical));
     }
-    kept_raw
+    kept
 }
 
 /// How long a re-arm caller waits for the hub thread's acknowledgement before
 /// reporting failure. The thread only pumps events, so this is generous.
 const REARM_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn sorted(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    paths.sort();
-    paths
-}
-
-/// Arm the recursive watch over every root and pump events (and control messages)
-/// until shutdown. Runs on its own thread so `start` returns without blocking on
-/// the initial (potentially huge) directory walks.
+/// Arm the watch over every target and pump events (and control messages) until
+/// shutdown. Runs on its own thread so `start` returns without blocking on the
+/// initial (potentially huge) directory walks.
 fn run_hub_thread(
     inner: Arc<HubInner>,
-    roots: Vec<PathBuf>,
+    targets: Vec<WatchTarget>,
     event_tx: std::sync::mpsc::SyncSender<HubMsg>,
     rx: std::sync::mpsc::Receiver<HubMsg>,
 ) {
@@ -783,20 +850,22 @@ fn run_hub_thread(
         }
     };
 
-    // `armed` holds the raw spellings whose `watch()` succeeded; a root that
-    // failed is deliberately NOT recorded, so a later re-arm onto the same set
-    // retries it instead of assuming coverage.
-    let mut armed: Vec<PathBuf> = Vec::new();
-    for root in dedup_nested_roots(roots) {
-        match watcher.watch(&root, RecursiveMode::Recursive) {
+    // `armed` holds each successfully-watched target with its canonical path
+    // CAPTURED AT WATCH TIME — later comparisons must never re-canonicalize a raw
+    // spelling (a retargeted symlink would then claim coverage it lost). A target
+    // whose `watch()` failed is deliberately NOT recorded, so a later re-arm onto
+    // the same set retries it instead of assuming coverage.
+    let mut armed: Vec<(WatchTarget, PathBuf)> = Vec::new();
+    for (target, canonical) in dedup_targets(targets) {
+        match watcher.watch(&target.path, target.mode()) {
             Ok(()) => {
-                tracing::info!(?root, "workspace change hub watching root");
-                armed.push(root);
+                tracing::info!(root = ?target.path, recursive = target.recursive, "workspace change hub watching root");
+                armed.push((target, canonical));
             }
             // A single unwatchable root (a missing extension dir, an inotify-limit) leaves
             // that subtree to the reconciler rather than failing the whole hub.
             Err(error) => {
-                tracing::warn!(?root, "workspace change hub failed to watch root: {error}")
+                tracing::warn!(root = ?target.path, "workspace change hub failed to watch root: {error}")
             }
         }
     }
@@ -817,55 +886,71 @@ fn run_hub_thread(
                     }
                 }
             }
-            HubMsg::Rearm { roots, ack } => {
-                apply_rearm(&inner, &mut watcher, &mut armed, roots);
+            HubMsg::Rearm { targets, ack } => {
+                let full_coverage = apply_rearm(&inner, &mut watcher, &mut armed, targets);
                 // `try_send`, not `send`: the requester may have timed out and
                 // dropped its receiver; the hub thread must never block on it.
-                let _ = ack.try_send(());
+                let _ = ack.try_send(full_coverage);
             }
             HubMsg::Shutdown => return,
         }
     }
 }
 
-/// Re-point the watch set at `new_roots`, on the hub thread. Additions are armed
-/// BEFORE obsolete roots are unwatched, so a subtree present in both sets has no
-/// unwatched window. Every cursor is then flagged to rescan once: anything a
-/// consumer derived under the old set predates the new roots' coverage, and
-/// events inside a newly-added root from before its arm were never delivered.
+/// Re-point the watch set at `new_targets`, on the hub thread. Additions are armed
+/// BEFORE obsolete targets are unwatched, so a subtree present in both sets has no
+/// unwatched window; every surviving target is then defensively re-armed, because a
+/// recursive `unwatch` of an overlapping old root can deregister a kept target's
+/// descendants on inotify. Comparison uses each armed target's canonical path
+/// CAPTURED AT WATCH TIME — a symlink retargeted since then must read as "not
+/// covered" and be re-armed, not silently claimed. Every cursor is then flagged to
+/// rescan once: anything a consumer derived under the old set predates the new
+/// targets' coverage, and events inside a newly-added root from before its arm were
+/// never delivered. Returns whether EVERY desired target is armed afterwards.
 fn apply_rearm(
     inner: &HubInner,
     watcher: &mut RecommendedWatcher,
-    armed: &mut Vec<PathBuf>,
-    new_roots: Vec<PathBuf>,
-) {
-    let canon = |p: &PathBuf| p.canonicalize().unwrap_or_else(|_| p.clone());
-    let new_roots = dedup_nested_roots(new_roots);
-    let new_canonical: Vec<PathBuf> = new_roots.iter().map(canon).collect();
-    let old_canonical: Vec<PathBuf> = armed.iter().map(canon).collect();
+    armed: &mut Vec<(WatchTarget, PathBuf)>,
+    new_targets: Vec<WatchTarget>,
+) -> bool {
+    let desired = dedup_targets(new_targets);
+    let is_armed = |list: &[(WatchTarget, PathBuf)], t: &WatchTarget, c: &PathBuf| {
+        list.iter().any(|(at, ac)| at.recursive == t.recursive && ac == c)
+    };
 
-    let mut next_armed: Vec<PathBuf> = Vec::new();
-    for (root, canonical) in new_roots.iter().zip(&new_canonical) {
-        if old_canonical.contains(canonical) {
-            next_armed.push(root.clone());
+    let mut full_coverage = true;
+    let mut next_armed: Vec<(WatchTarget, PathBuf)> = Vec::new();
+    for (target, canonical) in &desired {
+        if is_armed(armed, target, canonical) {
+            next_armed.push((target.clone(), canonical.clone()));
             continue;
         }
-        match watcher.watch(root, RecursiveMode::Recursive) {
+        match watcher.watch(&target.path, target.mode()) {
             Ok(()) => {
-                tracing::info!(?root, "workspace change hub watching root (re-arm)");
-                next_armed.push(root.clone());
+                tracing::info!(root = ?target.path, recursive = target.recursive, "workspace change hub watching root (re-arm)");
+                next_armed.push((target.clone(), canonical.clone()));
             }
             Err(error) => {
-                tracing::warn!(?root, "workspace change hub failed to watch new root: {error}");
-                inner.note_rewatch_failed(root, &error);
+                tracing::warn!(root = ?target.path, "workspace change hub failed to watch new root: {error}");
+                inner.note_rewatch_failed(&target.path, &error);
+                full_coverage = false;
             }
         }
     }
-    for (root, canonical) in armed.iter().zip(&old_canonical) {
-        if !new_canonical.contains(canonical) {
-            if let Err(error) = watcher.unwatch(root) {
-                tracing::debug!(?root, "workspace change hub unwatch on re-arm: {error}");
+    for (target, canonical) in armed.iter() {
+        if !is_armed(&next_armed, target, canonical) {
+            if let Err(error) = watcher.unwatch(&target.path) {
+                tracing::debug!(root = ?target.path, "workspace change hub unwatch on re-arm: {error}");
             }
+        }
+    }
+    // Defensive re-arm of every kept target: on inotify a recursive unwatch of an
+    // overlapping obsolete root strips descendant registrations, including a kept
+    // target's. Re-watching an already-watched path is idempotent.
+    for (target, _) in &next_armed {
+        if let Err(error) = watcher.watch(&target.path, target.mode()) {
+            inner.note_rewatch_failed(&target.path, &error);
+            full_coverage = false;
         }
     }
     *armed = next_armed;
@@ -875,6 +960,7 @@ fn apply_rearm(
     acc.enter_rescan(false, DegradeReason::Rearmed);
     drop(acc);
     inner.wake.notify_all();
+    full_coverage
 }
 
 #[cfg(test)]
@@ -1238,7 +1324,7 @@ mod tests {
         let toml = root.join("bsl-analyzer.toml");
         std::fs::write(&toml, "[source]\nroot = \"src/cf\"\n").unwrap();
 
-        let hub = WorkspaceChangeHub::start(watch_targets_for(root, &[source]));
+        let hub = WorkspaceChangeHub::start_targets(watch_targets_for(root, &[source]));
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         let mut cursor = hub.subscribe();
 
@@ -1259,6 +1345,47 @@ mod tests {
         assert!(seen, "an edit to the config file above the scan roots must be delivered");
     }
 
+    /// The workspace-root dir watch must deliver a config file that did NOT exist
+    /// at arm time (absent -> create) and keep delivering across editor-style
+    /// atomic saves (write temp + rename over), which replace the inode and would
+    /// permanently kill a watch on the file itself.
+    #[test]
+    fn config_creation_and_atomic_replace_are_delivered_via_the_root_watch() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let source = root.join("src/cf");
+        std::fs::create_dir_all(&source).unwrap();
+        // NO config file exists yet.
+        let hub = WorkspaceChangeHub::start_targets(watch_targets_for(root, &[source]));
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let mut cursor = hub.subscribe();
+        std::thread::sleep(Duration::from_millis(100));
+
+        let toml = root.join("bsl-analyzer.toml");
+        let expect_delivery = |cursor: &mut SinkCursor, what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let batch = hub.drain(*cursor);
+                *cursor = batch.cursor;
+                if batch.entries.iter().any(|e| e.raw == toml || e.canonical == toml) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "config {what} must be delivered");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+
+        std::fs::write(&toml, "[source]\nroot = \"src/cf\"\n").unwrap();
+        expect_delivery(&mut cursor, "creation");
+
+        for round in 0..2 {
+            let tmp = root.join(format!(".bsl-analyzer.toml.tmp{round}"));
+            std::fs::write(&tmp, format!("[source]\nroot = \"src/cf\"\n# v{round}\n")).unwrap();
+            std::fs::rename(&tmp, &toml).unwrap();
+            expect_delivery(&mut cursor, "atomic replace");
+        }
+    }
+
     /// A re-arm extends coverage to the new root without a hub restart: the cursor
     /// survives (same id, one rescan flag), and a change in the NEWLY-added root is
     /// event-delivered afterwards.
@@ -1272,10 +1399,13 @@ mod tests {
 
         assert!(
             hub.rearm(
-                vec![a.path().to_path_buf(), b.path().to_path_buf()],
+                vec![
+                    WatchTarget::recursive(a.path().to_path_buf()),
+                    WatchTarget::recursive(b.path().to_path_buf()),
+                ],
                 Duration::from_secs(10)
             ),
-            "the hub thread acknowledges the re-arm"
+            "the hub thread acknowledges the re-arm with full coverage"
         );
         let batch = hub.drain(cursor);
         assert!(batch.rescan_required, "a re-arm owes every cursor exactly one rescan");
@@ -1308,13 +1438,13 @@ mod tests {
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         let cursor = hub.subscribe();
 
-        assert!(hub.ensure_roots(&[a.path().to_path_buf()]));
+        assert!(hub.ensure_roots(&[WatchTarget::recursive(a.path().to_path_buf())]));
         let batch = hub.drain(cursor);
         assert!(!batch.rescan_required, "an unchanged root set must not force a rescan");
         assert_eq!(hub.health(), Health::Healthy);
     }
 
-    /// A re-arm that cannot watch one of the new roots still acknowledges (the
+    /// A re-arm that cannot watch one of the new roots reports partial coverage (the
     /// armable subset is covered) and degrades health so consumers scan, instead of
     /// silently pretending the missing subtree is watched.
     #[test]
@@ -1324,15 +1454,23 @@ mod tests {
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         let cursor = hub.subscribe();
 
-        let missing = a.path().join("нет-такого-каталога");
+        // Disjoint from `a`: a missing path nested under a watched recursive root
+        // is legitimately covered (the recursive watch sees it once created).
+        let elsewhere = tempdir().unwrap();
+        let missing = elsewhere.path().join("нет-такого-каталога");
         assert!(
-            hub.rearm(vec![a.path().to_path_buf(), missing], Duration::from_secs(10)),
-            "partial failure still acknowledges"
+            !hub.rearm(
+                vec![
+                    WatchTarget::recursive(a.path().to_path_buf()),
+                    WatchTarget::recursive(missing),
+                ],
+                Duration::from_secs(10)
+            ),
+            "a re-arm that leaves a root unarmed must NOT read as covered"
         );
         assert!(matches!(hub.health(), Health::Degraded(_)), "an unwatchable root degrades health");
         let batch = hub.drain(cursor);
-        assert!(batch.rescan_required);
-        assert_eq!(hub.health(), Health::Healthy, "recovers once cursors acknowledge");
+        assert!(batch.rescan_required, "the armable subset still owes a rescan");
     }
 
     /// `shutdown` terminates and joins the hub thread; later control requests fail
@@ -1345,7 +1483,10 @@ mod tests {
 
         hub.shutdown();
         assert!(
-            !hub.rearm(vec![a.path().to_path_buf()], Duration::from_millis(100)),
+            !hub.rearm(
+                vec![WatchTarget::recursive(a.path().to_path_buf())],
+                Duration::from_millis(100)
+            ),
             "a re-arm after shutdown must report failure, not hang"
         );
         let cursor = hub.subscribe();
@@ -1354,24 +1495,39 @@ mod tests {
         hub.shutdown();
     }
 
-    /// Nested roots collapse to their common ancestor so a subtree is never double-watched
-    /// (which some backends would report as duplicate events), regardless of input order.
+    /// Nested targets collapse under a recursive ancestor so a subtree is never
+    /// double-watched (which some backends would report as duplicate events),
+    /// regardless of input order — while a NON-recursive ancestor absorbs nothing
+    /// (it covers only direct children), and a recursive duplicate of the same
+    /// path wins over a non-recursive one.
     #[test]
-    fn dedup_nested_roots_drops_subtrees() {
+    fn dedup_targets_drops_subtrees_of_recursive_ancestors_only() {
         let dir = tempdir().unwrap();
         let parent = dir.path().join("parent");
         let child = parent.join("sub");
         let sibling = dir.path().join("sibling");
         std::fs::create_dir_all(&child).unwrap();
         std::fs::create_dir_all(&sibling).unwrap();
+        let r = |p: &PathBuf| WatchTarget::recursive(p.clone());
+        let nr = |p: &PathBuf| WatchTarget { path: p.clone(), recursive: false };
+        let kept_paths = |targets: Vec<WatchTarget>| -> Vec<(PathBuf, bool)> {
+            dedup_targets(targets).into_iter().map(|(t, _)| (t.path, t.recursive)).collect()
+        };
 
-        let kept = dedup_nested_roots(vec![parent.clone(), child.clone(), sibling.clone()]);
-        assert!(kept.iter().any(|r| r == &parent), "the ancestor is kept");
-        assert!(kept.iter().any(|r| r == &sibling), "a disjoint root is kept");
-        assert!(!kept.iter().any(|r| r == &child), "a nested root is dropped");
+        let kept = kept_paths(vec![r(&parent), r(&child), r(&sibling)]);
+        assert!(kept.contains(&(parent.clone(), true)), "the ancestor is kept");
+        assert!(kept.contains(&(sibling.clone(), true)), "a disjoint root is kept");
+        assert!(!kept.iter().any(|(p, _)| p == &child), "a nested root is dropped");
 
         // Order-independent: the child listed first is still dropped.
-        let kept2 = dedup_nested_roots(vec![child, parent.clone()]);
-        assert_eq!(kept2, vec![parent]);
+        assert_eq!(kept_paths(vec![r(&child), r(&parent)]), vec![(parent.clone(), true)]);
+
+        // A non-recursive ancestor does not absorb a recursive descendant.
+        let kept = kept_paths(vec![nr(&parent), r(&child)]);
+        assert!(kept.contains(&(parent.clone(), false)));
+        assert!(kept.contains(&(child.clone(), true)), "non-recursive parent covers no subtree");
+
+        // Same path, both modes: the recursive registration wins.
+        assert_eq!(kept_paths(vec![nr(&parent), r(&parent)]), vec![(parent.clone(), true)]);
     }
 }

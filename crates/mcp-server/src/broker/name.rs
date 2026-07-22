@@ -272,6 +272,11 @@ pub fn embedding_config_fingerprint() -> u64 {
     u64::from_le_bytes(bytes.as_bytes()[..8].try_into().expect("blake3 yields >= 8 bytes"))
 }
 
+/// Env var carrying the spawning proxy's frozen topology fingerprint to the daemon
+/// child, so both sides key the SAME rendezvous even if the config changes between
+/// their respective project reads.
+pub const TOPOLOGY_FP_ENV: &str = "BSL_MCP_TOPOLOGY_FP";
+
 /// Stable 64-bit identity of the project's extension topology at `source_dir`, for
 /// backend keying: a daemon whose graph/search/diagnostics caches were built for
 /// one dependency graph must not be reused by a client whose config now declares

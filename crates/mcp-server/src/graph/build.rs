@@ -45,8 +45,10 @@ impl GraphState {
             tracing::warn!("fused graph build straddled a disk write; snapshot marked stale");
         }
         self.adopt_prebuilt(generation, built.fp_pre, built.files);
-        self.ensure_hub_roots(&built.scan_roots);
-        self.notify_published(build_start_seq);
+        self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
+        // The fused sink just wrote every indexed document's context from THIS
+        // build — nothing persisted predates it, so no whole-collection re-render.
+        self.notify_published(build_start_seq, false);
         Ok(())
     }
 
@@ -55,10 +57,19 @@ impl GraphState {
     /// root would otherwise leave the hub watching the old universe — events in a
     /// new extension would never be delivered, and every consumer would coast on
     /// its reconcile interval. A no-op when the roots did not change.
-    pub(super) fn ensure_hub_roots(&self, scan_roots: &[std::path::PathBuf]) {
+    pub(super) fn ensure_hub_roots(&self, scan_roots: &[std::path::PathBuf], built_topology: u64) {
         let (Some(hub), Some(root)) = (&self.change_hub, self.workspace_root.as_deref()) else {
             return;
         };
+        // A slow build finishing after a newer topology reload must not roll the
+        // shared hub back onto its older root set: re-derive the live topology
+        // (config parse + discovery, no tree walk) and skip when this build's
+        // snapshot is already superseded — the fresher build re-arms instead.
+        let live = crate::graph::ProjectSnapshot::load(root);
+        if super::scan::topology_u64(&live.configs) != built_topology {
+            tracing::info!("skipping hub re-arm: the built snapshot's topology is superseded");
+            return;
+        }
         if !hub.ensure_roots(&crate::change_hub::watch_targets_for(root, scan_roots)) {
             tracing::warn!("graph rebuild could not re-arm the change hub onto new roots");
         }
@@ -126,8 +137,20 @@ impl GraphState {
                 // freshness check re-scans against the new snapshot rather than a
                 // pre-reload cached fingerprint.
                 *lock_recover(&self.scan) = None;
+                let topology_changed;
                 {
                     let mut inner = lock_recover(&self.inner);
+                    // Only a WITNESSED transition (a previously published topology
+                    // differing from this build's) requests the whole-collection
+                    // re-render. `None` deliberately reads as unchanged: a cold
+                    // build must keep the boot invariant that an early publish
+                    // clears no pre-existing context marks — the offline-edit
+                    // warm start is covered by the stale-adopt -> catch-up chain,
+                    // which publishes the old topology first and transitions here.
+                    topology_changed = inner
+                        .published
+                        .as_ref()
+                        .is_some_and(|p| p.fingerprint.topology != built.fp_pre.topology);
                     inner.published = Some(Published {
                         generation,
                         fingerprint: built.fp_pre,
@@ -136,8 +159,8 @@ impl GraphState {
                     });
                     inner.status = GraphStatus::Ready { files: built.files };
                 }
-                self.ensure_hub_roots(&built.scan_roots);
-                self.notify_published(build_start_seq);
+                self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
+                self.notify_published(build_start_seq, topology_changed);
                 tracing::info!(
                     files = built.files,
                     generation,
@@ -269,7 +292,7 @@ impl GraphState {
         // Bracket the patch with fingerprint scans, mirroring the full build's
         // straddle detection: a write landing mid-patch marks the snapshot stale.
         let fp_pre = super::scan::workspace_fingerprint_over(&project);
-        let tmp_path = db_path.with_extension("db.building");
+        let tmp_path = db_path.with_extension(format!("db.building.{}", std::process::id()));
         let built_at = chrono::Utc::now().to_rfc3339();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let summary = crate::graph_db::update_graph_database_bodies(
@@ -285,7 +308,9 @@ impl GraphState {
                     built_at,
                 },
             )?;
-            let fp_post = super::scan::workspace_fingerprint_over(&project);
+            let fp_post = super::scan::workspace_fingerprint_over(
+                &crate::graph::ProjectSnapshot::load(workspace_root),
+            );
             let force_stale = fp_pre != fp_post;
             {
                 let conn = rusqlite::Connection::open(&tmp_path)?;
@@ -316,7 +341,8 @@ impl GraphState {
                     });
                     inner.status = GraphStatus::Ready { files };
                 }
-                self.notify_published(build_start_seq);
+                // The body-only gate proved the stored topology unchanged.
+                self.notify_published(build_start_seq, false);
                 tracing::info!(
                     files,
                     generation,
@@ -369,7 +395,9 @@ impl GraphState {
         });
         inner.status = GraphStatus::Ready { files };
         drop(inner);
-        self.notify_published(build_start_seq);
+        // Exact fingerprint match (files AND topology): the persisted search
+        // contexts were rendered against this same workspace state.
+        self.notify_published(build_start_seq, false);
         tracing::info!(files, revision, "reused cached graph database (workspace unchanged)");
         true
     }
@@ -452,7 +480,10 @@ fn build_and_publish_graph_file(
     let project = crate::graph::ProjectSnapshot::load(workspace_root);
     let fp_pre = super::scan::workspace_fingerprint_over(&project);
     let out_path = graph_db_path(workspace_root);
-    let tmp_path = out_path.with_extension("db.building");
+    // Pid-suffixed temp: two daemons over the same workspace (an old topology
+    // generation draining while a new one starts) must not interleave writes into
+    // one temp file — each builds its own and the atomic rename decides.
+    let tmp_path = out_path.with_extension(format!("db.building.{}", std::process::id()));
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -475,7 +506,12 @@ fn build_and_publish_graph_file(
             crate::graph_db::build_graph_database(&project, &tmp_path, GRAPH_BUILD_BATCH, &meta)?
         }
     };
-    let fp_post = super::scan::workspace_fingerprint_over(&project);
+    // The post-scan derives a FRESH project snapshot: the straddle check must see
+    // the world as it is now, or a topology/root change landing mid-build would
+    // compare the frozen snapshot against itself and publish clean.
+    let fp_post = super::scan::workspace_fingerprint_over(&crate::graph::ProjectSnapshot::load(
+        workspace_root,
+    ));
     let force_stale = fp_pre != fp_post;
     {
         let conn = rusqlite::Connection::open(&tmp_path)?;
@@ -1749,6 +1785,48 @@ mod tests {
         write(root, "src/cfe/NewExt/Configuration.xml", "<Configuration/>");
         let after = workspace_fingerprint(root);
         assert_ne!(base.topology, after.topology, "discovery must reshape the topology");
+    }
+
+    /// The offline-edit warm start (daemon down while `dependsOn` changed): the
+    /// stale cache is served, and the catch-up publish must hand its hook
+    /// `topology_changed = true` — that request is what re-renders persisted
+    /// search contexts built under the old topology. A files-only drift must NOT
+    /// raise it.
+    #[test]
+    fn a_topology_only_warm_start_requests_a_whole_collection_context_refresh() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_extension_workspace(root, false);
+        seed_cache(root, workspace_fingerprint(root));
+        write_extension_config(root, true); // offline dependsOn edit
+
+        let requested = Arc::new(AtomicBool::new(false));
+        let hook = {
+            let requested = Arc::clone(&requested);
+            Arc::new(move |signal: crate::graph::GraphPublishSignal| {
+                if signal.topology_changed {
+                    requested.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                true
+            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+        };
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline
+            && !requested.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            requested.load(std::sync::atomic::Ordering::SeqCst),
+            "the catch-up publish after a topology-only warm start must request the refresh",
+        );
     }
 
     /// A cached on-disk graph built under one dependency graph is dead the moment the

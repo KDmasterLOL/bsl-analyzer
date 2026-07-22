@@ -183,7 +183,7 @@ impl DiagnosticsState {
 
     pub(super) fn apply_drained_entries(&self, entries: &[ChangeEntry]) {
         let baseline: HashMap<String, u64> = lock_recover(&self.inner).stats.clone();
-        // The analyzer config files fingerprinted by `config_fingerprint` — canonicalised
+        // The analyzer config files fingerprinted by `config_files_fingerprint` — canonicalised
         // to match the drained key spelling. Only a file at THIS exact location is config
         // drift; an identically-named file elsewhere in the tree is not (parity with the
         // scan path, which fingerprints only `root.join(name)`).
@@ -500,9 +500,10 @@ impl DiagnosticsState {
         // describe the same project state, mirroring how the build derives its
         // baseline — otherwise the comparison could pair one state's files with
         // another's topology and mask (or fabricate) drift.
+        let config_files_fp = config_files_fingerprint(root);
         let project = crate::graph::input::ProjectSnapshot::load(root);
         let stats = crate::graph::scan::scan_stats_over_roots(&project.scan_roots);
-        let config_fp = config_identity(root, &project.configs);
+        let config_fp = config_identity(config_files_fp, &project.configs);
         *cache = Some(ScanCache { at: Instant::now(), stats: stats.clone(), config_fp });
         Some(OwnedScan { stats, config_fp })
     }
@@ -531,23 +532,28 @@ pub(super) fn compute_freshness(inner: &Inner, scan: Option<&OwnedScan>) -> Fres
 /// extension-topology hash of `configs`. Folding the topology in covers changes no
 /// config-file stat can see — an auto-discovered extension appearing or vanishing
 /// re-shapes visibility with `bsl-analyzer.toml` untouched (or absent entirely).
-pub(super) fn config_identity(root: &Path, configs: &ide::WorkspaceConfigsSnapshot) -> u64 {
+pub(super) fn config_identity(
+    config_files_fp: u64,
+    configs: &ide::WorkspaceConfigsSnapshot,
+) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
-    (config_fingerprint(root), crate::graph::scan::topology_u64(configs)).hash(&mut hasher);
+    (config_files_fp, crate::graph::scan::topology_u64(configs)).hash(&mut hasher);
     hasher.finish()
 }
 
 /// [`config_identity`] against a freshly derived project state — the cheap
-/// (config parse + extension discovery, no tree walk) probe the post-publication
-/// re-check uses.
+/// (config-file stat + config parse + extension discovery, no tree walk) probe
+/// the post-publication re-check and the throttled scan use. The stat is taken
+/// BEFORE the project load, pairing with how the build captures its baseline.
 pub(super) fn config_identity_now(root: &Path) -> u64 {
-    config_identity(root, &crate::graph::input::ProjectSnapshot::load(root).configs)
+    let config_files_fp = config_files_fingerprint(root);
+    config_identity(config_files_fp, &crate::graph::input::ProjectSnapshot::load(root).configs)
 }
 
-pub(super) fn config_fingerprint(root: &Path) -> u64 {
+pub(super) fn config_files_fingerprint(root: &Path) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::UNIX_EPOCH;
@@ -1682,7 +1688,7 @@ mod tests {
     }
 
     /// A `bsl-analyzer.toml` in a SUBDIRECTORY is not the analyzer config (which lives at the
-    /// workspace root): the drain must ignore it, matching the scan path's `config_fingerprint`
+    /// workspace root): the drain must ignore it, matching the scan path's `config_files_fingerprint`
     /// which only fingerprints `root.join(name)`. A subtree toml edit is not a rebuild trigger.
     #[test]
     fn subdir_config_file_is_not_config_drift() {
@@ -1740,12 +1746,16 @@ mod tests {
             "&НаСервере\nФункция Р() Экспорт КонецФункции",
         );
 
-        // Build the hub over the SAME roots the scan sees (source + extensions), as production does.
+        // Build the hub over the SAME targets production arms (source + extensions,
+        // plus the workspace root non-recursively) — a narrower boot set would be
+        // upgraded by the resident's post-publish re-arm, and that one-time rescan
+        // debt is exactly what this zero-scan assertion must not see.
         let project = project_model::Project::new(root).expect("valid test project");
         let mut roots = vec![project.source_path().to_path_buf()];
         roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
         assert!(roots.len() >= 2, "the extension root must be discovered: {roots:?}");
-        let hub = WorkspaceChangeHub::start(roots);
+        let hub =
+            WorkspaceChangeHub::start_targets(crate::change_hub::watch_targets_for(root, &roots));
         assert!(hub.wait_until_watching(Duration::from_secs(5)), "the hub must arm");
 
         let mut state =

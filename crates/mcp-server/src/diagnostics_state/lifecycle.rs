@@ -35,6 +35,8 @@ struct ResidentBuild {
     stats: HashMap<String, u64>,
     config_fp: u64,
     scan_roots: Vec<PathBuf>,
+    /// The build snapshot's topology hash, for the hub re-arm supersession guard.
+    topology: u64,
 }
 
 /// Everything mutable about the resident db, guarded by one `Mutex`. The lock is held
@@ -384,7 +386,7 @@ impl DiagnosticsState {
                 }
                 *lock_recover(&self.scan) = None;
                 tracing::info!(files, "diagnostics resident db ready");
-                self.ensure_hub_roots(&built.scan_roots);
+                self.ensure_hub_roots(&built.scan_roots, built.topology);
                 self.recheck_config_identity_after_publish();
             }
             Err(msg) => {
@@ -435,7 +437,7 @@ impl DiagnosticsState {
                 drop(inner);
                 *lock_recover(&self.scan) = None;
                 tracing::info!(files, "diagnostics resident db reloaded");
-                self.ensure_hub_roots(&built.scan_roots);
+                self.ensure_hub_roots(&built.scan_roots, built.topology);
                 self.recheck_config_identity_after_publish();
             }
             Err(msg) => {
@@ -470,6 +472,12 @@ impl DiagnosticsState {
     /// LSP server registers (source root, per-file source root + text, all config
     /// paths). Returns the resident, the per-file drift baseline, and the config fp.
     fn build_resident(root: &Path) -> anyhow::Result<ResidentBuild> {
+        // The config-file stat is captured BEFORE the project load: the published
+        // identity must describe the config state the resident was built FROM. A
+        // stat taken after the build could pair a mid-build config edit's mtime
+        // with the old snapshot's settings — the post-publish recheck would then
+        // see its own mixture as current and never reload.
+        let config_files_fp = super::drift::config_files_fingerprint(root);
         // Load the project ONCE: the scan universe, the config roots (with their
         // dependency closures) and the `[diagnostics]` settings all derive from
         // this single snapshot, so a reload can never mix two project states.
@@ -527,8 +535,9 @@ impl DiagnosticsState {
                 (s.path, fp)
             })
             .collect();
-        let config_fp = config_identity(root, &snapshot.configs);
+        let config_fp = config_identity(config_files_fp, &snapshot.configs);
 
+        let topology = crate::graph::scan::topology_u64(&snapshot.configs);
         Ok(ResidentBuild {
             resident: DiagnosticsResident {
                 db,
@@ -540,6 +549,7 @@ impl DiagnosticsState {
             stats,
             config_fp,
             scan_roots: snapshot.scan_roots,
+            topology,
         })
     }
 
@@ -547,10 +557,17 @@ impl DiagnosticsState {
     /// snapshot's scan roots (no-op when unchanged): a topology reload that added
     /// an extension root must start receiving its events instead of leaving that
     /// subtree to the periodic reconciler.
-    fn ensure_hub_roots(&self, scan_roots: &[PathBuf]) {
+    fn ensure_hub_roots(&self, scan_roots: &[PathBuf], built_topology: u64) {
         let (Some(hub), Some(root)) = (&self.change_hub, self.workspace_root.as_deref()) else {
             return;
         };
+        // A slow build finishing after a newer topology reload must not roll the
+        // shared hub back onto its older root set (see the graph-side twin).
+        let live = crate::graph::input::ProjectSnapshot::load(root);
+        if crate::graph::scan::topology_u64(&live.configs) != built_topology {
+            tracing::info!("skipping hub re-arm: the built snapshot's topology is superseded");
+            return;
+        }
         if !hub.ensure_roots(&crate::change_hub::watch_targets_for(root, scan_roots)) {
             tracing::warn!("resident rebuild could not re-arm the change hub onto new roots");
         }
@@ -566,7 +583,7 @@ impl DiagnosticsState {
     /// build are captured by the build's own baseline scan, events DURING/AFTER it stay
     /// pending and apply to the freshly-published resident.
     /// The canonical paths of the analyzer config files at the workspace root — the exact
-    /// set [`config_fingerprint`] folds. A drained path counts as config drift only if it
+    /// set [`config_files_fingerprint`] folds. A drained path counts as config drift only if it
     /// is one of these, matching the scan path (which fingerprints only `root.join(name)`)
     /// so an identically-named file elsewhere in the tree is not a spurious rebuild trigger.
     /// Drop this state's hub cursor so an evicted (or never-built) resident does not pin

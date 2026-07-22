@@ -84,7 +84,7 @@ impl SharedState {
         // sink and preserves its prior behavior (mark only source-root `.bsl` paths dirty).
         let mut scan_roots = vec![config_path.to_path_buf()];
         scan_roots.extend(project.extension_paths().iter().map(|(_, path)| path.clone()));
-        let change_hub = WorkspaceChangeHub::start(crate::change_hub::watch_targets_for(
+        let change_hub = WorkspaceChangeHub::start_targets(crate::change_hub::watch_targets_for(
             &project.root,
             &scan_roots,
         ));
