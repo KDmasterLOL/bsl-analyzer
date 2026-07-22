@@ -19,41 +19,56 @@ fn file_inside_designer() -> PathBuf {
     designer_fixture_path().join("CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl")
 }
 
-fn setup_main_plus_cfe() -> (RootDatabaseImpl, FileId) {
-    let file_id = FileId::from_raw(1);
+fn file_inside_extension() -> PathBuf {
+    extension_common_module_path().join("CommonModules/РасширениеТолькоМодуль/Ext/Module.bsl")
+}
+
+/// A file in the base root and a file in the extension root over the same
+/// registered config set. Base files see only the base; extension files see
+/// base + their own extension.
+fn setup_main_plus_cfe() -> (RootDatabaseImpl, FileId, FileId) {
+    let base_file = FileId::from_raw(1);
+    let ext_file = FileId::from_raw(2);
     let mut db = RootDatabaseImpl::new();
 
     let mut file_set = FileSet::default();
-    file_set.insert(file_id, VfsPath::new(file_inside_designer().to_string_lossy().to_string()));
+    file_set.insert(base_file, VfsPath::new(file_inside_designer().to_string_lossy().to_string()));
+    file_set.insert(ext_file, VfsPath::new(file_inside_extension().to_string_lossy().to_string()));
     db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
-    db.set_file_source_root(file_id, SourceRootId(0));
-    db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
+    for file_id in [base_file, ext_file] {
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
+    }
 
     db.set_all_config_paths(vec![
         (None, designer_fixture_path()),
         (Some("РасширениеОбщегоМодуля".to_string()), extension_common_module_path()),
     ]);
-    (db, file_id)
+    (db, base_file, ext_file)
 }
 
 #[test]
-fn configurations_returns_main_then_cfe_in_registration_order() {
-    let (db, file_id) = setup_main_plus_cfe();
-    let configs = db.configurations(file_id);
+fn configurations_returns_main_then_own_cfe_in_registration_order() {
+    let (db, base_file, ext_file) = setup_main_plus_cfe();
 
-    assert_eq!(configs.len(), 2, "expected main + 1 CFE, got {}", configs.len());
-    assert_eq!(configs[0].name, None, "main config must come first with name = None");
+    let base_configs = db.configurations(base_file);
+    assert_eq!(base_configs.len(), 1, "a base file must see only the base configuration");
+    assert_eq!(base_configs[0].name, None, "main config must come first with name = None");
+
+    let ext_configs = db.configurations(ext_file);
+    assert_eq!(ext_configs.len(), 2, "an extension file sees main + its own CFE");
+    assert_eq!(ext_configs[0].name, None, "main config must come first with name = None");
     assert_eq!(
-        configs[1].name.as_deref(),
+        ext_configs[1].name.as_deref(),
         Some("РасширениеОбщегоМодуля"),
-        "CFE must follow with its registered extension name",
+        "the file's own CFE must follow with its registered extension name",
     );
 }
 
 #[test]
 fn cfe_only_common_module_resolves_through_extension_entry() {
-    let (db, file_id) = setup_main_plus_cfe();
-    let configs = db.configurations(file_id);
+    let (db, _base_file, ext_file) = setup_main_plus_cfe();
+    let configs = db.configurations(ext_file);
 
     let main = &configs[0].configuration;
     assert!(
@@ -68,8 +83,8 @@ fn cfe_only_common_module_resolves_through_extension_entry() {
 
 #[test]
 fn shared_common_module_lookup_finds_main_independently_of_cfe() {
-    let (db, file_id) = setup_main_plus_cfe();
-    let configs = db.configurations(file_id);
+    let (db, _base_file, ext_file) = setup_main_plus_cfe();
+    let configs = db.configurations(ext_file);
 
     let main = &configs[0].configuration;
     assert!(

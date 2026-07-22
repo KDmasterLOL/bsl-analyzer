@@ -48,6 +48,7 @@ pub use hir::ModuleId;
 pub use hir::{call_hierarchy_method_digest, MethodCallDigest};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
+pub use ide_db::metadata::WorkspaceConfigsSnapshot;
 pub use ide_db::{GraphConfigCache, RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};
 pub use ide_diagnostics::{
     all_diagnostic_codes, apply_extension_merge, diagnostics as compute_diagnostics, docs,
@@ -295,10 +296,12 @@ impl Analysis {
         // Warm it ONCE on this thread first so the parallel jobs below find it memoised and
         // never open a nested scope — a stolen sibling job carrying a different `db` clone
         // would attach a second database to a thread mid-query, which Salsa forbids.
-        // `configurations` loads every config root (base + extensions), closing the window;
-        // it runs each chunk, so a prior chunk's between-chunk LRU trim cannot leave it cold.
-        if let Some(&first) = file_ids.first() {
-            let _ = self.db.configurations(first);
+        // The inventory loads EVERY config root (base + all extensions), closing the
+        // window; per-file `configurations` would warm only that file's visible chain
+        // and let an unrelated root first-load inside a worker. It runs each chunk, so
+        // a prior chunk's between-chunk LRU trim cannot leave it cold.
+        if !file_ids.is_empty() {
+            let _ = self.db.configurations_inventory();
         }
 
         // Move an owned db clone into the pool (Salsa handles are `Send` but `&Analysis`

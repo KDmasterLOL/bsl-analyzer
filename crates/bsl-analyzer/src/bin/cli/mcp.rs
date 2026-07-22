@@ -294,10 +294,12 @@ fn run_mcp_broker(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let source_dir = require_workspace_broker(profile, args.source_dir.clone())?;
 
+    let topology_fp = mcp_server::broker::workspace_topology_fingerprint(&source_dir);
     let key = mcp_server::broker::BackendKey::new(
         &source_dir,
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
+        topology_fp,
     );
 
     let mut cmd = std::process::Command::new(env::current_exe()?);
@@ -321,6 +323,11 @@ fn run_mcp_broker(
     if !args.onec_password.is_empty() {
         cmd.env("BSL_ONEC_PASSWORD", &args.onec_password);
     }
+    // The daemon must bind the EXACT key this proxy dials. Re-deriving the
+    // topology in the child races a config edit landing between the two reads —
+    // the daemon would bind a different socket and the proxy would spin through
+    // respawns into the stdio fallback. The frozen value travels via env.
+    cmd.env(mcp_server::broker::TOPOLOGY_FP_ENV, topology_fp.to_string());
 
     tracing::info!(?source_dir, "Starting MCP broker proxy");
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -358,10 +365,17 @@ fn run_mcp_daemon(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let source_dir = require_workspace_broker(profile, source_dir)?;
 
+    // Prefer the frozen identity the spawning proxy passed (see the env write in
+    // `run_mcp_broker`); a directly-launched daemon derives its own.
+    let topology_fp = env::var(mcp_server::broker::TOPOLOGY_FP_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| mcp_server::broker::workspace_topology_fingerprint(&source_dir));
     let key = mcp_server::broker::BackendKey::new(
         &source_dir,
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
+        topology_fp,
     );
 
     // Build only after the daemon wins the bind, so a race loser never starts a
@@ -588,7 +602,8 @@ fn build_server(
                 )
             })?;
             let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
-            let mut state = mcp_server::SharedState::workspace(source_dir);
+            let mut state = mcp_server::SharedState::workspace(source_dir)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
             if let Some(ref url) = onec_url {
                 tracing::info!(%url, "Configuring 1C HTTP client");
                 state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));

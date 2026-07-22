@@ -25,10 +25,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rustc_hash::FxHashMap;
 use vfs::FileId;
 
-use crate::graph::input::{
-    build_source_root, config_metadata_paths, db_for_files, enumerate_bsl_files,
-};
-use crate::graph::scan::scan_file_stats;
+use crate::graph::input::{build_source_root, db_for_files, enumerate_bsl_files};
+use crate::graph::scan::scan_stats_over_roots;
 
 /// Bumped whenever the table layout OR the persisted edge/node content changes so a
 /// stale on-disk cache from an older binary is rejected (via the `meta` row) and
@@ -45,8 +43,12 @@ use crate::graph::scan::scan_file_stats;
 /// `register_record_set` edges (code → register reached through a literal record-set creator
 /// `РегистрыНакопления.<X>.СоздатьНаборЗаписей()`) and resolves locally-literal dynamic
 /// `Движения[…]` indices to `register_movement` edges. Version 13 persists resolved
-/// constant-manager method calls as method-to-method `call` edges.
-pub(crate) const SCHEMA_VERSION: u32 = 13;
+/// constant-manager method calls as method-to-method `call` edges. Version 14 builds
+/// edges under dependency-aware extension visibility (`dependsOn`), so graphs built by
+/// a pre-dependency binary must be rejected and rebuilt. Version 15 records the
+/// extension-topology fingerprint (`topology_fp`) in the freshness meta, so a cached
+/// graph without it can never be mistaken for topology-fresh.
+pub(crate) const SCHEMA_VERSION: u32 = 15;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a
@@ -62,14 +64,28 @@ pub(crate) struct FileFingerprint {
     pub sig_hash: Option<u64>,
 }
 
+/// The workspace identity a graph build reflects, as two independent components.
+/// `files` folds every graph-relevant file's `(path, mtime, len)`; `topology`
+/// identifies the extension dependency graph (declared roots + `dependsOn`
+/// closures). Kept structured — not XOR-folded into one word — so a change in one
+/// component can never algebraically cancel a change in the other, and so a
+/// consumer can tell a topology-triggered rebuild from a plain file edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GraphFp {
+    /// Order-independent fold of the on-disk file stats.
+    pub files: u64,
+    /// Stable hash of the extension-topology fingerprint.
+    pub topology: u64,
+}
+
 /// Build-level metadata recorded in the `meta` table, used on reopen to decide
 /// whether a cached database still matches the current sources and binary. Node
 /// and edge counts are derived from the bulk data at finalize time, not supplied.
 pub struct GraphMeta {
     /// The [`GraphState`](crate::graph) generation this build reflects.
     pub revision: u64,
-    /// On-disk fingerprint of the source tree at build time.
-    pub fingerprint: u64,
+    /// Workspace identity (file stats + extension topology) at build time.
+    pub fingerprint: GraphFp,
     /// Number of `.bsl` files indexed.
     pub files: usize,
     /// RFC 3339 build timestamp.
@@ -371,10 +387,11 @@ impl GraphDbWriter {
         let nodes: i64 = self.conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
         let edges: i64 = self.conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
 
-        let rows: [(&str, String); 7] = [
+        let rows: [(&str, String); 8] = [
             ("schema_version", SCHEMA_VERSION.to_string()),
             ("revision", meta.revision.to_string()),
-            ("fingerprint", meta.fingerprint.to_string()),
+            ("fingerprint", meta.fingerprint.files.to_string()),
+            ("topology_fp", meta.fingerprint.topology.to_string()),
             ("files", meta.files.to_string()),
             ("built_at", meta.built_at.clone()),
             ("nodes", nodes.to_string()),
@@ -406,26 +423,26 @@ impl GraphDbWriter {
 ///
 /// Returns the build tally; node/edge counts in the database are recorded in its
 /// `meta` table by [`GraphDbWriter::finalize`].
-pub fn build_graph_database(
-    workspace_root: &Path,
+pub(crate) fn build_graph_database(
+    project: &crate::graph::ProjectSnapshot,
     out_path: &Path,
     batch_size: usize,
     meta: &GraphMeta,
 ) -> anyhow::Result<GraphBuildSummary> {
-    build_graph_database_inner(workspace_root, out_path, batch_size, meta, None)
+    build_graph_database_inner(project, out_path, batch_size, meta, None)
 }
 
 /// As [`build_graph_database`], but also streams the search index's code chunks (with
 /// graph context) from the same parse pass into `chunk_sink` — the compute half of the
 /// graph/search fusion. The graph rows written are byte-identical to the plain build.
-pub fn build_graph_database_fused(
-    workspace_root: &Path,
+pub(crate) fn build_graph_database_fused(
+    project: &crate::graph::ProjectSnapshot,
     out_path: &Path,
     batch_size: usize,
     meta: &GraphMeta,
     chunk_sink: &mut dyn ide::FusedChunkSink,
 ) -> anyhow::Result<GraphBuildSummary> {
-    build_graph_database_inner(workspace_root, out_path, batch_size, meta, Some(chunk_sink))
+    build_graph_database_inner(project, out_path, batch_size, meta, Some(chunk_sink))
 }
 
 /// Default seconds without build progress before the watchdog reports a stall.
@@ -609,14 +626,13 @@ fn thread_state_summary() -> String {
 }
 
 fn build_graph_database_inner(
-    workspace_root: &Path,
+    project: &crate::graph::ProjectSnapshot,
     out_path: &Path,
     batch_size: usize,
     meta: &GraphMeta,
     chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
 ) -> anyhow::Result<GraphBuildSummary> {
-    let files = enumerate_bsl_files(workspace_root);
-    let config_paths = config_metadata_paths(workspace_root);
+    let files = enumerate_bsl_files(project);
     let modules: Vec<ModuleId> = files.iter().map(|(f, _)| ModuleId::new(*f)).collect();
     let paths: FxHashMap<FileId, String> =
         files.iter().map(|(f, p)| (*f, p.to_string_lossy().replace('\\', "/"))).collect();
@@ -650,7 +666,7 @@ fn build_graph_database_inner(
         let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
             let batch_files: Vec<(FileId, PathBuf)> =
                 batch.iter().map(|m| (m.file_id, file_paths[&m.file_id].clone())).collect();
-            db_for_files(&source_root, &batch_files, &config_paths, Some(&config_cache))
+            db_for_files(&source_root, &batch_files, &project.configs, Some(&config_cache))
         };
         let mut sink = |nodes: &[NodeRow],
                         edges: &[EdgeRow]|
@@ -662,7 +678,7 @@ fn build_graph_database_inner(
         ide::build_workspace_graph_rows(
             &modules,
             &paths,
-            Some(workspace_root),
+            Some(&project.workspace_root),
             batch_size,
             &mut open_batch,
             &mut sink,
@@ -687,7 +703,7 @@ fn build_graph_database_inner(
             file_paths.get(&m.file_id).map(|p| (p.to_string_lossy().into_owned(), h))
         })
         .collect();
-    let file_rows: Vec<FileFingerprint> = scan_file_stats(workspace_root)
+    let file_rows: Vec<FileFingerprint> = scan_stats_over_roots(&project.scan_roots)
         .iter()
         .map(|s| FileFingerprint {
             fingerprint: s.fingerprint(),
@@ -913,16 +929,15 @@ fn insert_node_row(tx: &rusqlite::Transaction<'_>, row: &NodeRow, id: &str) -> a
 /// Concurrency: the patch lands on a copy and the caller atomically renames it into
 /// place — the same model the full build uses, so a live reader keeps its open
 /// snapshot until it reopens and no in-place mutation races a query.
-pub fn update_graph_database_bodies(
-    workspace_root: &Path,
+pub(crate) fn update_graph_database_bodies(
+    project: &crate::graph::ProjectSnapshot,
     src_path: &Path,
     out_path: &Path,
     changed_paths: &[PathBuf],
     batch_size: usize,
     meta: &GraphMeta,
 ) -> anyhow::Result<GraphBuildSummary> {
-    let files = enumerate_bsl_files(workspace_root);
-    let config_paths = config_metadata_paths(workspace_root);
+    let files = enumerate_bsl_files(project);
     let all_modules: Vec<ModuleId> = files.iter().map(|(f, _)| ModuleId::new(*f)).collect();
     let paths: FxHashMap<FileId, String> =
         files.iter().map(|(f, p)| (*f, p.to_string_lossy().replace('\\', "/"))).collect();
@@ -951,7 +966,7 @@ pub fn update_graph_database_bodies(
     let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
         let batch_files: Vec<(FileId, PathBuf)> =
             batch.iter().map(|m| (m.file_id, file_paths[&m.file_id].clone())).collect();
-        db_for_files(&source_root, &batch_files, &config_paths, Some(&config_cache))
+        db_for_files(&source_root, &batch_files, &project.configs, Some(&config_cache))
     };
 
     // The reprojection's index pass runs the same guarded batch runners as a full
@@ -964,7 +979,7 @@ pub fn update_graph_database_bodies(
         &all_modules,
         &changed_modules,
         &paths,
-        Some(workspace_root),
+        Some(&project.workspace_root),
         batch_size,
         &mut open_batch,
         Some(&ticker),
@@ -990,8 +1005,10 @@ pub fn update_graph_database_bodies(
         format!("copying graph db {} → {}", src_path.display(), out_path.display())
     })?;
 
-    let stat_fp: FxHashMap<String, u64> =
-        scan_file_stats(workspace_root).iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+    let stat_fp: FxHashMap<String, u64> = scan_stats_over_roots(&project.scan_roots)
+        .iter()
+        .map(|s| (s.path.clone(), s.fingerprint()))
+        .collect();
 
     let mut conn = Connection::open(out_path)?;
     {
@@ -1123,9 +1140,10 @@ pub fn update_graph_database_bodies(
         // never force-stale.
         let node_count: i64 = tx.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
         let edge_count: i64 = tx.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
-        let meta_rows: [(&str, String); 7] = [
+        let meta_rows: [(&str, String); 8] = [
             ("revision", meta.revision.to_string()),
-            ("fingerprint", meta.fingerprint.to_string()),
+            ("fingerprint", meta.fingerprint.files.to_string()),
+            ("topology_fp", meta.fingerprint.topology.to_string()),
             ("files", all_modules.len().to_string()),
             ("built_at", meta.built_at.clone()),
             ("nodes", node_count.to_string()),
@@ -1179,8 +1197,8 @@ pub fn recompute_module_profiles(
 ) -> anyhow::Result<FxHashMap<String, ModuleProfile>> {
     use ide::graph_index::GraphIndex;
 
-    let files = enumerate_bsl_files(workspace_root);
-    let config_paths = config_metadata_paths(workspace_root);
+    let project = crate::graph::ProjectSnapshot::load(workspace_root);
+    let files = enumerate_bsl_files(&project);
     let source_root = crate::graph::build_source_root(&files);
 
     let changed_set: std::collections::HashSet<&Path> =
@@ -1193,7 +1211,7 @@ pub fn recompute_module_profiles(
 
     let batch_files: Vec<(FileId, PathBuf)> =
         changed.iter().map(|(m, p)| (m.file_id, p.clone())).collect();
-    let db = db_for_files(&source_root, &batch_files, &config_paths, None);
+    let db = db_for_files(&source_root, &batch_files, &project.configs, None);
     let modules: Vec<ModuleId> = changed.iter().map(|(m, _)| *m).collect();
     let index = GraphIndex::build(&db, &modules);
 
@@ -1401,7 +1419,7 @@ mod tests {
         w.write_edges(&[edge("method/common/X/A", "method/common/X/B")]).unwrap();
         w.finalize(&GraphMeta {
             revision: 1,
-            fingerprint: 42,
+            fingerprint: GraphFp { files: 42, topology: 7 },
             files: 1,
             built_at: "2026-06-01T00:00:00Z".to_string(),
         })
@@ -1450,8 +1468,13 @@ mod tests {
         let mut w = GraphDbWriter::create(&path).unwrap();
         w.write_nodes(&[first]).unwrap();
         w.write_nodes(&[second]).unwrap();
-        w.finalize(&GraphMeta { revision: 1, fingerprint: 0, files: 0, built_at: "t".to_string() })
-            .unwrap();
+        w.finalize(&GraphMeta {
+            revision: 1,
+            fingerprint: GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        })
+        .unwrap();
 
         let conn = open(&path);
         let qualified: String = conn
@@ -1475,8 +1498,13 @@ mod tests {
             FileFingerprint { path: "/cfg/A.xml".to_string(), fingerprint: 222, sig_hash: None },
         ])
         .unwrap();
-        w.finalize(&GraphMeta { revision: 1, fingerprint: 0, files: 0, built_at: "t".to_string() })
-            .unwrap();
+        w.finalize(&GraphMeta {
+            revision: 1,
+            fingerprint: GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        })
+        .unwrap();
 
         let conn = open(&path);
         let (fp, sig): (i64, Option<i64>) = conn
@@ -1504,8 +1532,13 @@ mod tests {
         w.write_nodes(&[method_node("a", "A"), method_node("b", "B"), method_node("hub", "Hub")])
             .unwrap();
         w.write_edges(&[edge("a", "hub"), edge("b", "hub"), edge("a", "b")]).unwrap();
-        w.finalize(&GraphMeta { revision: 1, fingerprint: 0, files: 0, built_at: "t".to_string() })
-            .unwrap();
+        w.finalize(&GraphMeta {
+            revision: 1,
+            fingerprint: GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        })
+        .unwrap();
 
         let conn = open(&path);
         let hub: i64 = conn
@@ -1529,14 +1562,19 @@ mod tests {
 
         let mut w = GraphDbWriter::create(&path).unwrap();
         w.write_nodes(&[method_node("stale", "Stale")]).unwrap();
-        w.finalize(&GraphMeta { revision: 1, fingerprint: 0, files: 0, built_at: "t".to_string() })
-            .unwrap();
+        w.finalize(&GraphMeta {
+            revision: 1,
+            fingerprint: GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        })
+        .unwrap();
 
         // A second build at the same path must not see the prior row.
         let w2 = GraphDbWriter::create(&path).unwrap();
         w2.finalize(&GraphMeta {
             revision: 2,
-            fingerprint: 0,
+            fingerprint: GraphFp::default(),
             files: 0,
             built_at: "t".to_string(),
         })
@@ -1569,8 +1607,13 @@ mod tests {
         sub_edge.kind = "event_subscription";
         sub_edge.provenance = "string_resolved";
         w.write_edges(&[sub_edge]).unwrap();
-        w.finalize(&GraphMeta { revision: 1, fingerprint: 1, files: 1, built_at: "t".to_string() })
-            .unwrap();
+        w.finalize(&GraphMeta {
+            revision: 1,
+            fingerprint: GraphFp { files: 1, topology: 0 },
+            files: 1,
+            built_at: "t".to_string(),
+        })
+        .unwrap();
 
         let profile = ModuleProfile {
             sig_hash: 999,
@@ -1615,11 +1658,16 @@ mod tests {
         std::fs::write(&module_path, "&НаСервере\nПроцедура Выполнить() Экспорт\nКонецПроцедуры")
             .unwrap();
 
-        let meta =
-            || GraphMeta { revision: 1, fingerprint: 0, files: 0, built_at: "t".to_string() };
+        let meta = || GraphMeta {
+            revision: 1,
+            fingerprint: GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
         let db_pre = root.join(".build/pre.db");
         std::fs::create_dir_all(db_pre.parent().expect("database path has a parent")).unwrap();
-        build_graph_database(root, &db_pre, 1, &meta()).expect("initial build succeeds");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
+            .expect("initial build succeeds");
 
         let changed = vec![module_path.canonicalize().expect("module file exists")];
         let path_key = changed[0].to_string_lossy().into_owned();
@@ -1644,10 +1692,18 @@ mod tests {
         );
 
         let db_incremental = root.join(".build/incremental.db");
-        update_graph_database_bodies(root, &db_pre, &db_incremental, &changed, 1, &meta())
-            .expect("body-only incremental update succeeds");
+        update_graph_database_bodies(
+            &crate::graph::ProjectSnapshot::load(root),
+            &db_pre,
+            &db_incremental,
+            &changed,
+            1,
+            &meta(),
+        )
+        .expect("body-only incremental update succeeds");
         let db_full = root.join(".build/full.db");
-        build_graph_database(root, &db_full, 1, &meta()).expect("full rebuild succeeds");
+        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
+            .expect("full rebuild succeeds");
 
         let dump = |path: &Path| {
             let conn = Connection::open(path).unwrap();
@@ -1749,10 +1805,15 @@ mod tests {
 
         // When: the workspace graph is persisted through the production builder.
         build_graph_database(
-            root,
+            &crate::graph::ProjectSnapshot::load(root),
             &path,
             1,
-            &GraphMeta { revision: 1, fingerprint: 0, files: 0, built_at: "t".to_string() },
+            &GraphMeta {
+                revision: 1,
+                fingerprint: GraphFp::default(),
+                files: 0,
+                built_at: "t".to_string(),
+            },
         )
         .unwrap();
 
@@ -1824,7 +1885,7 @@ mod tests {
         writer
             .finalize(&GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: GraphFp::default(),
                 files: 0,
                 built_at: "t".to_string(),
             })
@@ -1885,7 +1946,7 @@ mod tests {
         writer
             .finalize(&GraphMeta {
                 revision: 1,
-                fingerprint: 0,
+                fingerprint: GraphFp::default(),
                 files: 0,
                 built_at: "t".to_string(),
             })
@@ -1913,7 +1974,7 @@ mod tests {
         let source_root = std::env::var_os("BSL_SOURCE_ROOT").expect("BSL_SOURCE_ROOT is required");
         let graph_db = PathBuf::from(graph_db);
         let source_root = PathBuf::from(source_root);
-        let files = enumerate_bsl_files(&source_root);
+        let files = enumerate_bsl_files(&crate::graph::ProjectSnapshot::load(&source_root));
 
         // Given: the persisted graph and the exact BSL files in the anchor's source root.
         let digest = read_source_root_scoped_sqlite_method_call_digest(

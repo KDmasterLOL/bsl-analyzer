@@ -19,7 +19,7 @@ pub(crate) mod vfs_helpers;
 pub use hir::SdblHirEntries;
 pub use types::SymbolKind;
 
-pub use database::{GraphConfigCache, RootDatabaseImpl};
+pub use database::{GraphConfigCache, RootDatabaseImpl, VisibleRoots};
 pub use root_db::RootDatabase;
 
 pub use provider::AnalysisProvider;

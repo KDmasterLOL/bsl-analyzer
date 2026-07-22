@@ -11,7 +11,7 @@ pub(super) fn build_project_adapter(
     source_dir: &Path,
     mode: project_model::PostgresAccessMode,
 ) -> Result<bsl_search::ExternalBaselineAdapter, Box<dyn Error + Send + Sync>> {
-    let project = project_model::Project::new(source_dir);
+    let project = project_model::Project::new(source_dir)?;
     let resolved =
         resolve_project_url(&project.config.search.baseline.postgres, mode).map_err(|error| {
             io::Error::new(

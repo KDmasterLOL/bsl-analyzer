@@ -96,10 +96,31 @@ impl AnalysisProvider for SalsaProvider<'_> {
         Some(self.db.load_configuration(path_input))
     }
 
-    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfigWithRoot> {
-        let paths = self.db.all_config_paths();
-        if paths.is_empty() {
-            return match self.configuration_path_input {
+    fn visible_configurations(&self, file_id: FileId) -> Vec<VisibleConfigWithRoot> {
+        let load = |name: Option<String>, path: std::path::PathBuf| {
+            let path_input = intern_configuration_path(
+                self.db,
+                &path.to_string_lossy(),
+                self.db.config_root_revision_for_path(&path),
+            );
+            let configuration = self.db.load_configuration(path_input);
+            VisibleConfigWithRoot {
+                config: bsl_config::VisibleConfig { name, configuration },
+                root: path,
+            }
+        };
+
+        // Only the roots the FILE may see: base + its dependency chain. An
+        // unrelated sibling extension must not leak into per-file diagnostics
+        // even though it is registered in the workspace.
+        match self.db.visible_roots_for_file(file_id) {
+            Some(roots) => roots
+                .main
+                .into_iter()
+                .map(|path| load(None, path))
+                .chain(roots.chain.into_iter().map(|(name, path)| load(Some(name), path)))
+                .collect(),
+            None => match self.configuration_path_input {
                 Some(path_input) => {
                     let root = std::path::PathBuf::from(path_input.path(self.db));
                     vec![VisibleConfigWithRoot {
@@ -111,24 +132,8 @@ impl AnalysisProvider for SalsaProvider<'_> {
                     }]
                 }
                 None => Vec::new(),
-            };
+            },
         }
-
-        paths
-            .into_iter()
-            .map(|(name, path)| {
-                let path_input = intern_configuration_path(
-                    self.db,
-                    &path.to_string_lossy(),
-                    self.db.config_root_revision_for_path(&path),
-                );
-                let configuration = self.db.load_configuration(path_input);
-                VisibleConfigWithRoot {
-                    config: bsl_config::VisibleConfig { name, configuration },
-                    root: path,
-                }
-            })
-            .collect()
     }
 
     fn common_module_for_file(&self, file_id: FileId) -> Option<Arc<bsl_metadata::CommonModule>> {

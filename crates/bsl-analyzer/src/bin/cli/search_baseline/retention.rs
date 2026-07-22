@@ -35,7 +35,7 @@ pub(super) struct SnapshotRetentionAssessment {
 }
 
 pub(super) fn run(args: SearchBaselineRetentionArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let project = project_model::Project::new(&args.source_dir);
+    let project = project_model::Project::new(&args.source_dir)?;
     let policy = &project.config.search.baseline.workspace_code.policy;
     if !policy.is_configured() {
         return Err(io::Error::new(

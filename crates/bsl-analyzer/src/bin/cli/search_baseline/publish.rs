@@ -12,7 +12,7 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
         SnapshotPublishMetadata,
     };
 
-    let project = project_model::Project::new(&args.source_dir);
+    let project = project_model::Project::new(&args.source_dir)?;
     let source_path = project.source_path().to_path_buf();
     let branch = publish_policy::resolve_publish_branch(args.branch.as_deref(), &project.root);
     let commit = publish_policy::resolve_publish_commit(args.commit.as_deref(), &project.root);

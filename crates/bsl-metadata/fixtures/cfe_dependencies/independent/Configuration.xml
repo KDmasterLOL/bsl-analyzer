@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+	<Configuration uuid="ec000006-0000-0000-0000-000000000006">
+		<Properties>
+			<Name>Независимое</Name>
+			<Synonym/>
+			<Comment/>
+			<NamePrefix/>
+			<DefaultRunMode>ManagedApplication</DefaultRunMode>
+		</Properties>
+		<ChildObjects>
+			<CommonModule>МодульНезависимый</CommonModule>
+					<Catalog>СвойОбъект</Catalog>
+		</ChildObjects>
+	</Configuration>
+</MetaDataObject>

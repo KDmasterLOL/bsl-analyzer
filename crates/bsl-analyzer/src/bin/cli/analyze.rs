@@ -175,9 +175,9 @@ fn analyze_salsa(
 
     tracing::info!("Loading project configuration");
     let proj_config = if let Some(ref cfg) = config_path {
-        project_model::ProjectConfig::load_from_file(cfg).unwrap_or_default()
+        project_model::ProjectConfig::load_from_file(cfg)?
     } else {
-        project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
+        project_model::ProjectConfig::load(&source_dir)?.unwrap_or_default()
     };
 
     let _metadata = proj_config.load_metadata(&source_dir);
@@ -186,25 +186,21 @@ fn analyze_salsa(
     // Scope the file walk to the configuration source root (+ extension roots)
     // instead of the raw `-s` dir, so vendored/build copies such as
     // `.build/vendor` are not analyzed as a duplicate configuration.
-    let project = project_model::Project::with_config(&source_dir, proj_config.clone());
+    let project = project_model::Project::with_config(&source_dir, proj_config.clone())?;
     let source_roots = project.source_roots();
 
     tracing::info!("Creating database");
     let mut db = RootDatabaseImpl::default();
     bsl_analyzer::features_state::apply_features_to_db(&mut db, &project.config.features);
 
-    // Register the base + extension configuration roots so per-file resolution — and the
-    // `&ИзменениеИКонтроль` effective merge (`effective_target` → `pair_base_module_path`) —
-    // can pair an extension module to its base. Mirrors the LSP workspace loader; without
-    // this `all_config_paths` is empty and extension merging silently never activates.
-    {
-        let mut config_paths: Vec<(Option<String>, PathBuf)> =
-            vec![(None, project.source_path().to_path_buf())];
-        for (name, ext_path) in project.extension_paths() {
-            config_paths.push((Some(name.clone()), ext_path.clone()));
-        }
-        db.set_all_config_paths(config_paths);
-    }
+    // Register the base + extension configuration roots (with their dependency
+    // topology) so per-file resolution — and the `&ИзменениеИКонтроль` effective
+    // merge (`effective_target` → `pair_base_module_path`) — can pair an extension
+    // module to its base. Mirrors the LSP workspace loader; without this
+    // `all_config_paths` is empty and extension merging silently never activates.
+    db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot::from_project(
+        &project,
+    ));
 
     tracing::info!("Finding BSL files in {:?}", source_roots);
     let mut bsl_files = Vec::new();

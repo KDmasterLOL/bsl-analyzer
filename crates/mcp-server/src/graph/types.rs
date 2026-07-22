@@ -24,6 +24,11 @@ pub(crate) struct GraphPublishSignal {
     /// reflects, never one stamped after it began. This bound is what makes the consumption
     /// correct.
     pub(crate) build_start_seq: i64,
+    /// The published build's extension topology differs from the previously published
+    /// one (or nothing was published before, so persisted search contexts cannot be
+    /// trusted). The consumer must conservatively re-render EVERY document's graph
+    /// context — a topology change re-shapes visibility with no per-object mark to go by.
+    pub(crate) topology_changed: bool,
 }
 
 /// What a [`crate::graph::GraphState::nudge_rebuild`] scheduled. Surfaced so the single-flight

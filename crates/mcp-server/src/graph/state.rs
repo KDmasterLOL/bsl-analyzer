@@ -54,7 +54,7 @@ pub(super) struct Published {
     /// holds), marks must not be cleared against this snapshot.
     pub(super) stale: bool,
     pub(super) generation: u64,
-    pub(super) fingerprint: u64,
+    pub(super) fingerprint: crate::graph_db::GraphFp,
     pub(super) reload: ReloadState,
 }
 
@@ -106,7 +106,7 @@ pub(crate) struct GraphState {
     /// consumer (search context re-render) may read the fresh graph. Never called on a
     /// query path. Receives a [`GraphPublishSignal`]: `build_start_seq` bounds which marks
     /// the consumer may clear (correctness), `drift_pending` is a fast-path hint.
-    pub(super) on_published: Option<Arc<dyn Fn(GraphPublishSignal) + Send + Sync>>,
+    pub(super) on_published: Option<Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>>,
     /// The store's monotonic context-dirty mark counter, wired once the search engine
     /// exists (the engine is built after this graph). Read at each build's start to capture
     /// its `build_start_seq`. Absent (never wired, e.g. a disabled/reference graph, or a build
@@ -131,6 +131,10 @@ pub(crate) struct GraphState {
     /// build's publish would consume the search context marks against a graph built BEFORE
     /// the change.
     pub(super) pending_nudge: Arc<AtomicBool>,
+    /// A topology-changed publish whose hook could not run the whole-collection
+    /// context refresh (engine not yet published, or deferred behind a fresher
+    /// reload). Re-raised on the next publish so the refresh is never lost.
+    pub(super) pending_topology_refresh: Arc<AtomicBool>,
 }
 
 impl GraphState {
@@ -155,6 +159,7 @@ impl GraphState {
             scan_count: Arc::new(AtomicUsize::new(0)),
             on_published: None,
             pending_nudge: Arc::new(AtomicBool::new(false)),
+            pending_topology_refresh: Arc::new(AtomicBool::new(false)),
             mark_seq: Arc::new(OnceLock::new()),
             leftover_bound: Arc::new(AtomicI64::new(0)),
             fp_map: Arc::new(Mutex::new(FpMapState::default())),
@@ -183,7 +188,7 @@ impl GraphState {
     /// (correctness), `drift_pending` is a skip-this-round hint (optimization).
     pub(crate) fn with_publish_hook(
         mut self,
-        hook: Arc<dyn Fn(GraphPublishSignal) + Send + Sync>,
+        hook: Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>,
     ) -> Self {
         self.on_published = Some(hook);
         self
@@ -221,14 +226,22 @@ impl GraphState {
     /// later seq on another thread) cannot move the bound this publish hands the hook. The
     /// bound is what keeps the consumption correct: only marks at or below it — drifts this
     /// build already reflects — may be cleared.
-    pub(super) fn notify_published(&self, build_start_seq: i64) {
+    pub(super) fn notify_published(&self, build_start_seq: i64, topology_changed: bool) {
         // Idle pooled read handles belong to the superseded file; drop them now so
         // they release it promptly instead of waiting out lazy checkout discards.
         lock_recover(&self.snapshot_pool).clear();
         if self.pending_nudge.swap(false, Ordering::SeqCst) {
             self.reclaim_pending_reload();
         }
-        self.fire_hook(build_start_seq);
+        // A topology refresh survives publishes that cannot run it: the flag is
+        // re-raised whenever the hook reports the requested whole-collection
+        // re-render did not happen (deferred behind a fresher reload, or the
+        // search engine is not published yet).
+        let topology =
+            topology_changed || self.pending_topology_refresh.swap(false, Ordering::SeqCst);
+        if !self.fire_hook(build_start_seq, topology) && topology {
+            self.pending_topology_refresh.store(true, Ordering::SeqCst);
+        }
         // A leftover-marks consume was armed at boot (see `consume_leftover_marks`). This build's
         // own publish (above) captured its own `build_start_seq` — for the pre-wiring boot build
         // that is `0`, which clears nothing — so re-run the hook once with the bound captured when
@@ -237,15 +250,22 @@ impl GraphState {
         // a mark stamped after the capture: that mark is a new drift with its own nudge→publish.
         let leftover_bound = self.leftover_bound.swap(0, Ordering::SeqCst);
         if leftover_bound != 0 {
-            self.fire_hook(leftover_bound);
+            self.fire_hook(leftover_bound, false);
         }
     }
 
     /// Invoke the publish hook, if any, with the given bound. The consumer sees the current
-    /// [`Self::drift_pending`] so it can defer when a fresher reload is imminent.
-    fn fire_hook(&self, build_start_seq: i64) {
-        if let Some(hook) = &self.on_published {
-            hook(GraphPublishSignal { drift_pending: self.drift_pending(), build_start_seq });
+    /// [`Self::drift_pending`] so it can defer when a fresher reload is imminent. Returns
+    /// whether a requested topology refresh was handled (vacuously true when none was
+    /// requested or no hook is attached).
+    fn fire_hook(&self, build_start_seq: i64, topology_changed: bool) -> bool {
+        match &self.on_published {
+            Some(hook) => hook(GraphPublishSignal {
+                drift_pending: self.drift_pending(),
+                build_start_seq,
+                topology_changed,
+            }),
+            None => true,
         }
     }
 
@@ -282,7 +302,7 @@ impl GraphState {
         {
             let bound = self.leftover_bound.swap(0, Ordering::SeqCst);
             if bound != 0 {
-                self.fire_hook(bound);
+                self.fire_hook(bound, false);
             }
         }
     }
@@ -410,7 +430,12 @@ impl GraphState {
     /// cache and sets `published` + `Ready`. `force_stale` is already stamped into the
     /// file's meta (read back by a snapshot's freshness token), so it is not tracked
     /// here. Call only after a successful [`Self::try_begin_external_build`] + rename.
-    pub(crate) fn adopt_prebuilt(&self, generation: u64, fingerprint: u64, files: usize) {
+    pub(crate) fn adopt_prebuilt(
+        &self,
+        generation: u64,
+        fingerprint: crate::graph_db::GraphFp,
+        files: usize,
+    ) {
         *lock_recover(&self.scan) = None;
         let mut inner = lock_recover(&self.inner);
         inner.published =
@@ -596,7 +621,8 @@ mod tests {
             let fired = Arc::clone(&fired);
             Arc::new(move |_signal: GraphPublishSignal| {
                 fired.fetch_add(1, Ordering::SeqCst);
-            }) as Arc<dyn Fn(GraphPublishSignal) + Send + Sync>
+                true
+            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
         };
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
         graph.ensure_loading();
@@ -622,6 +648,41 @@ mod tests {
         assert_eq!(graph.current_mark_seq(), 13, "reads continue using the first source");
     }
 
+    /// A topology refresh the hook cannot run (deferred, engine absent) must be
+    /// re-raised on the NEXT publish — otherwise a dependsOn edit landing while
+    /// the search engine boots would leave every persisted context stale forever.
+    #[test]
+    fn an_unhandled_topology_refresh_is_re_raised_on_the_next_publish() {
+        use std::sync::atomic::AtomicUsize;
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let handled = Arc::new(AtomicI64::new(0));
+        let hook = {
+            let seen = Arc::clone(&seen);
+            let handled = Arc::clone(&handled);
+            Arc::new(move |signal: GraphPublishSignal| {
+                if signal.topology_changed {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    // First sighting: report unhandled; second: handled.
+                    return handled.fetch_add(1, Ordering::SeqCst) > 0;
+                }
+                true
+            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
+        };
+        let graph = GraphState::disabled().with_publish_hook(hook);
+
+        graph.notify_published(0, true);
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "the request reaches the hook");
+        graph.notify_published(0, false);
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "an unhandled topology refresh is re-raised even though this publish did not change it",
+        );
+        graph.notify_published(0, false);
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "a handled request is not re-raised");
+    }
+
     /// A drift delivered while a build is in flight (`nudge_rebuild` during `Loading`, or while
     /// a reload runs) is recorded, not dropped: the build's publish re-checks and — seeing disk
     /// moved past what the build captured — claims a follow-up reload whose own publish fires
@@ -640,7 +701,8 @@ mod tests {
             let fired = Arc::clone(&fired);
             Arc::new(move |_signal: GraphPublishSignal| {
                 fired.fetch_add(1, Ordering::SeqCst);
-            }) as Arc<dyn Fn(GraphPublishSignal) + Send + Sync>
+                true
+            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
         };
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
         // Simulate an initial build that already published (generation 1) with a fingerprint
@@ -650,7 +712,7 @@ mod tests {
             inner.status = GraphStatus::Ready { files: 0 };
             inner.published = Some(Published {
                 generation: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Idle,
             });
@@ -661,7 +723,7 @@ mod tests {
         // drifted past the faked build, claims a follow-up reload. Pass an explicit unbounded
         // bound (i64::MAX) so the seq bound never gates this test — only the reclaim behavior
         // under test decides how many times the hook fires.
-        graph.notify_published(i64::MAX);
+        graph.notify_published(i64::MAX, false);
 
         let deadline = Instant::now() + Duration::from_secs(30);
         while fired.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
@@ -685,7 +747,7 @@ mod tests {
             inner.status = GraphStatus::Ready { files: 0 };
             inner.published = Some(Published {
                 generation: 1,
-                fingerprint: 1,
+                fingerprint: crate::graph_db::GraphFp { files: 1, topology: 1 },
                 stale: false,
                 reload: ReloadState::Idle,
             });
@@ -715,13 +777,14 @@ mod tests {
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(Arc::new(
             move |_signal| {
                 hook_fired.fetch_add(1, Ordering::SeqCst);
+                true
             },
         ));
         {
             let mut inner = lock_recover(&graph.inner);
             inner.published = Some(Published {
                 generation: 7,
-                fingerprint: 1,
+                fingerprint: crate::graph_db::GraphFp { files: 1, topology: 1 },
                 stale: true,
                 reload: ReloadState::Failed("catch-up failed".to_owned()),
             });
@@ -752,7 +815,7 @@ mod tests {
             // fingerprint 0 can never match the real disk scan → a drift is always seen.
             inner.published = Some(Published {
                 generation: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Idle,
             });
@@ -787,7 +850,7 @@ mod tests {
             inner.status = GraphStatus::Ready { files: 0 };
             inner.published = Some(Published {
                 generation: 1,
-                fingerprint: 0,
+                fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Running,
             });

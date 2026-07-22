@@ -507,7 +507,7 @@ mod tests {
         wait_ready(&state);
 
         let module = module_path(root, "Сервер");
-        let project = project_model::Project::new(root);
+        let project = project_model::Project::new(root).expect("valid test project");
         let config_root = project
             .source_path()
             .canonicalize()

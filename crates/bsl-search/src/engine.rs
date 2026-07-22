@@ -1136,6 +1136,13 @@ impl SearchEngine {
     /// changed: conservatively assume any module's context could shift). Returns the
     /// number of files marked.
     pub fn mark_workspace_context_dirty(&self) -> Result<usize, SearchError> {
+        Ok(self.store.mark_collection_context_dirty("code")?.0)
+    }
+
+    /// [`Self::mark_workspace_context_dirty`] returning the batch's shared mark `seq`
+    /// too, for a caller that consumes the batch in the same breath and must bound its
+    /// clear to exactly these marks.
+    pub fn mark_workspace_context_dirty_with_seq(&self) -> Result<(usize, i64), SearchError> {
         self.store.mark_collection_context_dirty("code")
     }
 

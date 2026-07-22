@@ -71,16 +71,27 @@ pub(crate) mod heap_estimate {
         path.capacity()
     }
 
-    /// Heap of a [`super::WorkspaceConfigsInput`]: the `paths` vec plus each
-    /// entry's owned `Option<String>` label and `PathBuf` root.
+    /// Heap of a [`super::WorkspaceConfigsInput`]: the snapshot's path vecs
+    /// (declared + canonical) with their owned labels and roots, the closure
+    /// index vecs, and the optional fingerprint string.
     pub(crate) fn workspace_configs_input_heap(
-        (paths,): &(Vec<(Option<String>, std::path::PathBuf)>,),
+        (snapshot,): &(std::sync::Arc<super::WorkspaceConfigsSnapshot>,),
     ) -> usize {
+        let paths = &snapshot.paths;
         stdx::heap::vec_bytes::<(Option<String>, std::path::PathBuf)>(paths.len())
             + paths
                 .iter()
                 .map(|(label, root)| label.as_ref().map_or(0, String::capacity) + root.capacity())
                 .sum::<usize>()
+            + stdx::heap::vec_bytes::<std::path::PathBuf>(snapshot.canonical_paths.len())
+            + snapshot.canonical_paths.iter().map(|p| p.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<Vec<usize>>(snapshot.closures.len())
+            + snapshot
+                .closures
+                .iter()
+                .map(|c| stdx::heap::vec_bytes::<usize>(c.len()))
+                .sum::<usize>()
+            + snapshot.fingerprint.as_ref().map_or(0, String::capacity)
     }
 
     /// Heap of a [`super::MetadataListingInput`]: the ten per-family `Arc<Vec<_>>`
@@ -330,10 +341,81 @@ pub(crate) fn canonicalize_configuration_path(raw_path: &str) -> String {
     }
 }
 
+/// Atomic description of the workspace's config roots and their dependency
+/// topology. ONE input field holds the whole value because Salsa tracks input
+/// FIELDS independently (a revision per setter): splitting paths, closures and
+/// fingerprint across fields would let a reload be observed half-applied.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceConfigsSnapshot {
+    /// Config roots in declaration order; exactly one `None` label (the base).
+    pub paths: Vec<(Option<String>, PathBuf)>,
+    /// Canonicalized counterpart of `paths` (same order) — what per-file
+    /// longest-prefix matching uses, so a symlinked workspace still matches.
+    pub canonical_paths: Vec<PathBuf>,
+    /// Per entry: ordered transitive dependency chain (indices into `paths`,
+    /// dependencies first, the entry itself excluded). Empty for the base and
+    /// for independent extensions — which keeps the pre-dependency semantics:
+    /// a file sees the base plus its own extension only.
+    pub closures: Vec<Vec<usize>>,
+    /// Topology fingerprint (full hex digest) when built from a validated
+    /// project; `None` for legacy path-only registration.
+    pub fingerprint: Option<String>,
+}
+
+impl WorkspaceConfigsSnapshot {
+    /// Legacy shape: bare roots, no dependency edges. Every extension is
+    /// independent, exactly the pre-`dependsOn` visibility.
+    pub fn from_paths(paths: Vec<(Option<String>, PathBuf)>) -> Self {
+        let canonical_paths = paths
+            .iter()
+            .map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+            .collect();
+        let closures = vec![Vec::new(); paths.len()];
+        Self { paths, canonical_paths, closures, fingerprint: None }
+    }
+
+    /// The full shape from a validated project: base first, then extensions in
+    /// declaration order, each carrying its ordered transitive dependency
+    /// chain and the topology fingerprint.
+    pub fn from_project(project: &project_model::Project) -> Self {
+        let topology = project.extension_topology();
+        let base = project.source_path().to_path_buf();
+        let canonical_base = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
+        let mut paths: Vec<(Option<String>, PathBuf)> = vec![(None, base)];
+        let mut canonical_paths = vec![canonical_base];
+        let mut closures: Vec<Vec<usize>> = vec![Vec::new()];
+        for node in topology.nodes() {
+            paths.push((Some(node.name().to_string()), node.path().to_path_buf()));
+            canonical_paths.push(node.canonical_path().to_path_buf());
+            // Topology node indices are 0-based over extensions; snapshot slot 0
+            // is the base root, so every index shifts by one.
+            closures.push(node.closure().iter().map(|id| id.index() + 1).collect());
+        }
+        Self {
+            paths,
+            canonical_paths,
+            closures,
+            fingerprint: Some(topology.fingerprint().to_hex()),
+        }
+    }
+
+    /// Replace each configured root spelling with its canonical form. For hosts
+    /// whose file universe is enumerated canonically (the MCP resident/graph
+    /// scans): substrate back-links join a root against a canonical `.bsl`
+    /// path, so the registered roots must be canonical too or the reverse
+    /// lookup misses on a symlinked workspace.
+    pub fn canonicalized(mut self) -> Self {
+        for (idx, (_, path)) in self.paths.iter_mut().enumerate() {
+            *path = self.canonical_paths[idx].clone();
+        }
+        self
+    }
+}
+
 #[salsa::input(singleton, debug, heap_size = heap_estimate::workspace_configs_input_heap)]
 pub struct WorkspaceConfigsInput {
     #[returns(clone)]
-    pub paths: Vec<(Option<String>, PathBuf)>,
+    pub snapshot: Arc<WorkspaceConfigsSnapshot>,
 }
 
 /// Fallback revision counter for files that match no registered config root
@@ -425,6 +507,46 @@ pub fn merged_configuration<'db>(
     let main = db.load_configuration(main_input);
     let extension = db.load_configuration(extension_input);
     Arc::new(main.merged_with_extension(&extension))
+}
+
+/// An ordered visibility chain of config roots: the base first, then the
+/// file's transitive extension dependencies, then its own extension last.
+/// Interned so equal chains (every file of one extension) share one query key,
+/// and so the recursive prefix of a chain is itself a chain.
+#[salsa::interned(debug, heap_size = stdx::heap::zero)]
+pub struct ConfigChainInput<'db> {
+    #[returns(ref)]
+    pub inputs: Vec<ConfigurationPathInput<'db>>,
+}
+
+/// The whole-config merge of an ordered visibility chain, composed FORWARD:
+/// each overlay is applied onto the accumulated configuration, so dependencies
+/// apply before their dependents and the file's own extension wins last. The
+/// recursion memoizes every prefix — the chain `[base, d1, own]` reuses
+/// `[base, d1]`, which is exactly the chain of `d1`'s own files. Memoized
+/// entries are bounded by the number of unique prefixes: at most the sum of
+/// all chain lengths, far below the LRU cap for realistic extension counts.
+#[salsa::tracked(
+    lru = 1024,
+    heap_size = heap_estimate::configuration_heap,
+    returns(clone)
+)]
+pub fn chain_configuration<'db>(
+    db: &'db dyn MetadataDb,
+    chain: ConfigChainInput<'db>,
+) -> Arc<Configuration> {
+    let _span = tracing::info_span!("chain_configuration").entered();
+    let inputs = chain.inputs(db.as_dyn_database());
+    match inputs.split_last() {
+        None => Arc::new(Configuration::new("Configuration")),
+        Some((only, [])) => db.load_configuration(*only),
+        Some((last, prefix)) => {
+            let prefix_chain = ConfigChainInput::new(db.as_dyn_database(), prefix.to_vec());
+            let base = chain_configuration(db, prefix_chain);
+            let overlay = db.load_configuration(*last);
+            Arc::new(base.merged_with_extension(&overlay))
+        }
+    }
 }
 
 /// The composing files of a single metadata object: the main `<Name>.xml` and an

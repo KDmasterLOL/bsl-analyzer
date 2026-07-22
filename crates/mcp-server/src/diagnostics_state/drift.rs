@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::change_hub::{ChangeEntry, Health, WorkspaceChangeHub};
-use crate::graph::scan::{classify_changes, scan_file_stats, FileStat, WorkspaceDiff};
+use crate::graph::scan::{classify_changes, FileStat, WorkspaceDiff};
 
 use super::lifecycle::{lock_recover, DiagnosticsState, Inner};
 use super::resident::apply_resident_changes;
@@ -183,7 +183,7 @@ impl DiagnosticsState {
 
     pub(super) fn apply_drained_entries(&self, entries: &[ChangeEntry]) {
         let baseline: HashMap<String, u64> = lock_recover(&self.inner).stats.clone();
-        // The analyzer config files fingerprinted by `config_fingerprint` — canonicalised
+        // The analyzer config files fingerprinted by `config_files_fingerprint` — canonicalised
         // to match the drained key spelling. Only a file at THIS exact location is config
         // drift; an identically-named file elsewhere in the tree is not (parity with the
         // scan path, which fingerprints only `root.join(name)`).
@@ -496,8 +496,14 @@ impl DiagnosticsState {
             }
         }
         self.scan_count.fetch_add(1, Ordering::SeqCst);
-        let stats = scan_file_stats(root);
-        let config_fp = config_fingerprint(root);
+        // One project load per scan: the stat universe and the config identity must
+        // describe the same project state, mirroring how the build derives its
+        // baseline — otherwise the comparison could pair one state's files with
+        // another's topology and mask (or fabricate) drift.
+        let config_files_fp = config_files_fingerprint(root);
+        let project = crate::graph::input::ProjectSnapshot::load(root);
+        let stats = crate::graph::scan::scan_stats_over_roots(&project.scan_roots);
+        let config_fp = config_identity(config_files_fp, &project.configs);
         *cache = Some(ScanCache { at: Instant::now(), stats: stats.clone(), config_fp });
         Some(OwnedScan { stats, config_fp })
     }
@@ -522,7 +528,32 @@ pub(super) fn compute_freshness(inner: &Inner, scan: Option<&OwnedScan>) -> Fres
     }
 }
 
-pub(super) fn config_fingerprint(root: &Path) -> u64 {
+/// The resident's "config drift" identity: the config-file stat fold PLUS the
+/// extension-topology hash of `configs`. Folding the topology in covers changes no
+/// config-file stat can see — an auto-discovered extension appearing or vanishing
+/// re-shapes visibility with `bsl-analyzer.toml` untouched (or absent entirely).
+pub(super) fn config_identity(
+    config_files_fp: u64,
+    configs: &ide::WorkspaceConfigsSnapshot,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    (config_files_fp, crate::graph::scan::topology_u64(configs)).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// [`config_identity`] against a freshly derived project state — the cheap
+/// (config-file stat + config parse + extension discovery, no tree walk) probe
+/// the post-publication re-check and the throttled scan use. The stat is taken
+/// BEFORE the project load, pairing with how the build captures its baseline.
+pub(super) fn config_identity_now(root: &Path) -> u64 {
+    let config_files_fp = config_files_fingerprint(root);
+    config_identity(config_files_fp, &crate::graph::input::ProjectSnapshot::load(root).configs)
+}
+
+pub(super) fn config_files_fingerprint(root: &Path) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::UNIX_EPOCH;
@@ -560,6 +591,52 @@ mod tests {
     use crate::change_hub::ChangeKind;
     use ide::DiagnosticsConfig;
     use std::fs;
+
+    /// The resident's config identity must move on a `dependsOn`-only edit while the
+    /// per-file stat channel stays silent — that identity is the only trigger a full
+    /// rebuild (with re-derived closures) has for such a change.
+    #[test]
+    fn config_identity_tracks_a_depends_on_only_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        fs::create_dir_all(root.join("ext/a")).unwrap();
+        fs::create_dir_all(root.join("ext/b")).unwrap();
+        let config = |deps: &str| {
+            format!(
+                "[source]\nroot = \".\"\nextensions = [\n  \
+                 {{ name = \"a\", path = \"ext/a\" }},\n  \
+                 {{ name = \"b\", path = \"ext/b\"{deps} }},\n]\n"
+            )
+        };
+        fs::write(root.join("bsl-analyzer.toml"), config("")).unwrap();
+        let before = config_identity_now(root);
+
+        fs::write(root.join("bsl-analyzer.toml"), config(", dependsOn = [\"a\"]")).unwrap();
+        assert_ne!(
+            before,
+            config_identity_now(root),
+            "the dependency edge must change the resident's config identity"
+        );
+    }
+
+    /// With NO analyzer config file at all, an extension appearing through
+    /// auto-discovery must still change the config identity: there is no
+    /// config-file stat to observe, only the re-derived topology.
+    #[test]
+    fn config_identity_sees_an_auto_discovered_extension_without_any_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let before = config_identity_now(root);
+
+        write(root, "src/cfe/NewExt/Configuration.xml", "<Configuration/>");
+        assert_ne!(
+            before,
+            config_identity_now(root),
+            "discovery must reshape the config identity with zero config files"
+        );
+    }
 
     /// Editing `bsl-analyzer.toml` is structural drift: the resident fully reloads and
     /// re-derives its effective config, so a later `file`/`workspace` sees the new
@@ -1611,7 +1688,7 @@ mod tests {
     }
 
     /// A `bsl-analyzer.toml` in a SUBDIRECTORY is not the analyzer config (which lives at the
-    /// workspace root): the drain must ignore it, matching the scan path's `config_fingerprint`
+    /// workspace root): the drain must ignore it, matching the scan path's `config_files_fingerprint`
     /// which only fingerprints `root.join(name)`. A subtree toml edit is not a rebuild trigger.
     #[test]
     fn subdir_config_file_is_not_config_drift() {
@@ -1669,12 +1746,16 @@ mod tests {
             "&НаСервере\nФункция Р() Экспорт КонецФункции",
         );
 
-        // Build the hub over the SAME roots the scan sees (source + extensions), as production does.
-        let project = project_model::Project::new(root);
+        // Build the hub over the SAME targets production arms (source + extensions,
+        // plus the workspace root non-recursively) — a narrower boot set would be
+        // upgraded by the resident's post-publish re-arm, and that one-time rescan
+        // debt is exactly what this zero-scan assertion must not see.
+        let project = project_model::Project::new(root).expect("valid test project");
         let mut roots = vec![project.source_path().to_path_buf()];
         roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
         assert!(roots.len() >= 2, "the extension root must be discovered: {roots:?}");
-        let hub = WorkspaceChangeHub::start(roots);
+        let hub =
+            WorkspaceChangeHub::start_targets(crate::change_hub::watch_targets_for(root, &roots));
         assert!(hub.wait_until_watching(Duration::from_secs(5)), "the hub must arm");
 
         let mut state =

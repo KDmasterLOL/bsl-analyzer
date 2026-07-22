@@ -379,7 +379,18 @@ impl GlobalState {
     pub fn new(sender: Sender<Message>) -> Self {
         let (loader_sender, loader_receiver) = crossbeam_channel::bounded(4);
         let loader = vfs_notify::NotifyHandle::spawn(loader_sender);
+        Self::with_loader(sender, Box::new(loader), loader_receiver)
+    }
 
+    /// Construct with an injected VFS loader. This is the observation seam for
+    /// workspace-(re)load tests: a recording [`loader::Handle`] sees exactly the
+    /// configs [`Self::set_workspace_root`] emits (include roots, watch set),
+    /// without arming a live filesystem watcher.
+    pub fn with_loader(
+        sender: Sender<Message>,
+        loader: Box<dyn loader::Handle>,
+        loader_receiver: Receiver<loader::Message>,
+    ) -> Self {
         Self {
             sender,
             req_queue: ReqQueue::default(),
@@ -389,7 +400,7 @@ impl GlobalState {
             workspace_root: None,
             project: None,
             shutdown_requested: false,
-            loader: Box::new(loader),
+            loader,
             loader_receiver,
             vfs_progress_config_version: 0,
             vfs_done: false,
@@ -540,6 +551,14 @@ impl GlobalState {
     /// it is opened: if the batch had published diagnostics for it, clear them so the
     /// open document is the sole owner (pull, or push for a non-pull client) and the
     /// two streams never double-report the same file.
+    /// `window/showMessage` with error severity — for failures the user must
+    /// see without digging through server logs (e.g. a broken project config).
+    pub fn show_error_message(&self, message: String) {
+        let params = lsp_types::ShowMessageParams { typ: lsp_types::MessageType::ERROR, message };
+        let notification = lsp_server::Notification::new("window/showMessage".to_string(), params);
+        let _ = self.sender.send(notification.into());
+    }
+
     pub fn clear_batch_push_for(&mut self, uri: &Url) {
         if self.batch_pushed.remove(uri).is_some() {
             let params =
@@ -794,7 +813,7 @@ mod vfs_race_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
 
         // Initial load (vfs_done = false): the gate closes until the finalize.
-        state.set_workspace_root(tmp.path().to_path_buf());
+        state.set_workspace_root(tmp.path().to_path_buf()).expect("valid test workspace");
         assert!(
             !state.analysis_host.raw_database().workspace_load_complete(),
             "the initial load must close the whole-config loader gate"
@@ -803,11 +822,94 @@ mod vfs_race_tests {
         // A live reload (vfs_done = true) must not degrade running analysis.
         state.vfs_done = true;
         state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
-        state.set_workspace_root(tmp.path().to_path_buf());
+        state.set_workspace_root(tmp.path().to_path_buf()).expect("valid test workspace");
         assert!(
             state.analysis_host.raw_database().workspace_load_complete(),
             "a live workspace reload must keep the gate open"
         );
+    }
+
+    /// A live workspace reload that adds an extension root must emit a loader
+    /// config whose include set covers the new root (and still watches the config
+    /// files) — otherwise the VFS never scans the extension and no analysis sees
+    /// it. Observed through an injected recording loader, not a live watcher.
+    #[test]
+    fn live_reload_emits_a_loader_config_covering_a_new_extension_root() {
+        #[derive(Debug)]
+        struct RecordingLoader(std::sync::mpsc::Sender<loader::Config>);
+        impl loader::Handle for RecordingLoader {
+            fn spawn(_sender: loader::Sender) -> Self
+            where
+                Self: Sized,
+            {
+                unreachable!("injected via with_loader, never spawned")
+            }
+            fn set_config(&mut self, config: loader::Config) {
+                let _ = self.0.send(config);
+            }
+            fn invalidate(&mut self, _path: paths::AbsPathBuf) {}
+            fn load_sync(&mut self, _path: &paths::AbsPath) -> Option<Vec<u8>> {
+                None
+            }
+        }
+        let includes = |config: &loader::Config| -> Vec<String> {
+            config
+                .load
+                .iter()
+                .flat_map(|entry| match entry {
+                    loader::Entry::Directories(dirs) => {
+                        dirs.include.iter().map(|p| p.to_string()).collect::<Vec<_>>()
+                    }
+                    loader::Entry::Files(_) => Vec::new(),
+                })
+                .collect()
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        // The extension lives OUTSIDE the workspace tree, so its presence in the
+        // loader config can only come from the declared topology — never from the
+        // source-root scan covering it incidentally.
+        let ext_tmp = tempfile::tempdir().expect("tempdir");
+        let ext = ext_tmp.path();
+        std::fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \".\"\n").unwrap();
+
+        let (configs_tx, configs_rx) = std::sync::mpsc::channel();
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let (_loader_tx, loader_receiver) = crossbeam_channel::bounded(4);
+        let mut state = GlobalState::with_loader(
+            sender,
+            Box::new(RecordingLoader(configs_tx)),
+            loader_receiver,
+        );
+
+        state.set_workspace_root(root.to_path_buf()).expect("initial load");
+        let first = configs_rx.try_recv().expect("the initial load emits a loader config");
+        let ext_str = ext.to_string_lossy().into_owned();
+        assert!(
+            !includes(&first).iter().any(|p| p.contains(&ext_str)),
+            "the undeclared extension is not scanned initially"
+        );
+
+        std::fs::write(
+            root.join("bsl-analyzer.toml"),
+            format!("[source]\nroot = \".\"\nextensions = [{{ name = \"a\", path = {ext:?} }}]\n"),
+        )
+        .unwrap();
+        state.vfs_done = true;
+        state.set_workspace_root(root.to_path_buf()).expect("live reload");
+        let second = configs_rx.try_recv().expect("the reload emits a fresh loader config");
+        assert!(
+            includes(&second).iter().any(|p| p.contains(&ext_str)),
+            "the reload's loader config must include the newly-declared extension root: {:?}",
+            includes(&second),
+        );
+        assert!(
+            second.load.iter().any(|e| matches!(e, loader::Entry::Files(_))),
+            "the analyzer config files stay watched after the reload"
+        );
+        assert!(second.version > first.version, "each loader config carries a fresh version");
     }
 
     #[test]
@@ -915,11 +1017,15 @@ mod vfs_race_tests {
     fn call_hierarchy_workspace_changes_journal_bodies_and_supersede_structure() {
         use crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId;
 
-        // Given: a loaded source root with an active compact-index build.
+        // Given: a loaded source root with an active compact-index build. The
+        // workspace root must exist and be valid: a config-file change only
+        // counts as structural after its project reload succeeds.
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let mut state = GlobalState::new(sender);
         state.vfs_done = true;
         state.init_empty_source_root();
+        let tmp = tempfile::tempdir().unwrap();
+        state.set_workspace_root(tmp.path().to_path_buf()).expect("valid empty workspace");
         let module_path = vfs::VfsPath::new("/cf/CommonModules/М/Ext/Module.bsl");
         state.vfs.write().set_file_contents(
             module_path.clone(),
