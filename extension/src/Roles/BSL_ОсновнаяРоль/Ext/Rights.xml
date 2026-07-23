@@ -11,13 +11,6 @@
 		</right>
 	</object>
 	<object>
-		<name>HTTPService.BSLAnalyzerService.URLTemplate.Вычислить.Method.POST</name>
-		<right>
-			<name>Use</name>
-			<value>true</value>
-		</right>
-	</object>
-	<object>
 		<name>HTTPService.BSLAnalyzerService.URLTemplate.ПроверкаЗапроса.Method.POST</name>
 		<right>
 			<name>Use</name>
@@ -83,13 +76,6 @@
 		</right>
 	</object>
 	<object>
-		<name>HTTPService.BSLAnalyzerService.URLTemplate.Выполнить.Method.POST</name>
-		<right>
-			<name>Use</name>
-			<value>true</value>
-		</right>
-	</object>
-	<object>
 		<name>HTTPService.BSLAnalyzerService.URLTemplate.Версия.Method.GET</name>
 		<right>
 			<name>Use</name>
@@ -98,6 +84,20 @@
 	</object>
 	<object>
 		<name>HTTPService.BSLAnalyzerService.URLTemplate.ЖурналРегистрации.Method.POST</name>
+		<right>
+			<name>Use</name>
+			<value>true</value>
+		</right>
+	</object>
+	<object>
+		<name>HTTPService.BSLAnalyzerService.URLTemplate.СписокМетаданных.Method.POST</name>
+		<right>
+			<name>Use</name>
+			<value>true</value>
+		</right>
+	</object>
+	<object>
+		<name>HTTPService.BSLAnalyzerService.URLTemplate.СтруктураМетаданных.Method.POST</name>
 		<right>
 			<name>Use</name>
 			<value>true</value>

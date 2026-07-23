@@ -23,13 +23,19 @@ pub fn schema() -> CallToolResult {
     }))
 }
 
-pub async fn validate_query(state: &SharedState, query: &str) -> Result<CallToolResult, McpError> {
+pub async fn validate_query(
+    state: &SharedState,
+    query: &str,
+    connection: Option<&str>,
+) -> Result<CallToolResult, McpError> {
     if query.trim().is_empty() {
         return Err(McpError::invalid_params("Пустой запрос", None));
     }
 
-    if let Some(client) = state.onec_client() {
-        return validate_query_remote(client, query).await;
+    if connection.is_some() || state.onec_client().is_some() {
+        let selected =
+            state.onec_connection(connection).map_err(|e| McpError::invalid_params(e, None))?;
+        return validate_query_remote(selected.client(), query).await;
     }
 
     validate_query_local(query)
@@ -107,13 +113,10 @@ pub async fn execute_query(
     query: &str,
     limit: Option<u32>,
     parameters: Option<HashMap<String, serde_json::Value>>,
+    connection: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    let client = state.onec_client().ok_or_else(|| {
-        McpError::invalid_params(
-            "1C HTTP клиент не настроен. Укажите --onec-url при запуске MCP сервера.",
-            None,
-        )
-    })?;
+    let selected =
+        state.onec_connection(connection).map_err(|e| McpError::invalid_params(e, None))?;
 
     if query.trim().is_empty() {
         return Err(McpError::invalid_params("Пустой запрос", None));
@@ -133,7 +136,7 @@ pub async fn execute_query(
         parameters: parameters.unwrap_or_default(),
     };
 
-    let result = client.execute_query(&request).await.map_err(|e| {
+    let result = selected.client().execute_query(&request).await.map_err(|e| {
         McpError::internal_error(format!("Ошибка выполнения запроса в 1С: {e}"), None)
     })?;
 
@@ -257,7 +260,7 @@ mod tests {
     fn test_validate_query_empty() {
         let state = test_shared_state();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(validate_query(&state, ""));
+        let result = rt.block_on(validate_query(&state, "", None));
         assert!(result.is_err(), "empty query should fail");
     }
 
@@ -265,7 +268,7 @@ mod tests {
     fn test_validate_query_whitespace() {
         let state = test_shared_state();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(validate_query(&state, "   "));
+        let result = rt.block_on(validate_query(&state, "   ", None));
         assert!(result.is_err(), "whitespace-only query should fail");
     }
 

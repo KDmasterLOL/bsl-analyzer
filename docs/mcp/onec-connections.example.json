@@ -1,0 +1,10 @@
+{
+  "connections": {
+    "test-base": {
+      "url": "http://127.0.0.1/test-base/hs/bsl-analyzer",
+      "user_env": "BSL_TEST_BASE_USER",
+      "password_env": "BSL_TEST_BASE_PASSWORD",
+      "allow_execute": false
+    }
+  }
+}
