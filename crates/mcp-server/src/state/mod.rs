@@ -134,9 +134,16 @@ impl SharedState {
     pub fn onec_connection(&self, name: Option<&str>) -> Result<OnecConnection, String> {
         if let Some(name) = name {
             return self.onec_connections.get(name).cloned().ok_or_else(|| {
-                let available =
-                    self.onec_connections.keys().cloned().collect::<Vec<_>>().join(", ");
-                format!("Unknown 1C connection '{name}'. Available: {available}")
+                if self.onec_connections.is_empty() {
+                    format!(
+                        "Unknown 1C connection '{name}'. No named connections are configured; \
+                         omit `connection` to use the --onec-url client."
+                    )
+                } else {
+                    let available =
+                        self.onec_connections.keys().cloned().collect::<Vec<_>>().join(", ");
+                    format!("Unknown 1C connection '{name}'. Available: {available}")
+                }
             });
         }
         if let Some(client) = &self.onec_client {

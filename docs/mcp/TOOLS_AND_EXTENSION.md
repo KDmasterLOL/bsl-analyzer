@@ -178,9 +178,9 @@ bsl-analyzer mcp serve --profile reference
 операции чтения используют `BSL_ОсновнаяРоль`.
 
 Инструмент `metadata` поддерживает `mode=source|infobase|auto`. В режиме
-`infobase` действие `tree` принимает тип коллекции в `filter`, а `object` —
-`object_type` и `object_name`; исходники конфигурации для этих двух вызовов не
-требуются.
+`infobase` действие `tree` принимает тип коллекции в `meta_type` (и опционально
+`name_mask`, `max_items`), а `object` — `object_type` и `object_name`; исходники
+конфигурации для этих двух вызовов не требуются.
 
 ### 1. Экспортируйте расширение
 
