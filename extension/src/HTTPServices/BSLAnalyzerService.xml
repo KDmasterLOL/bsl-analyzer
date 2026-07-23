@@ -218,6 +218,44 @@
 					</Method>
 				</ChildObjects>
 			</URLTemplate>
+			<URLTemplate uuid="6c6ad7fd-8318-447f-949b-b55e2cbcfe15">
+				<Properties>
+					<Name>СписокМетаданных</Name>
+					<Synonym/>
+					<Comment/>
+					<Template>/metadata-list</Template>
+				</Properties>
+				<ChildObjects>
+					<Method uuid="02d8b066-d5c9-4468-89f8-df9faed87423">
+						<Properties>
+							<Name>POST</Name>
+							<Synonym/>
+							<Comment/>
+							<HTTPMethod>POST</HTTPMethod>
+							<Handler>СписокМетаданныхPOST</Handler>
+						</Properties>
+					</Method>
+				</ChildObjects>
+			</URLTemplate>
+			<URLTemplate uuid="478e1ff8-4fc4-4b91-b6d3-a8e24712487a">
+				<Properties>
+					<Name>СтруктураМетаданных</Name>
+					<Synonym/>
+					<Comment/>
+					<Template>/metadata-structure</Template>
+				</Properties>
+				<ChildObjects>
+					<Method uuid="7eeef61a-ae03-4b28-a290-6653ff8fc611">
+						<Properties>
+							<Name>POST</Name>
+							<Synonym/>
+							<Comment/>
+							<HTTPMethod>POST</HTTPMethod>
+							<Handler>СтруктураМетаданныхPOST</Handler>
+						</Properties>
+					</Method>
+				</ChildObjects>
+			</URLTemplate>
 		</ChildObjects>
 	</HTTPService>
 </MetaDataObject>

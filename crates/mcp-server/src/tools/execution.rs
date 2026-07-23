@@ -2,17 +2,19 @@ use crate::state::SharedState;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
 
-fn require_onec_client(state: &SharedState) -> Result<&onec_client::Client, McpError> {
-    state.onec_client().ok_or_else(|| {
-        McpError::invalid_params(
-            "1C HTTP клиент не настроен. Укажите --onec-url при запуске MCP сервера.",
-            None,
-        )
-    })
+fn require_onec_connection(
+    state: &SharedState,
+    connection: Option<&str>,
+) -> Result<crate::OnecConnection, McpError> {
+    state.onec_connection(connection).map_err(|e| McpError::invalid_params(e, None))
 }
 
-pub async fn check_syntax(state: &SharedState, code: &str) -> Result<CallToolResult, McpError> {
-    let client = require_onec_client(state)?;
+pub async fn check_syntax(
+    state: &SharedState,
+    code: &str,
+    connection: Option<&str>,
+) -> Result<CallToolResult, McpError> {
+    let selected = require_onec_connection(state, connection)?;
 
     if code.trim().is_empty() {
         return Err(McpError::invalid_params("Пустой код", None));
@@ -20,7 +22,7 @@ pub async fn check_syntax(state: &SharedState, code: &str) -> Result<CallToolRes
 
     let request = onec_client::CheckSyntaxRequest { code: code.to_string() };
 
-    let result = client.check_syntax(&request).await.map_err(|e| {
+    let result = selected.client().check_syntax(&request).await.map_err(|e| {
         McpError::internal_error(format!("Ошибка проверки синтаксиса в 1С: {e}"), None)
     })?;
 
@@ -32,8 +34,15 @@ pub async fn check_syntax(state: &SharedState, code: &str) -> Result<CallToolRes
     }
 }
 
-pub async fn execute_code(state: &SharedState, code: &str) -> Result<CallToolResult, McpError> {
-    let client = require_onec_client(state)?;
+pub async fn execute_code(
+    state: &SharedState,
+    code: &str,
+    connection: Option<&str>,
+) -> Result<CallToolResult, McpError> {
+    let selected = require_onec_connection(state, connection)?;
+    if !selected.allow_execute() {
+        return Err(McpError::invalid_params("BSL run is disabled for this 1C connection", None));
+    }
 
     if code.trim().is_empty() {
         return Err(McpError::invalid_params("Пустой код", None));
@@ -41,10 +50,10 @@ pub async fn execute_code(state: &SharedState, code: &str) -> Result<CallToolRes
 
     let request = onec_client::ExecuteRequest { code: code.to_string() };
 
-    let result = client
-        .execute_code(&request)
-        .await
-        .map_err(|e| McpError::internal_error(format!("Ошибка выполнения кода в 1С: {e}"), None))?;
+    let result =
+        selected.client().execute_code(&request).await.map_err(|e| {
+            McpError::internal_error(format!("Ошибка выполнения кода в 1С: {e}"), None)
+        })?;
 
     let mut out = if result.success {
         "✓ Код выполнен успешно".to_string()
@@ -76,8 +85,12 @@ pub async fn execute_code(state: &SharedState, code: &str) -> Result<CallToolRes
 pub async fn eval_expression(
     state: &SharedState,
     expression: &str,
+    connection: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    let client = require_onec_client(state)?;
+    let selected = require_onec_connection(state, connection)?;
+    if !selected.allow_execute() {
+        return Err(McpError::invalid_params("BSL eval is disabled for this 1C connection", None));
+    }
 
     if expression.trim().is_empty() {
         return Err(McpError::invalid_params("Пустое выражение", None));
@@ -85,7 +98,7 @@ pub async fn eval_expression(
 
     let request = onec_client::EvalRequest { expression: expression.to_string() };
 
-    let result = client.eval_expression(&request).await.map_err(|e| {
+    let result = selected.client().eval_expression(&request).await.map_err(|e| {
         McpError::internal_error(format!("Ошибка вычисления выражения в 1С: {e}"), None)
     })?;
 
@@ -117,49 +130,49 @@ mod tests {
     #[tokio::test]
     async fn test_check_syntax_empty_code() {
         let state = test_shared_state();
-        let result = check_syntax(&state, "").await;
+        let result = check_syntax(&state, "", None).await;
         assert!(result.is_err(), "empty code should fail");
     }
 
     #[tokio::test]
     async fn test_check_syntax_whitespace() {
         let state = test_shared_state();
-        let result = check_syntax(&state, "   ").await;
+        let result = check_syntax(&state, "   ", None).await;
         assert!(result.is_err(), "whitespace-only code should fail");
     }
 
     #[tokio::test]
     async fn test_check_syntax_no_client() {
         let state = test_shared_state();
-        let result = check_syntax(&state, "а = 1;").await;
+        let result = check_syntax(&state, "а = 1;", None).await;
         assert!(result.is_err(), "should fail without onec client");
     }
 
     #[tokio::test]
     async fn test_execute_code_empty() {
         let state = test_shared_state();
-        let result = execute_code(&state, "").await;
+        let result = execute_code(&state, "", None).await;
         assert!(result.is_err(), "empty code should fail");
     }
 
     #[tokio::test]
     async fn test_execute_code_no_client() {
         let state = test_shared_state();
-        let result = execute_code(&state, "Сообщить(1);").await;
+        let result = execute_code(&state, "Сообщить(1);", None).await;
         assert!(result.is_err(), "should fail without onec client");
     }
 
     #[tokio::test]
     async fn test_eval_expression_empty() {
         let state = test_shared_state();
-        let result = eval_expression(&state, "").await;
+        let result = eval_expression(&state, "", None).await;
         assert!(result.is_err(), "empty expression should fail");
     }
 
     #[tokio::test]
     async fn test_eval_expression_no_client() {
         let state = test_shared_state();
-        let result = eval_expression(&state, "1 + 1").await;
+        let result = eval_expression(&state, "1 + 1", None).await;
         assert!(result.is_err(), "should fail without onec client");
     }
 }
