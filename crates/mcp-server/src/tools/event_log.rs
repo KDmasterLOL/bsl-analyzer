@@ -21,6 +21,7 @@ pub struct EventLogQuery {
     pub metadata: Option<String>,
     pub contains: Option<String>,
     pub limit: Option<u32>,
+    pub connection: Option<String>,
 }
 
 fn build_request(query: EventLogQuery) -> onec_client::EventLogRequest {
@@ -46,16 +47,13 @@ pub async fn event_log(
     state: &SharedState,
     query: EventLogQuery,
 ) -> Result<CallToolResult, McpError> {
-    let client = state.onec_client().ok_or_else(|| {
-        McpError::invalid_params(
-            "1C HTTP клиент не настроен. Укажите --onec-url при запуске MCP сервера.",
-            None,
-        )
-    })?;
+    let selected = state
+        .onec_connection(query.connection.as_deref())
+        .map_err(|e| McpError::invalid_params(e, None))?;
 
     let request = build_request(query);
 
-    let result = client.event_log(&request).await.map_err(|e| {
+    let result = selected.client().event_log(&request).await.map_err(|e| {
         McpError::internal_error(format!("Ошибка чтения журнала регистрации в 1С: {e}"), None)
     })?;
 
