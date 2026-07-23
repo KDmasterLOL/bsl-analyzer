@@ -65,6 +65,7 @@
 		<ChildObjects>
 			<Language>Русский</Language>
 			<Role>BSL_ОсновнаяРоль</Role>
+			<Role>BSL_ВыполнениеКода</Role>
 			<HTTPService>BSLAnalyzerService</HTTPService>
 		</ChildObjects>
 	</Configuration>

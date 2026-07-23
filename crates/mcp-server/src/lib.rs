@@ -18,8 +18,8 @@ pub use graph_db::{
     read_source_root_scoped_sqlite_method_call_digest, read_sqlite_method_call_digest,
 };
 pub use graph_query::{GraphDb, GraphDbContextProvider};
-pub use state::SharedState;
 use state::WorkspaceSearchMode;
+pub use state::{OnecConnection, SharedState};
 
 pub async fn serve_stdio(server: McpServer) -> anyhow::Result<()> {
     serve_stream(server, rmcp::transport::stdio()).await
@@ -70,6 +70,12 @@ struct MetadataParams {
     action: String,
     /// `tree`: case-insensitive substring to narrow the returned tree (optional).
     filter: Option<String>,
+    /// `tree` in infobase mode: metadata collection, e.g. `Справочники`/`Documents`.
+    meta_type: Option<String>,
+    /// `tree` in infobase mode: case-insensitive object name/synonym substring.
+    name_mask: Option<String>,
+    /// `tree` in infobase mode: maximum returned objects (default 100, max 1000).
+    max_items: Option<u32>,
     /// Metadata object type, e.g. `Документ`/`Справочник`/`ОбщийМодуль`. Required for
     /// `object` and `form`.
     object_type: Option<String>,
@@ -81,6 +87,10 @@ struct MetadataParams {
     /// `tree` (filtered listing): output budget in tokens (~4 chars each); an over-budget
     /// listing is truncated at a line boundary with a continuation note (default 6000).
     max_output_tokens: Option<usize>,
+    /// Named live 1C connection for `mode=infobase` (optional).
+    connection: Option<String>,
+    /// auto | source | infobase (default auto).
+    mode: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -115,6 +125,8 @@ struct QueryParams {
     limit: Option<u32>,
     /// `execute`: named SDBL query parameters (`&Param` → value) (optional).
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// Named live 1C connection (optional when only one/default connection exists).
+    connection: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -123,6 +135,8 @@ struct ExecuteParams {
     action: String,
     /// BSL source to `check`/`run`, or the single expression to `eval`.
     code: String,
+    /// Named live 1C connection (optional when only one/default connection exists).
+    connection: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -145,6 +159,8 @@ struct EventLogParams {
     contains: Option<String>,
     /// Max records (newest first), default 100, capped at 1000.
     limit: Option<u32>,
+    /// Named live 1C connection (optional when only one/default connection exists).
+    connection: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -335,6 +351,46 @@ impl McpServer {
         use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome};
 
         let p = params.0;
+        let mode = p.mode.as_deref().unwrap_or("auto");
+        if !matches!(mode, "auto" | "source" | "infobase") {
+            return Err(McpError::invalid_params(
+                format!("Unknown metadata mode '{mode}'. Expected: auto, source, infobase"),
+                None,
+            ));
+        }
+        let live = mode == "infobase" || (mode == "auto" && p.connection.is_some());
+        if live {
+            return match p.action.as_str() {
+                "tree" => {
+                    let meta_type = require(p.meta_type, "meta_type", "tree in infobase mode")?;
+                    tools::metadata::get_live_metadata_tree(
+                        &self.state,
+                        p.connection.as_deref(),
+                        &meta_type,
+                        p.name_mask,
+                        p.max_items.unwrap_or(100),
+                    )
+                    .await
+                }
+                "object" => {
+                    let object_type = require(p.object_type, "object_type", "object")?;
+                    let object_name = require(p.object_name, "object_name", "object")?;
+                    tools::metadata::get_live_metadata_object(
+                        &self.state,
+                        p.connection.as_deref(),
+                        &object_type,
+                        &object_name,
+                    )
+                    .await
+                }
+                other => Err(McpError::invalid_params(
+                    format!(
+                        "Metadata action '{other}' is unavailable in infobase mode. Expected: tree, object"
+                    ),
+                    None,
+                )),
+            };
+        }
 
         // `form` reads managed-form XML straight off the configuration source root — data
         // the metadata substrate does not carry — so it needs neither the resident db nor
@@ -556,11 +612,18 @@ impl McpServer {
             "schema" => Ok(tools::query::schema()),
             "validate" => {
                 let query = require(p.query, "query", "validate")?;
-                tools::query::validate_query(&self.state, &query).await
+                tools::query::validate_query(&self.state, &query, p.connection.as_deref()).await
             }
             "execute" => {
                 let query = require(p.query, "query", "execute")?;
-                tools::query::execute_query(&self.state, &query, p.limit, p.parameters).await
+                tools::query::execute_query(
+                    &self.state,
+                    &query,
+                    p.limit,
+                    p.parameters,
+                    p.connection.as_deref(),
+                )
+                .await
             }
             other => Err(McpError::invalid_params(
                 format!("Unknown action '{other}'. Expected: validate, execute, schema"),
@@ -578,9 +641,16 @@ impl McpServer {
     async fn execute(&self, params: Parameters<ExecuteParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         match p.action.as_str() {
-            "check" => tools::execution::check_syntax(&self.state, &p.code).await,
-            "run" => tools::execution::execute_code(&self.state, &p.code).await,
-            "eval" => tools::execution::eval_expression(&self.state, &p.code).await,
+            "check" => {
+                tools::execution::check_syntax(&self.state, &p.code, p.connection.as_deref()).await
+            }
+            "run" => {
+                tools::execution::execute_code(&self.state, &p.code, p.connection.as_deref()).await
+            }
+            "eval" => {
+                tools::execution::eval_expression(&self.state, &p.code, p.connection.as_deref())
+                    .await
+            }
             other => Err(McpError::invalid_params(
                 format!("Unknown action '{other}'. Expected: check, run, eval"),
                 None,
@@ -612,6 +682,7 @@ impl McpServer {
                 metadata: p.metadata,
                 contains: p.contains,
                 limit: p.limit,
+                connection: p.connection,
             },
         )
         .await
@@ -1481,6 +1552,7 @@ mod contract {
             Filters: `date_from`/`date_to`, `level`, `user`, `event`, `metadata`, and `contains`
             (post-read substring over the newest `limit` window). `limit` is newest-first (default
             100, max 1000). Requires the extension deployed with event-log read rights.
+              - connection: Named live 1C connection (optional when only one/default connection exists).
               - contains: Case-insensitive substring filter over the comment/data columns, applied AFTER the
             platform read — so it narrows the already-`limit`-capped newest window, it does not
             scan the whole log. Widen `limit` if a match may lie deeper.
@@ -1500,6 +1572,7 @@ mod contract {
             single expression in `code`. `run`/`eval` execute code, so this tool is not read-only.
               - action: check | run | eval.
               - code: BSL source to `check`/`run`, or the single expression to `eval`.
+              - connection: Named live 1C connection (optional when only one/default connection exists).
 
             ## graph
             Whole-config semantic call graph: traverse who-calls-whom and object/metadata usage by
@@ -1537,10 +1610,15 @@ mod contract {
             managed form's layout (needs `object_type`). Reads the resident analysis host; while it
             builds it returns a retry envelope, not an error.
               - action: info | tree | object | form.
+              - connection: Named live 1C connection for `mode=infobase` (optional).
               - filter: `tree`: case-insensitive substring to narrow the returned tree (optional).
               - form_name: `form`: managed-form name (optional; omit for the object's default form).
+              - max_items: `tree` in infobase mode: maximum returned objects (default 100, max 1000).
               - max_output_tokens: `tree` (filtered listing): output budget in tokens (~4 chars each); an over-budget
             listing is truncated at a line boundary with a continuation note (default 6000).
+              - meta_type: `tree` in infobase mode: metadata collection, e.g. `Справочники`/`Documents`.
+              - mode: auto | source | infobase (default auto).
+              - name_mask: `tree` in infobase mode: case-insensitive object name/synonym substring.
               - object_name: Metadata object name, e.g. `ЗаказКлиента`. Required for `object`; for `form` it
             selects the owner object (omit for a configuration-level common form).
               - object_type: Metadata object type, e.g. `Документ`/`Справочник`/`ОбщийМодуль`. Required for
@@ -1554,6 +1632,7 @@ mod contract {
             required); `execute` — run it (`query` required; optional `limit`, `parameters`);
             `schema` — the SDBL schema reference.
               - action: validate | execute | schema.
+              - connection: Named live 1C connection (optional when only one/default connection exists).
               - limit: `execute`: cap on returned rows (optional).
               - parameters: `execute`: named SDBL query parameters (`&Param` → value) (optional).
               - query: SDBL text — required for `validate`/`execute`, omitted for `schema`.

@@ -1,6 +1,23 @@
 use std::{collections::BTreeMap, env, error::Error, io, path::PathBuf, time::Duration};
 
 use clap::{Args, Subcommand, ValueEnum};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct OnecConnectionsFile {
+    connections: BTreeMap<String, OnecConnectionConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OnecConnectionConfig {
+    url: String,
+    #[serde(default)]
+    user_env: String,
+    #[serde(default)]
+    password_env: String,
+    #[serde(default)]
+    allow_execute: bool,
+}
 
 #[derive(Subcommand)]
 pub enum McpCommand {
@@ -608,6 +625,7 @@ fn build_server(
                 tracing::info!(%url, "Configuring 1C HTTP client");
                 state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));
             }
+            configure_named_onec_connections(&mut state)?;
             state.warm_start();
             state
         }
@@ -615,6 +633,54 @@ fn build_server(
     };
 
     Ok(mcp_server::McpServer::new(profile, state))
+}
+
+fn configure_named_onec_connections(
+    state: &mut mcp_server::SharedState,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let Some(path) = env::var_os("BSL_ONEC_CONNECTIONS_FILE") else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    let text = std::fs::read_to_string(&path)?;
+    let config: OnecConnectionsFile = serde_json::from_str(&text)?;
+    for (name, connection) in config.connections {
+        if name.trim().is_empty() || connection.url.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "1C connection name and url must not be empty",
+            )
+            .into());
+        }
+        let user = if connection.user_env.is_empty() {
+            String::new()
+        } else {
+            env::var(&connection.user_env).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("missing environment variable {}", connection.user_env),
+                )
+            })?
+        };
+        let password = if connection.password_env.is_empty() {
+            String::new()
+        } else {
+            env::var(&connection.password_env).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("missing environment variable {}", connection.password_env),
+                )
+            })?
+        };
+        state.add_onec_connection(
+            name,
+            mcp_server::OnecConnection::new(
+                onec_client::Client::new(&connection.url, &user, &password),
+                connection.allow_execute,
+            ),
+        );
+    }
+    Ok(())
 }
 
 fn resolve_scope(

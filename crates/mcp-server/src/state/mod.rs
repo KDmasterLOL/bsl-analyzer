@@ -11,6 +11,7 @@ use crate::diagnostics_state::DiagnosticsState;
 use crate::graph::GraphState;
 use bsl_search::IndexProgress;
 use onec_client::Client as OnecClient;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,7 @@ pub struct SharedState {
     /// `metadata(form)` resolve object directories relative to THIS root, not the repo root.
     source_root: Option<PathBuf>,
     onec_client: Option<OnecClient>,
+    onec_connections: BTreeMap<String, OnecConnection>,
     debug_session: Arc<Mutex<Option<bsl_debug::session::DebugSession>>>,
     search_engine: SharedSearchEngine,
     index_progress: Arc<IndexProgress>,
@@ -67,6 +69,26 @@ pub struct SharedState {
     /// held here so `init_search` reuses the same flight the publish hook does — otherwise the
     /// two could race an index swap and last-writer-wins would install a stale index.
     embed_flight: Arc<embed::EmbedFlight>,
+}
+
+#[derive(Clone)]
+pub struct OnecConnection {
+    client: OnecClient,
+    allow_execute: bool,
+}
+
+impl OnecConnection {
+    pub fn new(client: OnecClient, allow_execute: bool) -> Self {
+        Self { client, allow_execute }
+    }
+
+    pub fn client(&self) -> &OnecClient {
+        &self.client
+    }
+
+    pub fn allow_execute(&self) -> bool {
+        self.allow_execute
+    }
 }
 
 impl SharedState {
@@ -103,6 +125,43 @@ impl SharedState {
 
     pub fn onec_client(&self) -> Option<&OnecClient> {
         self.onec_client.as_ref()
+    }
+
+    pub fn add_onec_connection(&mut self, name: String, connection: OnecConnection) {
+        self.onec_connections.insert(name, connection);
+    }
+
+    pub fn onec_connection(&self, name: Option<&str>) -> Result<OnecConnection, String> {
+        if let Some(name) = name {
+            return self.onec_connections.get(name).cloned().ok_or_else(|| {
+                if self.onec_connections.is_empty() {
+                    format!(
+                        "Unknown 1C connection '{name}'. No named connections are configured; \
+                         omit `connection` to use the --onec-url client."
+                    )
+                } else {
+                    let available =
+                        self.onec_connections.keys().cloned().collect::<Vec<_>>().join(", ");
+                    format!("Unknown 1C connection '{name}'. Available: {available}")
+                }
+            });
+        }
+        if let Some(client) = &self.onec_client {
+            // The legacy `--onec-url` client predates per-connection gating; keep run/eval
+            // enabled for it — execution is still guarded by the 1C-side role split.
+            return Ok(OnecConnection::new(client.clone(), true));
+        }
+        if self.onec_connections.len() == 1 {
+            return Ok(self.onec_connections.values().next().expect("one connection").clone());
+        }
+        if self.onec_connections.is_empty() {
+            return Err(
+                "1C HTTP клиент не настроен. Укажите --onec-url или BSL_ONEC_CONNECTIONS_FILE."
+                    .to_string(),
+            );
+        }
+        let available = self.onec_connections.keys().cloned().collect::<Vec<_>>().join(", ");
+        Err(format!("1C connection is required. Available: {available}"))
     }
 
     pub fn set_workspace_root(&mut self, root: PathBuf) {
@@ -182,5 +241,42 @@ impl SharedState {
     /// reindex disk-reads it — so search never regresses when the resident is unavailable.
     pub(crate) fn prefetch_resident_overlay(engine: &SharedSearchEngine) {
         sync::prefetch_resident_overlay(engine);
+    }
+}
+
+#[cfg(test)]
+mod onec_connection_tests {
+    use super::*;
+
+    #[test]
+    fn named_connection_is_selected_and_carries_execute_policy() {
+        let mut state = SharedState::shared();
+        state.add_onec_connection(
+            "test".into(),
+            OnecConnection::new(OnecClient::new("http://localhost/test", "", ""), true),
+        );
+        assert!(state.onec_connection(Some("test")).unwrap().allow_execute());
+        let error = match state.onec_connection(Some("missing")) {
+            Ok(_) => panic!("missing connection must fail"),
+            Err(error) => error,
+        };
+        assert!(error.contains("test"));
+    }
+
+    #[test]
+    fn legacy_client_keeps_execute_enabled() {
+        let mut state = SharedState::shared();
+        state.set_onec_client(OnecClient::new("http://localhost/legacy", "", ""));
+        assert!(state.onec_connection(None).unwrap().allow_execute());
+    }
+
+    #[test]
+    fn sole_named_connection_is_default() {
+        let mut state = SharedState::shared();
+        state.add_onec_connection(
+            "only".into(),
+            OnecConnection::new(OnecClient::new("http://localhost/only", "", ""), false),
+        );
+        assert!(!state.onec_connection(None).unwrap().allow_execute());
     }
 }

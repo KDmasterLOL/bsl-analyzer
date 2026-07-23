@@ -73,6 +73,20 @@ impl Client {
         self.post("/event-log", request).await
     }
 
+    pub async fn list_metadata(
+        &self,
+        request: &MetadataListRequest,
+    ) -> Result<MetadataListResult, Error> {
+        self.post("/metadata-list", request).await
+    }
+
+    pub async fn metadata_structure(
+        &self,
+        request: &MetadataStructureRequest,
+    ) -> Result<MetadataStructureResult, Error> {
+        self.post("/metadata-structure", request).await
+    }
+
     async fn post<T: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         endpoint: &str,
@@ -191,4 +205,60 @@ pub struct EventLogResult {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub total: u32,
     pub truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetadataListRequest {
+    pub meta_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_mask: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MetadataListItem {
+    pub name: String,
+    pub full_name: String,
+    pub synonym: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MetadataListResult {
+    pub items: Vec<MetadataListItem>,
+    pub returned: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetadataStructureRequest {
+    pub meta_type: String,
+    pub name: String,
+}
+
+pub type MetadataStructureResult = serde_json::Value;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_list_omits_empty_mask() {
+        let request =
+            MetadataListRequest { meta_type: "Constants".into(), name_mask: None, limit: 10 };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["meta_type"], "Constants");
+        assert!(value.get("name_mask").is_none());
+        assert_eq!(value["limit"], 10);
+    }
+
+    #[test]
+    fn metadata_structure_contract_is_stable() {
+        let request = MetadataStructureRequest {
+            meta_type: "Catalogs".into(),
+            name: "Организации".into(),
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["meta_type"], "Catalogs");
+        assert_eq!(value["name"], "Организации");
+    }
 }

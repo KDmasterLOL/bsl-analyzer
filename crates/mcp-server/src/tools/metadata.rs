@@ -6,6 +6,60 @@ use rmcp::ErrorData as McpError;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+pub async fn get_live_metadata_tree(
+    state: &crate::SharedState,
+    connection: Option<&str>,
+    meta_type: &str,
+    name_mask: Option<String>,
+    limit: u32,
+) -> Result<CallToolResult, McpError> {
+    let selected =
+        state.onec_connection(connection).map_err(|e| McpError::invalid_params(e, None))?;
+    let result = selected
+        .client()
+        .list_metadata(&onec_client::MetadataListRequest {
+            meta_type: meta_type.to_string(),
+            name_mask,
+            limit: limit.clamp(1, 1000),
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Ошибка чтения метаданных 1С: {e}"), None))?;
+    Ok(crate::tools::response::structured(serde_json::json!({
+        "source": "infobase",
+        "connection": connection,
+        "items": result.items.into_iter().map(|item| serde_json::json!({
+            "name": item.name,
+            "full_name": item.full_name,
+            "synonym": item.synonym,
+        })).collect::<Vec<_>>(),
+        "returned": result.returned,
+        "truncated": result.truncated,
+    })))
+}
+
+pub async fn get_live_metadata_object(
+    state: &crate::SharedState,
+    connection: Option<&str>,
+    meta_type: &str,
+    name: &str,
+) -> Result<CallToolResult, McpError> {
+    let selected =
+        state.onec_connection(connection).map_err(|e| McpError::invalid_params(e, None))?;
+    let value = selected
+        .client()
+        .metadata_structure(&onec_client::MetadataStructureRequest {
+            meta_type: meta_type.to_string(),
+            name: name.to_string(),
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Ошибка чтения метаданных 1С: {e}"), None))?;
+    Ok(crate::tools::response::structured(serde_json::json!({
+        "source": "infobase",
+        "connection": connection,
+        "object": value,
+    })))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServiceKind {
     Http,
