@@ -27,10 +27,21 @@ vfs.workspace = true
 walkdir.workspace = true
 rayon.workspace = true
 
-rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "1.7", features = [
+    "server",
+    "macros",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
 # rmcp's per-request cancellation token type (`notifications/cancelled` bridge);
 # already in the tree via rmcp itself.
 tokio-util = "0.7"
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+] }
+tower-http = { version = "0.6", features = ["limit"] }
 schemars = "1.2"
 tokio = { version = "1", features = [
     "net",
@@ -71,6 +82,14 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 [dev-dependencies]
 expect-test.workspace = true
 tempfile.workspace = true
-# Client feature only for the broker integration test (drives a real MCP handshake
-# through the daemon). Unified with the lib's server features at build time.
-rmcp = { version = "1.7", features = ["client"] }
+# Client features for integration tests that drive real MCP handshakes through
+# the broker and Streamable HTTP transports. Unified with the library's server
+# features at build time.
+rmcp = { version = "1.7", features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls",
+] }
