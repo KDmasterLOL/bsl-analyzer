@@ -3,27 +3,8 @@ use super::SharedState;
 use bsl_search::{IndexProgress, SearchEngine};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-
-/// RAII counter for in-flight background indexing. Increments on construction and
-/// decrements on drop (including unwind), so a panicking or early-returning indexing
-/// task always releases its hold and the broker's liveness signal returns to idle.
-pub(super) struct BackgroundWorkGuard(Arc<AtomicUsize>);
-
-impl BackgroundWorkGuard {
-    pub(super) fn new(counter: &Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::SeqCst);
-        Self(Arc::clone(counter))
-    }
-}
-
-impl Drop for BackgroundWorkGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
 
 /// The ONE embed single-flight for the whole workspace. Both the boot pass (fills the initial
 /// NULL embeddings after a fused cold build) and the post-context-refresh re-embed kick funnel
@@ -92,6 +73,13 @@ impl EmbedFlight {
     #[cfg(test)]
     fn is_in_flight(&self) -> bool {
         self.lock().in_flight
+    }
+
+    /// Whether a caller that lost the claim recorded a rerun — the observable proof that its
+    /// work was absorbed into the running pass rather than dropped or spawned as a second one.
+    #[cfg(test)]
+    fn rerun_pending(&self) -> bool {
+        self.lock().rerun_pending
     }
 
     #[cfg(test)]
@@ -184,7 +172,6 @@ impl SharedState {
         search_engine: SharedSearchEngine,
         workspace_root: PathBuf,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
-        background_indexers: Arc<AtomicUsize>,
         index_progress: Arc<IndexProgress>,
         embed_flight: Arc<EmbedFlight>,
     ) -> Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync> {
@@ -193,7 +180,6 @@ impl SharedState {
                 &search_engine,
                 &workspace_root,
                 &semantic_runtime,
-                &background_indexers,
                 &index_progress,
                 &embed_flight,
                 signal,
@@ -392,7 +378,6 @@ impl SharedState {
         engine: &SharedSearchEngine,
         workspace_root: &Path,
         semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
-        background_indexers: &Arc<AtomicUsize>,
         index_progress: &Arc<IndexProgress>,
         embed_flight: &Arc<EmbedFlight>,
         signal: crate::graph::GraphPublishSignal,
@@ -467,13 +452,7 @@ impl SharedState {
         // the OLD vector in-process and vanish from semantic results after a restart until
         // the boot pass. Kick the same background embed machinery workspace init uses.
         if cleared_embeddings > 0 {
-            Self::kick_context_reembed(
-                engine,
-                semantic_runtime,
-                background_indexers,
-                index_progress,
-                embed_flight,
-            );
+            Self::kick_context_reembed(engine, semantic_runtime, index_progress, embed_flight);
         }
         topology_handled
     }
@@ -485,7 +464,6 @@ impl SharedState {
     fn kick_context_reembed(
         engine: &SharedSearchEngine,
         semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
-        background_indexers: &Arc<AtomicUsize>,
         index_progress: &Arc<IndexProgress>,
         embed_flight: &Arc<EmbedFlight>,
     ) {
@@ -502,7 +480,6 @@ impl SharedState {
         Self::spawn_embed_pass(
             Arc::clone(engine),
             Arc::clone(semantic_runtime),
-            Arc::clone(background_indexers),
             Arc::clone(index_progress),
             Arc::clone(embed_flight),
             db_path,
@@ -523,7 +500,6 @@ impl SharedState {
     pub(super) fn spawn_embed_pass(
         engine: SharedSearchEngine,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
-        background_indexers: Arc<AtomicUsize>,
         index_progress: Arc<IndexProgress>,
         embed_flight: Arc<EmbedFlight>,
         db_path: PathBuf,
@@ -534,8 +510,6 @@ impl SharedState {
             return;
         }
 
-        // Take the daemon-alive hold BEFORE spawning so the count never dips to zero.
-        let work_guard = BackgroundWorkGuard::new(&background_indexers);
         Self::set_semantic_runtime_status(&semantic_runtime, SemanticRuntimeStatus::Indexing);
         // Clone the handles the thread owns; the originals stay behind for the spawn-error path.
         let engine = Arc::clone(&engine);
@@ -543,7 +517,6 @@ impl SharedState {
         let flight = Arc::clone(&embed_flight);
         let spawned =
             std::thread::Builder::new().name("bsl-search-embed".to_owned()).spawn(move || {
-                let _work_guard = work_guard;
                 // Restore the flight claim on any abnormal exit; a clean release calls
                 // `disarm()` first so this never stomps a later owner that already re-claimed.
                 let mut claim_guard = EmbedClaimGuard::new(Arc::clone(&flight));
@@ -629,36 +602,12 @@ mod tests {
         mock_embedding_env, mock_semantic_config, spawn_mock_embedding_server, write_common_module,
         ENV_LOCK,
     };
-    use super::{BackgroundWorkGuard, SharedState};
+    use super::SharedState;
     use bsl_search::SearchEngine;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
-    #[test]
-    fn background_work_guard_releases_on_every_path_including_panic() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let counter = Arc::new(AtomicUsize::new(0));
-        {
-            let _g1 = BackgroundWorkGuard::new(&counter);
-            assert_eq!(counter.load(Ordering::SeqCst), 1);
-            let _g2 = BackgroundWorkGuard::new(&counter);
-            assert_eq!(counter.load(Ordering::SeqCst), 2, "nested tasks stack");
-        }
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "both holds released on scope exit");
-
-        // The embedding pass can bail via `?` or panic mid-run; the broker's liveness
-        // signal must still fall back to idle, or the daemon would never shut down.
-        let counter2 = Arc::clone(&counter);
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _g = BackgroundWorkGuard::new(&counter2);
-            assert_eq!(counter2.load(Ordering::SeqCst), 1);
-            panic!("simulated indexing-task panic");
-        }));
-        assert!(unwound.is_err(), "the task panicked");
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "the hold was released on unwind");
-    }
     /// The re-embed kick: after a context refresh NULLs a chunk's embedding, the kick's
     /// background pass re-embeds it and swaps the fresh vector into the LIVE engine, so the
     /// re-contexted chunk answers semantic queries in-process (not only after a restart).
@@ -706,14 +655,12 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Indexing));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
 
         SharedState::kick_context_reembed(
             &engine_arc,
             &semantic_runtime,
-            &background_indexers,
             &index_progress,
             &embed_flight,
         );
@@ -778,25 +725,21 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         // A pass is already in flight: the kick must be absorbed, spawning nothing.
         let embed_flight = super::EmbedFlight::in_flight_for_test();
 
-        let before = background_indexers.load(Ordering::SeqCst);
         SharedState::kick_context_reembed(
             &engine_arc,
             &semantic_runtime,
-            &background_indexers,
             &index_progress,
             &embed_flight,
         );
-        assert_eq!(
-            background_indexers.load(Ordering::SeqCst),
-            before,
-            "a kick while a pass is claimed spawns no second pass",
-        );
         assert!(embed_flight.is_in_flight(), "the existing claim is untouched");
+        assert!(
+            embed_flight.rerun_pending(),
+            "a kick while a pass is claimed is absorbed as a rerun, not spawned as a second pass",
+        );
     }
 
     /// End-to-end lifecycle net through PRODUCTION wiring, using real components (real store,
@@ -853,14 +796,12 @@ mod tests {
         // Wire the SAME publish hook the daemon builds, so the graph's real publish — not a
         // hand-call — drives the context refresh and re-embed.
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
         let hook = SharedState::build_publish_hook(
             Arc::clone(&engine_arc),
             workspace.clone(),
             Arc::clone(&semantic_runtime),
-            Arc::clone(&background_indexers),
             Arc::clone(&index_progress),
             Arc::clone(&embed_flight),
         );
@@ -999,7 +940,6 @@ mod tests {
         }
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
 
@@ -1009,7 +949,6 @@ mod tests {
             &engine_arc,
             &workspace,
             &semantic_runtime,
-            &background_indexers,
             &index_progress,
             &embed_flight,
             crate::graph::GraphPublishSignal {
@@ -1031,7 +970,6 @@ mod tests {
             &engine_arc,
             &workspace,
             &semantic_runtime,
-            &background_indexers,
             &index_progress,
             &embed_flight,
             crate::graph::GraphPublishSignal {
@@ -1094,7 +1032,6 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
 
@@ -1105,7 +1042,6 @@ mod tests {
             let engine_arc = Arc::clone(&engine_arc);
             let workspace = workspace.clone();
             let semantic_runtime = Arc::clone(&semantic_runtime);
-            let background_indexers = Arc::clone(&background_indexers);
             let index_progress = Arc::clone(&index_progress);
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
@@ -1114,7 +1050,6 @@ mod tests {
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
-                    &background_indexers,
                     &index_progress,
                     &embed_flight,
                     signal,
@@ -1186,7 +1121,6 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
         let fired = Arc::new(AtomicUsize::new(0));
@@ -1194,7 +1128,6 @@ mod tests {
             let engine_arc = Arc::clone(&engine_arc);
             let workspace = workspace.clone();
             let semantic_runtime = Arc::clone(&semantic_runtime);
-            let background_indexers = Arc::clone(&background_indexers);
             let index_progress = Arc::clone(&index_progress);
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
@@ -1203,7 +1136,6 @@ mod tests {
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
-                    &background_indexers,
                     &index_progress,
                     &embed_flight,
                     signal,
@@ -1304,7 +1236,6 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
         let fired = Arc::new(AtomicUsize::new(0));
@@ -1312,7 +1243,6 @@ mod tests {
             let engine_arc = Arc::clone(&engine_arc);
             let workspace = workspace.clone();
             let semantic_runtime = Arc::clone(&semantic_runtime);
-            let background_indexers = Arc::clone(&background_indexers);
             let index_progress = Arc::clone(&index_progress);
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
@@ -1321,7 +1251,6 @@ mod tests {
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
-                    &background_indexers,
                     &index_progress,
                     &embed_flight,
                     signal,
@@ -1417,7 +1346,6 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
         let fired = Arc::new(AtomicUsize::new(0));
@@ -1425,7 +1353,6 @@ mod tests {
             let engine_arc = Arc::clone(&engine_arc);
             let workspace = workspace.clone();
             let semantic_runtime = Arc::clone(&semantic_runtime);
-            let background_indexers = Arc::clone(&background_indexers);
             let index_progress = Arc::clone(&index_progress);
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
@@ -1434,7 +1361,6 @@ mod tests {
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
-                    &background_indexers,
                     &index_progress,
                     &embed_flight,
                     signal,
@@ -1567,12 +1493,10 @@ mod tests {
         }
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Indexing));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         SharedState::spawn_embed_pass(
             Arc::clone(&engine_arc),
             semantic_runtime,
-            background_indexers,
             index_progress,
             Arc::clone(&embed_flight),
             db_path.clone(),
@@ -1650,13 +1574,11 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Indexing));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
         SharedState::kick_context_reembed(
             &engine_arc,
             &semantic_runtime,
-            &background_indexers,
             &index_progress,
             &embed_flight,
         );

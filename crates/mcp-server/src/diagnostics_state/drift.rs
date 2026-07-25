@@ -832,28 +832,6 @@ mod tests {
         assert!(reloaded, "config edit reloads the resident with the updated diagnostics config");
     }
 
-    /// `is_busy` is true while a build is `Loading` or a reload is `Running`, and false
-    /// otherwise — the signal the broker ORs in so it keeps the backend alive through a
-    /// cold diagnostics build but lets it idle-exit once the resident is settled.
-    #[test]
-    fn is_busy_reflects_loading_and_reload() {
-        let state = DiagnosticsState::for_workspace(std::env::temp_dir());
-        assert!(!state.is_busy(), "idle is not busy");
-
-        lock_recover(&state.inner).status = DiagnosticsStatus::Loading;
-        assert!(state.is_busy(), "loading is busy");
-
-        {
-            let mut inner = lock_recover(&state.inner);
-            inner.status = DiagnosticsStatus::Ready { files: 0 };
-            inner.reload = ReloadState::Running;
-        }
-        assert!(state.is_busy(), "a running reload is busy even when ready");
-
-        lock_recover(&state.inner).reload = ReloadState::Idle;
-        assert!(!state.is_busy(), "ready with no reload is not busy");
-    }
-
     /// A disabled handle never loads and reads degrade to `Disabled`.
     #[test]
     fn disabled_handle_does_not_load() {

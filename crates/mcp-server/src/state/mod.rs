@@ -13,7 +13,6 @@ use bsl_search::IndexProgress;
 use onec_client::Client as OnecClient;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(crate) use types::{
@@ -59,12 +58,6 @@ pub struct SharedState {
     /// sink already runs off a clone taken at construction.
     #[allow(dead_code)]
     change_hub: Option<WorkspaceChangeHub>,
-    /// Number of background index/embedding tasks currently in flight. The broker
-    /// backend keeps itself alive while this is non-zero so it never idle-exits (and
-    /// kills) a long embedding pass. Incremented at the start of each such task and
-    /// decremented by [`BackgroundWorkGuard`] on every exit path — including early `?`
-    /// returns and panics — so it can never get stuck above zero.
-    background_indexers: Arc<AtomicUsize>,
     /// The ONE embed single-flight shared by the boot pass and the post-refresh re-embed kick,
     /// held here so `init_search` reuses the same flight the publish hook does — otherwise the
     /// two could race an index swap and last-writer-wins would install a stale index.
@@ -189,16 +182,6 @@ impl SharedState {
 
     pub fn index_progress(&self) -> &Arc<IndexProgress> {
         &self.index_progress
-    }
-
-    /// Whether a long-running background index/embedding task is in flight. The broker
-    /// backend uses this so it does not idle-exit (and kill the task) just because no
-    /// client is currently connected — the expensive embedding run, which can take far
-    /// longer than the idle window, must be allowed to finish so its already-spent work
-    /// is not wasted on the next cold start. Backed by a guarded counter that is released
-    /// on every task exit path (including panics), so the signal cannot get stuck.
-    pub fn background_indexing_active(&self) -> bool {
-        self.background_indexers.load(Ordering::SeqCst) > 0
     }
 
     pub(crate) fn semantic_runtime(&self) -> Arc<Mutex<SemanticRuntimeStatus>> {

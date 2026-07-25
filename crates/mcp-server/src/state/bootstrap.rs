@@ -1,4 +1,4 @@
-use super::embed::{BackgroundWorkGuard, EmbedFlight};
+use super::embed::EmbedFlight;
 use super::types::{
     OverlayInit, OverlayWarmupState, PendingEmbed, SemanticRuntimeStatus, SharedSearchEngine,
     WorkspaceSearchInit, WorkspaceSearchMode,
@@ -12,7 +12,7 @@ use crate::diagnostics_state::DiagnosticsState;
 use crate::graph::GraphState;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
     env,
@@ -60,7 +60,6 @@ impl SharedState {
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let overlay_warmup = Arc::new(Mutex::new(OverlayWarmupState::Pending));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let watcher_ready = Arc::new(AtomicBool::new(false));
         // Only the cheap, local part of baseline resolution runs here (config, env,
         // credential helper); the PG connect itself is deferred to a background thread
@@ -106,7 +105,6 @@ impl SharedState {
             Arc::clone(&search_engine),
             source_dir.clone(),
             Arc::clone(&semantic_runtime),
-            Arc::clone(&background_indexers),
             Arc::clone(&index_progress),
             Arc::clone(&embed_flight),
         );
@@ -130,7 +128,6 @@ impl SharedState {
             Arc::clone(&index_progress),
             Arc::clone(&semantic_runtime),
             Arc::clone(&overlay_warmup),
-            Arc::clone(&background_indexers),
             source_dir.clone(),
             Arc::clone(&watcher_ready),
             baseline.clone(),
@@ -163,7 +160,6 @@ impl SharedState {
             graph,
             diagnostics,
             change_hub: Some(change_hub),
-            background_indexers,
             embed_flight,
         })
     }
@@ -178,7 +174,6 @@ impl SharedState {
         index_progress: Arc<IndexProgress>,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         overlay_warmup: Arc<Mutex<OverlayWarmupState>>,
-        background_indexers: Arc<AtomicUsize>,
         workspace_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
         baseline: DeferredBaselineRuntime,
@@ -190,9 +185,6 @@ impl SharedState {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
             .spawn(move || {
-                // Held for the whole init (incl. a multi-minute fused cold build) so the
-                // broker stays alive even if the launching client disconnects mid-build.
-                let _init_guard = BackgroundWorkGuard::new(&background_indexers);
                 tracing::info!("search engine initialization started in background");
 
                 // The graph is a boot subsystem like the resident, not a lazy one. In
@@ -341,7 +333,6 @@ impl SharedState {
                     Self::spawn_embed_pass(
                         Arc::clone(&search_engine),
                         Arc::clone(&semantic_runtime),
-                        Arc::clone(&background_indexers),
                         Arc::clone(&index_progress),
                         Arc::clone(&embed_flight),
                         pending.db_path,
@@ -357,11 +348,9 @@ impl SharedState {
                     let search_engine = Arc::clone(&search_engine);
                     let semantic_runtime = Arc::clone(&semantic_runtime);
                     let overlay_warmup = Arc::clone(&overlay_warmup);
-                    let warmup_guard = BackgroundWorkGuard::new(&background_indexers);
                     std::thread::Builder::new()
                         .name("bsl-search-overlay-warmup".to_owned())
                         .spawn(move || {
-                            let _warmup_guard = warmup_guard;
                             tracing::info!("workspace overlay semantic warmup started");
                             Self::run_overlay_warmup(&search_engine, &overlay_warmup);
                             // Semantic stays available via the baseline even when the overlay
@@ -381,7 +370,6 @@ impl SharedState {
         let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let project_config = project_root.as_deref().and_then(|root| {
             match project_model::ProjectConfig::load(root) {
                 Ok(config) => config,
@@ -406,11 +394,9 @@ impl SharedState {
             let progress_arc = Arc::clone(&index_progress);
             let semantic_runtime_arc = Arc::clone(&semantic_runtime);
             let baseline = baseline.clone();
-            let init_guard = BackgroundWorkGuard::new(&background_indexers);
             std::thread::Builder::new()
                 .name("bsl-search-reference-init".to_owned())
                 .spawn(move || {
-                    let _init_guard = init_guard;
                     tracing::info!("reference search engine initialization started in background");
                     // Wait for the deferred connect before deciding shared-vs-local:
                     // a still-pending baseline read as `None` would rebuild the local
@@ -460,7 +446,6 @@ impl SharedState {
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
-            background_indexers,
             embed_flight: EmbedFlight::new(),
         }
     }
@@ -481,7 +466,6 @@ impl SharedState {
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
-            background_indexers: Arc::new(AtomicUsize::new(0)),
             embed_flight: EmbedFlight::new(),
         }
     }
@@ -1169,7 +1153,6 @@ impl SharedState {
                 Arc::clone(&self.index_progress),
                 Arc::clone(&self.semantic_runtime),
                 Arc::clone(&self.overlay_warmup),
-                Arc::clone(&self.background_indexers),
                 root,
                 watcher_ready,
                 self.baseline.clone(),
@@ -1216,7 +1199,7 @@ mod tests {
         SearchEngine,
     };
     use std::fs;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
@@ -1273,7 +1256,6 @@ mod tests {
             IndexProgress::new(),
             Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             Arc::new(Mutex::new(OverlayWarmupState::Pending)),
-            Arc::new(AtomicUsize::new(0)),
             workspace.clone(),
             Arc::new(AtomicBool::new(false)),
             baseline,

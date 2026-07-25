@@ -359,15 +359,6 @@ impl McpServer {
         self.state.shutdown();
     }
 
-    /// Whether long-running background work is still in flight — a search/embedding
-    /// pass OR a diagnostics resident build/reload. The broker backend polls this to
-    /// avoid idle-exiting (and killing the work) while it runs, so an expensive
-    /// embedding run or a cold diagnostics build finishes instead of restarting on the
-    /// next request. See [`SharedState::background_indexing_active`].
-    pub fn background_work_active(&self) -> bool {
-        self.state.background_indexing_active() || self.state.diagnostics().is_busy()
-    }
-
     /// Browse the configuration's metadata: objects, their structure, and managed forms.
     /// Use to answer "what objects exist / what does object X contain / what is on form Y" —
     /// attributes, tabular sections, forms, types — straight from the metadata substrate. Not

@@ -149,15 +149,6 @@ impl DiagnosticsState {
         lock_recover(&self.inner).status.clone()
     }
 
-    /// Whether a resident build or reload is in flight. The broker backend ORs this
-    /// into its background-work signal so it does not idle-exit (and kill) a cold
-    /// diagnostics build during a client-disconnect window — the build runs on its own
-    /// thread and would otherwise be invisible to the idle timer, wasting its work.
-    pub(crate) fn is_busy(&self) -> bool {
-        let inner = lock_recover(&self.inner);
-        inner.status == DiagnosticsStatus::Loading || inner.reload == ReloadState::Running
-    }
-
     /// A lifecycle snapshot for the `status` action and the enriched `loading` envelope.
     pub(crate) fn status_report(&self) -> StatusReport {
         let inner = lock_recover(&self.inner);
