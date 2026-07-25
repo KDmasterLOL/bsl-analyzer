@@ -94,6 +94,15 @@ pub enum Task {
     /// Posted by [`AnalysisGuard`] on drop so the in-flight counter is always
     /// balanced even if the job panicked before producing its result task.
     AnalysisJobFinished,
+    /// A background vendor-diff analysis-scope build finished. Applied on the
+    /// event loop only when `generation` matches the in-flight build.
+    AnalysisScopeReady {
+        generation: u64,
+        result: Result<Arc<base_db::AnalysisScope>, String>,
+        /// Resolved (base, HEAD) OIDs at build time; the idle tick compares
+        /// against them to notice ref-only movement with no file events.
+        identity: Option<(String, String)>,
+    },
     /// One chunk of the deferred whole-project diagnostics batch (Stream B) finished on
     /// a worker; the [`WorkspaceBatchOutcome`] says what to do next. The event loop
     /// applies the push (diffed against the last one, skipping files opened since the
@@ -239,6 +248,28 @@ pub struct GlobalState {
     pub call_hierarchy_wait_policy: CallHierarchyWaitPolicy,
     pub(crate) next_request_id: AtomicI32,
     pub(crate) diagnostics_config: DiagnosticsConfigInput,
+
+    /// Vendor-diff analysis-scope lifecycle (`[analysis].diff_base`); the
+    /// effective scope is mirrored into `diagnostics_config.scope`.
+    pub analysis_scope: crate::analysis_scope::ScopeState,
+    /// Monotonic guard: only the newest in-flight scope build may publish.
+    pub(crate) scope_generation: u64,
+    /// A scope rebuild was requested (save / external change / config reload)
+    /// and waits for a free worker; coalesces bursts into one build.
+    pub(crate) scope_build_queued: bool,
+    /// Open documents edited since their last save: their buffer differs from
+    /// the disk state the scope was diffed against, so they conservatively
+    /// count as whole-file in scope until saved or closed.
+    pub scope_dirty_docs: std::collections::HashSet<Url>,
+    /// Resolved (base, HEAD) OIDs the current scope was built against; the
+    /// idle tick rebuilds when the live refs no longer match (ref-only moves).
+    pub(crate) scope_ref_identity: Option<(String, String)>,
+    /// The last scope failure shown via `window/showMessage`, so a persistent
+    /// failure warns once instead of on every save-triggered rebuild.
+    pub(crate) scope_warning_shown: Option<String>,
+    /// Whether the "ignored_authors is not applied in LSP" notice went out,
+    /// so config reloads do not repeat it.
+    pub(crate) author_warning_shown: bool,
 
     pub(crate) lsp_locale: Option<Locale>,
     pub position_encoding: PositionEncoding,
@@ -418,6 +449,13 @@ impl GlobalState {
                 Locale::default(),
                 true,
             ),
+            analysis_scope: crate::analysis_scope::ScopeState::default(),
+            scope_generation: 0,
+            scope_build_queued: false,
+            scope_dirty_docs: std::collections::HashSet::new(),
+            scope_ref_identity: None,
+            scope_warning_shown: None,
+            author_warning_shown: false,
             lsp_locale: None,
             position_encoding: PositionEncoding::default(),
             supports_insert_text_mode_adjust_indentation: false,
@@ -739,6 +777,7 @@ impl GlobalState {
             vfs_done: self.vfs_done,
             task_sender: self.task_pool.pool.sender.clone(),
             call_hierarchy_index: self.call_hierarchy_index.ensure(),
+            scope_dirty_docs: self.scope_dirty_docs.clone(),
         }
     }
 }
@@ -754,6 +793,9 @@ pub struct GlobalStateSnapshot {
     pub vfs_done: bool,
     pub task_sender: Sender<Task>,
     pub call_hierarchy_index: CallHierarchyIndexState,
+    /// Open documents edited since their last save; they count as whole-file
+    /// in scope (the disk-derived diff no longer describes their buffer).
+    pub scope_dirty_docs: std::collections::HashSet<Url>,
 }
 
 impl GlobalStateSnapshot {

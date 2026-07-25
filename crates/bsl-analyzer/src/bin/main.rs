@@ -124,6 +124,9 @@ enum Commands {
 
         #[arg(long)]
         diff_filter: Option<PathBuf>,
+
+        #[arg(long = "ignored-author", alias = "ignored-authors", value_delimiter = ',')]
+        ignored_authors: Vec<String>,
     },
 
     CheckConfig {
@@ -298,6 +301,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             format,
             only_diagnostic,
             diff_filter,
+            ignored_authors,
         }) => analyze(
             source_dir,
             workspace_dir,
@@ -312,6 +316,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             format,
             only_diagnostic,
             diff_filter,
+            ignored_authors,
         ),
         Some(Commands::CheckConfig { config }) => check_config(config),
         Some(Commands::Format { file, write, spaces, indent_size, check }) => {

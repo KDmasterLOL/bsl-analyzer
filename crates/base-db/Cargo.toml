@@ -16,4 +16,5 @@ tracing.workspace = true
 salsa.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 expect-test.workspace = true

@@ -140,6 +140,20 @@ fn build_check_config_report(
     );
     let _ =
         writeln!(out, "  Language:    {}", project_config.language.as_deref().unwrap_or("default"));
+    let _ = writeln!(
+        out,
+        "  Diff base:   {}",
+        project_config.analysis.diff_base.as_deref().unwrap_or("none (full analysis)")
+    );
+    let _ = writeln!(
+        out,
+        "  Ignored authors: {}",
+        if project_config.analysis.ignored_authors.is_empty() {
+            "none".to_owned()
+        } else {
+            project_config.analysis.ignored_authors.join(", ")
+        }
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Extension topology:");
     match project {
@@ -410,6 +424,7 @@ backend = "postgres"
             r#"{
                 "configurationRoot": "src/cf",
                 "extensions": ["src/cfe/ExtA"],
+                "analysis": { "diffBase": "vendor", "ignoredAuthors": ["Фирма 1С"] },
                 "formatting": { "use_tabs": true, "indent_size": 1 },
                 "codeLens": {
                     "showCognitiveComplexity": true,
@@ -460,6 +475,8 @@ backend = "postgres"
         assert!(report.contains("Project:"));
         assert!(report.contains("Source root: src/cf"));
         assert!(report.contains("Extensions:  src/cfe/ExtA"));
+        assert!(report.contains("Diff base:   vendor"));
+        assert!(report.contains("Ignored authors: Фирма 1С"));
         assert!(report.contains("ordinaryAppSupport: true"));
         assert!(report.contains("dataflowMaxIterations: 20000"));
         assert!(report.contains("Disabled codes: CommentedCode"));

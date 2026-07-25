@@ -234,6 +234,11 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
             }
         }
 
+        // A queued analysis-scope (re)build starts as soon as a worker frees up;
+        // launched before the batch so the batch's own scope gate sees the newest
+        // loading state instead of sweeping under a stale filter.
+        state.maybe_spawn_scope_build();
+
         // Launch the deferred whole-project diagnostics batch (Stream B) once a
         // worker frees up. Interactive per-file scheduling above is drained first so
         // the batch never contends ahead of the file the user is editing; its own
@@ -326,6 +331,10 @@ fn idle_trim_kind(state: &GlobalState, over_budget: bool) -> Option<IdleTrimKind
 /// quiescence gate guarantees no live snapshot, so the exclusive borrow cannot block.
 fn handle_idle_tick(state: &mut GlobalState) {
     state.idle_ticks = state.idle_ticks.saturating_add(1);
+
+    // Ref-only git movement (fetch/rebase/reset) produces no file events; the
+    // idle tick is the only place that notices it.
+    state.check_scope_ref_drift();
 
     // Ahead of the trim kill-switch on purpose: measuring raw accumulation with
     // `BSL_IDLE_TRIM=0` still needs the idle snapshot.
@@ -690,6 +699,9 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
         }
         Task::AnalysisJobFinished => {
             state.note_analysis_finished();
+        }
+        Task::AnalysisScopeReady { generation, result, identity } => {
+            state.handle_analysis_scope_ready(generation, result, identity);
         }
         Task::WorkspaceBatchChunk { generation, outcome } => {
             apply_workspace_batch_completion(state, generation, outcome)?;
@@ -1078,6 +1090,9 @@ fn handle_vfs_msg(
         // closed in-scope files too; re-arm the deferred batch so its coverage — not
         // just open documents — reflects the new disk state.
         state.mark_workspace_batch_dirty();
+        // The same external batch may be a checkout/pull that moved the git state
+        // the vendor-diff scope was computed against.
+        state.request_scope_rebuild();
     }
 
     Ok(())
