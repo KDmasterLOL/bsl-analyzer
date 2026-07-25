@@ -9,8 +9,23 @@ use tempfile::TempDir;
 /// A module that reliably produces at least one diagnostic (unclosed procedure).
 const BROKEN: &str = "Процедура Тест(\n";
 
+/// Drop the ambient git environment. When the suite runs inside a `git commit` pre-commit hook,
+/// GIT_DIR / GIT_INDEX_FILE point at the real repository and win over `git -C <tempdir>`: the
+/// fixture would build its history in the developer's repository, or die on its locked index.
+/// The analysis binary is scrubbed for the same reason — resolving `--git-diff` shells out to
+/// git from the source directory it was given.
+fn hermetic(command: &mut Command) -> &mut Command {
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(&key);
+        }
+    }
+    command
+}
+
 fn run_git(dir: &Path, args: &[&str]) {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    let output = hermetic(&mut command)
         .arg("-C")
         .arg(dir)
         .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
@@ -48,7 +63,8 @@ fn run_analyze(root: &Path, extra_args: &[&str]) -> (bool, String) {
     let output_dir = root.join("reports");
     fs::create_dir_all(&output_dir).expect("output dir");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"));
+    let output = hermetic(&mut command)
         .args(["analyze", "-s"])
         .arg(root)
         .args(["-r", "sarif", "-o"])
