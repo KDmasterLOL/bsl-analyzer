@@ -102,8 +102,9 @@ struct SearchParams {
     query: Option<String>,
     /// Cap on returned hits (default 10, max 50).
     limit: Option<usize>,
-    /// Output budget in tokens (~4 chars each); over-budget results are truncated at a hit
-    /// boundary with a note telling you to raise `limit` or narrow the query (default 6000).
+    /// Output budget in tokens (~4 chars each) for the text listing and the structured hits
+    /// together; over-budget results are truncated at a hit boundary with a note telling you to
+    /// raise `limit` or narrow the query, and `budget_exhausted: true` (default 6000).
     max_output_tokens: Option<usize>,
 }
 
@@ -535,7 +536,14 @@ impl McpServer {
     /// `graph` (callers/callees by durable id) — and not for analyzer findings — that is
     /// `diagnostics`. Actions: `search_code` — the search (`query` required; `limit` default
     /// 10, max 50); `status` — index readiness. While the index warms up it returns a retry
-    /// envelope; retry shortly.
+    /// envelope; retry shortly. Hits arrive twice: a listing for people in the text block, and
+    /// the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, path,
+    /// line_start, line_end, symbol, kind, graph_id, snippet, snippet_truncated_lines}], shown,
+    /// total, budget_exhausted?, degraded?}`. Read the structured form: it is the versioned
+    /// contract, whereas the text layout may be reformatted in any release. Absent fields mean
+    /// absent facts — no `symbol` is a file/header chunk, no `graph_id` means the hit has no
+    /// durable id to pass to `graph`. `total` is the ranked list before the output budget cut
+    /// it (already bounded by `limit`), not the configuration-wide match count.
     #[tool(name = "search", annotations(read_only_hint = true))]
     async fn workspace_search(
         &self,
@@ -1385,7 +1393,12 @@ impl McpServer {
     /// workspace profile's `search`; for one platform member's signature use `syntax_help`.
     /// Actions: `find_docs` / `search_docs` — doc search (`query` required; `limit` default 10,
     /// max 50); `status` — index readiness. While the index warms up it returns a retry
-    /// envelope.
+    /// envelope. Hits arrive twice: a listing for people in the text block, and the same hits
+    /// in `structuredContent` — `{schema_version, hits: [{rank, score, path, line_start,
+    /// line_end, symbol, kind, snippet, snippet_truncated_lines}], shown, total,
+    /// budget_exhausted?}`. Read the structured form: it is the versioned contract, whereas the
+    /// text layout may be reformatted in any release. `score` is the ranker's own number —
+    /// comparable within one response, meaningless across searches or backends.
     #[tool(name = "search", annotations(read_only_hint = true))]
     async fn reference_search(
         &self,
@@ -1741,12 +1754,20 @@ mod contract {
             `graph` (callers/callees by durable id) — and not for analyzer findings — that is
             `diagnostics`. Actions: `search_code` — the search (`query` required; `limit` default
             10, max 50); `status` — index readiness. While the index warms up it returns a retry
-            envelope; retry shortly.
+            envelope; retry shortly. Hits arrive twice: a listing for people in the text block, and
+            the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, path,
+            line_start, line_end, symbol, kind, graph_id, snippet, snippet_truncated_lines}], shown,
+            total, budget_exhausted?, degraded?}`. Read the structured form: it is the versioned
+            contract, whereas the text layout may be reformatted in any release. Absent fields mean
+            absent facts — no `symbol` is a file/header chunk, no `graph_id` means the hit has no
+            durable id to pass to `graph`. `total` is the ranked list before the output budget cut
+            it (already bounded by `limit`), not the configuration-wide match count.
               - action: Workspace profile: `search_code` | `status`. Reference profile: `find_docs` |
             `search_docs` | `status`.
               - limit: Cap on returned hits (default 10, max 50).
-              - max_output_tokens: Output budget in tokens (~4 chars each); over-budget results are truncated at a hit
-            boundary with a note telling you to raise `limit` or narrow the query (default 6000).
+              - max_output_tokens: Output budget in tokens (~4 chars each) for the text listing and the structured hits
+            together; over-budget results are truncated at a hit boundary with a note telling you to
+            raise `limit` or narrow the query, and `budget_exhausted: true` (default 6000).
               - query: Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
 
             ## symbol_info
@@ -1800,12 +1821,18 @@ mod contract {
             workspace profile's `search`; for one platform member's signature use `syntax_help`.
             Actions: `find_docs` / `search_docs` — doc search (`query` required; `limit` default 10,
             max 50); `status` — index readiness. While the index warms up it returns a retry
-            envelope.
+            envelope. Hits arrive twice: a listing for people in the text block, and the same hits
+            in `structuredContent` — `{schema_version, hits: [{rank, score, path, line_start,
+            line_end, symbol, kind, snippet, snippet_truncated_lines}], shown, total,
+            budget_exhausted?}`. Read the structured form: it is the versioned contract, whereas the
+            text layout may be reformatted in any release. `score` is the ranker's own number —
+            comparable within one response, meaningless across searches or backends.
               - action: Workspace profile: `search_code` | `status`. Reference profile: `find_docs` |
             `search_docs` | `status`.
               - limit: Cap on returned hits (default 10, max 50).
-              - max_output_tokens: Output budget in tokens (~4 chars each); over-budget results are truncated at a hit
-            boundary with a note telling you to raise `limit` or narrow the query (default 6000).
+              - max_output_tokens: Output budget in tokens (~4 chars each) for the text listing and the structured hits
+            together; over-budget results are truncated at a hit boundary with a note telling you to
+            raise `limit` or narrow the query, and `budget_exhausted: true` (default 6000).
               - query: Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
 
             ## syntax_help

@@ -9,6 +9,11 @@ pub(super) const DIRECT_SEARCH_MAX_REFILL_ROUNDS: usize = 4;
 /// ranked just outside `limit` in one modality but boosted by the other can still surface.
 pub(super) const HYBRID_FETCH_MULTIPLIER: usize = 2;
 
+/// The version of the `search` structured hit contract: the fields of one hit object and the
+/// envelope around the list. Bump it whenever that shape changes — a machine consumer pins
+/// against this, whereas the text listing is a human mirror with no such promise.
+pub(super) const SEARCH_SCHEMA_VERSION: &str = "1";
+
 /// The outcome of producing one modality's code hits, separated from presentation so the
 /// hybrid path can fuse two modalities. Hard policy/terminal failures stay `Err(McpError)`;
 /// these soft states let `hybrid_code` reproduce today's lexical messages and degrade

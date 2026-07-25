@@ -2,10 +2,13 @@ use super::gating::{
     ensure_reference_baseline_runtime_ready, external_baseline_mcp_error,
     map_reference_baseline_resolution,
 };
-use super::render::{format_doc_hits, format_lexical_doc_hits, format_semantic_doc_hits};
+use super::render::{
+    format_doc_hits, format_lexical_doc_hits, format_semantic_doc_hits, no_hits_response,
+};
+use super::status::docs_not_ready;
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService};
 use bsl_search::{lexical_hits_for_resolved_view, SearchEngine};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
@@ -30,12 +33,10 @@ pub fn find_docs(
         )? {
             match source.lexical_search(snapshot.id.0.as_str(), query, Some("platform"), limit) {
                 Ok(hits) if !hits.is_empty() => {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        format_lexical_doc_hits(&hits, max_output_tokens),
-                    )]));
+                    return Ok(format_lexical_doc_hits(&hits, max_output_tokens).into_response());
                 }
                 Ok(_) => {
-                    return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+                    return Ok(no_hits_response(None));
                 }
                 Err(error) => {
                     if error.is_terminal() {
@@ -56,30 +57,25 @@ pub fn find_docs(
             )? {
                 let hits = lexical_hits_for_resolved_view(&view, query, limit, Some("platform"));
                 if !hits.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text(format_doc_hits(
-                        &hits,
-                        max_output_tokens,
-                    ))]));
+                    return Ok(format_doc_hits(&hits, max_output_tokens).into_response());
                 }
-                return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+                return Ok(no_hits_response(None));
             }
         }
     }
 
     let Some(engine) = guard.as_ref() else {
-        return Ok(CallToolResult::success(vec![Content::text(
-            "Search index is being built, please try again in a moment.",
-        )]));
+        return Ok(docs_not_ready());
     };
     let hits = engine
         .text_search(query, limit, Some("platform"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
 
     if hits.is_empty() {
-        return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+        return Ok(no_hits_response(None));
     }
 
-    Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits, max_output_tokens))]))
+    Ok(format_doc_hits(&hits, max_output_tokens).into_response())
 }
 
 pub fn search_docs(
@@ -94,9 +90,7 @@ pub fn search_docs(
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
     if guard.is_none() {
-        return Ok(CallToolResult::success(vec![Content::text(
-            "Search index is being built, please try again in a moment.",
-        )]));
+        return Ok(docs_not_ready());
     }
     let engine = guard.as_ref().expect("checked above");
 
@@ -139,12 +133,10 @@ pub fn search_docs(
                 limit,
             ) {
                 Ok(hits) if !hits.is_empty() => {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        format_semantic_doc_hits(&hits, max_output_tokens),
-                    )]));
+                    return Ok(format_semantic_doc_hits(&hits, max_output_tokens).into_response());
                 }
                 Ok(_) => {
-                    return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+                    return Ok(no_hits_response(None));
                 }
                 Err(error) => {
                     if error.is_terminal() {
@@ -165,10 +157,10 @@ pub fn search_docs(
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
 
     if hits.is_empty() {
-        return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+        return Ok(no_hits_response(None));
     }
 
-    Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits, max_output_tokens))]))
+    Ok(format_doc_hits(&hits, max_output_tokens).into_response())
 }
 
 #[cfg(test)]
@@ -177,10 +169,73 @@ mod tests {
     use crate::baseline::{
         ConfiguredBaselineStatus, ExternalBaselineService, RefreshableExternalBaselineSource,
     };
-    use bsl_search::{BaselineRef, CorpusId, SearchEngine};
+    use bsl_search::{BaselineRef, CorpusId, Document, SearchEngine};
     use rmcp::model::ErrorCode;
+    use serde_json::json;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    #[test]
+    fn find_docs_hits_carry_the_structured_listing_beside_the_text() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine
+            .index_documents(
+                "platform",
+                "platform/Массив",
+                b"v1",
+                &[Document {
+                    title: "Массив".to_owned(),
+                    body: "Массив — упорядоченная коллекция значений.".to_owned(),
+                    kind: "type".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+
+        let result =
+            find_docs(&Arc::new(Mutex::new(Some(engine))), None, None, "Массив", 10, usize::MAX)
+                .unwrap();
+
+        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        assert!(text.starts_with("#1 ["), "text listing unchanged: {text}");
+
+        let body = result.structured_content.as_ref().expect("structured listing");
+        assert_eq!(body["schema_version"], "1");
+        let hits = body["hits"].as_array().expect("hits array");
+        assert_eq!(hits[0]["rank"], 1);
+        assert_eq!(hits[0]["symbol"], "Массив");
+        assert!(hits[0]["score"].is_number(), "the score the listing prints: {body}");
+        assert_eq!(body["shown"], json!(hits.len()));
+    }
+
+    #[test]
+    fn doc_search_not_ready_and_empty_answers_are_structured_too() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let engine = SearchEngine::fts_only(&db_path).unwrap();
+
+        let building =
+            find_docs(&Arc::new(Mutex::new(None)), None, None, "Массив", 10, usize::MAX).unwrap();
+        assert_eq!(
+            building.content[0].raw.as_text().expect("text").text,
+            "Search index is being built, please try again in a moment.",
+        );
+        let building_body = building.structured_content.as_ref().expect("structured envelope");
+        assert_eq!(building_body["status"], "not_ready");
+        assert_eq!(building_body["retry_after_ms"], 1500);
+
+        let empty =
+            find_docs(&Arc::new(Mutex::new(Some(engine))), None, None, "Массив", 10, usize::MAX)
+                .unwrap();
+        assert_eq!(empty.content[0].raw.as_text().expect("text").text, "No results found.");
+        // An empty index and an empty result set must not look alike to a machine consumer.
+        assert_eq!(
+            empty.structured_content.as_ref().expect("structured envelope")["hits"],
+            json!([]),
+        );
+    }
 
     #[test]
     fn search_docs_with_external_reference_baseline_uses_standard_semantic_validation() {
