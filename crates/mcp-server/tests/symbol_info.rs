@@ -65,15 +65,20 @@ fn args(pairs: &[(&str, Value)]) -> Map<String, Value> {
 }
 
 /// Call `symbol_info` and return the parsed card, retrying past the "still loading"
-/// envelope (text, no structured content) until the resident is ready or the budget runs
-/// out. A resolved card and a resident miss both carry structured content.
+/// envelope until the resident is ready or the budget runs out. The envelope is told apart
+/// by its `status: "loading"` field — the way a consumer is meant to read it. Matching the
+/// human sentence, or inferring "not ready" from an absent envelope, is what this suite
+/// must not model: a resolved card, a resident miss AND the retry envelope all carry
+/// structured content.
 async fn poll_card(client: &Client, call_args: Map<String, Value>) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         let call = CallToolRequestParams::new("symbol_info").with_arguments(call_args.clone());
         let result = client.call_tool(call).await.expect("transport ok");
         if let Some(structured) = result.structured_content {
-            return structured;
+            if structured["status"] != "loading" {
+                return structured;
+            }
         }
         assert!(
             tokio::time::Instant::now() < deadline,

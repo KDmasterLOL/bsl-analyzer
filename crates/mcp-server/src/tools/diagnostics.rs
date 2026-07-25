@@ -118,46 +118,7 @@ pub fn schema() -> CallToolResult {
 /// lifecycle snapshot (`state`/`generation`/`elapsed_ms`) so the agent can tell a
 /// progressing build from a stuck or failed one instead of polling a flat `loading`.
 pub fn loading(report: &StatusReport) -> CallToolResult {
-    let mut body = json!({
-        "status": "loading",
-        "detail": "diagnostics database is building; retry shortly",
-        "state": report.state,
-        "generation": report.generation,
-    });
-    if let Some(ms) = report.elapsed_ms {
-        body["elapsed_ms"] = json!(ms);
-    }
-    if let Some(err) = &report.error {
-        body["error"] = json!(err);
-    }
-    structured(body)
-}
-
-/// The `status` action: the resident lifecycle snapshot, always available (no resident
-/// db required), so an agent can poll readiness/progress without a flat `loading`.
-pub fn status(report: &StatusReport) -> CallToolResult {
-    let mut body = json!({
-        "state": report.state,
-        "generation": report.generation,
-        "reload": report.reload,
-    });
-    if let Some(files) = report.files {
-        body["files"] = json!(files);
-    }
-    if let Some(ms) = report.elapsed_ms {
-        body["elapsed_ms"] = json!(ms);
-    }
-    if let Some(err) = &report.error {
-        body["error"] = json!(err);
-    }
-    if let Some(watch) = &report.watch {
-        body["watch"] = json!({
-            "mode": watch.mode,
-            "health": watch.health,
-            "events_seen": watch.events_seen,
-        });
-    }
-    structured(body)
+    crate::tools::resident::loading(report, "diagnostics database is building; retry shortly")
 }
 
 /// Wrap a `file` result in the freshness envelope, matching the `graph` tool.

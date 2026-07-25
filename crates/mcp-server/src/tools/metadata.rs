@@ -1016,12 +1016,26 @@ pub fn configs_from_db(
 /// A "still loading, retry shortly" envelope for a metadata call issued while the resident
 /// db is building (or rebuilding after an idle eviction). Never a hard "not loaded" error —
 /// the resident always eventually becomes ready.
+///
+/// The machine-readable body has the same shape `diagnostics` returns — only `detail`
+/// differs, naming this tool's view of the one build — so "not ready" is recognized by one
+/// field check across every tool reading the resident. The Russian
+/// sentence stays the text block instead of the JSON mirror `graph`/`diagnostics` emit:
+/// `metadata` is a text tool (its answers are listings, not JSON), and a consumer that
+/// matched the sentence before the envelope existed keeps working while it migrates to
+/// `structuredContent`.
 pub fn loading(report: &crate::diagnostics_state::StatusReport) -> CallToolResult {
     let mut msg = String::from("Метаданные загружаются, повторите запрос через несколько секунд.");
     if let Some(ms) = report.elapsed_ms {
         let _ = write!(msg, " (идёт загрузка, {ms} мс)");
     }
-    CallToolResult::success(vec![Content::text(msg)])
+    crate::tools::response::structured_with_text(
+        msg,
+        crate::tools::resident::loading_body(
+            report,
+            "resident analysis database is building; retry shortly",
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -1099,6 +1113,37 @@ mod tests {
 
         // The localized type name resolves to the same place.
         assert!(get_form_structure(Some(tmp.path()), "ОбщаяФорма", None, None).is_ok());
+    }
+
+    /// A "not ready" answer must be recognizable by a field, not by matching the sentence:
+    /// an unrecognized retry envelope is read as content, and an object that exists then
+    /// looks absent. The sentence stays in the text block for people and for consumers that
+    /// matched it before the envelope existed.
+    #[test]
+    fn loading_carries_a_machine_readable_envelope_beside_the_sentence() {
+        let report = crate::diagnostics_state::StatusReport {
+            state: "loading",
+            generation: 0,
+            files: None,
+            reload: "none",
+            error: None,
+            elapsed_ms: Some(20),
+            watch: None,
+        };
+
+        let result = loading(&report);
+        let body =
+            result.structured_content.as_ref().expect("loading answers with structuredContent");
+
+        assert_eq!(body["status"], "loading");
+        assert_eq!(body["state"], "loading");
+        assert_eq!(body["elapsed_ms"], 20);
+        assert!(body["detail"].as_str().is_some_and(|d| !d.is_empty()));
+        assert!(
+            extract_text(&result).starts_with("Метаданные загружаются"),
+            "the human sentence stays the text block: {}",
+            extract_text(&result),
+        );
     }
 
     #[test]

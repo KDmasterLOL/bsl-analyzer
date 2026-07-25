@@ -634,6 +634,63 @@ mod tests {
         );
     }
 
+    /// The SqliteLocal boot builds the graph and the search chunks in ONE parse pass, and
+    /// claims the graph for it through `try_begin_external_build` — which needs the
+    /// `Idle → Loading` transition for itself. An eager start that lands first takes that
+    /// transition and the claim fails, degrading the fused pass into two. This is why the
+    /// boot's eager start is mode-gated and otherwise runs only after the claim.
+    #[test]
+    fn an_already_started_graph_refuses_the_fused_build_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+
+        assert!(
+            !graph.try_begin_external_build(),
+            "a graph already building must refuse the fused claim, not build twice",
+        );
+        // Let the spawned build finish before the temp workspace goes away.
+        wait_ready(&graph);
+    }
+
+    /// The mirror image: once the fused build owns the claim, the boot's catch-all start is
+    /// inert — it must not spawn a second builder over the one already writing the database.
+    /// A spawned loader would publish and fire the hook, so a hook that never fires (while the
+    /// claim still reads `Loading`) is what rules a second build out; the status alone would
+    /// not, since a second loader leaves it `Loading` too until it publishes.
+    #[test]
+    fn starting_a_claimed_graph_spawns_no_second_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let published = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let published = Arc::clone(&published);
+            Arc::new(move |_signal: GraphPublishSignal| {
+                published.fetch_add(1, Ordering::SeqCst);
+                true
+            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
+        };
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
+        assert!(graph.try_begin_external_build(), "an idle graph yields the claim");
+
+        graph.ensure_loading();
+
+        // Long enough for a loader spawned by that call to build this two-module workspace and
+        // publish: `publish_hook_fires_after_a_build_publishes` waits for the same build.
+        std::thread::sleep(Duration::from_secs(2));
+        assert_eq!(published.load(Ordering::SeqCst), 0, "no second builder may publish");
+        assert_eq!(
+            graph.status(),
+            GraphStatus::Loading,
+            "the external build keeps the claim; nothing else may drive it",
+        );
+    }
+
     #[test]
     fn set_mark_seq_source_is_first_writer_wins() {
         let graph = GraphState::disabled();

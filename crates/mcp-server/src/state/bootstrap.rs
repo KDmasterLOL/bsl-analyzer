@@ -194,6 +194,24 @@ impl SharedState {
                 // broker stays alive even if the launching client disconnects mid-build.
                 let _init_guard = BackgroundWorkGuard::new(&background_indexers);
                 tracing::info!("search engine initialization started in background");
+
+                // The graph is a boot subsystem like the resident, not a lazy one. In
+                // SqliteLocal the fused cold build below claims and builds it; the Postgres
+                // branch never reaches that claim at all, which is why a PG workspace paid for
+                // a whole-config graph build mid-session, on the first `graph`/`symbol_info`
+                // call. Start it here instead — ahead of the baseline connect wait, which the
+                // graph does not depend on. (Other early exits are covered by the catch-all
+                // start after the init returns.)
+                //
+                // Mode-gated on purpose: in SqliteLocal an eager kick would win the
+                // `Idle → Loading` transition that `try_begin_external_build` needs, the fused
+                // claim would fail, and one parse pass producing both graph and search chunks
+                // would degrade into two. A warm graph cache makes either start cheap —
+                // `run_load` publishes the cached build instead of rebuilding.
+                if matches!(mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+                    graph.ensure_loading();
+                }
+
                 // Postgres mode needs the baseline connect's outcome before it can load
                 // the manifest; waiting HERE keeps the wait on this background thread
                 // (never a request path) and off the slot's lock. On timeout the init
@@ -218,6 +236,12 @@ impl SharedState {
                     external_baseline,
                     &graph,
                 );
+
+                // Whatever the init decided, the graph must not be left idle: it may have
+                // bailed (invalid project, unopenable store) before reaching the fused claim
+                // at all. A no-op once the build is claimed or published, so the fused and
+                // cached paths above are untouched.
+                graph.ensure_loading();
 
                 let Some(mut init) = init else {
                     Self::set_semantic_runtime_status(
@@ -1179,16 +1203,20 @@ impl SharedState {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{write_common_module_tree, EnvVarGuard, ENV_LOCK};
-    use super::{OverlayInit, SharedState, WorkspaceSearchMode};
+    use super::{
+        DiagnosticsState, EmbedFlight, GraphState, OverlayInit, OverlayWarmupState,
+        SemanticRuntimeStatus, SharedState, WorkspaceSearchMode,
+    };
     use crate::baseline::{
-        BaselineBootstrap, BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineService,
-        RefreshableExternalBaselineSource,
+        BaselineBootstrap, BaselineRuntime, ConfiguredBaselineStatus, DeferredBaselineRuntime,
+        ExternalBaselineService, RefreshableExternalBaselineSource,
     };
     use bsl_search::{
-        BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexedDocument, SearchEngine,
+        BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexProgress, IndexedDocument,
+        SearchEngine,
     };
     use std::fs;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
@@ -1202,6 +1230,69 @@ mod tests {
             },
             external_baseline: None,
         })
+    }
+
+    /// The Postgres branch of the search init returns before it ever reaches the fused cold
+    /// build's graph claim, which used to leave the graph idle until the first
+    /// `graph`/`symbol_info` call — billing a whole-config build to a mid-session request.
+    /// The boot must start it regardless, so this drives the harshest case: an unavailable
+    /// baseline, where the search init bails immediately and touches no graph at all.
+    #[test]
+    fn postgres_boot_starts_the_graph_even_when_the_search_init_bails() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &workspace,
+            "Сервер",
+            "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
+        );
+
+        let graph = GraphState::for_workspace(workspace.clone());
+        // Postgres mode with no external baseline: `init_workspace_search_engine` warns and
+        // returns `None` without opening a store.
+        let baseline = DeferredBaselineRuntime::ready(BaselineRuntime {
+            configured_baseline: ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "test".to_owned(),
+                issue: Some("baseline unavailable".to_owned()),
+                support: None,
+            },
+            external_baseline: None,
+        });
+
+        SharedState::spawn_workspace_search_init(
+            Arc::new(Mutex::new(None)),
+            IndexProgress::new(),
+            Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            Arc::new(Mutex::new(OverlayWarmupState::Pending)),
+            Arc::new(AtomicUsize::new(0)),
+            workspace.clone(),
+            Arc::new(AtomicBool::new(false)),
+            baseline,
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            graph.clone(),
+            EmbedFlight::new(),
+            Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
+                DiagnosticsState::disabled(),
+            )),
+        );
+
+        for _ in 0..600 {
+            match graph.status() {
+                crate::graph::GraphStatus::Ready { .. } => return,
+                crate::graph::GraphStatus::Failed(msg) => panic!("graph load failed: {msg}"),
+                _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        panic!("the boot left the graph at {:?}; it must not stay lazy", graph.status());
     }
 
     /// A postgres config failure (unconfigured section, credential rejection) must NOT

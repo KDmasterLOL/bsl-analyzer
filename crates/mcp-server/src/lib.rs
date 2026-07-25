@@ -72,7 +72,7 @@ impl McpProfile {
 
 #[derive(Deserialize, JsonSchema)]
 struct MetadataParams {
-    /// info | tree | object | form.
+    /// info | tree | object | form | status.
     action: String,
     /// `tree`: case-insensitive substring to narrow the returned tree (optional).
     filter: Option<String>,
@@ -374,8 +374,10 @@ impl McpServer {
     /// for call relationships (use `graph`) and not for finding code by meaning (use `search`).
     /// Actions: `info` — configuration summary; `tree` — the metadata object tree (filterable);
     /// `object` — one object's structure (needs `object_type` + `object_name`); `form` — a
-    /// managed form's layout (needs `object_type`). Reads the resident analysis host; while it
-    /// builds it returns a retry envelope, not an error.
+    /// managed form's layout (needs `object_type`); `status` — resident readiness. Reads the
+    /// resident analysis host; while it builds it returns a retry envelope, not an error —
+    /// `structuredContent.status == "loading"`, same field `diagnostics`/`graph` set, so retry
+    /// shortly instead of reading the answer as "no such object".
     #[tool(name = "metadata", annotations(read_only_hint = true))]
     async fn metadata(
         &self,
@@ -391,6 +393,18 @@ impl McpServer {
                 None,
             ));
         }
+        // `status` reports the resident lifecycle (and kicks the lazy build), so an agent can
+        // poll readiness here instead of firing `info` just to read its `loading` envelope.
+        // Answered ahead of every mode branch: readiness is a property of this server, not of
+        // the requested mode, and a client that passes `connection` on every metadata call
+        // would otherwise be told the action does not exist. Rendered by the shared renderer,
+        // so it is byte-identical to `diagnostics status`: one resident, one status shape.
+        if p.action == "status" {
+            let diag = self.state.diagnostics();
+            diag.ensure_loading();
+            return Ok(tools::resident::status(&diag.status_report()));
+        }
+
         let live = mode == "infobase" || (mode == "auto" && p.connection.is_some());
         if live {
             return match p.action.as_str() {
@@ -1151,7 +1165,7 @@ impl McpServer {
             "status" => {
                 let diag = self.state.diagnostics();
                 diag.ensure_loading();
-                Ok(tools::diagnostics::status(&diag.status_report()))
+                Ok(tools::resident::status(&diag.status_report()))
             }
             "file" => self.diagnostics_file(p).await,
             "workspace" => self.diagnostics_workspace(p, ct).await,
@@ -1731,9 +1745,11 @@ mod tool_descriptions {
             for call relationships (use `graph`) and not for finding code by meaning (use `search`).
             Actions: `info` — configuration summary; `tree` — the metadata object tree (filterable);
             `object` — one object's structure (needs `object_type` + `object_name`); `form` — a
-            managed form's layout (needs `object_type`). Reads the resident analysis host; while it
-            builds it returns a retry envelope, not an error.
-              - action: info | tree | object | form.
+            managed form's layout (needs `object_type`); `status` — resident readiness. Reads the
+            resident analysis host; while it builds it returns a retry envelope, not an error —
+            `structuredContent.status == "loading"`, same field `diagnostics`/`graph` set, so retry
+            shortly instead of reading the answer as "no such object".
+              - action: info | tree | object | form | status.
               - connection: Named live 1C connection for `mode=infobase` (optional).
               - filter: `tree`: case-insensitive substring to narrow the returned tree (optional).
               - form_name: `form`: managed-form name (optional; omit for the object's default form).
