@@ -2,6 +2,7 @@ mod baseline;
 pub mod broker;
 mod cache;
 mod change_hub;
+pub mod contract;
 mod diagnostics_state;
 mod drift_classify;
 mod graph;
@@ -42,8 +43,13 @@ where
 use crate::graph::GraphStatus;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::model::{
+    AnnotateAble, CallToolResult, ListResourcesResult, PaginatedRequestParams, RawResource,
+    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -490,10 +496,9 @@ impl McpServer {
                                 require(object_name.clone(), "object_name", "object")?;
                             tools::metadata::object_from_db(db, &object_type, &object_name)
                         }
-                        other => Err(McpError::invalid_params(
-                            format!("Unknown action '{other}'. Expected: info, tree, object, form"),
-                            None,
-                        )),
+                        other => {
+                            Err(contract::unknown_action(McpProfile::Workspace, "metadata", other))
+                        }
                     }
                 })
             };
@@ -626,10 +631,7 @@ impl McpServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: search_code, status"),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Workspace, "search", other)),
         }
     }
 
@@ -669,10 +671,7 @@ impl McpServer {
                 )
                 .await
             }
-            other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: validate, execute, schema"),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Workspace, "query", other)),
         }
     }
 
@@ -714,10 +713,7 @@ impl McpServer {
                 )
                 .await
             }
-            other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: check, run, eval"),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Workspace, "execute", other)),
         }
     }
 
@@ -864,13 +860,7 @@ impl McpServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            other => Err(McpError::invalid_params(
-                format!(
-                    "Unknown action '{other}'. Expected: attach, disconnect, set_breakpoint, \
-                     remove_breakpoint, continue, step, wait_stop, stack_trace, locals, eval"
-                ),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Workspace, "debug", other)),
         }
     }
 
@@ -980,13 +970,7 @@ impl McpServer {
                     tools::graph::neighbors(gdb, &neighbors, budget)
                 }
                 other => {
-                    return Err(McpError::invalid_params(
-                        format!(
-                            "Unknown action '{other}'. Expected: overview, schema, status, node, \
-                             source, neighbors, callers, callees, resolve"
-                        ),
-                        None,
-                    ))
+                    return Err(contract::unknown_action(McpProfile::Workspace, "graph", other))
                 }
             };
             // Stamp freshness relative to the snapshot that served this answer: the
@@ -1171,12 +1155,7 @@ impl McpServer {
             }
             "file" => self.diagnostics_file(p).await,
             "workspace" => self.diagnostics_workspace(p, ct).await,
-            other => Err(McpError::invalid_params(
-                format!(
-                    "Unknown action '{other}'. Expected: catalog, schema, status, file, workspace"
-                ),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Workspace, "diagnostics", other)),
         }
     }
 
@@ -1461,10 +1440,7 @@ impl McpServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: find_docs, search_docs, status"),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Reference, "search", other)),
         }
     }
 
@@ -1541,23 +1517,66 @@ impl ServerHandler for McpServer {
                     .into()
             }
         });
-        info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        info.server_info = rmcp::model::Implementation::from_build_env();
+        info.capabilities = ServerCapabilities::builder().enable_tools().enable_resources().build();
+        // NOT `Implementation::from_build_env()`: that macro expands inside rmcp, so it
+        // reports rmcp's own name and version — a consumer reading `serverInfo` to learn
+        // which analyzer build it is talking to gets the transport library instead.
+        info.server_info =
+            rmcp::model::Implementation::new("bsl-analyzer", env!("CARGO_PKG_VERSION"));
         info
+    }
+
+    /// The contract declaration is served as a resource rather than a tool on purpose: it
+    /// is for feature detection by consumers, not work an agent does, and a tool would
+    /// spend description tokens in every session to say so.
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let resource = RawResource::new(contract::CONTRACT_URI, "contract")
+            .with_title("Tool and CLI contract")
+            .with_description(
+                "Machine-readable declaration of this build's surfaces: MCP tools with their \
+                 actions and parameters, the CLI commands and flags, and a contract version \
+                 separate from the build version.",
+            )
+            .with_mime_type("application/json")
+            .no_annotation();
+        Ok(ListResourcesResult::with_all_items(vec![resource]))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        if request.uri != contract::CONTRACT_URI {
+            return Err(McpError::resource_not_found(
+                format!("Unknown resource '{}'", request.uri),
+                None,
+            ));
+        }
+        let body = serde_json::to_string_pretty(&contract::document())
+            .map_err(|e| McpError::internal_error(format!("contract serialization: {e}"), None))?;
+        Ok(ReadResourceResult::new(vec![
+            ResourceContents::text(body, contract::CONTRACT_URI).with_mime_type("application/json")
+        ]))
     }
 }
 
 #[cfg(test)]
-mod contract {
+mod tool_descriptions {
     use super::*;
     use expect_test::expect;
     use std::fmt::Write;
 
     /// Render a profile's `tools/list` into a stable text contract: every tool (sorted by
-    /// name) with its description and each parameter field's description. This is the #25
-    /// guardrail — a refactor that drops a tool description or a field doc changes this
-    /// snapshot loudly, instead of silently shipping an empty contract to agents. Rebase with
-    /// `UPDATE_EXPECT=1 cargo test -p mcp-server contract`.
+    /// name) with its description and each parameter field's description. A refactor that
+    /// drops a tool description or a field doc changes this snapshot loudly, instead of
+    /// silently shipping an empty contract to agents. The machine-readable declaration
+    /// consumers read lives in [`crate::contract`]; this guards the prose agents read.
+    /// Rebase with `UPDATE_EXPECT=1 cargo test -p mcp-server tool_descriptions`.
     fn render(tools: &[rmcp::model::Tool]) -> String {
         let mut tools: Vec<&rmcp::model::Tool> = tools.iter().collect();
         tools.sort_by(|a, b| a.name.cmp(&b.name));

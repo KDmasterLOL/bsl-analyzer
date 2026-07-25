@@ -40,11 +40,12 @@ mod cli;
 
 use std::{env, error::Error, fs, path::PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use cli::{
     analyze::{analyze, OutputFormat},
     bench::{run_bench, BenchCommands},
     check_config::check_config,
+    contract::cli_surface,
     dap::run_dap_server,
     deps::{run_deps, DepsOutputFormat},
     extension::{self, ExtensionCommands},
@@ -133,6 +134,11 @@ enum Commands {
         #[arg(short, long)]
         config: std::path::PathBuf,
     },
+
+    /// Print the machine-readable contract of this build: CLI commands and flags, MCP
+    /// tools with their actions and parameters, and a contract version separate from the
+    /// build version. Check compatibility against this instead of grepping `--help`.
+    Contract,
 
     Format {
         file: PathBuf,
@@ -286,6 +292,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         std::process::exit(1);
     }
 
+    // Both the `contract` command and the MCP `bsl-analyzer://contract` resource declare
+    // this process's CLI surface, and only the binary can introspect its own clap
+    // definition. Hand it over once here rather than per command, so a future command that
+    // serves the contract cannot forget to.
+    mcp_server::contract::register_cli_surface(cli_surface(&Cli::command()));
+
     match cli.command {
         Some(Commands::Analyze {
             source_dir,
@@ -319,6 +331,10 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             ignored_authors,
         ),
         Some(Commands::CheckConfig { config }) => check_config(config),
+        Some(Commands::Contract) => {
+            println!("{}", serde_json::to_string_pretty(&mcp_server::contract::document())?);
+            Ok(())
+        }
         Some(Commands::Format { file, write, spaces, indent_size, check }) => {
             run_format(file, write, spaces, indent_size, check)
         }
@@ -357,5 +373,235 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
         Some(Commands::Bench { command }) => run_bench(command),
         Some(Commands::Lsp) | None => run_lsp_server(),
+    }
+}
+
+#[cfg(test)]
+mod contract_surface {
+    use super::*;
+    use expect_test::expect;
+    use serde_json::Value;
+    use std::fmt::Write;
+
+    fn surface() -> Value {
+        cli_surface(&Cli::command())
+    }
+
+    fn command<'a>(parent: &'a Value, name: &str) -> &'a Value {
+        parent["commands"]
+            .as_array()
+            .unwrap_or_else(|| panic!("'{}' has no subcommands", parent["name"]))
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no command '{name}' under '{}'", parent["name"]))
+    }
+
+    fn arg_names(cmd: &Value) -> Vec<&str> {
+        cmd["args"].as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap()).collect()
+    }
+
+    /// The flags downstream CI checks for, asserted against the declaration rather than
+    /// against the wording of `--help`. Renaming one of these is a contract change and
+    /// must be a deliberate one — see `mcp_server::contract::CONTRACT_VERSION`.
+    #[test]
+    fn declares_the_flags_consumers_depend_on() {
+        let surface = surface();
+
+        let analyze = command(&surface, "analyze");
+        let names = arg_names(analyze);
+        assert!(names.contains(&"source-dir"), "{names:?}");
+        assert!(names.contains(&"format"), "{names:?}");
+        let format =
+            analyze["args"].as_array().unwrap().iter().find(|a| a["name"] == "format").unwrap();
+        assert_eq!(format["values"], serde_json::json!(["console", "jsonl"]));
+
+        let serve = command(command(&surface, "mcp"), "serve");
+        let names = arg_names(serve);
+        assert!(names.contains(&"profile"), "{names:?}");
+        assert!(names.contains(&"source-dir"), "{names:?}");
+        let mode = serve["args"].as_array().unwrap().iter().find(|a| a["name"] == "mode").unwrap();
+        assert!(
+            mode["values"].as_array().unwrap().contains(&serde_json::json!("stdio")),
+            "{mode:#}"
+        );
+    }
+
+    fn render(cmd: &Value, depth: usize) -> String {
+        let indent = "  ".repeat(depth);
+        let mut out = String::new();
+        let _ = writeln!(out, "{indent}{}", cmd["name"].as_str().unwrap());
+        for arg in cmd["args"].as_array().unwrap() {
+            let mut line = format!("{indent}  {}", arg["name"].as_str().unwrap());
+            if let Some(short) = arg["short"].as_str() {
+                let _ = write!(line, " (-{short})");
+            }
+            if let Some(aliases) = arg["aliases"].as_array() {
+                let aliases: Vec<&str> = aliases.iter().map(|a| a.as_str().unwrap()).collect();
+                let _ = write!(line, " [{}]", aliases.join(", "));
+            }
+            if let Some(conflicts) = arg["conflicts_with"].as_array() {
+                let conflicts: Vec<&str> = conflicts.iter().map(|c| c.as_str().unwrap()).collect();
+                let _ = write!(line, " !{}", conflicts.join(" !"));
+            }
+            if let Some(values) = arg["values"].as_array() {
+                let values: Vec<&str> = values.iter().map(|v| v.as_str().unwrap()).collect();
+                let _ = write!(line, " = {}", values.join(" | "));
+            }
+            let _ = writeln!(out, "{line}");
+        }
+        for sub in cmd["commands"].as_array().into_iter().flatten() {
+            out.push_str(&render(sub, depth + 1));
+        }
+        out
+    }
+
+    /// Every command, flag and accepted enum value in one place, so a rename or removal
+    /// shows up in the diff of the change that causes it instead of in a consumer's CI.
+    /// Rebase with `UPDATE_EXPECT=1 cargo test -p bsl-analyzer contract_surface`.
+    #[test]
+    fn cli_surface_snapshot() {
+        expect![[r#"
+            bsl-analyzer
+              stdio
+              trace-profile
+              trace-profile-json
+              analyze
+                changed-files !git-diff
+                config (-c) [configuration]
+                diff-filter
+                format = console | jsonl
+                git-diff !changed-files
+                ignored-author [ignored-authors]
+                incremental
+                only-diagnostic
+                output-dir (-o) [outputDir]
+                quiet (-q) [silent]
+                reporters (-r) [reporter]
+                source-dir (-s) [srcDir, src, project]
+                workers
+                workspace-dir (-w) [workspaceDir]
+              check-config
+                config (-c)
+              contract
+              format
+                check !write
+                file
+                indent-size
+                spaces
+                write (-w) !check
+              lsp
+              mcp
+                serve
+                  mode = stdio | broker | daemon
+                  onec-password
+                  onec-url
+                  onec-user
+                  profile = workspace | reference
+                  source-dir (-s)
+                install
+                  dry-run
+                  env
+                  force
+                  name
+                  onec-password
+                  onec-url
+                  onec-user
+                  preset = workspace | reference | recommended
+                  scope = user | project | local
+                  source-dir (-s)
+                  target = codex | gemini | claude | cursor | all
+              extension
+                export
+                  output (-o)
+              dap
+              search
+                baseline
+                  publish
+                    allow-non-policy-branch
+                    branch
+                    commit
+                    corpus = workspace-code | reference
+                    parent-snapshot-id
+                    snapshot-id
+                    source-dir (-s)
+                  inspect
+                    list-snapshots
+                      branch
+                      commit
+                      corpus = workspace-code | reference
+                      limit
+                      source-dir (-s)
+                    show-snapshot
+                      snapshot-id
+                      source-dir (-s)
+                    list-file-objects
+                      collection
+                      limit
+                      source-dir (-s)
+                    show-file-object
+                      file-object-id
+                      source-dir (-s)
+                    list-embeddings
+                      dimension
+                      model
+                      source-dir (-s)
+                    show-embedding-coverage
+                      dimension
+                      model
+                      source-dir (-s)
+                    retention
+                      branch
+                      limit
+                      source-dir (-s)
+                  admin
+                    migrate
+                      source-dir (-s)
+                    gc
+                      execute
+                      source-dir (-s)
+              rules
+                export
+                  format = sonarqube | json
+                  lang
+                  output (-o)
+                list
+              deps
+                bench !bench-index !multi-open
+                bench-index !bench !multi-open
+                bytes
+                depth (-d)
+                format = csv | json
+                index-workers
+                multi-open !bench !bench-index
+                quiet (-q)
+                report-mem
+                sample
+                source-dir (-s)
+              smoke
+                budgets
+                json
+                scenarios
+                source-dir (-s)
+              bench
+                discover
+                  boot-budget-ms
+                  output (-o)
+                  skip-features
+                  source-dir (-s)
+                run
+                  boot-budget-ms
+                  json
+                  manifest (-m)
+                  mode = latency | recompute | memory
+                  point (-p)
+                  source-dir (-s)
+                  trim-settle-ms
+                  warm-iterations
+                compare
+                  baseline
+                  candidate
+                  policy
+        "#]]
+        .assert_eq(&render(&surface(), 0));
     }
 }

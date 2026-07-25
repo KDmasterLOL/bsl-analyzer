@@ -1,0 +1,1229 @@
+//! Machine-readable declaration of what this build accepts.
+//!
+//! Consumers need to know which tools, actions and parameters a given build supports
+//! before they call it. Without a declaration the only observable surface is the text of
+//! `--help` and the prose in tool descriptions, so downstream CI ends up asserting on
+//! substrings: a reworded help line breaks it, while a renamed parameter does not. This
+//! module turns the surface into data.
+//!
+//! Two things are declared here by hand — the action names each tool accepts and the
+//! parameters each action needs — because neither is expressible in the JSON schema
+//! `tools/list` already publishes (`action` is a plain string, and requiredness varies per
+//! action). Everything else is derived: parameter names, types and schema-level
+//! requiredness come from the tool router's own schemas, so a renamed parameter cannot
+//! silently diverge from the declaration — [`tests::declared_params_exist_in_schema`]
+//! rejects it. The unknown-action error messages are generated from the same tables
+//! ([`unknown_action`]), so a renamed action cannot diverge either.
+//!
+//! The CLI surface is declared by the binary crate, which owns the clap definition, and
+//! handed over at startup through [`register_cli_surface`].
+
+use std::collections::BTreeSet;
+use std::sync::OnceLock;
+
+use rmcp::ErrorData as McpError;
+use serde_json::{json, Map, Value};
+
+use crate::{McpProfile, McpServer};
+
+/// Version of the *contract*, deliberately separate from the analyzer's build version: a
+/// patch release must not look like a contract change, and a renamed parameter must.
+///
+/// - **major** — a tool, action or parameter is removed or renamed, a parameter becomes
+///   required, or the meaning of an existing field changes;
+/// - **minor** — a tool, action, parameter or accepted value is added.
+///
+/// Consumers should require an exact major and a minimum minor. Bump this by hand in the
+/// same commit that changes the surface; the snapshot test over [`document`] puts the
+/// version field next to the change in the diff.
+pub const CONTRACT_VERSION: &str = "1.0";
+
+/// URI of the MCP resource carrying [`document`].
+pub const CONTRACT_URI: &str = "bsl-analyzer://contract";
+
+/// One tool's hand-declared part of the contract.
+pub struct ToolDecl {
+    pub name: &'static str,
+    /// Values accepted in the tool's `action` parameter, in the order the tool reports
+    /// them. Empty for single-purpose tools that have no `action` parameter.
+    pub actions: &'static [ActionDecl],
+    /// A requirement the JSON schema cannot express (e.g. "one of these two").
+    pub note: Option<&'static str>,
+}
+
+/// One action of a tool, with the parameters it needs beyond the schema-level required ones.
+pub struct ActionDecl {
+    pub name: &'static str,
+    pub required: &'static [&'static str],
+    /// A requirement that holds only in a specific mode.
+    pub note: Option<&'static str>,
+}
+
+const fn action(name: &'static str, required: &'static [&'static str]) -> ActionDecl {
+    ActionDecl { name, required, note: None }
+}
+
+const fn tool(name: &'static str, actions: &'static [ActionDecl]) -> ToolDecl {
+    ToolDecl { name, actions, note: None }
+}
+
+const METADATA_ACTIONS: &[ActionDecl] = &[
+    action("info", &[]),
+    ActionDecl {
+        name: "tree",
+        required: &[],
+        note: Some(
+            "in infobase mode (`mode=infobase`, or `connection` set under `mode=auto`) \
+             `meta_type` is required and only `tree`/`object` are available",
+        ),
+    },
+    action("object", &["object_type", "object_name"]),
+    action("form", &["object_type"]),
+];
+
+const WORKSPACE_SEARCH_ACTIONS: &[ActionDecl] =
+    &[action("search_code", &["query"]), action("status", &[])];
+
+const QUERY_ACTIONS: &[ActionDecl] =
+    &[action("validate", &["query"]), action("execute", &["query"]), action("schema", &[])];
+
+const EXECUTE_ACTIONS: &[ActionDecl] =
+    &[action("check", &[]), action("run", &[]), action("eval", &[])];
+
+const DEBUG_ACTIONS: &[ActionDecl] = &[
+    action("attach", &["host", "infobase"]),
+    action("disconnect", &[]),
+    action("set_breakpoint", &["module", "line"]),
+    action("remove_breakpoint", &["module", "line"]),
+    action("continue", &[]),
+    action("step", &["direction"]),
+    action("wait_stop", &[]),
+    action("stack_trace", &[]),
+    action("locals", &[]),
+    action("eval", &["expression"]),
+];
+
+const GRAPH_ACTIONS: &[ActionDecl] = &[
+    action("overview", &[]),
+    action("schema", &[]),
+    action("status", &[]),
+    action("node", &["id"]),
+    action("source", &["ids"]),
+    action("neighbors", &["id"]),
+    action("callers", &["id"]),
+    action("callees", &["id"]),
+    action("resolve", &["query"]),
+];
+
+const DIAGNOSTICS_ACTIONS: &[ActionDecl] = &[
+    action("catalog", &[]),
+    action("schema", &[]),
+    action("status", &[]),
+    action("file", &["path"]),
+    action("workspace", &[]),
+];
+
+const REFERENCE_SEARCH_ACTIONS: &[ActionDecl] =
+    &[action("find_docs", &["query"]), action("search_docs", &["query"]), action("status", &[])];
+
+const WORKSPACE_TOOLS: &[ToolDecl] = &[
+    tool("metadata", METADATA_ACTIONS),
+    tool("search", WORKSPACE_SEARCH_ACTIONS),
+    tool("query", QUERY_ACTIONS),
+    tool("execute", EXECUTE_ACTIONS),
+    tool("event_log", &[]),
+    tool("debug", DEBUG_ACTIONS),
+    tool("graph", GRAPH_ACTIONS),
+    ToolDecl {
+        name: "symbol_info",
+        actions: &[],
+        note: Some("one of `symbol` or `path`+`line` is required"),
+    },
+    tool("diagnostics", DIAGNOSTICS_ACTIONS),
+];
+
+const REFERENCE_TOOLS: &[ToolDecl] =
+    &[tool("search", REFERENCE_SEARCH_ACTIONS), tool("syntax_help", &[]), tool("its_help", &[])];
+
+fn tools_of(profile: McpProfile) -> &'static [ToolDecl] {
+    match profile {
+        McpProfile::Workspace => WORKSPACE_TOOLS,
+        McpProfile::Reference => REFERENCE_TOOLS,
+    }
+}
+
+fn decl_of(profile: McpProfile, tool: &str) -> Option<&'static ToolDecl> {
+    tools_of(profile).iter().find(|d| d.name == tool)
+}
+
+/// The `Unknown action` error every action-dispatching tool returns, generated from the
+/// declaration so the accepted list an agent is told about and the one a consumer reads
+/// from the contract are the same string by construction.
+pub(crate) fn unknown_action(profile: McpProfile, tool: &str, got: &str) -> McpError {
+    let expected: Vec<&str> = decl_of(profile, tool)
+        .map(|d| d.actions.iter().map(|a| a.name).collect())
+        .unwrap_or_default();
+    McpError::invalid_params(
+        format!("Unknown action '{got}'. Expected: {}", expected.join(", ")),
+        None,
+    )
+}
+
+/// The full declaration: contract version, build version, and every surface this process
+/// exposes. The CLI surface is present once the binary has registered it
+/// ([`register_cli_surface`]); a library embedder that only serves MCP gets the MCP part.
+pub fn document() -> Value {
+    let mut doc = Map::new();
+    doc.insert("contract_version".into(), json!(CONTRACT_VERSION));
+    doc.insert("build_version".into(), json!(env!("CARGO_PKG_VERSION")));
+    doc.insert("mcp".into(), mcp_surface());
+    if let Some(cli) = CLI_SURFACE.get() {
+        doc.insert("cli".into(), cli.clone());
+    }
+    Value::Object(doc)
+}
+
+/// The MCP surface of both profiles: which tools each serves, which actions each tool
+/// accepts, and every parameter with its type and requiredness.
+pub fn mcp_surface() -> Value {
+    json!({
+        "profiles": {
+            McpProfile::Workspace.as_str(): profile_surface(McpProfile::Workspace),
+            McpProfile::Reference.as_str(): profile_surface(McpProfile::Reference),
+        }
+    })
+}
+
+fn profile_surface(profile: McpProfile) -> Value {
+    let router = match profile {
+        McpProfile::Workspace => McpServer::workspace_tool_router(),
+        McpProfile::Reference => McpServer::reference_tool_router(),
+    };
+    let listed = router.list_all();
+    let tools: Vec<Value> = tools_of(profile)
+        .iter()
+        .map(|decl| {
+            let schema = listed.iter().find(|t| t.name == decl.name).map(|t| &*t.input_schema);
+            let mut entry = Map::new();
+            entry.insert("name".into(), json!(decl.name));
+            if let Some(note) = decl.note {
+                entry.insert("note".into(), json!(note));
+            }
+            entry.insert(
+                "actions".into(),
+                Value::Array(decl.actions.iter().map(action_surface).collect()),
+            );
+            entry.insert(
+                "params".into(),
+                schema.map(params_surface).unwrap_or_else(|| Value::Array(Vec::new())),
+            );
+            Value::Object(entry)
+        })
+        .collect();
+    json!({ "tools": tools })
+}
+
+fn action_surface(decl: &ActionDecl) -> Value {
+    let mut entry = Map::new();
+    entry.insert("name".into(), json!(decl.name));
+    entry.insert("required".into(), json!(decl.required));
+    if let Some(note) = decl.note {
+        entry.insert("note".into(), json!(note));
+    }
+    Value::Object(entry)
+}
+
+/// Parameters lifted straight out of the tool's published JSON schema, so names, types and
+/// schema-level requiredness cannot drift from what the server actually accepts.
+/// Descriptions are deliberately left out: they are prose for agents, they live in
+/// `tools/list`, and carrying them here would make every reworded sentence read as a
+/// contract change — exactly the failure mode this declaration exists to end.
+fn params_surface(schema: &Map<String, Value>) -> Value {
+    let required: BTreeSet<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return Value::Array(Vec::new());
+    };
+    let mut names: Vec<&String> = props.keys().collect();
+    names.sort();
+    Value::Array(
+        names
+            .into_iter()
+            .map(|name| {
+                let mut param = Map::new();
+                param.insert("name".into(), json!(name));
+                param.insert("type".into(), json!(type_of(&props[name])));
+                param.insert("required".into(), json!(required.contains(name.as_str())));
+                // Absent and explicitly `null` are different inputs: an optional parameter
+                // may be omitted, and a nullable one additionally accepts `null` in place
+                // of a value. `required: false` alone would under-declare the second.
+                if accepts_null(&props[name]) {
+                    param.insert("nullable".into(), json!(true));
+                }
+                Value::Object(param)
+            })
+            .collect(),
+    )
+}
+
+fn accepts_null(schema: &Value) -> bool {
+    schema
+        .get("type")
+        .and_then(Value::as_array)
+        .is_some_and(|names| names.iter().any(|name| name == "null"))
+}
+
+/// Collapse a property schema to one type name. `Option<T>` widens the schema to
+/// `["T", "null"]`; the null arm is reported separately by `nullable`, so it is dropped
+/// here rather than turning every optional parameter's type into a union.
+fn type_of(schema: &Value) -> String {
+    let base = match schema.get("type") {
+        Some(Value::String(name)) => name.clone(),
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|name| *name != "null")
+            .unwrap_or("any")
+            .to_string(),
+        _ => "any".to_string(),
+    };
+    if base == "array" {
+        if let Some(item) = schema.get("items") {
+            return format!("array<{}>", type_of(item));
+        }
+    }
+    base
+}
+
+static CLI_SURFACE: OnceLock<Value> = OnceLock::new();
+
+/// Hand the process's CLI surface to the contract document.
+///
+/// The clap definition lives in the binary crate, which this crate cannot see, yet the
+/// point of the declaration is that one read answers "what does this build accept" for
+/// every surface at once. The binary introspects its own commands at startup and registers
+/// the result here; the first registration wins, later ones are ignored.
+pub fn register_cli_surface(surface: Value) {
+    let _ = CLI_SURFACE.set(surface);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use expect_test::expect;
+
+    fn schema_props(profile: McpProfile, tool: &str) -> Map<String, Value> {
+        let router = match profile {
+            McpProfile::Workspace => McpServer::workspace_tool_router(),
+            McpProfile::Reference => McpServer::reference_tool_router(),
+        };
+        let listed = router.list_all();
+        let found = listed.iter().find(|t| t.name == tool).unwrap_or_else(|| {
+            panic!("tool '{tool}' is declared but the router does not serve it")
+        });
+        found.input_schema.get("properties").and_then(Value::as_object).cloned().unwrap_or_default()
+    }
+
+    /// The declaration names parameters that the tool really accepts. A renamed parameter
+    /// fails here instead of shipping a contract that points at a field nobody reads.
+    #[test]
+    fn declared_params_exist_in_schema() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            for decl in tools_of(profile) {
+                let props = schema_props(profile, decl.name);
+                if !decl.actions.is_empty() {
+                    assert!(
+                        props.contains_key("action"),
+                        "{}/{} declares actions but has no `action` parameter",
+                        profile.as_str(),
+                        decl.name
+                    );
+                }
+                for action in decl.actions {
+                    for param in action.required {
+                        assert!(
+                            props.contains_key(*param),
+                            "{}/{} action '{}' requires '{param}', which is not a parameter of \
+                             the tool",
+                            profile.as_str(),
+                            decl.name,
+                            action.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every tool the router serves is declared, and nothing is declared that is not
+    /// served. A new tool that forgets its declaration fails here.
+    #[test]
+    fn declaration_covers_every_served_tool() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            let router = match profile {
+                McpProfile::Workspace => McpServer::workspace_tool_router(),
+                McpProfile::Reference => McpServer::reference_tool_router(),
+            };
+            let mut served: Vec<String> =
+                router.list_all().iter().map(|t| t.name.to_string()).collect();
+            served.sort();
+            let mut declared: Vec<String> =
+                tools_of(profile).iter().map(|d| d.name.to_string()).collect();
+            declared.sort();
+            assert_eq!(served, declared, "profile {}", profile.as_str());
+        }
+    }
+
+    #[test]
+    fn unknown_action_lists_the_declared_actions() {
+        let err = unknown_action(McpProfile::Workspace, "query", "validte");
+        assert_eq!(err.message, "Unknown action 'validte'. Expected: validate, execute, schema");
+    }
+
+    /// A tool with no declared actions must not produce an empty `Expected:` list — that
+    /// would mean an action-dispatching tool lost its declaration.
+    #[test]
+    fn unknown_action_never_reports_an_empty_list() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            for decl in tools_of(profile) {
+                if decl.actions.is_empty() {
+                    continue;
+                }
+                let err = unknown_action(profile, decl.name, "nope");
+                assert!(
+                    !err.message.ends_with("Expected: "),
+                    "{}/{} produced an empty expected-action list",
+                    profile.as_str(),
+                    decl.name
+                );
+            }
+        }
+    }
+
+    /// The declaration in full. Any change to a tool, action, parameter name, parameter
+    /// type or requiredness lands in this diff next to `contract_version` — that adjacency
+    /// is the reminder to bump it. `build_version` is left out on purpose: it moves every
+    /// release and would drown the changes worth noticing. Rebase with
+    /// `UPDATE_EXPECT=1 cargo test -p mcp-server contract`.
+    #[test]
+    fn mcp_surface_snapshot() {
+        let mut doc = Map::new();
+        doc.insert("contract_version".into(), json!(CONTRACT_VERSION));
+        doc.insert("mcp".into(), mcp_surface());
+        expect![[r#"
+            {
+              "contract_version": "1.0",
+              "mcp": {
+                "profiles": {
+                  "reference": {
+                    "tools": [
+                      {
+                        "actions": [
+                          {
+                            "name": "find_docs",
+                            "required": [
+                              "query"
+                            ]
+                          },
+                          {
+                            "name": "search_docs",
+                            "required": [
+                              "query"
+                            ]
+                          },
+                          {
+                            "name": "status",
+                            "required": []
+                          }
+                        ],
+                        "name": "search",
+                        "params": [
+                          {
+                            "name": "action",
+                            "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "limit",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "query",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [],
+                        "name": "syntax_help",
+                        "params": [
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "name",
+                            "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "type_name",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [],
+                        "name": "its_help",
+                        "params": [
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "question",
+                            "required": true,
+                            "type": "string"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "workspace": {
+                    "tools": [
+                      {
+                        "actions": [
+                          {
+                            "name": "info",
+                            "required": []
+                          },
+                          {
+                            "name": "tree",
+                            "note": "in infobase mode (`mode=infobase`, or `connection` set under `mode=auto`) `meta_type` is required and only `tree`/`object` are available",
+                            "required": []
+                          },
+                          {
+                            "name": "object",
+                            "required": [
+                              "object_type",
+                              "object_name"
+                            ]
+                          },
+                          {
+                            "name": "form",
+                            "required": [
+                              "object_type"
+                            ]
+                          }
+                        ],
+                        "name": "metadata",
+                        "params": [
+                          {
+                            "name": "action",
+                            "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "connection",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "filter",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "form_name",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "max_items",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "meta_type",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "mode",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "name_mask",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "object_name",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "object_type",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [
+                          {
+                            "name": "search_code",
+                            "required": [
+                              "query"
+                            ]
+                          },
+                          {
+                            "name": "status",
+                            "required": []
+                          }
+                        ],
+                        "name": "search",
+                        "params": [
+                          {
+                            "name": "action",
+                            "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "limit",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "query",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [
+                          {
+                            "name": "validate",
+                            "required": [
+                              "query"
+                            ]
+                          },
+                          {
+                            "name": "execute",
+                            "required": [
+                              "query"
+                            ]
+                          },
+                          {
+                            "name": "schema",
+                            "required": []
+                          }
+                        ],
+                        "name": "query",
+                        "params": [
+                          {
+                            "name": "action",
+                            "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "connection",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "limit",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "parameters",
+                            "nullable": true,
+                            "required": false,
+                            "type": "object"
+                          },
+                          {
+                            "name": "query",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [
+                          {
+                            "name": "check",
+                            "required": []
+                          },
+                          {
+                            "name": "run",
+                            "required": []
+                          },
+                          {
+                            "name": "eval",
+                            "required": []
+                          }
+                        ],
+                        "name": "execute",
+                        "params": [
+                          {
+                            "name": "action",
+                            "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "code",
+                            "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "connection",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [],
+                        "name": "event_log",
+                        "params": [
+                          {
+                            "name": "connection",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "contains",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "date_from",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "date_to",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "event",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "level",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "limit",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "metadata",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "user",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [
+                          {
+                            "name": "attach",
+                            "required": [
+                              "host",
+                              "infobase"
+                            ]
+                          },
+                          {
+                            "name": "disconnect",
+                            "required": []
+                          },
+                          {
+                            "name": "set_breakpoint",
+                            "required": [
+                              "module",
+                              "line"
+                            ]
+                          },
+                          {
+                            "name": "remove_breakpoint",
+                            "required": [
+                              "module",
+                              "line"
+                            ]
+                          },
+                          {
+                            "name": "continue",
+                            "required": []
+                          },
+                          {
+                            "name": "step",
+                            "required": [
+                              "direction"
+                            ]
+                          },
+                          {
+                            "name": "wait_stop",
+                            "required": []
+                          },
+                          {
+                            "name": "stack_trace",
+                            "required": []
+                          },
+                          {
+                            "name": "locals",
+                            "required": []
+                          },
+                          {
+                            "name": "eval",
+                            "required": [
+                              "expression"
+                            ]
+                          }
+                        ],
+                        "name": "debug",
+                        "params": [
+                          {
+                            "name": "action",
+                            "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "auto_attach",
+                            "required": false,
+                            "type": "array<string>"
+                          },
+                          {
+                            "name": "condition",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "config_root",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "direction",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "expression",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "extensions",
+                            "required": false,
+                            "type": "array<array<string>>"
+                          },
+                          {
+                            "name": "host",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "infobase",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "line",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "module",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "port",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "stack_level",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "timeout_secs",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [
+                          {
+                            "name": "overview",
+                            "required": []
+                          },
+                          {
+                            "name": "schema",
+                            "required": []
+                          },
+                          {
+                            "name": "status",
+                            "required": []
+                          },
+                          {
+                            "name": "node",
+                            "required": [
+                              "id"
+                            ]
+                          },
+                          {
+                            "name": "source",
+                            "required": [
+                              "ids"
+                            ]
+                          },
+                          {
+                            "name": "neighbors",
+                            "required": [
+                              "id"
+                            ]
+                          },
+                          {
+                            "name": "callers",
+                            "required": [
+                              "id"
+                            ]
+                          },
+                          {
+                            "name": "callees",
+                            "required": [
+                              "id"
+                            ]
+                          },
+                          {
+                            "name": "resolve",
+                            "required": [
+                              "query"
+                            ]
+                          }
+                        ],
+                        "name": "graph",
+                        "params": [
+                          {
+                            "name": "action",
+                            "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "depth",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "detail",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "dir",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "edge_kinds",
+                            "required": false,
+                            "type": "array<string>"
+                          },
+                          {
+                            "name": "id",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "ids",
+                            "required": false,
+                            "type": "array<string>"
+                          },
+                          {
+                            "name": "max_nodes",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "provenance",
+                            "required": false,
+                            "type": "array<string>"
+                          },
+                          {
+                            "name": "query",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "top",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [],
+                        "name": "symbol_info",
+                        "note": "one of `symbol` or `path`+`line` is required",
+                        "params": [
+                          {
+                            "name": "column",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "include",
+                            "required": false,
+                            "type": "array<string>"
+                          },
+                          {
+                            "name": "line",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "locale",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "path",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "symbol",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [
+                          {
+                            "name": "catalog",
+                            "required": []
+                          },
+                          {
+                            "name": "schema",
+                            "required": []
+                          },
+                          {
+                            "name": "status",
+                            "required": []
+                          },
+                          {
+                            "name": "file",
+                            "required": [
+                              "path"
+                            ]
+                          },
+                          {
+                            "name": "workspace",
+                            "required": []
+                          }
+                        ],
+                        "name": "diagnostics",
+                        "params": [
+                          {
+                            "name": "action",
+                            "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "codes",
+                            "required": false,
+                            "type": "array<string>"
+                          },
+                          {
+                            "name": "detail",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "locale",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "max_files",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_findings",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "min_severity",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "path",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "range_end",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "range_start",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }"#]].assert_eq(&serde_json::to_string_pretty(&Value::Object(doc)).unwrap());
+    }
+}
