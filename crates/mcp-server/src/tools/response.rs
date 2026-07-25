@@ -1,6 +1,6 @@
 //! Response-shaping helpers shared by the agent-facing tools.
 
-use rmcp::model::CallToolResult;
+use rmcp::model::{CallToolResult, Content};
 use serde_json::Value;
 
 /// Emit `body` as the MCP `structuredContent` field. rmcp mirrors the value as a
@@ -53,6 +53,9 @@ pub fn trim_items_to_budget(items: &mut Vec<Value>, max_output_tokens: usize) ->
 /// no structured envelope, so the trailing note IS the truncation marker. Returns whether it
 /// truncated. A single line longer than the budget is cut at a char boundary rather than
 /// dropped whole.
+///
+/// The note is the floor: a budget smaller than `note` yields the note alone rather than a
+/// silently clipped body, because an unmarked truncation reads as a complete answer.
 pub fn truncate_text_to_budget(text: &mut String, max_output_tokens: usize, note: &str) -> bool {
     let budget = max_output_tokens.saturating_mul(4);
     if text.len() <= budget {
@@ -69,6 +72,18 @@ pub fn truncate_text_to_budget(text: &mut String, max_output_tokens: usize, note
     text.truncate(cut);
     text.push_str(note);
     true
+}
+
+/// Emit a plain-text tool body already fitted to `max_output_tokens`, appending `note` when it
+/// had to cut. The text tools carry no structured envelope, so this is the whole truncation
+/// contract for them: body first, continuation hint last.
+pub fn text_within_budget(
+    mut text: String,
+    max_output_tokens: usize,
+    note: &str,
+) -> CallToolResult {
+    truncate_text_to_budget(&mut text, max_output_tokens, note);
+    CallToolResult::success(vec![Content::text(text)])
 }
 
 /// The largest count `n ≤ items` such that `render(n)` fits `max_output_tokens` (~4 chars

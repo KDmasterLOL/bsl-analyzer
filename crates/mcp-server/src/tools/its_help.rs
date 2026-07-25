@@ -1,3 +1,4 @@
+use crate::tools::response::text_within_budget;
 use naparnik::{NaparnikApi, NaparnikHttpClient};
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
@@ -6,7 +7,15 @@ use tracing::debug;
 
 static CLIENT: Mutex<Option<NaparnikHttpClient>> = Mutex::const_new(None);
 
-pub async fn its_help(question: &str) -> Result<CallToolResult, McpError> {
+/// The knowledge base answers at whatever length the document warrants, so the answer goes
+/// out through the output budget.
+const BUDGET_NOTE: &str =
+    "\n-- ответ усечён под max_output_tokens; повысьте бюджет или задайте более узкий вопрос --\n";
+
+pub async fn its_help(
+    question: &str,
+    max_output_tokens: usize,
+) -> Result<CallToolResult, McpError> {
     let mut guard = CLIENT.lock().await;
     if guard.is_none() {
         let client = NaparnikHttpClient::from_env()
@@ -22,5 +31,5 @@ pub async fn its_help(question: &str) -> Result<CallToolResult, McpError> {
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-    Ok(CallToolResult::success(vec![rmcp::model::Content::text(answer.text)]))
+    Ok(text_within_budget(answer.text, max_output_tokens, BUDGET_NOTE))
 }

@@ -113,6 +113,9 @@ struct SyntaxHelpParams {
     name: String,
     /// Owning platform type when `name` is a member of a specific type (optional).
     type_name: Option<String>,
+    /// Output budget in tokens (~4 chars each); a large type's card is truncated at a line
+    /// boundary with a note pointing at the single-member lookup (default 6000).
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -127,6 +130,11 @@ struct QueryParams {
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
     /// Named live 1C connection (optional when only one/default connection exists).
     connection: Option<String>,
+    /// `execute`: output budget in tokens (~4 chars each) on top of the `limit` row cap —
+    /// `limit` bounds how many rows come back, nothing bounds how wide they are. An
+    /// over-budget table is truncated at a row boundary with a note (default 6000); when the
+    /// row cap fired too, the note says raising the budget alone will not help.
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -137,6 +145,9 @@ struct ExecuteParams {
     code: String,
     /// Named live 1C connection (optional when only one/default connection exists).
     connection: Option<String>,
+    /// Output budget in tokens (~4 chars each); over-budget output (a `run` context block, an
+    /// evaluated value, a long syntax-error listing) is truncated with a note (default 6000).
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -161,6 +172,14 @@ struct EventLogParams {
     limit: Option<u32>,
     /// Named live 1C connection (optional when only one/default connection exists).
     connection: Option<String>,
+    /// Output budget in tokens (~4 chars each) on top of the `limit` record cap — `limit`
+    /// counts records, it does not bound their size. An over-budget read drops the oldest
+    /// records, flags `budget_exhausted: true` and carries a `budget_hint` (default 6000);
+    /// when the record cap fired too, the hint says raising the budget alone will not help.
+    /// In the response, `returned` counts the records actually delivered and `total` the ones
+    /// the platform read for this `limit` window — neither is the whole matching population,
+    /// which the platform never reports.
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -258,6 +277,9 @@ struct DiagnosticsParams {
 struct ItsHelpParams {
     /// Natural-language question for the ITS expert help.
     question: String,
+    /// Output budget in tokens (~4 chars each); a long answer is truncated at a line boundary
+    /// with a continuation note (default 6000).
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -293,6 +315,10 @@ struct DebugParams {
     stack_level: Option<u32>,
     /// `eval`: BSL expression to evaluate in the current stop (required).
     expression: Option<String>,
+    /// Output budget in tokens (~4 chars each) for the state-reading actions `stack_trace`,
+    /// `locals`, `wait_stop` and `eval`: a deep stack or a wide frame is truncated at a line
+    /// boundary with a continuation note (default 6000).
+    max_output_tokens: Option<usize>,
 }
 
 fn default_debug_port() -> u16 {
@@ -604,15 +630,24 @@ impl McpServer {
     /// the query-language schema. Not for browsing metadata structure (use `metadata`) and not
     /// for BSL code (use `execute`). Actions: `validate` — parse and type-check a query (`query`
     /// required); `execute` — run it (`query` required; optional `limit`, `parameters`);
-    /// `schema` — the SDBL schema reference.
+    /// `schema` — the SDBL schema reference. `execute` output is bounded by `max_output_tokens`
+    /// on top of `limit` and appends a truncation note.
     #[tool(name = "query", annotations(read_only_hint = true))]
     async fn query(&self, params: Parameters<QueryParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
+        let max_output_tokens =
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
         match p.action.as_str() {
             "schema" => Ok(tools::query::schema()),
             "validate" => {
                 let query = require(p.query, "query", "validate")?;
-                tools::query::validate_query(&self.state, &query, p.connection.as_deref()).await
+                tools::query::validate_query(
+                    &self.state,
+                    &query,
+                    p.connection.as_deref(),
+                    max_output_tokens,
+                )
+                .await
             }
             "execute" => {
                 let query = require(p.query, "query", "execute")?;
@@ -622,6 +657,7 @@ impl McpServer {
                     p.limit,
                     p.parameters,
                     p.connection.as_deref(),
+                    max_output_tokens,
                 )
                 .await
             }
@@ -637,19 +673,38 @@ impl McpServer {
     /// database (use `query` for SDBL) and not for analyzer findings (use `diagnostics`).
     /// Actions: `check` — syntax-check `code`; `run` — execute `code`; `eval` — evaluate the
     /// single expression in `code`. `run`/`eval` execute code, so this tool is not read-only.
+    /// Output is bounded by `max_output_tokens` and appends a truncation note.
     #[tool(name = "execute")]
     async fn execute(&self, params: Parameters<ExecuteParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
+        let budget = p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
         match p.action.as_str() {
             "check" => {
-                tools::execution::check_syntax(&self.state, &p.code, p.connection.as_deref()).await
+                tools::execution::check_syntax(
+                    &self.state,
+                    &p.code,
+                    p.connection.as_deref(),
+                    budget,
+                )
+                .await
             }
             "run" => {
-                tools::execution::execute_code(&self.state, &p.code, p.connection.as_deref()).await
+                tools::execution::execute_code(
+                    &self.state,
+                    &p.code,
+                    p.connection.as_deref(),
+                    budget,
+                )
+                .await
             }
             "eval" => {
-                tools::execution::eval_expression(&self.state, &p.code, p.connection.as_deref())
-                    .await
+                tools::execution::eval_expression(
+                    &self.state,
+                    &p.code,
+                    p.connection.as_deref(),
+                    budget,
+                )
+                .await
             }
             other => Err(McpError::invalid_params(
                 format!("Unknown action '{other}'. Expected: check, run, eval"),
@@ -664,7 +719,9 @@ impl McpServer {
     /// source (use `diagnostics`): this reads live runtime records from a running infobase.
     /// Filters: `date_from`/`date_to`, `level`, `user`, `event`, `metadata`, and `contains`
     /// (post-read substring over the newest `limit` window). `limit` is newest-first (default
-    /// 100, max 1000). Requires the extension deployed with event-log read rights.
+    /// 100, max 1000) and bounds the record COUNT; `max_output_tokens` bounds the response
+    /// SIZE and flags `budget_exhausted`. Requires the extension deployed with event-log read
+    /// rights.
     #[tool(name = "event_log", annotations(read_only_hint = true))]
     async fn event_log(
         &self,
@@ -684,6 +741,7 @@ impl McpServer {
                 limit: p.limit,
                 connection: p.connection,
             },
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
         )
         .await
     }
@@ -692,12 +750,14 @@ impl McpServer {
     /// to debug a running infobase — attach, break, then step and read locals/eval. Not for
     /// static analysis (use `diagnostics`) and not for running standalone code (use `execute`).
     /// Actions: `attach`/`disconnect`; `set_breakpoint`/`remove_breakpoint`; `continue`/`step`;
-    /// `wait_stop`; `stack_trace`; `locals`; `eval`. Requires a reachable debug endpoint
+    /// `wait_stop`; `stack_trace`; `locals`; `eval`. State-reading actions are bounded by
+    /// `max_output_tokens` and append a truncation note. Requires a reachable debug endpoint
     /// (`host` + `infobase`, default port 1550).
     #[tool(name = "debug")]
     async fn debug(&self, params: Parameters<DebugParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let session = self.state.debug_session().clone();
+        let budget = p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
 
         match p.action.as_str() {
             "attach" => {
@@ -720,6 +780,7 @@ impl McpServer {
                             extensions: &extensions,
                             auto_attach: &auto_attach,
                         },
+                        budget,
                     )
                 })
                 .await
@@ -768,20 +829,20 @@ impl McpServer {
             "wait_stop" => {
                 let timeout_secs = p.timeout_secs;
                 tokio::task::spawn_blocking(move || {
-                    tools::debug::debug_wait_stop(&session, timeout_secs)
+                    tools::debug::debug_wait_stop(&session, timeout_secs, budget)
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            "stack_trace" => {
-                tokio::task::spawn_blocking(move || tools::debug::debug_stack_trace(&session))
-                    .await
-                    .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-            }
+            "stack_trace" => tokio::task::spawn_blocking(move || {
+                tools::debug::debug_stack_trace(&session, budget)
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?,
             "locals" => {
                 let stack_level = p.stack_level;
                 tokio::task::spawn_blocking(move || {
-                    tools::debug::debug_locals(&session, stack_level)
+                    tools::debug::debug_locals(&session, stack_level, budget)
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
@@ -790,7 +851,7 @@ impl McpServer {
                 let expression = require(p.expression, "expression", "eval")?;
                 let stack_level = p.stack_level;
                 tokio::task::spawn_blocking(move || {
-                    tools::debug::debug_eval(&session, &expression, stack_level)
+                    tools::debug::debug_eval(&session, &expression, stack_level, budget)
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
@@ -1398,25 +1459,36 @@ impl McpServer {
     /// from the built-in platform data. Use when you know the member name (e.g. `СтрНайти`) and
     /// want its exact signature. For free-text doc discovery use `search`; for broader
     /// conceptual guidance use `its_help`. Params: `name` (required), optional `type_name` when
-    /// the member belongs to a specific platform type.
+    /// the member belongs to a specific platform type, optional `max_output_tokens` bounding a
+    /// large type's card.
     #[tool(name = "syntax_help", annotations(read_only_hint = true))]
     async fn syntax_help(
         &self,
         params: Parameters<SyntaxHelpParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::platform::bsl_syntax_help(&params.0.name, params.0.type_name.as_deref())
+        let p = params.0;
+        tools::platform::bsl_syntax_help(
+            &p.name,
+            p.type_name.as_deref(),
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+        )
     }
 
     /// Ask the ITS expert-help knowledge base a natural-language question about the 1C platform
     /// and development standards. Use for conceptual "how / why" questions. For one member's
-    /// signature use `syntax_help`; for doc keyword search use `search`. Param: `question`
-    /// (required).
+    /// signature use `syntax_help`; for doc keyword search use `search`. Params: `question`
+    /// (required), optional `max_output_tokens` bounding a long answer.
     #[tool(name = "its_help", annotations(read_only_hint = true))]
     async fn its_help(
         &self,
         params: Parameters<ItsHelpParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::its_help::its_help(&params.0.question).await
+        let p = params.0;
+        tools::its_help::its_help(
+            &p.question,
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+        )
+        .await
     }
 }
 
@@ -1437,9 +1509,12 @@ impl ServerHandler for McpServer {
                  - SDBL query validate/run → `query`; run/check BSL code → `execute`;\n\
                  - live infobase runtime events → `event_log`; live debugger session → `debug`.\n\
                  Tools whose data is built lazily (metadata, graph, diagnostics, search) return a \
-                 retry envelope while indexing rather than an error; large responses are bounded \
-                 by `max_output_tokens`/limits — JSON tools (graph, diagnostics) flag \
-                 `budget_exhausted`, text tools (search, metadata) append a truncation note."
+                 retry envelope while indexing rather than an error; every response is bounded \
+                 by `max_output_tokens` (and, where one exists, the action's own count cap) — \
+                 JSON tools (graph, diagnostics, event_log) flag `budget_exhausted` with a \
+                 `budget_hint`, text tools (search, metadata, query, execute, debug) append a \
+                 truncation note. When a count cap fired too, the hint says so: raising \
+                 `max_output_tokens` alone will not return more."
                     .into()
             }
             McpProfile::Reference => {
@@ -1448,7 +1523,8 @@ impl ServerHandler for McpServer {
                  - one platform member's signature by name → `syntax_help`;\n\
                  - platform docs by keyword or meaning → `search`;\n\
                  - conceptual how/why question on the platform or standards → `its_help`.\n\
-                 Tools: search, syntax_help, its_help."
+                 Tools: search, syntax_help, its_help. Every response is bounded by \
+                 `max_output_tokens`; a truncated one appends a continuation note."
                     .into()
             }
         });
@@ -1502,7 +1578,8 @@ mod contract {
             to debug a running infobase — attach, break, then step and read locals/eval. Not for
             static analysis (use `diagnostics`) and not for running standalone code (use `execute`).
             Actions: `attach`/`disconnect`; `set_breakpoint`/`remove_breakpoint`; `continue`/`step`;
-            `wait_stop`; `stack_trace`; `locals`; `eval`. Requires a reachable debug endpoint
+            `wait_stop`; `stack_trace`; `locals`; `eval`. State-reading actions are bounded by
+            `max_output_tokens` and append a truncation note. Requires a reachable debug endpoint
             (`host` + `infobase`, default port 1550).
               - action: attach | disconnect | set_breakpoint | remove_breakpoint | continue | step |
             wait_stop | stack_trace | locals | eval.
@@ -1515,6 +1592,9 @@ mod contract {
               - host: `attach`: debugger host (required).
               - infobase: `attach`: infobase name (required).
               - line: `set_breakpoint`/`remove_breakpoint`: 1-based line (required).
+              - max_output_tokens: Output budget in tokens (~4 chars each) for the state-reading actions `stack_trace`,
+            `locals`, `wait_stop` and `eval`: a deep stack or a wide frame is truncated at a line
+            boundary with a continuation note (default 6000).
               - module: `set_breakpoint`/`remove_breakpoint`: target module id (required).
               - port: `attach`: debugger port (default 1550).
               - stack_level: `locals`/`eval`: stack frame level to evaluate in (optional, default top frame).
@@ -1551,7 +1631,9 @@ mod contract {
             source (use `diagnostics`): this reads live runtime records from a running infobase.
             Filters: `date_from`/`date_to`, `level`, `user`, `event`, `metadata`, and `contains`
             (post-read substring over the newest `limit` window). `limit` is newest-first (default
-            100, max 1000). Requires the extension deployed with event-log read rights.
+            100, max 1000) and bounds the record COUNT; `max_output_tokens` bounds the response
+            SIZE and flags `budget_exhausted`. Requires the extension deployed with event-log read
+            rights.
               - connection: Named live 1C connection (optional when only one/default connection exists).
               - contains: Case-insensitive substring filter over the comment/data columns, applied AFTER the
             platform read — so it narrows the already-`limit`-capped newest window, it does not
@@ -1561,6 +1643,13 @@ mod contract {
               - event: Event name, e.g. `_$Session$_.Authentication` or a metadata event like `_$Data$_.Post`.
               - level: Severity: Информация/Предупреждение/Ошибка/Примечание or Information/Warning/Error/Note.
               - limit: Max records (newest first), default 100, capped at 1000.
+              - max_output_tokens: Output budget in tokens (~4 chars each) on top of the `limit` record cap — `limit`
+            counts records, it does not bound their size. An over-budget read drops the oldest
+            records, flags `budget_exhausted: true` and carries a `budget_hint` (default 6000);
+            when the record cap fired too, the hint says raising the budget alone will not help.
+            In the response, `returned` counts the records actually delivered and `total` the ones
+            the platform read for this `limit` window — neither is the whole matching population,
+            which the platform never reports.
               - metadata: Full metadata name to filter by, e.g. `Документ.ЗаказКлиента`.
               - user: Infobase user name (deleted users can only be matched by name).
 
@@ -1570,9 +1659,12 @@ mod contract {
             database (use `query` for SDBL) and not for analyzer findings (use `diagnostics`).
             Actions: `check` — syntax-check `code`; `run` — execute `code`; `eval` — evaluate the
             single expression in `code`. `run`/`eval` execute code, so this tool is not read-only.
+            Output is bounded by `max_output_tokens` and appends a truncation note.
               - action: check | run | eval.
               - code: BSL source to `check`/`run`, or the single expression to `eval`.
               - connection: Named live 1C connection (optional when only one/default connection exists).
+              - max_output_tokens: Output budget in tokens (~4 chars each); over-budget output (a `run` context block, an
+            evaluated value, a long syntax-error listing) is truncated with a note (default 6000).
 
             ## graph
             Whole-config semantic call graph: traverse who-calls-whom and object/metadata usage by
@@ -1630,10 +1722,15 @@ mod contract {
             the query-language schema. Not for browsing metadata structure (use `metadata`) and not
             for BSL code (use `execute`). Actions: `validate` — parse and type-check a query (`query`
             required); `execute` — run it (`query` required; optional `limit`, `parameters`);
-            `schema` — the SDBL schema reference.
+            `schema` — the SDBL schema reference. `execute` output is bounded by `max_output_tokens`
+            on top of `limit` and appends a truncation note.
               - action: validate | execute | schema.
               - connection: Named live 1C connection (optional when only one/default connection exists).
               - limit: `execute`: cap on returned rows (optional).
+              - max_output_tokens: `execute`: output budget in tokens (~4 chars each) on top of the `limit` row cap —
+            `limit` bounds how many rows come back, nothing bounds how wide they are. An
+            over-budget table is truncated at a row boundary with a note (default 6000); when the
+            row cap fired too, the note says raising the budget alone will not help.
               - parameters: `execute`: named SDBL query parameters (`&Param` → value) (optional).
               - query: SDBL text — required for `validate`/`execute`, omitted for `schema`.
 
@@ -1691,8 +1788,10 @@ mod contract {
             ## its_help
             Ask the ITS expert-help knowledge base a natural-language question about the 1C platform
             and development standards. Use for conceptual "how / why" questions. For one member's
-            signature use `syntax_help`; for doc keyword search use `search`. Param: `question`
-            (required).
+            signature use `syntax_help`; for doc keyword search use `search`. Params: `question`
+            (required), optional `max_output_tokens` bounding a long answer.
+              - max_output_tokens: Output budget in tokens (~4 chars each); a long answer is truncated at a line boundary
+            with a continuation note (default 6000).
               - question: Natural-language question for the ITS expert help.
 
             ## search
@@ -1714,7 +1813,10 @@ mod contract {
             from the built-in platform data. Use when you know the member name (e.g. `СтрНайти`) and
             want its exact signature. For free-text doc discovery use `search`; for broader
             conceptual guidance use `its_help`. Params: `name` (required), optional `type_name` when
-            the member belongs to a specific platform type.
+            the member belongs to a specific platform type, optional `max_output_tokens` bounding a
+            large type's card.
+              - max_output_tokens: Output budget in tokens (~4 chars each); a large type's card is truncated at a line
+            boundary with a note pointing at the single-member lookup (default 6000).
               - name: Platform member name to look up, e.g. `СтрНайти` or a type method.
               - type_name: Owning platform type when `name` is a member of a specific type (optional).
 
