@@ -45,7 +45,7 @@ pub fn from_hir(
     let alias = member_alias(entry, member_name.as_str())?;
     let replacement = replacement_for_alias(entry, alias)?;
     let message = type_member_message(
-        type_name.as_str(),
+        type_name_for_alias(type_name.as_str(), alias),
         member_name.as_str(),
         replacement,
         alias,
@@ -85,6 +85,19 @@ fn member_alias(entry: &DeprecationEntry, member_name: &str) -> Option<MemberAli
         return Some(MemberAlias::English);
     }
     None
+}
+
+/// Имя типа хранится в каноническом русском написании, а язык сообщения выбирает
+/// алиас, которым записан сам член. Владелец обязан следовать за членом, иначе
+/// английское сообщение получит русское имя типа: `Method "HTTPСоединение.Get"`.
+fn type_name_for_alias(type_name: &str, alias: MemberAlias) -> &str {
+    match alias {
+        MemberAlias::Russian => type_name,
+        MemberAlias::English => match bsl_platform::PlatformData::instance().get_type(type_name) {
+            Some(ty) if !ty.english_name.is_empty() => ty.english_name.as_str(),
+            _ => type_name,
+        },
+    }
 }
 
 fn replacement_for_alias(entry: &DeprecationEntry, alias: MemberAlias) -> Option<&'static str> {

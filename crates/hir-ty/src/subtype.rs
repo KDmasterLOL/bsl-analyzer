@@ -20,6 +20,18 @@ pub fn is_assignable(db: &dyn TypeKernelDb, from: TypeId, to: TypeId) -> bool {
         return true;
     }
 
+    // Имена в BSL складывают регистр. Корпусные имена сводит к канону
+    // интернирование, но внекорпусному номиналу (`ДокументМенеджер`, фантом от
+    // `Новый X`) канона взять неоткуда, и без этой ветки два его написания —
+    // два несовместимых типа, то есть ложное несоответствие на ровном месте.
+    if let (TypeKind::PlatformObject(from_facet), TypeKind::PlatformObject(to_facet)) =
+        (from_kind, to_kind)
+    {
+        if stdx::case::eq_ignore_case(&from_facet.name, &to_facet.name) {
+            return true;
+        }
+    }
+
     // Cold-kind metadata references (`Метаданные.Роли.X`, `.РегламентныеЗадания.X`, `.HTTPСервисы.X`,
     // …) are a soft, navigation-only inference. Before this type existed the expression was
     // `Unknown`, which assigns freely; keep them Unknown-like for assignability so a cold-kind
@@ -991,6 +1003,24 @@ mod tests {
         let items = db.platform_object("ЭлементыФормы".to_string());
         assert!(!is_assignable(&db, all, items));
         assert!(!is_assignable(&db, items, all));
+    }
+
+    /// Корпусные имена сводит к канону интернирование, а внекорпусному номиналу
+    /// канона взять неоткуда — регистр ему складывает уже присваиваемость.
+    #[test]
+    fn uncorpused_nominal_names_fold_case() {
+        let db = InMemoryDb::new();
+        for (a, b) in
+            [("ДокументМенеджер", "документменеджер"), ("УправляемаяФорма", "УПРАВЛЯЕМАЯФОРМА")]
+        {
+            let left = db.platform_object(a.to_string());
+            let right = db.platform_object(b.to_string());
+            assert!(is_assignable(&db, left, right), "{a} и {b} — одно имя");
+            assert!(is_assignable(&db, right, left), "и в обратную сторону");
+        }
+        let unrelated = db.platform_object("ДокументМенеджер".to_string());
+        let other = db.platform_object("СправочникМенеджер".to_string());
+        assert!(!is_assignable(&db, unrelated, other), "разные имена совместимыми не становятся");
     }
 
     #[test]

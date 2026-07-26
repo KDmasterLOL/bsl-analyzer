@@ -401,9 +401,11 @@ version = "0.2.63"
 dependencies = [
  "bsl-config",
  "bsl-metadata",
+ "bsl-platform",
  "elsa",
  "expect-test",
  "rustc-hash 2.1.2",
+ "stdx",
 ]
 
 [[package]]
