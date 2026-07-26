@@ -10,20 +10,21 @@ use std::sync::Arc;
 pub struct Store {
     conn: Connection,
     path: PathBuf,
-    /// Monotonic sequence stamped on every `context_dirty` mark. Never resets while the
-    /// store is open (seeded from the persisted `MAX(seq)` so it stays above any surviving
-    /// row across restarts, then only ever increments). A graph build captures this value
-    /// at build start; its post-publish refresh then consumes ONLY marks whose `seq` is at
-    /// or below that captured bound, so a drift landing after the build started is never
+    /// Monotonic sequence stamped on every `context_dirty` mark. A graph build captures this
+    /// value at build start; its post-publish refresh then consumes ONLY marks whose `seq` is
+    /// at or below that captured bound, so a drift landing after the build started is never
     /// cleared against the pre-drift graph. Shared as an `Arc` so the graph layer reads the
-    /// same counter the store increments.
+    /// same value the store maintains.
     ///
-    /// Single-writer invariant: exactly ONE live `Store` (the daemon's engine store) hands
-    /// out mark seqs for a given database. This counter is in-memory, seeded per open from
-    /// `MAX(seq)`; a second `Store` reopened on the same file would seed its OWN atomic from
-    /// the same `MAX(seq)` and issue seqs that collide with — or trail — the live store's,
-    /// breaking the monotonic bound the graph relies on. Reopened/standalone stores may READ
-    /// marks (status, reindex) but must never call the mark/next-seq APIs.
+    /// Seqs are allocated by the DATABASE (the `mark_seq` row of `meta`, bumped in the same
+    /// transaction as the mark itself), so any number of stores — reopened, standalone, or
+    /// belonging to two daemon generations racing over one workspace — draw from one
+    /// sequence and can never duplicate or lower a stamp. This atomic is a local mirror of
+    /// the highest seq THIS store has observed: it is what the graph reads at build start to
+    /// bound the marks its publish may consume. It only ever rises, and it lags the
+    /// database whenever another writer allocates — the safe direction, since a bound below
+    /// a mark leaves that mark pending for a later publish instead of clearing it against a
+    /// graph that predates it.
     mark_seq: Arc<AtomicI64>,
 }
 
@@ -354,7 +355,9 @@ impl Store {
             -- fires the embedding-generation triggers and invalidates the vector
             -- sidecar. A later reindex/embed pass re-renders the context and clears the
             -- entry; a lost row (a schema wipe) is harmless — the next drift re-marks it.
-            -- `seq` is a monotonic mark stamp (see `Store::mark_seq`): a graph build's
+            -- `seq` is a monotonic mark stamp drawn from the `mark_seq` row of `meta` (see
+            -- `Store::next_mark_seq`), so every process writing this file shares one
+            -- sequence: a graph build's
             -- post-publish refresh consumes only rows at or below the build's captured
             -- start-seq, so a drift that lands after the build started is never cleared
             -- against the pre-drift graph. Re-marking a row bumps its `seq`, so a clear
@@ -526,32 +529,97 @@ impl Store {
         Ok(())
     }
 
-    /// A handle to the monotonic mark-seq counter (see [`Self::mark_seq`]). The graph
+    /// A handle to the observed mark-seq high-water (see [`Self::mark_seq`]). The graph
     /// layer captures its value at build start to bound the marks its publish may consume.
     pub fn mark_seq_handle(&self) -> Arc<AtomicI64> {
         Arc::clone(&self.mark_seq)
     }
 
-    /// Reserve the next monotonic mark sequence. `fetch_add` keeps it strictly increasing
-    /// even across concurrent marks and never rewinds when rows are cleared, so a value a
-    /// build captured earlier stays below every mark stamped afterward.
+    /// Reserve the next mark sequence from the persisted counter, on `conn` (the caller's
+    /// transaction, so the stamp and the row it lands on commit together).
     ///
-    /// Correct only under the single-writer invariant on [`Self::mark_seq`]: all marks for a
-    /// database must be stamped through the one live engine store. A second store issuing seqs
-    /// concurrently would duplicate or lower them and corrupt the graph's consume bound.
-    fn next_mark_seq(&self) -> i64 {
-        self.mark_seq.fetch_add(1, Ordering::SeqCst) + 1
+    /// The counter lives in the database rather than in this process, so the sequence stays
+    /// strictly increasing across every store that ever opens the file — including two
+    /// daemon generations overlapping on one workspace. SQLite serializes the bumping write
+    /// against every other connection, so two allocations can neither collide nor rewind;
+    /// clearing rows never touches the counter, so a value a build captured earlier stays
+    /// below every mark stamped afterward.
+    fn next_mark_seq(conn: &Connection) -> Result<i64, SearchError> {
+        let seq = conn.query_row(
+            "INSERT INTO meta (key, value) VALUES ('mark_seq', '1')
+             ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+             RETURNING CAST(value AS INTEGER)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(seq)
     }
 
-    /// Raise the in-memory counter above every persisted mark so freshly stamped rows keep
-    /// increasing across a restart (surviving rows from a prior run hold `seq <= MAX(seq)`).
+    /// Raise the persisted counter above every surviving mark, and mirror it into the
+    /// in-memory high-water.
+    ///
+    /// The counter row is absent on a pre-counter database and dropped by a schema wipe,
+    /// while `context_dirty` rows can survive both; seeding from the larger of the two keeps
+    /// the next allocation above every stamp still on disk instead of re-issuing seqs a
+    /// surviving row already holds.
     fn seed_mark_seq(&self) -> Result<(), SearchError> {
-        let max: i64 =
+        let rows_max: i64 =
             self.conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM context_dirty", [], |row| {
                 row.get(0)
             })?;
-        self.mark_seq.store(max, Ordering::SeqCst);
+        let seeded: i64 = self.conn.query_row(
+            "INSERT INTO meta (key, value) VALUES ('mark_seq', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = CAST(MAX(CAST(value AS INTEGER), ?1) AS TEXT)
+             RETURNING CAST(value AS INTEGER)",
+            params![rows_max],
+            |row| row.get(0),
+        )?;
+        self.observe_mark_seq(seeded);
         Ok(())
+    }
+
+    /// Raise the local high-water to `seq` (never lower it): concurrent marks through this
+    /// same store may commit out of order, and another process's allocations are invisible
+    /// here until one of ours returns a seq above them.
+    fn observe_mark_seq(&self, seq: i64) {
+        self.mark_seq.fetch_max(seq, Ordering::SeqCst);
+    }
+
+    /// The highest mark seq the database at `path` has issued to ANYONE.
+    ///
+    /// A store's own high-water only tracks the stamps it allocated, so it sits below anything
+    /// another process wrote. That is safe for a bound but not sufficient: a mark stamped by a
+    /// second daemon would stay below every bound this one ever captures, and a mark no bound
+    /// covers is a mark no publish ever consumes — the file's context would stay stale for
+    /// good. A build captures its bound from HERE instead, which by construction sits above
+    /// every mark stamped before the build began and below every one stamped after.
+    ///
+    /// Read-only and connectionless: it is called once per build, from a process that may not
+    /// hold the engine. A database that does not exist yet, or predates the counter, reports
+    /// what its surviving rows imply.
+    pub fn persisted_mark_seq(path: &Path) -> Result<i64, SearchError> {
+        // A database that was never created has issued nothing — the ordinary state of a cold
+        // workspace, not a failure worth reporting to a caller that would only log it.
+        if !path.exists() {
+            return Ok(0);
+        }
+        // Read-only and NOT URI-interpreted: this takes a filesystem path, and a workspace whose
+        // path happens to contain `?` must not have it read as a URI query.
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        // Only "no such row" reads as zero. A busy database, a schema that is not there yet, or
+        // any other failure is REPORTED: swallowing it as zero would silently hand the caller a
+        // bound below another writer's marks, and a mark no bound covers is never consumed.
+        let counter: i64 = conn
+            .query_row("SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'mark_seq'", [], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .unwrap_or(0);
+        let rows_max: i64 = conn
+            .query_row("SELECT COALESCE(MAX(seq), 0) FROM context_dirty", [], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0);
+        Ok(counter.max(rows_max))
     }
 
     /// Record that `path`'s stored `graph_context` is stale (a metadata `.xml` it owns
@@ -563,13 +631,19 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let seq = self.next_mark_seq();
-        self.conn.execute(
+        // Allocation and row land in ONE transaction: a seq that committed while its row
+        // did not would let a build capture a bound above a mark that only becomes visible
+        // afterwards, and that mark would then be cleared against a graph predating it.
+        let tx = self.conn.unchecked_transaction()?;
+        let seq = Self::next_mark_seq(&tx)?;
+        tx.execute(
             "INSERT INTO context_dirty (path, collection, marked_at, seq)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?3, seq = ?4",
             params![path, collection, now, seq],
         )?;
+        tx.commit()?;
+        self.observe_mark_seq(seq);
         Ok(())
     }
 
@@ -587,14 +661,46 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let seq = self.next_mark_seq();
-        let count = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let seq = Self::next_mark_seq(&tx)?;
+        let count = tx.execute(
             "INSERT INTO context_dirty (path, collection, marked_at, seq)
              SELECT path, collection, ?2, ?3 FROM files WHERE collection = ?1
              ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?2, seq = ?3",
             params![collection, now, seq],
         )?;
+        tx.commit()?;
+        self.observe_mark_seq(seq);
         Ok((count, seq))
+    }
+
+    /// Mark every indexed file in `collection` context-dirty AT `stamp_seq`, leaving alone any
+    /// row that already carries a fresher stamp. Returns the number of rows written.
+    ///
+    /// This is the topology variant of [`Self::mark_collection_context_dirty`], and the
+    /// difference is the whole point. A topology re-render is performed against a build that
+    /// reflects the workspace as of `stamp_seq`, so that is the stamp its rows deserve — and a
+    /// row stamped ABOVE it belongs to a drift that build does NOT reflect. Stamping the batch
+    /// with a fresh (higher) seq would overwrite such a row and then sweep it into the same
+    /// bounded clear, re-rendering that file against a graph predating its drift and losing the
+    /// mark that would have fixed it later.
+    pub fn mark_collection_context_dirty_at(
+        &self,
+        collection: &str,
+        stamp_seq: i64,
+    ) -> Result<usize, SearchError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let count = self.conn.execute(
+            "INSERT INTO context_dirty (path, collection, marked_at, seq)
+             SELECT path, collection, ?2, ?3 FROM files WHERE collection = ?1
+             ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?2, seq = ?3
+             WHERE context_dirty.seq <= ?3",
+            params![collection, now, stamp_seq],
+        )?;
+        Ok(count)
     }
 
     /// The set of paths currently marked context-dirty in `collection`, regardless of
@@ -2005,6 +2111,42 @@ mod tests {
         );
     }
 
+    /// A topology re-render runs against a build that reflects the workspace up to its bound, so
+    /// its batch is stamped AT that bound — and a file whose own drift landed later keeps the
+    /// higher stamp it already carries. Stamping the batch above everything (a fresh seq) would
+    /// overwrite that file's mark and then sweep it into the same bounded clear: the file would
+    /// be re-rendered against a graph predating its change, and the mark that would have fixed
+    /// it later would be gone.
+    #[test]
+    fn a_topology_batch_leaves_a_fresher_drift_mark_alone() {
+        let mut store = Store::in_memory().unwrap();
+        for path in ["Stable.bsl", "Drifted.bsl"] {
+            store.reindex_file(path, b"h", &[sample_chunk("П")], None).unwrap();
+        }
+
+        // A build captured its bound here; then one file drifted, stamped ABOVE it.
+        let build_start_seq = store.mark_seq_handle().load(Ordering::SeqCst);
+        store.mark_context_dirty("code", "Drifted.bsl").unwrap();
+
+        let marked = store.mark_collection_context_dirty_at("code", build_start_seq).unwrap();
+        assert_eq!(marked, 1, "only the file with no fresher mark is stamped by the batch");
+
+        let batch = store.context_dirty_paths_bounded("code", build_start_seq).unwrap();
+        assert!(batch.contains("Stable.bsl"), "the batch re-renders what the build reflects");
+        assert!(
+            !batch.contains("Drifted.bsl"),
+            "a drift the build does not reflect is not re-rendered against it",
+        );
+
+        store.clear_context_dirty_bounded("code", "Stable.bsl", build_start_seq).unwrap();
+        store.clear_context_dirty_bounded("code", "Drifted.bsl", build_start_seq).unwrap();
+        assert_eq!(
+            store.context_dirty_paths("code").unwrap(),
+            HashSet::from(["Drifted.bsl".to_owned()]),
+            "and its mark survives for the publish that will reflect it",
+        );
+    }
+
     /// The bounded consume is stamped per mark: a re-mark that lands after a build captured
     /// its start-seq bumps the row's `seq` above the bound, so the build's bounded clear
     /// skips it and the newer mark survives (a lost update at row granularity is prevented).
@@ -2065,6 +2207,81 @@ mod tests {
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 3);
         store.mark_context_dirty("code", "D.bsl").unwrap(); // seq 4
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 4);
+    }
+
+    /// Two stores over ONE database file — the shape two daemon generations take while they
+    /// overlap on a workspace — draw from the same sequence: every stamp is unique and each
+    /// store's next allocation lands above whatever the other just wrote. With a per-process
+    /// counter both stores seed from the same `MAX(seq)` and re-issue the same numbers, and
+    /// a bounded clear then consumes the other writer's mark against a graph predating it.
+    #[test]
+    fn two_stores_on_one_file_never_duplicate_or_lower_a_mark_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("search.db");
+        let first = Store::open(&db).unwrap();
+        let second = Store::open(&db).unwrap();
+
+        let mut seqs = Vec::new();
+        for round in 0..3 {
+            first.mark_context_dirty("code", &format!("A{round}.bsl")).unwrap();
+            seqs.push(first.mark_seq_handle().load(Ordering::SeqCst));
+            second.mark_context_dirty("code", &format!("B{round}.bsl")).unwrap();
+            seqs.push(second.mark_seq_handle().load(Ordering::SeqCst));
+        }
+
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6], "the two stores share one rising sequence");
+        let persisted: Vec<i64> = {
+            let mut stmt =
+                first.conn.prepare("SELECT seq FROM context_dirty ORDER BY seq").unwrap();
+            stmt.query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(persisted, vec![1, 2, 3, 4, 5, 6], "no stamp is duplicated on disk");
+    }
+
+    /// A store's own high-water only tracks what IT allocated, so a bound taken from it would
+    /// sit below another writer's marks forever — and a mark no bound ever covers is a mark no
+    /// publish ever consumes. The persisted counter is what a build reads instead, and it sees
+    /// every writer's stamps.
+    #[test]
+    fn the_persisted_mark_seq_sees_marks_this_store_did_not_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("search.db");
+        let mine = Store::open(&db).unwrap();
+        let other = Store::open(&db).unwrap();
+
+        mine.mark_context_dirty("code", "Mine.bsl").unwrap(); // seq 1
+        other.mark_context_dirty("code", "Theirs.bsl").unwrap(); // seq 2
+
+        assert_eq!(
+            mine.mark_seq_handle().load(Ordering::SeqCst),
+            1,
+            "the local mirror never saw the other writer's stamp",
+        );
+        assert_eq!(
+            Store::persisted_mark_seq(&db).unwrap(),
+            2,
+            "but the persisted counter covers it, so a build's bound consumes that mark",
+        );
+    }
+
+    /// A database written before the counter existed (rows carrying seqs, no `mark_seq` row)
+    /// must not restart the sequence at 1 and re-issue stamps its surviving rows already
+    /// hold — the open seeds the counter from those rows.
+    #[test]
+    fn opening_a_pre_counter_database_seeds_above_surviving_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("search.db");
+        {
+            let store = Store::open(&db).unwrap();
+            store.mark_context_dirty("code", "A.bsl").unwrap(); // seq 1
+            store.mark_context_dirty("code", "B.bsl").unwrap(); // seq 2
+            store.conn.execute("DELETE FROM meta WHERE key = 'mark_seq'", []).unwrap();
+        }
+
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 2);
+        store.mark_context_dirty("code", "C.bsl").unwrap();
+        assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 3);
     }
 
     #[test]

@@ -37,7 +37,7 @@ mod types;
 mod workspace_sweep;
 
 pub(crate) use lifecycle::DiagnosticsState;
-pub(crate) use resident::DiagnosticsResident;
+pub(crate) use resident::{diagnostic_survives_authors, DiagnosticsResident};
 pub(crate) use snapshot::ResidentModuleSnapshotSource;
 #[allow(
     unused_imports,

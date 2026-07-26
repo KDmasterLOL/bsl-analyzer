@@ -171,6 +171,16 @@ async fn serve(
                 // once it has served real traffic, the short `orphan_grace` before then.
                 if active.load(Ordering::SeqCst) != 0 {
                     idle_since = None;
+                } else if server.superseded() {
+                    // A newer generation owns this workspace's derived caches, so this backend
+                    // can no longer maintain them — the warm hold buys a reconnecting client
+                    // nothing, and holding a multi-gigabyte resident until the TTL expires
+                    // starves the daemon that CAN work. No session is connected at this point,
+                    // so nobody's link is cut by leaving now.
+                    tracing::info!(
+                        "backend superseded by a newer daemon generation and idle; shutting down"
+                    );
+                    break;
                 } else {
                     let grace = if warmed.load(Ordering::SeqCst) { idle_ttl } else { orphan_grace };
                     let since = *idle_since.get_or_insert_with(Instant::now);

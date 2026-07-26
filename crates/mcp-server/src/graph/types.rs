@@ -29,6 +29,12 @@ pub(crate) struct GraphPublishSignal {
     /// trusted). The consumer must conservatively re-render EVERY document's graph
     /// context — a topology change re-shapes visibility with no per-object mark to go by.
     pub(crate) topology_changed: bool,
+    /// The extension topology of the snapshot this publish made current. A consumer that
+    /// re-opens the graph database by path must check it against the file it actually got:
+    /// a daemon of another generation may have renamed ITS build into the same path, and
+    /// rendering contexts from a foreign topology would write wrong answers into the
+    /// persisted search index.
+    pub(crate) topology: u64,
 }
 
 /// What a [`crate::graph::GraphState::nudge_rebuild`] scheduled. Surfaced so the single-flight
@@ -69,6 +75,11 @@ pub(crate) struct GraphStatusReport {
     pub reload: Option<&'static str>,
     /// Failure message (when `failed`).
     pub error: Option<String>,
+    /// `Some(true)` when a newer daemon generation owns this workspace's derived caches (see
+    /// [`crate::workspace_lease`]): this graph still serves, but it does not rebuild, so a
+    /// `stale` snapshot stays stale here. Emitted only when true — it explains a drift that
+    /// never gets picked up, which would otherwise look like a reload that never runs.
+    pub superseded: Option<bool>,
 }
 
 /// Whether the SqliteLocal startup graph decision already populated the search index.

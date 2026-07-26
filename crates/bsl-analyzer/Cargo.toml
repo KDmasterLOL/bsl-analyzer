@@ -25,6 +25,7 @@ ide-host-core.workspace = true
 parser.workspace = true
 ide-db.workspace = true
 base-db.workspace = true
+vcs.workspace = true
 hir.workspace = true
 lexer.workspace = true
 syntax.workspace = true

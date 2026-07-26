@@ -135,6 +135,16 @@ pub(crate) struct GraphState {
     /// context refresh (engine not yet published, or deferred behind a fresher
     /// reload). Re-raised on the next publish so the refresh is never lost.
     pub(super) pending_topology_refresh: Arc<AtomicBool>,
+    /// This daemon's claim on the workspace's derived caches. The graph database is shared
+    /// with every other daemon generation over the same workspace, so a superseded daemon
+    /// builds and publishes nothing — it serves what it already holds and lets the owner
+    /// maintain the file. Unmanaged (always owning) for a disabled graph and in tests.
+    pub(super) lease: crate::workspace_lease::WorkspaceLease,
+    /// The last load stopped only because another daemon generation owned the workspace's
+    /// derived caches — not because building failed. Kept apart from the `Failed` status it
+    /// produces so that regaining the workspace (the owner exited, or its record went stale)
+    /// re-arms the build, while a real build failure stays terminal as before.
+    pub(super) withheld_build: Arc<AtomicBool>,
 }
 
 impl GraphState {
@@ -164,7 +174,23 @@ impl GraphState {
             leftover_bound: Arc::new(AtomicI64::new(0)),
             fp_map: Arc::new(Mutex::new(FpMapState::default())),
             snapshot_pool: Arc::new(Mutex::new(Vec::new())),
+            lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
+            withheld_build: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Attach the daemon's claim on the workspace's derived caches, so this graph stops
+    /// building and publishing once a newer daemon generation takes the workspace over.
+    pub(crate) fn with_lease(mut self, lease: crate::workspace_lease::WorkspaceLease) -> Self {
+        self.lease = lease;
+        self
+    }
+
+    /// Whether this daemon may write the shared graph database. A superseded one keeps
+    /// serving its published snapshot but schedules no builds: the owner maintains the file,
+    /// and two processes rebuilding it only race renames and flicker generations.
+    pub(super) fn may_build(&self) -> bool {
+        self.lease.owns_caches()
     }
 
     /// Number of fingerprint walks performed (cache misses), for asserting that an
@@ -208,8 +234,38 @@ impl GraphState {
     /// build's publish clear no marks, rather than an unbounded consume that could clear a
     /// mark stamped after the publish snapshotted disk. Marks stranded across the wiring
     /// window are recovered by [`Self::consume_leftover_marks`].
+    ///
+    /// Once wired, the bound is taken from the STORE ON DISK rather than from the engine's
+    /// in-process mirror, which only reflects the stamps this daemon allocated. A mark another
+    /// daemon generation stamped would otherwise sit above every bound this one captures — and
+    /// a mark no bound covers is never consumed, leaving that file's context stale for good.
+    /// Reading the persisted counter is one small query per build.
     pub(super) fn current_mark_seq(&self) -> i64 {
-        self.mark_seq.get().map(|counter| counter.load(Ordering::SeqCst)).unwrap_or(0)
+        let Some(local) = self.mark_seq.get().map(|counter| counter.load(Ordering::SeqCst)) else {
+            return 0;
+        };
+        let persisted = match self.workspace_root.as_deref() {
+            Some(root) => {
+                match bsl_search::Store::persisted_mark_seq(&crate::cache::search_db_path(root)) {
+                    Ok(seq) => seq,
+                    Err(e) => {
+                        // Falling back to the local mirror is the safe direction — a bound that
+                        // is too low leaves marks pending rather than clearing them against a
+                        // graph that predates them. It is not free, though: a mark another
+                        // daemon stamped stays pending until a later build reads the counter
+                        // successfully, so say so rather than degrade in silence.
+                        tracing::warn!(
+                            error = %e,
+                            "could not read the persisted mark counter; this build's context \
+                             refresh is bounded by what this process stamped itself"
+                        );
+                        0
+                    }
+                }
+            }
+            None => 0,
+        };
+        local.max(persisted)
     }
 
     /// Fire the publish hook, if any. Called after a publish/adopt with no graph lock
@@ -236,9 +292,11 @@ impl GraphState {
         // A topology refresh survives publishes that cannot run it: the flag is
         // re-raised whenever the hook reports the requested whole-collection
         // re-render did not happen (deferred behind a fresher reload, or the
-        // search engine is not published yet).
-        let topology =
-            topology_changed || self.pending_topology_refresh.swap(false, Ordering::SeqCst);
+        // search engine is not published yet). The flag is taken FIRST, never behind a
+        // short-circuit: a publish that already carries `topology_changed` performs the very
+        // re-render the flag asks for, so leaving it armed would only make someone do it twice.
+        let pending = self.pending_topology_refresh.swap(false, Ordering::SeqCst);
+        let topology = topology_changed || pending;
         if !self.fire_hook(build_start_seq, topology) && topology {
             self.pending_topology_refresh.store(true, Ordering::SeqCst);
         }
@@ -259,13 +317,46 @@ impl GraphState {
     /// whether a requested topology refresh was handled (vacuously true when none was
     /// requested or no hook is attached).
     fn fire_hook(&self, build_start_seq: i64, topology_changed: bool) -> bool {
+        let topology = lock_recover(&self.inner)
+            .published
+            .as_ref()
+            .map(|p| p.fingerprint.topology)
+            .unwrap_or_default();
         match &self.on_published {
             Some(hook) => hook(GraphPublishSignal {
                 drift_pending: self.drift_pending(),
                 build_start_seq,
                 topology_changed,
+                topology,
             }),
             None => true,
+        }
+    }
+
+    /// Run a whole-collection context re-render that was requested before the search engine
+    /// existed to run it.
+    ///
+    /// The request is normally raised BY a publish and consumed by that same publish's hook. At
+    /// boot the order can invert: the topology mismatch is noticed while deciding what to
+    /// publish, and the publish that follows may land before the engine is in the shared handle
+    /// — the hook then reports the re-render unhandled and the request is merely re-raised. On
+    /// a fused cold build nothing publishes again (the pass wrote the index itself), so files
+    /// the build skipped as byte-identical would keep contexts rendered under the old topology
+    /// indefinitely. Called once the engine is published, this closes that gap.
+    ///
+    /// The bound passed is `0`: the re-render marks the whole collection itself and consumes
+    /// exactly that batch's own seq, so no OTHER pending mark is swept up by it.
+    pub(crate) fn flush_pending_topology_refresh(&self) {
+        if !self.pending_topology_refresh.load(Ordering::SeqCst) {
+            return;
+        }
+        // A graph that is not published cannot re-render anything against itself, and one with
+        // a fresher reload already coming leaves the work to that reload's publish.
+        if !matches!(self.status(), GraphStatus::Ready { .. }) || self.drift_pending() {
+            return;
+        }
+        if self.pending_topology_refresh.swap(false, Ordering::SeqCst) && !self.fire_hook(0, true) {
+            self.pending_topology_refresh.store(true, Ordering::SeqCst);
         }
     }
 
@@ -354,6 +445,7 @@ impl GraphState {
     /// context. A `Ready` status whose snapshot momentarily cannot be opened is reported as
     /// `loading` (a reload is renaming the file into place), never as a torn read.
     pub(crate) fn status_report(&self) -> GraphStatusReport {
+        let superseded = (!self.may_build()).then_some(true);
         let report = |state: &'static str| GraphStatusReport {
             state,
             files: None,
@@ -361,6 +453,7 @@ impl GraphState {
             stale: None,
             reload: None,
             error: None,
+            superseded,
         };
         match self.status() {
             GraphStatus::Disabled => report("disabled"),
@@ -384,16 +477,24 @@ impl GraphState {
 
     /// Trigger the background load if this is the first call. Transitions
     /// `Idle → Loading` and spawns exactly one loader thread; later calls return
-    /// immediately. No-op for disabled / already-loading / ready / failed graphs.
+    /// immediately. No-op for disabled / already-loading / ready graphs, and for a build
+    /// that genuinely failed — but NOT for the one that only stood aside for another daemon
+    /// generation (see [`Self::withheld_build`]): that graph must build the moment the
+    /// workspace comes back, or a daemon superseded once would serve no graph for the rest of
+    /// its life.
     pub(crate) fn ensure_loading(&self) {
         if self.workspace_root.is_none() {
             return;
         }
+        // Read before the lock: the lease may go to disk.
+        let regained = self.withheld_build.load(Ordering::SeqCst) && self.may_build();
         {
             let mut inner = lock_recover(&self.inner);
-            if inner.status != GraphStatus::Idle {
+            let retry_withheld = regained && matches!(inner.status, GraphStatus::Failed(_));
+            if inner.status != GraphStatus::Idle && !retry_withheld {
                 return;
             }
+            self.withheld_build.store(false, Ordering::SeqCst);
             inner.status = GraphStatus::Loading;
         }
 
@@ -414,7 +515,7 @@ impl GraphState {
     /// loading/ready/failed, in which case the caller must not build (the normal
     /// lifecycle owns it).
     pub(crate) fn try_begin_external_build(&self) -> bool {
-        if self.workspace_root.is_none() {
+        if self.workspace_root.is_none() || !self.may_build() {
             return false;
         }
         let mut inner = lock_recover(&self.inner);
@@ -494,9 +595,19 @@ impl GraphState {
                     NudgeOutcome::NoOp
                 }
             }
-            // Nothing to schedule (`Disabled`, or `Failed` — a failed graph does not
-            // auto-retry from a nudge).
-            GraphStatus::Disabled | GraphStatus::Failed(_) => NudgeOutcome::NoOp,
+            // A build that only stood aside for another daemon generation retries here as
+            // soon as the workspace is ours again — this is what makes the recovery
+            // autonomous, driven by a delivered change rather than by a client happening to
+            // ask for the graph. `ensure_loading` no-ops unless the stand-aside flag is set,
+            // so a genuinely failed build still does not auto-retry from a nudge.
+            GraphStatus::Failed(_) => {
+                self.ensure_loading();
+                match self.status() {
+                    GraphStatus::Loading => NudgeOutcome::LoadStarted,
+                    _ => NudgeOutcome::NoOp,
+                }
+            }
+            GraphStatus::Disabled => NudgeOutcome::NoOp,
         }
     }
 
@@ -506,6 +617,11 @@ impl GraphState {
     /// `false`. Shares the exact single-flight discipline [`Self::freshness`] uses, so a
     /// nudge and a freshness check cannot both start a reload.
     fn claim_reload_slot(&self) -> bool {
+        // Ahead of the fingerprint walk: a superseded daemon must not even pay for drift
+        // detection it is not allowed to act on.
+        if !self.may_build() {
+            return false;
+        }
         let disk_fp = self.current_disk_fp();
         let mut inner = lock_recover(&self.inner);
         let Some(published) = inner.published.as_mut() else {
@@ -631,6 +747,178 @@ mod tests {
         assert!(
             fired.load(Ordering::SeqCst) >= 1,
             "the publish hook must fire once the graph publishes its build",
+        );
+    }
+
+    /// A daemon whose workspace was taken over by a newer generation must not build the
+    /// shared graph database: the owner is maintaining that same file, and a second builder
+    /// only races its rename. It says so instead of looking like a build that never finishes —
+    /// and it refuses the fused claim too, so the search boot does not hand it the graph.
+    /// Remove the ownership gate in `run_load` and the superseded daemon rebuilds happily.
+    #[test]
+    fn a_superseded_daemon_builds_no_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let lease = crate::workspace_lease::WorkspaceLease::claim(root);
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_lease(lease);
+        // A newer daemon generation claims the same workspace.
+        let _newer = crate::workspace_lease::WorkspaceLease::claim(root);
+        wait_for(|| !graph.may_build());
+
+        assert!(!graph.try_begin_external_build(), "a superseded graph refuses the fused claim");
+
+        graph.ensure_loading();
+        wait_for(|| matches!(graph.status(), GraphStatus::Failed(_)));
+        let GraphStatus::Failed(msg) = graph.status() else {
+            panic!("a superseded daemon must report why it is not building: {:?}", graph.status())
+        };
+        assert!(msg.contains("owns this workspace's derived caches"), "{msg}");
+        assert!(
+            !crate::cache::graph_db_path(root).exists(),
+            "no graph database was written by the superseded daemon",
+        );
+        assert_eq!(
+            graph.status_report().superseded,
+            Some(true),
+            "the status says why the graph is not rebuilding",
+        );
+    }
+
+    /// A whole-collection re-render requested before the search engine existed to run it must
+    /// still happen. On a fused cold boot nothing publishes a second time, so a request left
+    /// pending would never be picked up and files the build skipped as byte-identical would
+    /// keep contexts rendered under the old topology. Drop the flush call and the hook never
+    /// receives `topology_changed`.
+    #[test]
+    fn a_topology_refresh_requested_before_the_engine_existed_is_flushed_afterwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let refreshes = Arc::clone(&refreshes);
+            Arc::new(move |signal: GraphPublishSignal| {
+                if signal.topology_changed {
+                    refreshes.fetch_add(1, Ordering::SeqCst);
+                }
+                true
+            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
+        };
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
+        graph.ensure_loading();
+        wait_ready(&graph);
+        let after_publish = refreshes.load(Ordering::SeqCst);
+
+        // What the boot's topology mismatch leaves behind, with no publish left to carry it.
+        graph.pending_topology_refresh.store(true, Ordering::SeqCst);
+        graph.flush_pending_topology_refresh();
+
+        assert_eq!(refreshes.load(Ordering::SeqCst), after_publish + 1, "the request is honoured");
+        assert!(
+            !graph.pending_topology_refresh.load(Ordering::SeqCst),
+            "and cleared once the consumer handled it",
+        );
+    }
+
+    /// Standing aside for another generation must not be terminal the way a failed build is:
+    /// when the owner hands the workspace back (it exited, or its record went stale), the next
+    /// kick builds. Without the re-arm the graph keeps its `Failed` status forever and the
+    /// daemon serves no graph for the rest of its life, however long its client stays.
+    #[test]
+    fn a_graph_that_stood_aside_builds_once_the_workspace_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let lease = crate::workspace_lease::WorkspaceLease::claim(root);
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_lease(lease);
+        let newer = crate::workspace_lease::WorkspaceLease::claim(root);
+        wait_for(|| !graph.may_build());
+
+        graph.ensure_loading();
+        wait_for(|| matches!(graph.status(), GraphStatus::Failed(_)));
+
+        // The newer daemon exits and hands the workspace back.
+        newer.release();
+        wait_for(|| graph.may_build());
+
+        // Through a NUDGE, not an explicit `ensure_loading`: the recovery has to be driven by a
+        // delivered change, or a client that never asks the graph anything — a search-only
+        // session — would leave the daemon graphless for as long as it stays connected.
+        assert_eq!(graph.nudge_rebuild(), NudgeOutcome::LoadStarted);
+        wait_ready(&graph);
+        assert!(crate::cache::graph_db_path(root).exists(), "the regained workspace is built");
+    }
+
+    /// Poll `condition` until it holds, so a test does not depend on the lease's verdict
+    /// cache expiring or a background thread landing within one fixed sleep.
+    fn wait_for(condition: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("condition did not hold within the timeout");
+    }
+
+    /// The SqliteLocal boot builds the graph and the search chunks in ONE parse pass, and
+    /// claims the graph for it through `try_begin_external_build` — which needs the
+    /// `Idle → Loading` transition for itself. An eager start that lands first takes that
+    /// transition and the claim fails, degrading the fused pass into two. This is why the
+    /// boot's eager start is mode-gated and otherwise runs only after the claim.
+    #[test]
+    fn an_already_started_graph_refuses_the_fused_build_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+
+        assert!(
+            !graph.try_begin_external_build(),
+            "a graph already building must refuse the fused claim, not build twice",
+        );
+        // Let the spawned build finish before the temp workspace goes away.
+        wait_ready(&graph);
+    }
+
+    /// The mirror image: once the fused build owns the claim, the boot's catch-all start is
+    /// inert — it must not spawn a second builder over the one already writing the database.
+    /// A spawned loader would publish and fire the hook, so a hook that never fires (while the
+    /// claim still reads `Loading`) is what rules a second build out; the status alone would
+    /// not, since a second loader leaves it `Loading` too until it publishes.
+    #[test]
+    fn starting_a_claimed_graph_spawns_no_second_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let published = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let published = Arc::clone(&published);
+            Arc::new(move |_signal: GraphPublishSignal| {
+                published.fetch_add(1, Ordering::SeqCst);
+                true
+            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
+        };
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
+        assert!(graph.try_begin_external_build(), "an idle graph yields the claim");
+
+        graph.ensure_loading();
+
+        // Long enough for a loader spawned by that call to build this two-module workspace and
+        // publish: `publish_hook_fires_after_a_build_publishes` waits for the same build.
+        std::thread::sleep(Duration::from_secs(2));
+        assert_eq!(published.load(Ordering::SeqCst), 0, "no second builder may publish");
+        assert_eq!(
+            graph.status(),
+            GraphStatus::Loading,
+            "the external build keeps the claim; nothing else may drive it",
         );
     }
 

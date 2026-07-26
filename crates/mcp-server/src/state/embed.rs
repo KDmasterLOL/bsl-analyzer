@@ -3,27 +3,8 @@ use super::SharedState;
 use bsl_search::{IndexProgress, SearchEngine};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-
-/// RAII counter for in-flight background indexing. Increments on construction and
-/// decrements on drop (including unwind), so a panicking or early-returning indexing
-/// task always releases its hold and the broker's liveness signal returns to idle.
-pub(super) struct BackgroundWorkGuard(Arc<AtomicUsize>);
-
-impl BackgroundWorkGuard {
-    pub(super) fn new(counter: &Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::SeqCst);
-        Self(Arc::clone(counter))
-    }
-}
-
-impl Drop for BackgroundWorkGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
 
 /// The ONE embed single-flight for the whole workspace. Both the boot pass (fills the initial
 /// NULL embeddings after a fused cold build) and the post-context-refresh re-embed kick funnel
@@ -92,6 +73,13 @@ impl EmbedFlight {
     #[cfg(test)]
     fn is_in_flight(&self) -> bool {
         self.lock().in_flight
+    }
+
+    /// Whether a caller that lost the claim recorded a rerun — the observable proof that its
+    /// work was absorbed into the running pass rather than dropped or spawned as a second one.
+    #[cfg(test)]
+    fn rerun_pending(&self) -> bool {
+        self.lock().rerun_pending
     }
 
     #[cfg(test)]
@@ -184,18 +172,18 @@ impl SharedState {
         search_engine: SharedSearchEngine,
         workspace_root: PathBuf,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
-        background_indexers: Arc<AtomicUsize>,
         index_progress: Arc<IndexProgress>,
         embed_flight: Arc<EmbedFlight>,
+        lease: crate::workspace_lease::WorkspaceLease,
     ) -> Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync> {
         Arc::new(move |signal| {
             Self::refresh_search_contexts_after_graph(
                 &search_engine,
                 &workspace_root,
                 &semantic_runtime,
-                &background_indexers,
                 &index_progress,
                 &embed_flight,
+                &lease,
                 signal,
             )
         })
@@ -392,13 +380,17 @@ impl SharedState {
         engine: &SharedSearchEngine,
         workspace_root: &Path,
         semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
-        background_indexers: &Arc<AtomicUsize>,
         index_progress: &Arc<IndexProgress>,
         embed_flight: &Arc<EmbedFlight>,
+        lease: &crate::workspace_lease::WorkspaceLease,
         signal: crate::graph::GraphPublishSignal,
     ) -> bool {
-        let crate::graph::GraphPublishSignal { drift_pending, build_start_seq, topology_changed } =
-            signal;
+        let crate::graph::GraphPublishSignal {
+            drift_pending,
+            build_start_seq,
+            topology_changed,
+            topology,
+        } = signal;
         // Fast-path skip (an optimization, not correctness): a follow-up reload is already
         // catching up, so let ITS publish re-render against the fresher graph. Correctness
         // does not depend on this — the `build_start_seq` bound below already prevents
@@ -418,6 +410,21 @@ impl SharedState {
                 return !topology_changed;
             }
         };
+        // The file we just opened is not necessarily the build that fired this hook: a
+        // daemon of another generation may have renamed ITS graph into the same path
+        // meanwhile. Contexts rendered from a foreign topology would be persisted as this
+        // workspace's answers, so treat the mismatch like an unavailable graph — the marks
+        // stay dirty and a later publish re-renders them from our own build.
+        match graph_db.freshness_token() {
+            Ok((_, fingerprint, _)) if fingerprint.topology == topology => {}
+            _ => {
+                tracing::warn!(
+                    published_topology = topology,
+                    "graph database on disk is not the published build; skipping context refresh"
+                );
+                return !topology_changed;
+            }
+        }
         let provider = crate::graph_query::GraphDbContextProvider::new(graph_db);
         let (cleared_embeddings, topology_handled) = {
             let Ok(guard) = engine.lock() else { return !topology_changed };
@@ -427,16 +434,18 @@ impl SharedState {
             // consume bound to exactly that batch's shared seq. Anything marked
             // after (a concurrent xml drift) carries a higher seq, stays dirty,
             // and is guaranteed its own nudge -> publish cycle.
-            let mut seq_bound = build_start_seq;
+            let seq_bound = build_start_seq;
             if topology_changed {
-                match engine.mark_workspace_context_dirty_with_seq() {
-                    Ok((count, seq)) => {
-                        tracing::info!(
-                            count,
-                            "topology changed; re-rendering every document's graph context"
-                        );
-                        seq_bound = seq_bound.max(seq);
-                    }
+                // Stamped AT the build's bound, not above it. The batch is dirty because of a
+                // topology this build already reflects, so the build's own bound is the honest
+                // stamp — and it leaves a file whose own drift landed after the build (a higher
+                // seq) out of both the batch and the clear, instead of re-rendering it against
+                // a graph that predates its change and then dropping the mark that said so.
+                match engine.mark_workspace_context_dirty_at(seq_bound) {
+                    Ok(count) => tracing::info!(
+                        count,
+                        "topology changed; re-rendering every document's graph context"
+                    ),
                     Err(e) => {
                         tracing::warn!("failed to mark collection for topology refresh: {e}");
                         return false;
@@ -470,9 +479,9 @@ impl SharedState {
             Self::kick_context_reembed(
                 engine,
                 semantic_runtime,
-                background_indexers,
                 index_progress,
                 embed_flight,
+                lease,
             );
         }
         topology_handled
@@ -485,9 +494,9 @@ impl SharedState {
     fn kick_context_reembed(
         engine: &SharedSearchEngine,
         semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
-        background_indexers: &Arc<AtomicUsize>,
         index_progress: &Arc<IndexProgress>,
         embed_flight: &Arc<EmbedFlight>,
+        lease: &crate::workspace_lease::WorkspaceLease,
     ) {
         // A no-embedder engine has nothing to re-embed; resolve the DB path only if semantic
         // is live so we never claim the flight for a pass that would do nothing.
@@ -502,9 +511,9 @@ impl SharedState {
         Self::spawn_embed_pass(
             Arc::clone(engine),
             Arc::clone(semantic_runtime),
-            Arc::clone(background_indexers),
             Arc::clone(index_progress),
             Arc::clone(embed_flight),
+            lease.clone(),
             db_path,
             config,
         );
@@ -523,27 +532,45 @@ impl SharedState {
     pub(super) fn spawn_embed_pass(
         engine: SharedSearchEngine,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
-        background_indexers: Arc<AtomicUsize>,
         index_progress: Arc<IndexProgress>,
         embed_flight: Arc<EmbedFlight>,
+        lease: crate::workspace_lease::WorkspaceLease,
         db_path: PathBuf,
         config: bsl_search::SearchConfig,
     ) {
+        // The one search write a superseded daemon must NOT make. A chunk's embedding is stored
+        // as a bare blob against its id, with no record of the model that produced it, and the
+        // embedding configuration is one of the axes that forks a daemon generation in the first
+        // place — so two generations filling the same NULL rows can leave vectors from the older
+        // daemon's model in the newer one's index, silently at equal dimensions and unfixably at
+        // unequal ones (a non-NULL row is never re-embedded). Chunks and FTS text stay ungated:
+        // both generations derive them from the same files, so duplicating them costs work, not
+        // correctness.
+        if !lease.owns_caches() {
+            tracing::debug!(
+                "another daemon generation owns this workspace's derived caches; \
+                 skipping the embedding pass"
+            );
+            return;
+        }
         if !embed_flight.claim() {
             // A pass is already running; it will loop again and absorb these NULL chunks.
             return;
         }
 
-        // Take the daemon-alive hold BEFORE spawning so the count never dips to zero.
-        let work_guard = BackgroundWorkGuard::new(&background_indexers);
         Self::set_semantic_runtime_status(&semantic_runtime, SemanticRuntimeStatus::Indexing);
         // Clone the handles the thread owns; the originals stay behind for the spawn-error path.
         let engine = Arc::clone(&engine);
         let runtime = Arc::clone(&semantic_runtime);
         let flight = Arc::clone(&embed_flight);
+        // Checked between batches, not just before the pass: this runs for hours on a large
+        // configuration, and a generation that takes the workspace over meanwhile must not keep
+        // finding this daemon's vectors — from a possibly different model — arriving in its
+        // index. Uncached, because a batch is seconds and the cached verdict's two-second
+        // "yes" is most of one.
+        let keep_writing = move || lease.owns_caches_now();
         let spawned =
             std::thread::Builder::new().name("bsl-search-embed".to_owned()).spawn(move || {
-                let _work_guard = work_guard;
                 // Restore the flight claim on any abnormal exit; a clean release calls
                 // `disarm()` first so this never stomps a later owner that already re-claimed.
                 let mut claim_guard = EmbedClaimGuard::new(Arc::clone(&flight));
@@ -560,6 +587,7 @@ impl SharedState {
                         &db_path,
                         &config,
                         Some(&index_progress),
+                        Some(&keep_writing),
                     ) {
                         Ok(index) => {
                             let swapped = match engine.lock() {
@@ -629,36 +657,23 @@ mod tests {
         mock_embedding_env, mock_semantic_config, spawn_mock_embedding_server, write_common_module,
         ENV_LOCK,
     };
-    use super::{BackgroundWorkGuard, SharedState};
+    use super::SharedState;
     use bsl_search::SearchEngine;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
-    #[test]
-    fn background_work_guard_releases_on_every_path_including_panic() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let counter = Arc::new(AtomicUsize::new(0));
-        {
-            let _g1 = BackgroundWorkGuard::new(&counter);
-            assert_eq!(counter.load(Ordering::SeqCst), 1);
-            let _g2 = BackgroundWorkGuard::new(&counter);
-            assert_eq!(counter.load(Ordering::SeqCst), 2, "nested tasks stack");
-        }
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "both holds released on scope exit");
-
-        // The embedding pass can bail via `?` or panic mid-run; the broker's liveness
-        // signal must still fall back to idle, or the daemon would never shut down.
-        let counter2 = Arc::clone(&counter);
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _g = BackgroundWorkGuard::new(&counter2);
-            assert_eq!(counter2.load(Ordering::SeqCst), 1);
-            panic!("simulated indexing-task panic");
-        }));
-        assert!(unwound.is_err(), "the task panicked");
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "the hold was released on unwind");
+    /// The extension topology recorded in the graph database a test just built — what a real
+    /// publish would put in its signal, and what the refresh checks the file against.
+    fn built_graph_topology(workspace: &std::path::Path) -> u64 {
+        crate::graph_query::GraphDb::open(&crate::cache::graph_db_path(workspace))
+            .expect("graph database built by the test")
+            .freshness_token()
+            .expect("graph database carries its freshness token")
+            .1
+            .topology
     }
+
     /// The re-embed kick: after a context refresh NULLs a chunk's embedding, the kick's
     /// background pass re-embeds it and swaps the fresh vector into the LIVE engine, so the
     /// re-contexted chunk answers semantic queries in-process (not only after a restart).
@@ -706,16 +721,15 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Indexing));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
 
         SharedState::kick_context_reembed(
             &engine_arc,
             &semantic_runtime,
-            &background_indexers,
             &index_progress,
             &embed_flight,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
         );
 
         // Poll until the background pass swaps the fresh vector into the live engine.
@@ -778,25 +792,22 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         // A pass is already in flight: the kick must be absorbed, spawning nothing.
         let embed_flight = super::EmbedFlight::in_flight_for_test();
 
-        let before = background_indexers.load(Ordering::SeqCst);
         SharedState::kick_context_reembed(
             &engine_arc,
             &semantic_runtime,
-            &background_indexers,
             &index_progress,
             &embed_flight,
-        );
-        assert_eq!(
-            background_indexers.load(Ordering::SeqCst),
-            before,
-            "a kick while a pass is claimed spawns no second pass",
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
         );
         assert!(embed_flight.is_in_flight(), "the existing claim is untouched");
+        assert!(
+            embed_flight.rerun_pending(),
+            "a kick while a pass is claimed is absorbed as a rerun, not spawned as a second pass",
+        );
     }
 
     /// End-to-end lifecycle net through PRODUCTION wiring, using real components (real store,
@@ -853,16 +864,15 @@ mod tests {
         // Wire the SAME publish hook the daemon builds, so the graph's real publish — not a
         // hand-call — drives the context refresh and re-embed.
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
         let hook = SharedState::build_publish_hook(
             Arc::clone(&engine_arc),
             workspace.clone(),
             Arc::clone(&semantic_runtime),
-            Arc::clone(&background_indexers),
             Arc::clone(&index_progress),
             Arc::clone(&embed_flight),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
         );
         let graph =
             crate::graph::GraphState::for_workspace(workspace.clone()).with_publish_hook(hook);
@@ -999,7 +1009,6 @@ mod tests {
         }
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
 
@@ -1009,13 +1018,14 @@ mod tests {
             &engine_arc,
             &workspace,
             &semantic_runtime,
-            &background_indexers,
             &index_progress,
             &embed_flight,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
             crate::graph::GraphPublishSignal {
                 drift_pending: true,
                 build_start_seq: i64::MAX,
                 topology_changed: false,
+                topology: built_graph_topology(&workspace),
             },
         );
         {
@@ -1031,13 +1041,14 @@ mod tests {
             &engine_arc,
             &workspace,
             &semantic_runtime,
-            &background_indexers,
             &index_progress,
             &embed_flight,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
             crate::graph::GraphPublishSignal {
                 drift_pending: false,
                 build_start_seq: i64::MAX,
                 topology_changed: false,
+                topology: built_graph_topology(&workspace),
             },
         );
         {
@@ -1094,7 +1105,6 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
 
@@ -1105,7 +1115,6 @@ mod tests {
             let engine_arc = Arc::clone(&engine_arc);
             let workspace = workspace.clone();
             let semantic_runtime = Arc::clone(&semantic_runtime);
-            let background_indexers = Arc::clone(&background_indexers);
             let index_progress = Arc::clone(&index_progress);
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
@@ -1114,9 +1123,9 @@ mod tests {
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
-                    &background_indexers,
                     &index_progress,
                     &embed_flight,
+                    &crate::workspace_lease::WorkspaceLease::unmanaged(),
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
@@ -1186,7 +1195,6 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
         let fired = Arc::new(AtomicUsize::new(0));
@@ -1194,7 +1202,6 @@ mod tests {
             let engine_arc = Arc::clone(&engine_arc);
             let workspace = workspace.clone();
             let semantic_runtime = Arc::clone(&semantic_runtime);
-            let background_indexers = Arc::clone(&background_indexers);
             let index_progress = Arc::clone(&index_progress);
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
@@ -1203,9 +1210,9 @@ mod tests {
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
-                    &background_indexers,
                     &index_progress,
                     &embed_flight,
+                    &crate::workspace_lease::WorkspaceLease::unmanaged(),
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
@@ -1304,7 +1311,6 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
         let fired = Arc::new(AtomicUsize::new(0));
@@ -1312,7 +1318,6 @@ mod tests {
             let engine_arc = Arc::clone(&engine_arc);
             let workspace = workspace.clone();
             let semantic_runtime = Arc::clone(&semantic_runtime);
-            let background_indexers = Arc::clone(&background_indexers);
             let index_progress = Arc::clone(&index_progress);
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
@@ -1321,9 +1326,9 @@ mod tests {
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
-                    &background_indexers,
                     &index_progress,
                     &embed_flight,
+                    &crate::workspace_lease::WorkspaceLease::unmanaged(),
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
@@ -1417,7 +1422,6 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
         let fired = Arc::new(AtomicUsize::new(0));
@@ -1425,7 +1429,6 @@ mod tests {
             let engine_arc = Arc::clone(&engine_arc);
             let workspace = workspace.clone();
             let semantic_runtime = Arc::clone(&semantic_runtime);
-            let background_indexers = Arc::clone(&background_indexers);
             let index_progress = Arc::clone(&index_progress);
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
@@ -1434,9 +1437,9 @@ mod tests {
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
-                    &background_indexers,
                     &index_progress,
                     &embed_flight,
+                    &crate::workspace_lease::WorkspaceLease::unmanaged(),
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
@@ -1485,6 +1488,64 @@ mod tests {
 
     /// A NULL chunk created AFTER the pass has read the store still gets embedded, because the
     /// owner loops on the recorded rerun and the final `set_vector_index` reflects the latest
+    /// An embedding pass over a large configuration runs for hours, so checking the right to
+    /// write only before it starts is not enough: a generation that takes the workspace over
+    /// meanwhile must not keep finding this daemon's vectors — from a possibly different model,
+    /// stored as unlabelled blobs — arriving in its index. The pass asks between batches and
+    /// stops, writing neither the remaining vectors nor the persisted sidecar. Drop the
+    /// `should_continue` check in `run_embedding_pass` and the chunk is embedded anyway.
+    #[test]
+    fn an_embedding_pass_stops_between_batches_when_the_right_to_write_is_withdrawn() {
+        use bsl_search::{Chunk, ChunkKind, SearchConfig, Store};
+
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+        let seed = |db: &std::path::Path| {
+            let mut store = Store::open(db).unwrap();
+            store
+                .reindex_file_with_context(
+                    "A.bsl",
+                    b"ha",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Альфа".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Альфа()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("ctx".to_owned())]),
+                )
+                .unwrap();
+        };
+        let embedded_count = |db: &std::path::Path, config: &SearchConfig| {
+            let dim = config.embedder.dim.unwrap_or(1024);
+            Store::open(db).unwrap().load_all_embeddings_with_generation(dim).unwrap().1.len()
+        };
+        seed(&db_path);
+        let config = mock_semantic_config(&mock);
+
+        SearchEngine::embed_pending_chunks_standalone(&db_path, &config, None, Some(&|| false))
+            .expect("a stopped pass is not an error");
+        assert_eq!(
+            embedded_count(&db_path, &config),
+            0,
+            "a pass that may no longer write persists no vector",
+        );
+
+        // The control: the same pass with the right to write does embed it, so the assertion
+        // above is about the withdrawal and not about an inert fixture.
+        SearchEngine::embed_pending_chunks_standalone(&db_path, &config, None, Some(&|| true))
+            .expect("the pass runs");
+        assert_eq!(embedded_count(&db_path, &config), 1, "with the right to write it embeds");
+    }
+
     /// store state. Reverting the rerun loop leaves the mid-flight chunk unembedded and it never
     /// answers the query.
     #[test]
@@ -1567,14 +1628,13 @@ mod tests {
         }
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Indexing));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         SharedState::spawn_embed_pass(
             Arc::clone(&engine_arc),
             semantic_runtime,
-            background_indexers,
             index_progress,
             Arc::clone(&embed_flight),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
             db_path.clone(),
             mock_semantic_config(&mock),
         );
@@ -1650,15 +1710,14 @@ mod tests {
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Indexing));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
         SharedState::kick_context_reembed(
             &engine_arc,
             &semantic_runtime,
-            &background_indexers,
             &index_progress,
             &embed_flight,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
         );
 
         let deadline = Instant::now() + Duration::from_secs(20);

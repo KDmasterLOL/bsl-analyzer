@@ -1,16 +1,30 @@
 use super::lexical::lexical_code_hits;
-use super::render::format_code_hits;
+use super::render::{format_code_hits, hits_response, no_hits_response};
 use super::semantic::semantic_code_hits;
 use super::status::search_not_ready;
 use super::types::{CodeHits, HYBRID_FETCH_MULTIPLIER};
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService};
 use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
 use bsl_search::{fuse_smart, FusedHit, IndexProgress, SearchEngine};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 use std::fmt::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+/// The one-line legend above the hits: what `[L]` / `[S]` / `[L+S]` mean.
+const MODALITY_LEGEND: &str = "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (cross-modal agreement).\n";
+
+/// What the hits may spend, once this profile's own wrapping is set aside: the legend above
+/// them and the degradation note, which is carried twice — as the trailing text line and as the
+/// envelope's `degraded`. (The envelope's keys are charged by the renderer itself.) Sizing the
+/// hits against the full budget and only then wrapping them in all this is how a response ends
+/// up over its ceiling while reporting `budget_exhausted: false`.
+fn hits_budget(max_output_tokens: usize, note: Option<&str>) -> usize {
+    let reserved =
+        MODALITY_LEGEND.len() + note.map_or(0, |note| note.len() * 2 + "-- {} --\n".len());
+    max_output_tokens.saturating_sub(reserved.div_ceil(4))
+}
 
 /// The unified code search: run lexical and semantic, fuse by `fuse_smart` (exact-symbol tier
 /// then semantic tail), and degrade to lexical (with a trailing note) when semantic cannot serve.
@@ -87,26 +101,28 @@ pub fn hybrid_code(
     hits.truncate(limit);
 
     if hits.is_empty() {
-        return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+        // The text stays the bare sentence it has always been; the degradation reaches a
+        // machine consumer through the envelope, where an empty list plus `degraded` reads as
+        // "half the search was down" rather than "there is nothing".
+        return Ok(no_hits_response(note.as_deref()));
     }
 
     // Explain the per-hit modality tag once, up front — a leading line does not shift the
     // per-hit `graph_id:` parsing (which is relative to each `#N` line).
-    let mut out = String::from(
-        "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (cross-modal agreement).\n",
-    );
-    out.push_str(&format_code_hits(
+    let mut out = String::from(MODALITY_LEGEND);
+    let rendered = format_code_hits(
         &hits,
         workspace_root.as_deref(),
         graph_root,
-        max_output_tokens,
-    ));
-    if let Some(note) = note {
+        hits_budget(max_output_tokens, note.as_deref()),
+    );
+    out.push_str(&rendered.text);
+    if let Some(note) = &note {
         // Append AFTER the hit lines — never before — so a client parsing `graph_id:` lines
         // positionally is not shifted.
         let _ = writeln!(out, "-- {note} --");
     }
-    Ok(CallToolResult::success(vec![Content::text(out)]))
+    Ok(hits_response(out, rendered, note.as_deref()))
 }
 
 #[cfg(test)]
@@ -230,6 +246,116 @@ mod tests {
         let empty_text = empty_result.content[0].raw.as_text().expect("text").text.as_str();
         assert_eq!(empty_text, "No results found.");
         assert!(!empty_text.contains("--"), "no trailing note without hits: {empty_text}");
+        // The text says nothing about the degradation, but a machine consumer must not read
+        // this as "the configuration has no such code": half the search was down.
+        let empty_body = empty_result.structured_content.as_ref().expect("structured envelope");
+        assert_eq!(empty_body["hits"], serde_json::json!([]));
+        assert_eq!(empty_body["degraded"], "semantic skipped: runtime initialization failed");
+    }
+
+    #[test]
+    fn the_whole_response_stays_within_the_budget_it_was_given() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        for i in 1..=6 {
+            fs::write(
+                workspace.join(format!("Модуль{i}.bsl")),
+                "Процедура ПроверитьИНН()\n\tВозврат;\nКонецПроцедуры",
+            )
+            .unwrap();
+        }
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        let engine = Arc::new(Mutex::new(Some(engine)));
+
+        // A sweep across the boundary where the hits alone fit but the assembled response does
+        // not — the case that overshoots when only the hit blocks are sized.
+        let mut saw_complete_answer = false;
+        for budget in [200usize, 400, 700, 875, 1000, 1200] {
+            let result = hybrid_code(
+                &engine,
+                &Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("boom".to_owned()))),
+                WorkspaceSearchMode::SqliteLocal,
+                None,
+                None,
+                None,
+                &IndexProgress::new(),
+                "ПроверитьИНН",
+                10,
+                budget,
+            )
+            .unwrap();
+
+            let text = result.content[0].raw.as_text().expect("text").text.as_str();
+            let body = result.structured_content.as_ref().expect("structured");
+            let size = text.len() + serde_json::to_string(body).unwrap().len();
+
+            // The flag's whole contract: absent means "this answer fits the ceiling you set".
+            // Everything the response carries counts — legend, hits, degradation note, envelope
+            // — not just the hit blocks that were measured while rendering.
+            if body.get("budget_exhausted").is_none() {
+                saw_complete_answer = true;
+                assert!(
+                    size <= budget * 4,
+                    "budget {budget}: {size} chars shipped as a complete answer: {text}",
+                );
+            }
+        }
+        assert!(
+            saw_complete_answer,
+            "the sweep must include budgets that fit, or it proves nothing"
+        );
+    }
+
+    #[test]
+    fn hybrid_hits_carry_the_structured_listing_beside_the_text() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(
+            workspace.join("CommonModule.bsl"),
+            "Процедура ПроверитьИНН()\n\tВозврат;\nКонецПроцедуры",
+        )
+        .unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let result = hybrid_code(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("boom".to_owned()))),
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "ПроверитьИНН",
+            10,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        assert!(text.starts_with("Modality tag per hit:"), "text listing unchanged: {text}");
+
+        let body = result.structured_content.as_ref().expect("structured listing");
+        assert_eq!(body["schema_version"], "1");
+        let hits = body["hits"].as_array().expect("hits array");
+        assert_eq!(hits.len(), body["shown"].as_u64().unwrap() as usize);
+        assert_eq!(body["total"], serde_json::json!(hits.len()));
+        assert!(body.get("budget_exhausted").is_none(), "nothing was cut: {body}");
+        assert_eq!(body["degraded"], "semantic skipped: runtime initialization failed");
+
+        let first = &hits[0];
+        assert_eq!(first["rank"], 1);
+        assert_eq!(first["modality"], "L");
+        assert_eq!(first["path"], "CommonModule.bsl");
+        assert_eq!(first["symbol"], "ПроверитьИНН");
+        // Every structured field is also on screen, so the two views cannot drift apart.
+        assert!(text.contains(first["path"].as_str().unwrap()), "{text}");
+        assert!(text.contains(first["symbol"].as_str().unwrap()), "{text}");
     }
 
     #[test]

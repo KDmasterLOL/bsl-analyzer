@@ -34,7 +34,7 @@ impl GraphState {
         let source_path = source_path.to_path_buf();
         let mut sink = FusedChunkWriter::new(engine, source_path);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_and_publish_graph_file(&workspace_root, generation, Some(&mut sink))
+            build_and_publish_graph_file(&workspace_root, generation, self, Some(&mut sink))
         }));
         let built = match outcome {
             Ok(Ok(v)) => v,
@@ -112,6 +112,22 @@ impl GraphState {
             return;
         }
 
+        // Everything below WRITES the shared graph database. A daemon superseded by a newer
+        // generation (see [`crate::workspace_lease`]) may still PUBLISH what is already on
+        // disk — both reads above — but never builds: the owner is maintaining that same file,
+        // and a second builder would only race its rename. Placed after the stale publish on
+        // purpose, so a superseded daemon still serves the stale snapshot (with the reason on
+        // its `reload` slot) instead of answering nothing at all.
+        if !self.may_build() {
+            self.record_load_failure(
+                is_reload,
+                "another daemon generation owns this workspace's derived caches; \
+                 this one serves without rebuilding the graph"
+                    .to_owned(),
+            );
+            return;
+        }
+
         // On reload, try the body-only fast path first: if only `.bsl` bodies changed
         // (signatures intact, nothing added/removed, no `.xml` drift) reproject just
         // those modules instead of the whole config. On any ineligibility or failure
@@ -122,7 +138,7 @@ impl GraphState {
 
         tracing::info!(?workspace_root, is_reload, generation, "graph database build started");
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_and_publish_graph_file(&workspace_root, generation, None)
+            build_and_publish_graph_file(&workspace_root, generation, self, None)
         }));
 
         match outcome {
@@ -319,7 +335,7 @@ impl GraphState {
                     rusqlite::params![if force_stale { "1" } else { "0" }],
                 )?;
             }
-            std::fs::rename(&tmp_path, &db_path)?;
+            self.publish_or_discard(&tmp_path, &db_path)?;
             anyhow::Ok((summary.modules, fp_pre, force_stale))
         }));
 
@@ -425,6 +441,26 @@ impl GraphState {
         if force_stale {
             return false;
         }
+        // Stale on FILES is what this path exists to serve — stale on TOPOLOGY is not. A build
+        // made under a different extension topology resolves names differently, so publishing it
+        // would answer questions about a project shape this workspace no longer has, and every
+        // later reader would compare against the foreign topology adopted here and find it
+        // consistent. The clean-match path above rejects it implicitly (its fingerprint covers
+        // the topology); here it has to be said.
+        //
+        // Not publishing it costs the transition WITNESS, though: the whole-collection context
+        // re-render is normally requested by a publish that observes its predecessor's topology
+        // differing from its own, and refusing to publish leaves nothing to differ from. The
+        // difference is visible right here — cached file versus live configuration — so the
+        // request is raised directly and the rebuild's publish carries it.
+        if !super::scan::graph_file_matches_live_topology(workspace_root, &graph) {
+            tracing::info!(
+                "cached graph database was built for another extension topology; \
+                 rebuilding instead of serving it stale, and re-rendering search contexts"
+            );
+            self.pending_topology_refresh.store(true, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
         let files = graph.files().unwrap_or(0);
         drop(graph);
 
@@ -448,10 +484,25 @@ impl GraphState {
         true
     }
 
+    /// Move a finished build into the shared path — unless this daemon lost the workspace
+    /// while it was building. See [`publish_or_discard`].
+    fn publish_or_discard(&self, tmp_path: &Path, out_path: &Path) -> anyhow::Result<()> {
+        publish_or_discard(self, tmp_path, out_path)
+    }
+
     /// A failed initial load surfaces as `Failed`; a failed reload keeps the
     /// previous snapshot but flags `reload="failed"` so the agent sees it. A
     /// later drift check retries the reload (the throttle bounds the retry rate).
+    ///
+    /// A load that stopped because the workspace is no longer ours is recorded as a failure
+    /// like any other, but flagged so it can be retried when the workspace comes back — see
+    /// [`GraphState::withheld_build`]. Both shapes count: the load that never started, and the
+    /// one that built for minutes and then lost the workspace at its publish. A genuinely
+    /// failed build (we still own the workspace) stays terminal as before.
     fn record_load_failure(&self, is_reload: bool, msg: String) {
+        if !self.may_build() {
+            self.withheld_build.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let mut inner = lock_recover(&self.inner);
         if is_reload {
             if let Some(p) = inner.published.as_mut() {
@@ -474,6 +525,7 @@ impl GraphState {
 fn build_and_publish_graph_file(
     workspace_root: &Path,
     generation: u64,
+    graph: &GraphState,
     chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
 ) -> anyhow::Result<PublishedBuild> {
     // ONE project snapshot serves the pre-scan, the build and the post-scan.
@@ -524,13 +576,42 @@ fn build_and_publish_graph_file(
             rusqlite::params![summary.modules.to_string()],
         )?;
     }
-    std::fs::rename(&tmp_path, &out_path)?;
+    publish_or_discard(graph, &tmp_path, &out_path)?;
     Ok(PublishedBuild {
         files: summary.modules,
         fp_pre,
         force_stale,
         scan_roots: project.scan_roots,
     })
+}
+
+/// Rename a finished build into the shared path, or throw it away.
+///
+/// A build takes minutes, and a newer daemon generation can claim the workspace's derived
+/// caches at any point during one (see [`crate::workspace_lease`]). The rename runs with
+/// ownership HELD rather than merely checked: a claim landing between a check and the rename
+/// would let this build clobber what the new owner just published, and "we owned it a moment
+/// ago" is exactly the guarantee a minutes-long build cannot rely on. A rename that cannot go
+/// ahead discards the build, temp file and all, so nothing is left behind.
+///
+/// Both reasons it can fail — the workspace was taken over, or ownership could not be
+/// established because a peer held the lock — re-arm the build (see
+/// [`GraphState::withheld_build`]). Neither says the build itself was bad, so neither should
+/// leave the graph terminally failed: the second one in particular happens while this daemon is
+/// still the rightful owner. The gates that keep a superseded daemon from STARTING a build are
+/// upstream; this is the one that closes the window a long build opens.
+fn publish_or_discard(graph: &GraphState, tmp_path: &Path, out_path: &Path) -> anyhow::Result<()> {
+    match graph.lease.with_ownership(|| std::fs::rename(tmp_path, out_path)) {
+        Some(renamed) => Ok(renamed?),
+        None => {
+            let _ = std::fs::remove_file(tmp_path);
+            graph.withheld_build.store(true, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!(
+                "this daemon could not establish ownership of the workspace's derived caches \
+                 when the graph build finished; the build was discarded instead of published"
+            )
+        }
+    }
 }
 
 /// The outcome of one full build+publish pass: what was published, the identity it
@@ -1826,6 +1907,32 @@ mod tests {
         assert!(
             requested.load(std::sync::atomic::Ordering::SeqCst),
             "the catch-up publish after a topology-only warm start must request the refresh",
+        );
+    }
+
+    /// Serving a stale cache is the right trade when the workspace's FILES moved — stale
+    /// answers beat "still indexing" for the minutes a rebuild takes. It is the wrong trade
+    /// when the extension TOPOLOGY moved: that build resolves names against a project shape
+    /// this workspace no longer has, and once adopted every later freshness check compares
+    /// against the foreign topology and finds it consistent. Drop the topology check in
+    /// `try_publish_stale_and_catch_up` and the foreign build is published as this
+    /// workspace's answer.
+    #[test]
+    fn a_stale_cache_from_another_topology_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_extension_workspace(root, false);
+        seed_cache(root, workspace_fingerprint(root));
+        write_extension_config(root, true); // offline dependsOn edit
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        assert!(
+            !graph.try_publish_stale_and_catch_up(root),
+            "a build made under another topology is not served, however stale-tolerant we are",
+        );
+        assert!(
+            graph.pending_topology_refresh.load(std::sync::atomic::Ordering::SeqCst),
+            "and the whole-collection context re-render is still requested",
         );
     }
 

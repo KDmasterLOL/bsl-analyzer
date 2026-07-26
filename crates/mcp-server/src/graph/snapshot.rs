@@ -93,7 +93,11 @@ impl GraphState {
     /// and can be moved onto a blocking task without holding the lock during the
     /// query.
     pub(crate) fn snapshot(&self) -> Option<GraphSnapshot> {
-        let published_generation = lock_recover(&self.inner).published.as_ref()?.generation;
+        let (published_generation, published_topology) = {
+            let inner = lock_recover(&self.inner);
+            let published = inner.published.as_ref()?;
+            (published.generation, published.fingerprint.topology)
+        };
         {
             let mut pool = lock_recover(&self.snapshot_pool);
             while let Some(entry) = pool.pop() {
@@ -115,6 +119,22 @@ impl GraphState {
         let path = graph_db_path(self.workspace_root.as_deref()?);
         let graph = GraphDb::open(&path).ok()?;
         let (generation, fingerprint, force_stale) = graph.freshness_token().ok()?;
+        // The file at this path is not necessarily the one WE published: a daemon of another
+        // generation over the same workspace (see [`crate::workspace_lease`]) renames its own
+        // build into place, and a build made under a different extension topology answers
+        // different questions about the same code. Serving it would be a silent wrong answer,
+        // so a foreign topology reads as "no snapshot" instead. The comparison is against our
+        // last publish, so between our own rename and the matching `published` update a
+        // topology-changing build of ours also reads as none — the honest answer while a
+        // publish is in flight.
+        if fingerprint.topology != published_topology {
+            tracing::warn!(
+                file_topology = fingerprint.topology,
+                published_topology,
+                "graph database on disk was built for another extension topology; not serving it"
+            );
+            return None;
+        }
         Some(GraphSnapshot {
             graph: PooledGraphDb {
                 entry: Some(PooledSnapshotEntry {
@@ -140,6 +160,10 @@ impl GraphState {
         let disk_fp = self.current_disk_fp();
         let stale =
             snapshot.force_stale || disk_fp.map(|fp| fp != snapshot.fingerprint).unwrap_or(false);
+        // Read before the lock: the lease may go to disk, and the inner mutex serializes every
+        // graph query. Drift is still reported (the response says `stale`), but only the daemon
+        // that owns the workspace's derived caches acts on it — see [`crate::workspace_lease`].
+        let may_build = self.may_build();
 
         let mut inner = lock_recover(&self.inner);
         let Some(published) = inner.published.as_mut() else {
@@ -147,7 +171,8 @@ impl GraphState {
         };
         let mut reload = published.reload.label();
         let claim_reload = disk_fp.map(|fp| fp != published.fingerprint).unwrap_or(false)
-            && published.reload != ReloadState::Running;
+            && published.reload != ReloadState::Running
+            && may_build;
         if claim_reload {
             published.reload = ReloadState::Running;
             reload = "running";
@@ -335,6 +360,43 @@ mod tests {
     use super::*;
     use crate::change_hub::WorkspaceChangeHub;
     use std::time::Duration;
+
+    /// A second daemon generation over the same workspace renames ITS build into the shared
+    /// path. On a pool miss the reopen must not serve that file when it was built under a
+    /// different extension topology — it answers different questions about the same code —
+    /// while a replacement under the SAME topology (a build that differs only on an axis the
+    /// graph does not depend on, e.g. binary version) stays serveable. Drop the topology
+    /// comparison in `snapshot` and the foreign build is served as this workspace's answer.
+    #[test]
+    fn a_graph_file_built_for_another_topology_is_not_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        seed_cache(root, workspace_fingerprint(root));
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let published = graph.snapshot().expect("the freshly built graph serves").fingerprint;
+        lock_recover(&graph.snapshot_pool).clear();
+
+        seed_cache(root, crate::graph_db::GraphFp { topology: published.topology, ..published });
+        assert!(
+            graph.snapshot().is_some(),
+            "a replacement built under our own topology is still serveable",
+        );
+        lock_recover(&graph.snapshot_pool).clear();
+
+        seed_cache(
+            root,
+            crate::graph_db::GraphFp { topology: published.topology.wrapping_add(1), ..published },
+        );
+        assert!(
+            graph.snapshot().is_none(),
+            "a build made under another extension topology is not served as ours",
+        );
+    }
 
     #[test]
     fn snapshot_pool_reuses_and_discards_superseded_handles() {

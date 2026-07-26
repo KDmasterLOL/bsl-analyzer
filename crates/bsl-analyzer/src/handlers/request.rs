@@ -1387,8 +1387,13 @@ pub fn handle_document_diagnostic(
 
     let file_id = ctx.file_id_for_url(&uri)?;
 
-    let ide_diagnostics =
-        ctx.analysis.file_diagnostics_cached(file_id, ctx.diagnostics_config.clone());
+    // An edited-but-unsaved buffer no longer matches the disk state the
+    // vendor-diff scope was computed against: analyze it whole-file.
+    let mut config = ctx.diagnostics_config.clone();
+    if config.scope.is_some() && ctx.scope_dirty_docs.contains(&uri) {
+        config.scope = None;
+    }
+    let ide_diagnostics = ctx.analysis.file_diagnostics_cached(file_id, config);
     let result_id = crate::lsp::diagnostics_result_id(&ide_diagnostics);
 
     if params.previous_result_id.as_deref() == Some(result_id.as_str()) {
@@ -1494,10 +1499,24 @@ pub fn handle_workspace_diagnostic(
         .map(|p| p.extension_paths().iter().map(|(_, path)| path.as_path()).collect())
         .unwrap_or_default();
 
+    // Vendor-diff file-gate: unchanged-vs-base files are excluded up front so the
+    // sweep does not walk thousands of files whose report is guaranteed empty.
+    // Dirty open documents no longer match the disk-derived scope: they stay in
+    // the sweep regardless of the gate and are analyzed whole-file below.
+    let analysis_scope = ctx.diagnostics_config.scope.clone();
+    let dirty_ids: std::collections::HashSet<vfs::FileId> = if analysis_scope.is_some() {
+        ctx.scope_dirty_docs.iter().filter_map(|uri| ctx.file_id_for_url(uri).ok()).collect()
+    } else {
+        Default::default()
+    };
     let mut file_ids: Vec<vfs::FileId> = ctx
         .file_paths
         .iter()
-        .filter(|(_, path)| path_in_workspace_scope(path, scope, &ext_roots))
+        .filter(|(file_id, path)| {
+            path_in_workspace_scope(path, scope, &ext_roots)
+                && (dirty_ids.contains(file_id)
+                    || analysis_scope.as_ref().is_none_or(|s| s.is_file_in_scope(path)))
+        })
         .map(|(file_id, _)| file_id)
         .collect();
     // Stable report order across pulls (protocol-agnostic, but keeps diffs/logs sane).
@@ -1535,7 +1554,20 @@ pub fn handle_workspace_diagnostic(
     let mut collected = Vec::new();
     let mut done = 0usize;
     for chunk in file_ids.chunks(CHUNK) {
-        let computed = ctx.analysis.workspace_diagnostics(chunk, ctx.diagnostics_config.clone());
+        let computed = if dirty_ids.is_empty() {
+            ctx.analysis.workspace_diagnostics(chunk, ctx.diagnostics_config.clone())
+        } else {
+            // Dirty buffers analyze without the scope (their disk hunks are
+            // stale); everything else keeps the filtered config.
+            let (dirty, clean): (Vec<vfs::FileId>, Vec<vfs::FileId>) =
+                chunk.iter().copied().partition(|file_id| dirty_ids.contains(file_id));
+            let mut computed =
+                ctx.analysis.workspace_diagnostics(&clean, ctx.diagnostics_config.clone());
+            let mut unscoped = ctx.diagnostics_config.clone();
+            unscoped.scope = None;
+            computed.extend(ctx.analysis.workspace_diagnostics(&dirty, unscoped));
+            computed
+        };
         let chunk_items: Vec<_> = computed
             .into_iter()
             .filter_map(|(file_id, diagnostics)| {
@@ -2161,6 +2193,7 @@ mod tests {
             client_sender: state.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&state.vfs.read()),
+            scope_dirty_docs: state.scope_dirty_docs.clone(),
         }
     }
 
@@ -2187,6 +2220,7 @@ mod tests {
             client_sender: state.sender.clone(),
             mem_docs: state.mem_docs.freeze(),
             file_paths: FrozenFilePaths::freeze(&state.vfs.read()),
+            scope_dirty_docs: state.scope_dirty_docs.clone(),
         };
         (ctx, token)
     }

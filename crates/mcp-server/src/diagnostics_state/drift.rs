@@ -12,6 +12,10 @@ use super::types::{DiagnosticsStatus, Freshness, ReloadState};
 
 pub(super) const DRIFT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How often the drift poll re-resolves the scope's git refs (base, HEAD) to
+/// notice ref-only movement. A couple of `rev-parse`s per minute is free.
+pub(super) const SCOPE_REF_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
 pub(super) const FORCE_RESCAN_FLOOR: Duration = Duration::from_millis(250);
 
 pub(super) const RECONCILE_INTERVAL: Duration = Duration::from_secs(90);
@@ -72,6 +76,11 @@ impl DiagnosticsState {
         if !matches!(self.status(), DiagnosticsStatus::Ready { .. }) {
             return;
         }
+
+        // Ref-only git movement (fetch/rebase/reset) changes what the scope
+        // should be without any watched-file event; this is the only place
+        // that can notice it.
+        self.check_scope_ref_drift(&root);
 
         // The `metadata object` miss escape hatch forces a scan regardless of hub health.
         if self.force_scan.swap(false, Ordering::SeqCst) {
@@ -231,6 +240,7 @@ impl DiagnosticsState {
         new_fp: &HashMap<String, u64>,
     ) {
         let mut needs_rebuild = false;
+        let mut rescope: Option<(PathBuf, String)> = None;
         {
             let mut inner = lock_recover(&self.inner);
             if inner.reload == ReloadState::Running {
@@ -252,6 +262,15 @@ impl DiagnosticsState {
             if rebuild {
                 needs_rebuild = true;
             } else {
+                // Body drift moved the working copy the vendor-diff scope was
+                // computed against (save, checkout, pull). The git diff can take
+                // seconds, so only capture the inputs here — the recompute runs
+                // after this lock is released. No-op without a configured base.
+                if !added_bsl.is_empty() || !modified_bsl.is_empty() || !removed_bsl.is_empty() {
+                    if let Some(base) = resident.diff_base.clone() {
+                        rescope = Some((resident.workspace_root().to_path_buf(), base));
+                    }
+                }
                 for (key, fp) in new_fp {
                     stats.insert(key.clone(), *fp);
                 }
@@ -276,6 +295,8 @@ impl DiagnosticsState {
         }
         if needs_rebuild {
             self.kick_full_reload();
+        } else if let Some((root, base)) = rescope {
+            self.rescope_out_of_lock(&root, &base);
         }
     }
 
@@ -291,6 +312,7 @@ impl DiagnosticsState {
             scan.stats.iter().map(|s| (s.path.as_str(), s.fingerprint())).collect();
 
         let mut needs_rebuild = false;
+        let mut rescope: Option<(PathBuf, String)> = None;
         {
             let mut inner = lock_recover(&self.inner);
             // A full rebuild already in flight will publish a fresh resident; defer to it
@@ -322,6 +344,15 @@ impl DiagnosticsState {
             if rebuild {
                 needs_rebuild = true;
             } else {
+                // Body drift moved the working copy the vendor-diff scope was
+                // computed against (save, checkout, pull). The git diff can take
+                // seconds, so only capture the inputs here — the recompute runs
+                // after this lock is released. No-op without a configured base.
+                if !added_bsl.is_empty() || !modified_bsl.is_empty() || !removed_bsl.is_empty() {
+                    if let Some(base) = resident.diff_base.clone() {
+                        rescope = Some((resident.workspace_root().to_path_buf(), base));
+                    }
+                }
                 // Advance the drift baseline to the scan we reconciled against: every
                 // applied body and every XML add/remove/edit is now reflected in the
                 // resident, so its state equals `scan`. Rebasing even when nothing moved
@@ -346,6 +377,81 @@ impl DiagnosticsState {
         }
         if needs_rebuild {
             self.kick_full_reload();
+        } else if let Some((root, base)) = rescope {
+            self.rescope_out_of_lock(&root, &base);
+        }
+    }
+
+    /// Recompute the vendor-diff scope OUTSIDE the resident lock (the git diff
+    /// can take seconds on a large working copy) and publish it under a short
+    /// lock — unless a full reload started meanwhile: the rebuilt resident
+    /// computes its own fresh scope.
+    fn rescope_out_of_lock(&self, root: &Path, base: &str) {
+        let (scope, identity) = super::resident::build_scope(root, base);
+        let mut inner = lock_recover(&self.inner);
+        if inner.reload == ReloadState::Running {
+            return;
+        }
+        if let Some(resident) = inner.resident.as_mut() {
+            resident.config.scope = scope;
+            resident.scope_identity = identity;
+        }
+    }
+
+    /// Compare the scope's resolved (base, HEAD) OIDs — and the author
+    /// filter's pinned HEAD — against the live refs, throttled off the request
+    /// hot path, and rebuild whichever went stale.
+    fn check_scope_ref_drift(&self, root: &Path) {
+        {
+            let mut at = lock_recover(&self.scope_ref_check_at);
+            if at.is_some_and(|t| t.elapsed() < SCOPE_REF_CHECK_INTERVAL) {
+                return;
+            }
+            *at = Some(Instant::now());
+        }
+        let (base, stored, author_identity, ignored_authors, generation) = {
+            let inner = lock_recover(&self.inner);
+            let Some(resident) = inner.resident.as_ref() else { return };
+            (
+                resident.diff_base.clone(),
+                resident.scope_identity.clone(),
+                resident.author_filter.as_ref().map(|f| (f.head_identity(), f.mailmap_fp())),
+                resident.ignored_authors.clone(),
+                inner.generation,
+            )
+        };
+
+        if let Some(base) = base {
+            if let Ok(identity) = vcs::scope_ref_identity(root, &base) {
+                if stored.as_ref().is_some_and(|s| s != &identity) {
+                    tracing::info!(
+                        "scope refs moved without file events; rebuilding vendor-diff scope"
+                    );
+                    self.rescope_out_of_lock(root, &base);
+                }
+            }
+        }
+
+        if author_filter_rebuild_needed(
+            &ignored_authors,
+            author_identity.as_ref().map(|(head, mm)| (head.as_str(), *mm)),
+            vcs::head_identity(root).ok().as_deref(),
+            vcs::mailmap_fingerprint(root),
+        ) {
+            tracing::info!("attribution inputs moved; rebuilding the ignored-authors filter");
+            // Rebuild outside the lock (repo open + ref resolve), publish
+            // under a short one — unless the resident changed meanwhile (a
+            // reload or drift apply bumped the generation): the fresh resident
+            // carries or will recompute its own filter, and a stale publish
+            // here could overwrite it.
+            let filter = super::resident::build_author_filter(root, &ignored_authors);
+            let mut inner = lock_recover(&self.inner);
+            if inner.reload == ReloadState::Running || inner.generation != generation {
+                return;
+            }
+            if let Some(resident) = inner.resident.as_mut() {
+                resident.author_filter = filter;
+            }
         }
     }
 
@@ -553,6 +659,34 @@ pub(super) fn config_identity_now(root: &Path) -> u64 {
     config_identity(config_files_fp, &crate::graph::input::ProjectSnapshot::load(root).configs)
 }
 
+/// Whether the ignored-authors filter must be (re)built. Fail-open logic:
+/// a filter attributing against inputs that no longer exist or moved is
+/// rebuilt (an unreadable repository then yields `None` = no suppression),
+/// and a missing filter is retried once the repository becomes usable again.
+fn author_filter_rebuild_needed(
+    configured_authors: &[String],
+    stored: Option<(&str, u64)>,
+    live_head: Option<&str>,
+    live_mailmap: Option<u64>,
+) -> bool {
+    if configured_authors.is_empty() {
+        return false;
+    }
+    match (stored, live_head) {
+        // Attribution inputs moved under an active filter.
+        (Some((stored_head, stored_mm)), Some(live)) => {
+            stored_head != live || live_mailmap != Some(stored_mm)
+        }
+        // Active filter over a repository that can no longer resolve HEAD:
+        // rebuild (and fail open) rather than keep suppressing against
+        // obsolete history.
+        (Some(_), None) => true,
+        // No filter was built but the repository is usable now — retry.
+        (None, Some(_)) => true,
+        (None, None) => false,
+    }
+}
+
 pub(super) fn config_files_fingerprint(root: &Path) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -583,10 +717,32 @@ mod tests {
     use crate::diagnostics_state::ResidentOutcome;
 
     use super::super::drift::{
-        clamp_reconcile_interval, ScanCache, FORCE_RESCAN_FLOOR, MIN_RECONCILE_INTERVAL,
-        RECONCILE_INTERVAL,
+        author_filter_rebuild_needed, clamp_reconcile_interval, ScanCache, FORCE_RESCAN_FLOOR,
+        MIN_RECONCILE_INTERVAL, RECONCILE_INTERVAL,
     };
     use super::super::test_support::*;
+
+    #[test]
+    fn author_filter_rebuild_decision_covers_every_transition() {
+        let authors = vec!["Фирма 1С".to_string()];
+        let none: &[String] = &[];
+
+        // Not configured: never rebuild, whatever the repo state.
+        assert!(!author_filter_rebuild_needed(none, None, Some("h1"), Some(1)));
+        assert!(!author_filter_rebuild_needed(none, Some(("h1", 1)), None, None));
+
+        // Steady state: same HEAD, same mailmap.
+        assert!(!author_filter_rebuild_needed(&authors, Some(("h1", 1)), Some("h1"), Some(1)));
+        // HEAD moved, mailmap edited, or mailmap unreadable → rebuild.
+        assert!(author_filter_rebuild_needed(&authors, Some(("h1", 1)), Some("h2"), Some(1)));
+        assert!(author_filter_rebuild_needed(&authors, Some(("h1", 1)), Some("h1"), Some(2)));
+        assert!(author_filter_rebuild_needed(&authors, Some(("h1", 1)), Some("h1"), None));
+        // Active filter over a repo that lost HEAD → rebuild (fails open).
+        assert!(author_filter_rebuild_needed(&authors, Some(("h1", 1)), None, None));
+        // Filter missing, repo became usable → retry; still broken → wait.
+        assert!(author_filter_rebuild_needed(&authors, None, Some("h1"), Some(1)));
+        assert!(!author_filter_rebuild_needed(&authors, None, None, None));
+    }
     use super::*;
     use crate::change_hub::ChangeKind;
     use ide::DiagnosticsConfig;
@@ -674,28 +830,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(reloaded, "config edit reloads the resident with the updated diagnostics config");
-    }
-
-    /// `is_busy` is true while a build is `Loading` or a reload is `Running`, and false
-    /// otherwise — the signal the broker ORs in so it keeps the backend alive through a
-    /// cold diagnostics build but lets it idle-exit once the resident is settled.
-    #[test]
-    fn is_busy_reflects_loading_and_reload() {
-        let state = DiagnosticsState::for_workspace(std::env::temp_dir());
-        assert!(!state.is_busy(), "idle is not busy");
-
-        lock_recover(&state.inner).status = DiagnosticsStatus::Loading;
-        assert!(state.is_busy(), "loading is busy");
-
-        {
-            let mut inner = lock_recover(&state.inner);
-            inner.status = DiagnosticsStatus::Ready { files: 0 };
-            inner.reload = ReloadState::Running;
-        }
-        assert!(state.is_busy(), "a running reload is busy even when ready");
-
-        lock_recover(&state.inner).reload = ReloadState::Idle;
-        assert!(!state.is_busy(), "ready with no reload is not busy");
     }
 
     /// A disabled handle never loads and reads degrade to `Disabled`.

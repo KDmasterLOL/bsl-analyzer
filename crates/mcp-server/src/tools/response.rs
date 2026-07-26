@@ -1,6 +1,6 @@
 //! Response-shaping helpers shared by the agent-facing tools.
 
-use rmcp::model::CallToolResult;
+use rmcp::model::{CallToolResult, Content};
 use serde_json::Value;
 
 /// Emit `body` as the MCP `structuredContent` field. rmcp mirrors the value as a
@@ -53,6 +53,9 @@ pub fn trim_items_to_budget(items: &mut Vec<Value>, max_output_tokens: usize) ->
 /// no structured envelope, so the trailing note IS the truncation marker. Returns whether it
 /// truncated. A single line longer than the budget is cut at a char boundary rather than
 /// dropped whole.
+///
+/// The note is the floor: a budget smaller than `note` yields the note alone rather than a
+/// silently clipped body, because an unmarked truncation reads as a complete answer.
 pub fn truncate_text_to_budget(text: &mut String, max_output_tokens: usize, note: &str) -> bool {
     let budget = max_output_tokens.saturating_mul(4);
     if text.len() <= budget {
@@ -71,22 +74,27 @@ pub fn truncate_text_to_budget(text: &mut String, max_output_tokens: usize, note
     true
 }
 
-/// The largest count `n ≤ items` such that `render(n)` fits `max_output_tokens` (~4 chars
-/// each), never below 1. For the text tools whose payload is line-oriented and positionally
-/// parsed (`search` hit blocks): shrink the number of rendered items at item boundaries
-/// rather than cutting a block mid-way. `render` is called O(items) times; callers keep the
-/// item count small (a search `limit`), so this stays cheap.
-pub fn fit_item_count(
-    items: usize,
+/// Emit a plain-text tool body already fitted to `max_output_tokens`, appending `note` when it
+/// had to cut. The text tools carry no structured envelope, so this is the whole truncation
+/// contract for them: body first, continuation hint last.
+pub fn text_within_budget(
+    mut text: String,
     max_output_tokens: usize,
-    render: impl Fn(usize) -> usize,
-) -> usize {
-    let budget = max_output_tokens.saturating_mul(4);
-    let mut n = items;
-    while n > 1 && render(n) > budget {
-        n -= 1;
-    }
-    n
+    note: &str,
+) -> CallToolResult {
+    truncate_text_to_budget(&mut text, max_output_tokens, note);
+    CallToolResult::success(vec![Content::text(text)])
+}
+
+/// Emit `body` as `structuredContent` while keeping `text` — a human-readable rendering, not
+/// the serialized body — as the content block. For a tool whose text listing predates its
+/// structured envelope: existing clients keep the exact text they parse today, structured
+/// clients read the envelope. Both describe the same answer, so callers must budget the pair
+/// together (see [`crate::tools::search`]), not the text alone.
+pub fn structured_with_text(text: String, body: Value) -> CallToolResult {
+    let mut result = CallToolResult::success(vec![Content::text(text)]);
+    result.structured_content = Some(body);
+    result
 }
 
 #[cfg(test)]
@@ -127,10 +135,12 @@ mod tests {
     }
 
     #[test]
-    fn fit_item_count_never_returns_zero() {
-        // A single item bigger than the budget is still delivered (flagged elsewhere).
-        assert_eq!(fit_item_count(10, 1, |n| n * 4000), 1);
-        assert_eq!(fit_item_count(0, 1, |_| 10_000), 0);
+    fn structured_with_text_keeps_the_human_rendering_as_the_content_block() {
+        let result = structured_with_text("#1 hit".to_owned(), json!({ "hits": [] }));
+
+        assert_eq!(result.content[0].raw.as_text().expect("text").text, "#1 hit");
+        assert_eq!(result.structured_content.expect("structured"), json!({ "hits": [] }));
+        assert_eq!(result.is_error, Some(false));
     }
 
     #[test]

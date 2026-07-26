@@ -329,8 +329,8 @@ complexityThreshold = 30
 | справка ИТС | `its_help` | reference (нужен `NAPARNIK_TOKEN`) |
 | live-запрос | `query` (action=`execute`) | workspace + расширение 1С |
 
-Первый вызов `graph`/`diagnostics` может вернуть `{"status":"loading"}` пока строится
-резидентная база — повторите через пару секунд (см.
+Пока строятся резидентная база и граф, любой из `metadata`/`symbol_info`/`diagnostics`/`graph`
+может вернуть `{"status":"loading"}` в `structuredContent` — повторите через пару секунд (см.
 [`TOOLS_AND_EXTENSION.md`](TOOLS_AND_EXTENSION.md#диагностики-и-граф-проектный-конфиг-и-резидентная-база)).
 
 ---

@@ -107,6 +107,13 @@ pub fn spawn_workspace_batch(state: &mut GlobalState) {
         return;
     }
 
+    // While the vendor-diff scope is still being computed, a sweep would publish
+    // the full unfiltered result set the feature exists to prevent — and be torn
+    // down moments later. Stay dirty; the scope's completion re-drives the loop.
+    if state.analysis_scope.is_loading() {
+        return;
+    }
+
     // Resume the active sweep; otherwise build a fresh one if a (re)run was requested.
     if state.workspace_batch_plan.is_none() {
         if !state.workspace_batch_dirty {
@@ -144,11 +151,15 @@ fn build_batch_plan(state: &mut GlobalState) -> Option<WorkspaceBatchPlan> {
     // In-scope closed files only: open buffers are owned by the interactive stream.
     // Sorted for a stable, log-friendly sweep order.
     let ext_roots_ref: Vec<&Path> = ext_roots.iter().map(|p| p.as_path()).collect();
+    // Vendor-diff file-gate: files with no changed lines are excluded up front so
+    // the sweep never spends provider setup on thousands of guaranteed-empty files.
+    let analysis_scope = state.analysis_scope.current();
     let mut file_ids: Vec<vfs::FileId> = file_paths
         .iter()
         .filter(|&(file_id, path)| {
             !state.open_files.contains(&file_id)
                 && crate::handlers::request::path_in_workspace_scope(path, scope, &ext_roots_ref)
+                && analysis_scope.as_ref().is_none_or(|s| s.is_file_in_scope(path))
         })
         .map(|(file_id, _)| file_id)
         .collect();
