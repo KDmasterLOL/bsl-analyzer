@@ -56,6 +56,11 @@ impl SharedState {
         let config_path = project.source_path();
         let source_root = config_path.to_path_buf();
 
+        // Claimed before any background pass starts, so the graph's very first build already
+        // knows whether this daemon owns the workspace's derived caches or is the superseded
+        // generation of a pair that overlaps over them.
+        let workspace_lease = crate::workspace_lease::WorkspaceLease::claim(&source_dir);
+
         let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
@@ -107,10 +112,12 @@ impl SharedState {
             Arc::clone(&semantic_runtime),
             Arc::clone(&index_progress),
             Arc::clone(&embed_flight),
+            workspace_lease.clone(),
         );
         let graph = GraphState::for_workspace(source_dir.clone())
             .with_change_hub(change_hub.clone())
-            .with_publish_hook(publish_hook);
+            .with_publish_hook(publish_hook)
+            .with_lease(workspace_lease.clone());
 
         // The `metadata` tool reads the resident diagnostics host (per-MDO substrate for
         // `object`, Channel-2 `load_configuration` for `tree`/`info`); it is seeded and
@@ -135,6 +142,7 @@ impl SharedState {
             graph.clone(),
             Arc::clone(&embed_flight),
             Arc::clone(&snapshot_source),
+            workspace_lease.clone(),
         );
 
         Self::spawn_search_sink(
@@ -161,6 +169,7 @@ impl SharedState {
             diagnostics,
             change_hub: Some(change_hub),
             embed_flight,
+            workspace_lease,
         })
     }
 
@@ -181,6 +190,7 @@ impl SharedState {
         graph: GraphState,
         embed_flight: Arc<EmbedFlight>,
         snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource>,
+        lease: crate::workspace_lease::WorkspaceLease,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
@@ -320,6 +330,13 @@ impl SharedState {
                     graph.consume_leftover_marks(leftover_bound);
                 }
 
+                // A boot that found the cached graph built under a different extension topology
+                // asked for a whole-collection re-render before this engine existed to run it.
+                // The publish that followed could not hand the request anywhere, so it is
+                // honoured here — otherwise files the build skipped as byte-identical keep the
+                // contexts they were given under the old topology.
+                graph.flush_pending_topology_refresh();
+
                 if let Some(status) = status_after_publish {
                     Self::set_semantic_runtime_status(&semantic_runtime, status);
                 }
@@ -335,6 +352,7 @@ impl SharedState {
                         Arc::clone(&semantic_runtime),
                         Arc::clone(&index_progress),
                         Arc::clone(&embed_flight),
+                        lease.clone(),
                         pending.db_path,
                         pending.config,
                     );
@@ -447,6 +465,7 @@ impl SharedState {
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
             embed_flight: EmbedFlight::new(),
+            workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
         }
     }
 
@@ -467,6 +486,7 @@ impl SharedState {
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
             embed_flight: EmbedFlight::new(),
+            workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
         }
     }
 
@@ -819,6 +839,17 @@ impl SharedState {
         if engine.has_semantic() {
             let graph_path = crate::cache::graph_db_path(workspace_root);
             match crate::graph_query::GraphDb::open(&graph_path) {
+                Ok(graph_db)
+                    if !crate::graph::scan::graph_file_matches_live_topology(
+                        workspace_root,
+                        &graph_db,
+                    ) =>
+                {
+                    tracing::warn!(
+                        "graph database was built for another extension topology; \
+                         embeddings without graph context"
+                    );
+                }
                 Ok(graph_db) => {
                     engine.set_graph_context_provider(Arc::new(
                         crate::graph_query::GraphDbContextProvider::new(graph_db),
@@ -1162,6 +1193,7 @@ impl SharedState {
                 Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
                     self.diagnostics.clone(),
                 )),
+                self.workspace_lease.clone(),
             );
         }
     }
@@ -1265,6 +1297,7 @@ mod tests {
             Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
                 DiagnosticsState::disabled(),
             )),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
         );
 
         for _ in 0..600 {

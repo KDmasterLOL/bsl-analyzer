@@ -621,6 +621,7 @@ impl SearchEngine {
         db_path: &Path,
         config: &SearchConfig,
         progress: Option<&Arc<IndexProgress>>,
+        should_continue: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<VectorIndex, SearchError> {
         let store = Store::open(db_path)?;
         let dim = config.embedder.dim.unwrap_or(1024);
@@ -635,6 +636,7 @@ impl SearchEngine {
             config.execution.batch_size(),
             config.execution.concurrency(),
             progress,
+            should_continue,
         )
     }
 
@@ -657,12 +659,17 @@ impl SearchEngine {
         batch_size: usize,
         concurrency: usize,
         progress: Option<&Arc<IndexProgress>>,
+        should_continue: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<VectorIndex, SearchError> {
         let pending = store.load_pending_embedding_documents("code")?;
         if pending.is_empty() {
             let (generation, data) = store.load_all_embeddings_with_generation(dim)?;
             let index = VectorIndex::build(dim, &data)?;
-            Self::persist_built(store, dim, Some(embedder), &index, generation);
+            // The sidecar is a shared artifact like any other; a caller that may no longer
+            // write leaves it to whoever may.
+            if should_continue.is_none_or(|keep_going| keep_going()) {
+                Self::persist_built(store, dim, Some(embedder), &index, generation);
+            }
             return Ok(index);
         }
 
@@ -738,7 +745,14 @@ impl SearchEngine {
 
         let mut embedded = 0usize;
         let mut errors = 0usize;
+        let mut stopped = false;
         while let Ok(result) = result_rx.recv() {
+            // Asked between batches, never inside one: a pass over a large configuration runs
+            // for hours, and the caller's right to write may not outlive it.
+            if should_continue.is_some_and(|keep_going| !keep_going()) {
+                stopped = true;
+                break;
+            }
             match result {
                 Ok(pairs) => {
                     for (id, emb) in pairs {
@@ -752,6 +766,9 @@ impl SearchEngine {
                 }
             }
         }
+        // Closed before the joins in every path: a worker parked on a send into a channel
+        // nobody reads any more would never finish, and the stop path leaves exactly that.
+        drop(result_rx);
 
         let _ = producer.join();
         for w in workers {
@@ -763,6 +780,18 @@ impl SearchEngine {
 
         let (generation, data) = store.load_all_embeddings_with_generation(dim)?;
         let index = VectorIndex::build(dim, &data)?;
+        // Asked once more before the sidecar: a takeover landing after the last batch would
+        // otherwise still leave this pass's index description behind for the new owner.
+        let stopped = stopped || should_continue.is_some_and(|keep_going| !keep_going());
+        if stopped {
+            // The vectors already written stay — they were written while the caller still had
+            // the right to. What is skipped is the persisted sidecar, the one artifact a
+            // stopped pass would leave behind for whoever writes this database next; the index
+            // itself is still returned, so this process keeps answering semantic queries from
+            // what it has.
+            warn!(embedded, errors, "embedding pass stopped early; sidecar not persisted");
+            return Ok(index);
+        }
         Self::persist_built(store, dim, Some(embedder), &index, generation);
 
         info!(embedded, errors, total_vectors = index.len(), "fused embedding complete");
@@ -1139,11 +1168,13 @@ impl SearchEngine {
         Ok(self.store.mark_collection_context_dirty("code")?.0)
     }
 
-    /// [`Self::mark_workspace_context_dirty`] returning the batch's shared mark `seq`
-    /// too, for a caller that consumes the batch in the same breath and must bound its
-    /// clear to exactly these marks.
-    pub fn mark_workspace_context_dirty_with_seq(&self) -> Result<(usize, i64), SearchError> {
-        self.store.mark_collection_context_dirty("code")
+    /// [`Self::mark_workspace_context_dirty`] for a caller that consumes the batch in the same
+    /// breath: the rows are stamped at `stamp_seq` — the bound of the build the re-render will
+    /// run against — so that same bound clears exactly this batch, and a file carrying a
+    /// fresher drift keeps its own mark instead of being swept up by it. Returns the number of
+    /// rows written.
+    pub fn mark_workspace_context_dirty_at(&self, stamp_seq: i64) -> Result<usize, SearchError> {
+        self.store.mark_collection_context_dirty_at("code", stamp_seq)
     }
 
     /// The set of paths currently marked context-dirty in `collection`.
@@ -1151,9 +1182,9 @@ impl SearchEngine {
         self.store.context_dirty_paths(collection)
     }
 
-    /// A handle to the store's monotonic context-dirty mark counter. The graph layer reads
-    /// it at build start to bound which marks that build's publish may consume; the store
-    /// increments it on every mark. See [`Store::mark_seq_handle`].
+    /// A handle to the highest context-dirty mark seq this store has observed. The graph
+    /// layer reads it at build start to bound which marks that build's publish may consume;
+    /// the stamps themselves are allocated by the database. See [`Store::mark_seq_handle`].
     pub fn mark_seq_handle(&self) -> Arc<AtomicI64> {
         self.store.mark_seq_handle()
     }

@@ -62,6 +62,9 @@ pub struct SharedState {
     /// held here so `init_search` reuses the same flight the publish hook does — otherwise the
     /// two could race an index swap and last-writer-wins would install a stale index.
     embed_flight: Arc<embed::EmbedFlight>,
+    /// This daemon's claim on the workspace's derived caches, held so the serve loop can retire
+    /// a superseded backend early. Unmanaged for profiles with no workspace to coordinate over.
+    workspace_lease: crate::workspace_lease::WorkspaceLease,
 }
 
 #[derive(Clone)]
@@ -87,6 +90,14 @@ impl OnecConnection {
 impl SharedState {
     pub(crate) fn graph(&self) -> &GraphState {
         &self.graph
+    }
+
+    /// Whether a newer daemon generation has taken this workspace's derived caches over (see
+    /// [`crate::workspace_lease`]). Such a backend still serves everything it holds, but it
+    /// produces no new derived state — so once its last session leaves there is nothing left
+    /// to stay warm for.
+    pub(crate) fn superseded(&self) -> bool {
+        !self.workspace_lease.owns_caches()
     }
 
     /// Start building the diagnostics resident now instead of on the first tool call.
@@ -207,6 +218,10 @@ impl SharedState {
     pub fn shutdown(&self) {
         self.baseline.shutdown();
         self.diagnostics.shutdown();
+        // Handing the workspace back on the way out is what keeps a short-lived server (a
+        // stdio session, a broker fallback) from demoting a long-running daemon for the whole
+        // staleness window just by having started later.
+        self.workspace_lease.release();
     }
 
     /// Prefetch resident snapshots for the overlay's dirty paths and feed them into the

@@ -10,6 +10,7 @@ mod graph_db;
 mod graph_query;
 mod state;
 mod tools;
+mod workspace_lease;
 
 pub use baseline::{
     resolve_project_baseline_diagnostics, BaselineConfigDiagnostics, BaselineResolutionSummary,
@@ -357,6 +358,14 @@ impl McpServer {
 
     pub fn shutdown(&self) {
         self.state.shutdown();
+    }
+
+    /// Whether a newer daemon generation owns this workspace's derived caches. The broker
+    /// backend consults it when it falls idle: staying warm buys a reconnecting client a
+    /// resident state that can no longer maintain itself, while the memory it holds is the
+    /// same multi-gigabyte footprint as a working backend's.
+    pub fn superseded(&self) -> bool {
+        self.state.superseded()
     }
 
     /// Browse the configuration's metadata: objects, their structure, and managed forms.
