@@ -96,6 +96,44 @@ mod tests {
         }
     }
 
+    /// Имя типа, записанное строкой, ограничено контекстом ровно так же, как
+    /// записанное синтаксисом.
+    #[test]
+    fn server_only_type_flagged_when_named_by_string() {
+        for ctor in [r#"Новый("ЧтениеТекста")"#, r#"Новый(Тип("ЧтениеТекста"))"#]
+        {
+            let fixture = format!(
+                r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура ПрочитатьНаКлиенте()
+    Чтение = {ctor};
+КонецПроцедуры
+"#
+            );
+            let diags = env_diags(&fixture);
+            assert!(
+                diags.iter().any(|d| d.0.starts_with("Тип 'ЧтениеТекста' недоступен")),
+                "`{ctor}` names the same server-only type and must be flagged: {diags:?}"
+            );
+        }
+    }
+
+    /// Квалифицированное имя — объект конфигурации, а не платформенный тип:
+    /// доступности по контексту у него нет и повода жаловаться тоже.
+    #[test]
+    fn qualified_string_type_name_is_not_env_checked() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура НаКлиенте()
+    Ключ = Новый(Тип("РегистрСведенийКлючЗаписи.ЦеныНоменклатуры"));
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "a configuration object carries no environment mask: {diags:?}");
+    }
+
     #[test]
     fn preprocessor_guard_narrows_environments() {
         let fixture = r#"

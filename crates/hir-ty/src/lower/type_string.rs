@@ -2,10 +2,13 @@ use bsl_platform::{split_type_alternatives, PlatformData};
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
+use hir_def::path::QualifiedName;
 use hir_def::type_ref::TypeRef;
+use hir_def::Name;
 use stdx::case::CaseExt;
 
 use super::builtin_names::bare_name_to_typeid;
+use super::TyLoweringContext;
 
 pub fn segment_is_valid_type(s: &str) -> bool {
     if s.is_empty() {
@@ -87,6 +90,73 @@ pub fn lower_platform_type_name_typeid(db: &dyn TypeKernelDb, name: &str) -> Typ
     }
 }
 
+/// Имя конструируемого типа, пришедшее строковым значением: `Новый("X")`,
+/// `Новый(Тип("X"))`.
+///
+/// В отличие от [`lower_platform_type_name_typeid`] здесь нет запасного варианта
+/// «похоже на идентификатор → номинальный фантом». Имя, написанное синтаксисом
+/// (`Новый X`), — утверждение автора о типе; имя, пришедшее значением, — лишь
+/// гипотеза, и её цена асимметрична: в позиции аргумента `Unknown` даёт
+/// неопределённость и молчание, а любой конкретный тип — несовместимость и
+/// `TypeMismatch`, поскольку `PlatformObject` сравнивается номинально. Поэтому
+/// нераспознанное имя остаётся `Unknown`, а не поднимается до фантома.
+pub fn lower_constructed_type_name_typeid(db: &dyn TypeKernelDb, raw: &str) -> TypeId {
+    let mut segments = raw.trim().split('.');
+    let first = segments.next().unwrap_or_default();
+    let second = segments.next();
+    // Больше двух сегментов — не имя типа: так записывают идентификатор внешней
+    // компоненты (`Новый("AddIn.CLON.DbControl")`), которого в корпусе нет.
+    if segments.next().is_some() {
+        return db.unknown();
+    }
+
+    match second {
+        None if names_a_real_type(first) => {
+            TyLoweringContext::new().lower_bare_name_id(db, &Name::new(first))
+        }
+        None => db.unknown(),
+        // Обычный `QualifiedName` собирает парсер, и сегменты в нём уже
+        // идентификаторы; строковый вход этот инвариант обходит, поэтому имя
+        // объекта проверяется здесь. Без проверки `"СправочникСсылка."` дал бы
+        // ссылку с пустым именем — номинальный тип, не совпадающий ни с чем.
+        Some(object) if is_identifier_shaped(first) && is_identifier_shaped(object) => {
+            TyLoweringContext::new().lower_qualified_id(
+                db,
+                &QualifiedName::from_segments([Name::new(first), Name::new(object)]),
+            )
+        }
+        Some(_) => db.unknown(),
+    }
+}
+
+/// Имя, за которым стоит настоящий тип: корпус, встроенные `TypeRef` и точно
+/// поименованные типы, которых в корпусе нет (`УправляемаяФорма`, элементы формы,
+/// строка табличной части). Без последних `Новый("УправляемаяФорма")` давал бы
+/// `Unknown` там, где `Новый УправляемаяФорма` даёт номинальный тип.
+///
+/// Именно точная половина, а не `is_known_non_corpus_type_name` целиком: тот
+/// вдобавок угадывает семейства по префиксу и суффиксу, и `"НесуществующийDOM"`
+/// прошёл бы как настоящий тип — ровно тот фантом, ради отсечения которого гейт
+/// и стоит.
+fn names_a_real_type(name: &str) -> bool {
+    segment_is_valid_type(name) || crate::platform_type_name::is_exact_non_corpus_type_name(name)
+}
+
+/// Форма идентификатора BSL — `[_\p{L}][_\p{L}0-9]*`. Цифры именно ASCII:
+/// `is_alphanumeric` пропустил бы `Товар٢`, которое лексер идентификатором не
+/// считает, и строка снова стала бы номинальным типом ни с чем не совпадающим.
+fn is_identifier_shaped(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    is_identifier_start(first) && chars.all(|c| is_identifier_start(c) || c.is_ascii_digit())
+}
+
+fn is_identifier_start(c: char) -> bool {
+    c == '_' || c.is_alphabetic()
+}
+
 fn is_type_name_shaped(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -118,6 +188,80 @@ mod tests {
             db.platform_object("Запрос".to_string())
         );
     }
+
+    #[test]
+    fn constructed_name_keeps_recognised_platform_types() {
+        let db = InMemoryDb::new();
+        assert_eq!(lower_constructed_type_name_typeid(&db, "Массив"), db.array(None));
+        assert_eq!(lower_constructed_type_name_typeid(&db, "Число"), db.number(None, None));
+        assert_eq!(lower_constructed_type_name_typeid(&db, "  Массив  "), db.array(None));
+    }
+
+    #[test]
+    fn constructed_name_degrades_unrecognised_to_unknown() {
+        let db = InMemoryDb::new();
+        // Имя из значения — гипотеза: номинальный фантом здесь дал бы только
+        // ложный `TypeMismatch`, поэтому нераспознанное остаётся Unknown.
+        assert_eq!(
+            lower_constructed_type_name_typeid(&db, "ЗаведомоНесуществующийТип"),
+            db.unknown()
+        );
+        assert_eq!(lower_constructed_type_name_typeid(&db, ""), db.unknown());
+        assert_eq!(lower_constructed_type_name_typeid(&db, "   "), db.unknown());
+    }
+
+    #[test]
+    fn constructed_name_rejects_external_component_ids() {
+        let db = InMemoryDb::new();
+        // `Новый("AddIn.CLON.DbControl")` создаёт объект внешней компоненты:
+        // строка — идентификатор компоненты, а не имя типа.
+        assert_eq!(lower_constructed_type_name_typeid(&db, "AddIn.CLON.DbControl"), db.unknown());
+        assert_eq!(lower_constructed_type_name_typeid(&db, "Addin.ЭДОNative.CryptS"), db.unknown());
+        assert_eq!(lower_constructed_type_name_typeid(&db, "AddIn.Компонента"), db.unknown());
+    }
+
+    #[test]
+    fn constructed_name_rejects_malformed_qualified_segments() {
+        let db = InMemoryDb::new();
+        // Пустое или неидентификаторное имя объекта дало бы ссылку, не совпадающую
+        // ни с одним настоящим объектом, — то есть только ложный `TypeMismatch`.
+        for raw in [
+            "СправочникСсылка.",
+            "СправочникСсылка. Товары",
+            "СправочникСсылка.Това ры",
+            ".Товары",
+            ".",
+            "СправочникСсылка.2Товары",
+            // Арабо-индийская двойка: `is_alphanumeric` её принимает, лексер BSL — нет.
+            "СправочникСсылка.Товар\u{0662}",
+        ] {
+            assert_eq!(
+                lower_constructed_type_name_typeid(&db, raw),
+                db.unknown(),
+                "{raw:?} is not a well-formed qualified type name"
+            );
+        }
+    }
+
+    #[test]
+    fn constructed_name_lowers_qualified_metadata_names() {
+        let db = InMemoryDb::new();
+        // Квалифицированное имя выразимо только строковой формой: синтаксис
+        // `Новый X` принимает ровно один сегмент.
+        assert!(matches!(
+            db.lookup_type(lower_constructed_type_name_typeid(&db, "СправочникСсылка.Товары")),
+            bsl_types::kind::TypeKind::MetadataRef(_)
+        ));
+        assert!(matches!(
+            db.lookup_type(lower_constructed_type_name_typeid(
+                &db,
+                "РегистрСведенийКлючЗаписи.ЦеныНоменклатуры"
+            )),
+            bsl_types::kind::TypeKind::MetadataRef(_)
+        ));
+    }
+
+    /// Контроль: тот же вопрос для квалифицированного пути, которым пользуются аннотации.
 
     #[test]
     fn split_handles_comma_semicolon_and_trailing_garbage() {

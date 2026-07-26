@@ -213,6 +213,28 @@ fn unresolved_type_does_not_fire_arity() {
     );
 }
 
+/// У динамической формы список аргументов — `(<Тип>, <МассивПараметров>)`, а не
+/// позиционные аргументы конструктора: сверять их с перегрузками нельзя, иначе
+/// само имя типа будет разобрано как первый параметр.
+#[test]
+fn dynamic_ctor_name_does_not_fire_arity() {
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест(Параметры)
+    А = Новый("Массив", Параметры);
+    Б = Новый(Тип("Массив"), Параметры);
+    В = Новый(Тип("ФиксированныйМассив"));
+    Г = Новый("Структура", Параметры);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        arg_count_diags(&db, file_id).is_empty(),
+        "dynamic `Новый(<Тип>, <Параметры>)` must not be matched against constructor overloads, got {:?}",
+        arg_count_diags(&db, file_id)
+    );
+}
+
 #[test]
 fn user_repro_structure_filter() {
     let fixture = r#"

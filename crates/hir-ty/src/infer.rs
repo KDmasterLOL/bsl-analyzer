@@ -830,6 +830,60 @@ impl<'db> InferenceContext<'db> {
         });
     }
 
+    /// The type name a `Новый(...)` names by value, trimmed once here so every
+    /// consumer below sees the same spelling. A `Тип(...)` wrapper counts only
+    /// when it really is the platform function: a nearer declaration takes the
+    /// name over, in the Local → Module → Global-CM → Platform order the call
+    /// path itself applies.
+    fn constructed_type_name<'b>(&mut self, body: &'b Body, arg: ExprIdx) -> Option<&'b str> {
+        if let Some(text) = crate::type_literal::bare_string_literal(body, arg) {
+            return Some(text.trim());
+        }
+        let (callee, text) = crate::type_literal::type_ctor_literal(body, arg)?;
+        if self.is_call_name_shadowed(callee) {
+            return None;
+        }
+        Some(text.trim())
+    }
+
+    fn is_call_name_shadowed(&mut self, name: &Name) -> bool {
+        let key = NormName::intern(name.as_str());
+        if self.body_declares_binding(name) || self.assigned_var_names.contains(&key) {
+            return true;
+        }
+        // A module-level `Перем` takes the name over just as a module method
+        // does, so both are asked. Not through `resolve_name`: it answers
+        // `Builtin` first, and every name worth asking about here — `Тип` above
+        // all — is precisely a builtin, so the module would never be consulted.
+        let resolver = self.get_resolver();
+        if resolver.resolve_module_method(self.db, name).is_some()
+            || resolver.resolve_module_variable(self.db, name).is_some()
+        {
+            return true;
+        }
+        self.global_export_map().contains_key(&key)
+    }
+
+    /// The same type-availability check as the syntactic `Новый X`, for a name
+    /// that arrived as a string value (`Новый("X")`, `Новый(Тип("X"))`). A
+    /// qualified name denotes a configuration object rather than a platform
+    /// type, and configuration objects carry no per-environment availability.
+    fn check_constructed_type_env(&mut self, expr: ExprId, name: &str) {
+        if name.contains('.') {
+            return;
+        }
+        let platform = bsl_platform::PlatformDataInner::instance();
+        let Some(platform_type) = platform.get_type(name) else {
+            return;
+        };
+        if platform.is_ambiguous_type_name(name) {
+            return;
+        }
+        let environment =
+            hir_def::execution_env::EnvFlags::from_platform_context(platform_type.context.as_ref());
+        self.check_member_env(expr, &Name::new(name), environment, EnvMemberKind::Type);
+    }
+
     /// Accessibility of a cross-module call to `callee_module` (a common
     /// module): every environment this body runs in must either be one the
     /// callee is compiled for, or — for `ВызовСервера` modules — a client
@@ -1553,6 +1607,17 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(ExprId::from_idx(arg));
                 }
 
+                // `Новый("X")` / `Новый(Тип("X"))`: имя типа приходит значением.
+                // Список аргументов у этой формы — `(<Тип>, <МассивПараметров>)`,
+                // то есть НЕ позиционные аргументы конструктора, поэтому ниже она
+                // не участвует ни в привязке к перегрузкам, ни в синтезе проекций
+                // запроса — иначе имя типа было бы разобрано как первый параметр.
+                let body = Arc::clone(&self.body);
+                let dynamic_name = match (type_name, args.first()) {
+                    (None, Some(&first)) => self.constructed_type_name(&body, first),
+                    _ => None,
+                };
+
                 if let Some(name) = type_name {
                     let platform = bsl_platform::PlatformDataInner::instance();
                     let platform_type = platform.get_type(name.as_str());
@@ -1602,16 +1667,33 @@ impl<'db> InferenceContext<'db> {
                     }
                 }
 
-                let is_query_ctor = type_name.as_ref().is_some_and(|name| {
-                    crate::method_lookup::is_platform_name(name, "Запрос", "Query")
+                if let Some(raw) = dynamic_name {
+                    self.check_constructed_type_env(expr_id, raw);
+                }
+
+                // Обе формы обязаны сходиться на одном типе, иначе `Новый Запрос`
+                // и `Новый("Запрос")` начали бы конфликтовать между собой.
+                let ctor_name = type_name.as_ref().map(Name::as_str).or(dynamic_name);
+                let is_query_ctor = ctor_name.is_some_and(|name| {
+                    crate::method_lookup::is_platform_name_str(name, "Запрос", "Query")
                 });
                 if is_query_ctor {
-                    let projections = self.try_synthesise_query_projections(args);
+                    let projections = match type_name {
+                        Some(_) => self.try_synthesise_query_projections(args),
+                        None => Arc::from([]),
+                    };
                     self.db.query(projections.iter().cloned().collect())
                 } else {
-                    match type_name {
-                        Some(name) => TyLoweringContext::new().lower_bare_name_id(self.db, name),
-                        None => self.db.unknown(),
+                    match (type_name, dynamic_name) {
+                        (Some(name), _) => {
+                            TyLoweringContext::new().lower_bare_name_id(self.db, name)
+                        }
+                        (None, Some(raw)) => {
+                            crate::lower::type_string::lower_constructed_type_name_typeid(
+                                self.db, raw,
+                            )
+                        }
+                        (None, None) => self.db.unknown(),
                     }
                 }
             }
