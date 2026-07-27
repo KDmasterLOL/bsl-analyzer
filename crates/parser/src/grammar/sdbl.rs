@@ -159,7 +159,10 @@ fn ends_a_name(p: &Parser, is_property: bool) -> bool {
         Some(TokenKind::Ident) => is_property || !select::is_clause_keyword(p),
         Some(TokenKind::Ampersand) => p.current_text().chars().count() > 1,
         Some(TokenKind::RParen) => p.open_group_count() > 0,
-        _ => false,
+        // A few words carry a kind of their own and are still names after a
+        // dot; the expression layer names that set, and the leftover reads a
+        // chain the same way or it will cut one in half.
+        _ => is_property && expressions::at_property_name(p),
     }
 }
 

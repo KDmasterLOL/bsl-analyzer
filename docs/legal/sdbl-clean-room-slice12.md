@@ -952,6 +952,51 @@ Measured over the testbed configuration again — 3 142 814 literals, with a
 positive control — nothing changed. These inputs do not occur in committed
 code, which is the point: they occur in editor buffers.
 
+### Naming the sites was the wrong move, twice
+
+The round after the one that introduced `at_name` found three more rules
+reading a bare name — the source after `ИЗ`, an alias after `КАК`, the
+sources of a join — each taking the word that begins the next query. None
+of them is a regression; all three behave the same before this slice. What
+was wrong was the claim that converting eight call sites closed the class.
+
+Enumerating call sites had now missed members twice. The third attempt does
+not enumerate: `expect` itself refuses a declared boundary. A rule asking
+for a token by kind cannot be asking for that one, because kinds are
+coarser than words — in a language whose keywords are not reserved, every
+keyword arrives as an identifier, so `expect(Ident)` standing at `ВЫБРАТЬ`
+is a rule about to take a word it has no claim to. The separator stays
+outside this: a rule that asks for `;` means `;`.
+
+Two more places had to agree with it. The skip that recovers a malformed
+field, and the one that recovers an expression, both stopped at clause
+keywords but not at a query start — so refusing the boundary in one place
+bought nothing while the skip beside it took it anyway. And the leftover's
+dot rule accepted only identifiers as names, while the expression layer
+accepts a handful of words that carry a kind of their own; `Т.В.ВЫБРАТЬ` is
+one chain of names, and reading it two ways cut it in half and invented a
+query out of the second piece.
+
+### An error on a query that was correct
+
+The same round found the slice charging a valid query for its own
+blindness. `ИЗ Справочник . Товары` is one name — whitespace around a dot
+means nothing — but the source rule read the space after the dot and not
+the space before it. Before this slice the unread part was dropped in
+silence; after it, the leftover reported it, and a correct query grew an
+error it had never had.
+
+That is the one thing this document said the slice must not do. The
+underlying gap is older than the slice, and the same raw look-ahead made
+`ВЫБРАТЬ Т . *` an error long before it. Both are fixed rather than
+tracked, because the slice is what turned the first from silent into loud.
+
+Two findings of the round are neither: a repeated `УПОРЯДОЧИТЬ ПО` and an
+aggregate list without its commas are both accepted in silence, before this
+slice as after it. Reporting them is a new diagnostic on real code, with a
+cost to be measured the way this slice measured its own, and it is tracked
+rather than smuggled in here.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -1086,9 +1131,12 @@ are covered by entries A6–A8 above.
   been read as a whole file. Eight findings: two are this slice's own and
   fixed here; six predate it, are one class, and are tracked with the BSL
   terminators, which turn out to be the same class. Parser tests 663.
-- C22 — the audit again. Three findings, all confirmed and all this
-  slice's own, one of them a parse that never returns. Parser tests
+- C22 `1175e647` — the audit again. Three findings, all confirmed and all
+  this slice's own, one of them a parse that never returns. Parser tests
   663 → 665.
+- C23 — the audit widened to the `SELECT` skeleton. Eight findings, all
+  confirmed, none a regression: six fixed here, two tracked as new
+  diagnostics needing their own measurement. Parser tests 665 → 668.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

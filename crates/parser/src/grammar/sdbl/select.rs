@@ -75,6 +75,11 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
 
         let at_top_level = case_depth == 0 && paren_depth == 0;
         let inside_nested_query = !nested_query_starts.is_empty();
+        // Refusing to take the boundary elsewhere buys nothing if the skip
+        // that follows takes it instead.
+        if at_top_level && super::at_query_boundary(p) {
+            break;
+        }
         if is_clause_keyword(p) {
             let stop = if at_top_level {
                 true
@@ -281,8 +286,8 @@ fn is_asterisk_start(p: &Parser) -> bool {
     }
 
     if p.at(TokenKind::Ident) {
-        if let Some(TokenKind::Dot) = p.nth(1) {
-            if let Some(TokenKind::Star) = p.nth(2) {
+        if let Some(TokenKind::Dot) = p.nth_non_trivia(0) {
+            if let Some(TokenKind::Star) = p.nth_non_trivia(1) {
                 return true;
             }
         }
@@ -295,9 +300,11 @@ fn asterisk_field(p: &mut Parser) {
     let m = p.start();
 
     while p.at(TokenKind::Ident) {
-        if let Some(TokenKind::Dot) = p.nth(1) {
+        if let Some(TokenKind::Dot) = p.nth_non_trivia(0) {
             p.bump();
+            p.skip_trivia();
             p.bump();
+            p.skip_trivia();
         } else {
             break;
         }
@@ -422,7 +429,14 @@ fn table_ref(p: &mut Parser) {
         return;
     }
 
-    while p.eat(TokenKind::Dot) {
+    // The dot reaches across the space before it as well as the space after
+    // it: `Справочник . Товары` is one name, and the expression layer already
+    // reads it as one.
+    while p.nth_non_trivia(0) == Some(TokenKind::Dot) || p.at(TokenKind::Dot) {
+        p.skip_trivia();
+        if !p.eat(TokenKind::Dot) {
+            break;
+        }
         p.check_iteration_limit();
         p.skip_trivia();
 

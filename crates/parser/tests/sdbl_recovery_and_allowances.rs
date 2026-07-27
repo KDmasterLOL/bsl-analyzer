@@ -981,6 +981,71 @@ fn a_name_left_unwritten_costs_only_its_own_query() {
 }
 
 #[test]
+fn no_rule_requires_the_word_that_begins_the_next_query() {
+    // Kinds are coarser than words: every keyword arrives as an identifier,
+    // so a rule asking for one by kind takes the next query's first word and
+    // costs the package that query. Naming the sites one at a time missed
+    // some twice, so the check lives in `expect` and covers every caller.
+    for input in [
+        "ВЫБРАТЬ А ИЗ ВЫБРАТЬ Б ИЗ У",
+        "ВЫБРАТЬ А КАК УНИЧТОЖИТЬ Т",
+        "ВЫБРАТЬ А ИЗ Т КАК УНИЧТОЖИТЬ У",
+        "ВЫБРАТЬ А УНИЧТОЖИТЬ Т",
+        "ВЫБРАТЬ А ИЗ Т ВНУТРЕННЕЕ СОЕДИНЕНИЕ ВЫБРАТЬ Б ИЗ У",
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| matches!(
+                    n.kind(),
+                    SyntaxKind::SDBL_SELECT_QUERY | SyntaxKind::SDBL_DROP_QUERY
+                ))
+                .count(),
+            2,
+            "`{input}` holds two queries: {:#?}",
+            parse.errors(),
+        );
+    }
+}
+
+#[test]
+fn a_dot_reaches_across_the_space_before_it_too() {
+    // Whitespace around a dot changes nothing about the name it builds. The
+    // parser read the space after the dot and not the space before it, so a
+    // valid query drew an error the moment the leftover started reporting.
+    accepted("ВЫБРАТЬ А ИЗ Справочник . Товары");
+    accepted("ВЫБРАТЬ Т . * ИЗ Справочник.Товары КАК Т");
+    accepted("ВЫБРАТЬ А ИЗ Справочник\n\t.Товары");
+}
+
+#[test]
+fn a_keyword_after_a_dot_is_still_a_name_to_the_leftover() {
+    // `Т.В.ВЫБРАТЬ` is one chain of names. A few words carry a kind of their
+    // own, and the leftover has to read them as the expression layer does or
+    // it cuts the chain in half and invents a query.
+    for input in ["Т.В.ВЫБРАТЬ", "Т.И.SELECT", "Т.НЕ.УНИЧТОЖИТЬ"] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| matches!(
+                    n.kind(),
+                    SyntaxKind::SDBL_SELECT_QUERY | SyntaxKind::SDBL_DROP_QUERY
+                ))
+                .count(),
+            0,
+            "`{input}` is one name, not a query: {:#?}",
+            parse.errors(),
+        );
+    }
+}
+
+#[test]
 fn a_rule_that_takes_nothing_still_ends_its_loop() {
     // A list of aggregates asks whether an expression starts here and then
     // parses one. Answering yes for a word no rule may take leaves the loop

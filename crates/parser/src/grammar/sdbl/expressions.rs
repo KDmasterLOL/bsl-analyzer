@@ -130,6 +130,10 @@ fn recover_to_delimiter(p: &mut Parser) {
 
         let inside_nested_query = !nested_query_starts.is_empty();
 
+        if paren_depth == 0 && brace_depth == 0 && super::at_query_boundary(p) {
+            break;
+        }
+
         if brace_depth == 0 && super::select::is_clause_keyword(p) {
             let stop = if paren_depth == 0 {
                 true

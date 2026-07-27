@@ -164,7 +164,13 @@ impl<'a> Parser<'a> {
     }
 
     pub fn expect(&mut self, kind: TokenKind) -> bool {
-        if self.eat(kind) {
+        // A grammar boundary belongs to a rule further out, and no rule may
+        // require it here. It matters because kinds are coarser than words:
+        // every keyword of a language whose keywords are not reserved
+        // arrives as an identifier, so `expect(Ident)` would take the word
+        // that begins the next construct and cost the caller that construct.
+        // The separator is not covered — a rule asking for `;` means it.
+        if !self.at_declared_boundary() && self.eat(kind) {
             return true;
         }
 
@@ -261,8 +267,13 @@ impl<'a> Parser<'a> {
     /// where the missing element should have been, and the token stays for
     /// the caller.
     fn at_statement_separator(&self) -> bool {
-        self.at(TokenKind::Semicolon)
-            || self.at_grammar_boundary.is_some_and(|at_boundary| at_boundary(self))
+        self.at(TokenKind::Semicolon) || self.at_declared_boundary()
+    }
+
+    /// The part of the boundary a grammar declared for itself, without the
+    /// separator every grammar has.
+    fn at_declared_boundary(&self) -> bool {
+        self.at_grammar_boundary.is_some_and(|at_boundary| at_boundary(self))
     }
 
     fn emit_error(&mut self, err: ParseError) {
