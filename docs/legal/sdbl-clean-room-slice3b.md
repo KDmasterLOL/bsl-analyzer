@@ -615,7 +615,7 @@ The regenerated snapshot confirms both halves of the C0a audit:
 - `c97dd622` (2026-07-27) — C2: per-variant provenance docstrings and
   the thematic index, the four added variants, the converter arm
   extension, and the corpus snapshot flip. See § C2 outcome.
-- `<C3>` (2026-07-27) — C3: the `sdbl_slice3b_metadata_objects.rs`
+- `c0d461bb` (2026-07-27) — C3: the `sdbl_slice3b_metadata_objects.rs`
   acceptance suite (49 tests), this attestation's flip to complete, the
   master-document Slice 3b section, and the correction of the exit
   criteria in `sdbl-provenance-2026-07-audit.md` for the unowned brace
