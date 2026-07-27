@@ -218,3 +218,21 @@ SELECT 1 FROM Catalog.Goods.Changes, AccumulationRegister.Stock.Changes
 ВЫБРАТЬ 1 ИЗ Справочник.Товары.Изменения; ВЫБРАТЬ 1 ИЗ Т ДЛЯ ИЗМЕНЕНИЯ
 ---- 110 slice5 identifiers starting with a virtual table suffix
 КубическийМетр ТаблицаТоваров ГраницыДиапазона ТочкаМаршрута Changeset Tableau
+---- 111 slice1addendum extension selection element russian
+ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Товары КАК Т {ВЫБРАТЬ Номенклатура, Склад}
+---- 112 slice1addendum extension filter element with child field marker
+{ГДЕ Номенклатура.*, Склад} {ГДЕ Документ.Дата >= &ДатаНачала, Документ.Дата <= &ДатаКонца}
+---- 113 slice1addendum extension characteristics element
+{ХАРАКТЕРИСТИКИ ТИП(Справочник.Номенклатура) ПОЛЕКЛЮЧА Ссылка ПОЛЕИМЕНИ Наименование}
+---- 114 slice1addendum extension in virtual table arguments
+РегистрНакопления.УчетНоменклатуры.Обороты({&ДатаНачала}, {&ДатаКонца}, , {Номенклатура.*, Склад.*})
+---- 115 slice1addendum empty and nested braces
+{} {{}} {ГДЕ {Вложенный} Т.Поле}
+---- 116 slice1addendum unbalanced opening brace at eof
+ВЫБРАТЬ 1 {ВЫБРАТЬ Т
+---- 117 slice1addendum unbalanced closing brace
+ВЫБРАТЬ 1 } ИЗ Т
+---- 118 slice1addendum braces inside a string literal
+ВЫБРАТЬ "{ВЫБРАТЬ Поле}" КАК Ф ИЗ Т
+---- 119 slice1addendum extension elements english
+SELECT 1 FROM Catalog.Goods AS T {SELECT Products, Warehouse} {WHERE Products.*}

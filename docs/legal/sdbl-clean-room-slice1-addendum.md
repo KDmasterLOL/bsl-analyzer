@@ -403,10 +403,50 @@ are closed at C0b. Because the slice changes no behaviour, the entries
 are written once and their snapshot lines never move again — unlike the
 vocabulary slices, where the C0b snapshot was a before-picture.
 
+### C0b outcome
+
+Nine thematic entries landed, numbered 111–119, closing all ten blind
+spots. The snapshot diff is **208 insertions and 0 deletions**: not one
+existing line changed, which is the mechanical form of § Behaviour
+change.
+
+- **111** extension selection element russian — `{ВЫБРАТЬ Номенклатура,
+  Склад}` after a complete query.
+- **112** extension filter element with child field marker — both
+  documented `{ГДЕ …}` forms, the alias list with `.*` and the
+  parameterised comparison.
+- **113** extension characteristics element — `{ХАРАКТЕРИСТИКИ
+  ТИП(…) ПОЛЕКЛЮЧА … ПОЛЕИМЕНИ …}`, which renders `ХАРАКТЕРИСТИКИ`,
+  `ПОЛЕКЛЮЧА` and `ПОЛЕИМЕНИ` as `Ident` and so pins the refusal
+  recorded in § The nine extension keywords are deliberately not added.
+- **114** extension in virtual table arguments — the article's own
+  example shape, `Обороты({&ДатаНачала}, {&ДатаКонца}, ,
+  {Номенклатура.*, Склад.*})`, including the empty third argument.
+- **115** empty and nested braces — `{}`, `{{}}` and a block nested
+  inside a `{ГДЕ …}`.
+- **116** unbalanced opening brace at eof, and **117** unbalanced
+  closing brace. Both tokenise cleanly; neither produces `Error`. The
+  tolerance those entries pin is the parser's, but it rests on the lexer
+  emitting brace tokens at all.
+- **118** braces inside a string literal — `"{ВЫБРАТЬ Поле}"` stays a
+  single `String` payload, so the extension delimiters do not leak into
+  quoted text.
+- **119** extension elements english — `{SELECT Products, Warehouse}`
+  and `{WHERE Products.*}`, the article's English examples.
+
+Two incidental readings in these entries are pre-existing shared
+spellings owned elsewhere and are pinned as they are: `Ссылка` renders
+`KwRefs`, the `ССЫЛКА (REFS)` operator of Slice 2, and `Дата` renders
+`TypeDate` from Slice 3a.
+
 ## Commit trail
 
-- C0a — this attestation document authored. Sole change: addition of
+- `5475fe6d` (2026-07-27) — C0a: this attestation document authored.
+  Sole change: addition of
   `docs/legal/sdbl-clean-room-slice1-addendum.md`.
+- C0b — corpus entries 111–119 added to
+  `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`; snapshot
+  regenerated via `UPDATE_EXPECT=1`. See § C0b outcome.
 
 ## Licensing note
 
