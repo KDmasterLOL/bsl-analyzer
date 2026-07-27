@@ -44,6 +44,17 @@ pub(super) fn at_property_name(p: &Parser) -> bool {
     )
 }
 
+// =====================================================================
+// CLEAN-ROOM Slice 12 — expression-level recovery
+//
+// None of this is the query language: the official grammar has no
+// opinion on malformed input. These helpers exist so that one bad
+// expression does not cost the editor the rest of the query, and each is
+// justified on that ground alone.
+//
+// Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entries A8–A9.
+// =====================================================================
+
 fn is_recovery_point(p: &Parser, recovery_set: &crate::token_set::TokenSet) -> bool {
     if let Some(kind) = p.current() {
         if recovery_set.contains(kind) {

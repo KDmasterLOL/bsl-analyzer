@@ -14,6 +14,18 @@ pub(super) fn eat_sdbl_keyword(p: &mut Parser, en: &str, ru: &str) -> bool {
     p.eat_keyword(en) || p.eat_keyword(ru)
 }
 
+// =====================================================================
+// CLEAN-ROOM Slice 12 — field-list recovery
+//
+// Skips a malformed selected field to the next boundary a reader would
+// recognise — an alias, a comma, a clause keyword — while refusing to
+// stop inside a `CASE`, a paren group or a nested query, where such a
+// boundary would be a false one. Not the language; kept so that one bad
+// field does not destroy the list around it.
+//
+// Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entry A6.
+// =====================================================================
+
 fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
     let err = p.start();
     let mut case_depth = 0i32;
@@ -746,6 +758,19 @@ fn order_by_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblOrderClause);
 }
 
+// =====================================================================
+// CLEAN-ROOM Slice 12 — ordering-field modifiers
+//
+// The Developer's Reference gives an ordering field exactly four
+// alternatives for its order: `ВОЗР`, `УБЫВ`, `ИЕРАРХИЯ` and
+// `ИЕРАРХИЯ УБЫВ`. The reverse word order `УБЫВ ИЕРАРХИЯ` is not among
+// them and is accepted anyway, as a plausible slip that costs nothing to
+// tolerate.
+//
+// Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entries A13 and
+// D4.
+// =====================================================================
+
 fn order_by_item(p: &mut Parser) {
     super::expressions::expression(p);
     p.skip_trivia();
@@ -878,6 +903,19 @@ fn totals_by_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblTotalsBy);
 }
 
+// =====================================================================
+// CLEAN-ROOM Slice 12 — totals control-point modifiers
+//
+// A control point is an expression, then an optional `[ТОЛЬКО]
+// ИЕРАРХИЯ` or `ПЕРИОДАМИ(<вид периода> [, <дата>] [, <дата>])`, then an
+// optional alias. Modifiers are consumed as tokens of the enclosing
+// `SdblTotalsBy` rather than promoted into nodes of their own, so the
+// shape `crates/sdbl-hir` reads is unchanged; interpreting them is
+// Slice 13's.
+//
+// Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entries D2–D3.
+// =====================================================================
+
 fn totals_group_item(p: &mut Parser) {
     super::expressions::expression(p);
     p.skip_trivia();
@@ -930,6 +968,17 @@ fn top_clause(p: &mut Parser) {
 
     m.complete(p, NodeKind::SdblTopClause);
 }
+
+// =====================================================================
+// CLEAN-ROOM Slice 12 — virtual-table argument recovery
+//
+// A safety net for malformed argument lists only: clean nested calls and
+// subqueries are consumed by the expression layer and never reach here.
+// Tracks paren depth so that a comma inside a nested call is not
+// mistaken for an argument separator.
+//
+// Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entry A7.
+// =====================================================================
 
 fn recover_to_delimiter_vt(p: &mut Parser) {
     let recovery = p.start();
