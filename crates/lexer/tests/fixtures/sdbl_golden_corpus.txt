@@ -160,3 +160,31 @@ TOTALS SUM(X) BY PERIODS(TENDAYS, &S, &E), PERIODS(HALFYEAR, &T, &U)
 ВЫБРАТЬ 1 ИЗ Константы; SELECT 1 FROM Constants
 ---- 081 slice3b unmatched byte error fallback
 ВЫБРАТЬ @ ИЗ Т
+---- 082 slice4 aggregate functions russian
+ВЫБРАТЬ СУММА(Цена), СРЕДНЕЕ(Цена), МИНИМУМ(Цена), МАКСИМУМ(Цена), КОЛИЧЕСТВО(*) ИЗ Продажи
+---- 083 slice4 date part functions russian
+ВЫБРАТЬ ГОД(Момент), КВАРТАЛ(Момент), МЕСЯЦ(Момент), ДЕНЬГОДА(Момент), ДЕНЬ(Момент), НЕДЕЛЯ(Момент), ДЕНЬНЕДЕЛИ(Момент), ЧАС(Момент), МИНУТА(Момент), СЕКУНДА(Момент)
+---- 084 slice4 date arithmetic functions russian
+ВЫБРАТЬ НАЧАЛОПЕРИОДА(Момент, МЕСЯЦ), КОНЕЦПЕРИОДА(Момент, ГОД), ДОБАВИТЬКДАТЕ(Момент, ДЕНЬ, 5), РАЗНОСТЬДАТ(Момент, ДАТАВРЕМЯ(2024, 1, 1), ЧАС)
+---- 085 slice4 string functions russian
+ВЫБРАТЬ ПОДСТРОКА(Имя, 1, 5), ДЛИНАСТРОКИ(Имя), СТРНАЙТИ(Имя, "к"), ВРЕГ(Имя), НРЕГ(Имя), СОКРЛП(Имя), СОКРЛ(Имя), СОКРП(Имя)
+---- 086 slice4 numeric type and null functions russian
+ВЫБРАТЬ ОКР(Цена, 2), ЦЕЛ(Цена), ТИПЗНАЧЕНИЯ(Товар), ПРЕДСТАВЛЕНИЕ(Товар), ПРЕДСТАВЛЕНИЕССЫЛКИ(Товар), ЕСТЬNULL(Цена, 0), УНИКАЛЬНЫЙИДЕНТИФИКАТОР(Товар)
+---- 087 slice4 empty table keyword and empty ref selector russian
+ВЫБРАТЬ ПУСТАЯТАБЛИЦА.(Ном, Тов) КАК Состав ИЗ Документ.Расход ГДЕ Товар = ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)
+---- 088 slice4 left and right substring russian
+ВЫБРАТЬ ЛЕВ(Имя, 3), ПРАВ(Имя, 3) ИЗ Справочник.Товары
+---- 089 slice4 join keywords keep the english left and right
+ЛЕВОЕ СОЕДИНЕНИЕ ПРАВОЕ СОЕДИНЕНИЕ LEFT JOIN RIGHT JOIN
+---- 090 slice4 string replacement bilingual
+ВЫБРАТЬ СтрЗаменить(Имя, "к", "г"); SELECT StrReplace(Name, "k", "g")
+---- 091 slice4 record autonumber bilingual
+ВЫБРАТЬ АВТОНОМЕРЗАПИСИ() ПОМЕСТИТЬ Врем; SELECT RECORDAUTONUMBER() INTO Tmp
+---- 092 slice4 grouped by probe bilingual
+ВЫБРАТЬ СГРУППИРОВАНОПО(Склад); SELECT GROUPEDBY(Store)
+---- 093 slice4 stored data size bilingual
+ВЫБРАТЬ РАЗМЕРХРАНИМЫХДАННЫХ(Данные); SELECT STOREDDATASIZE(Data)
+---- 094 slice4 trigonometric and exponential functions
+ВЫБРАТЬ ACos(X), ASin(X), ATan(X), Cos(X), Sin(X), Tan(X), Exp(X), Log(X), Log10(X), Pow(X, 2), Sqrt(X)
+---- 095 slice4 date difference alternate english spelling
+SELECT DATEDIFFERENCE(Start, Finish, DAY)

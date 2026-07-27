@@ -677,8 +677,8 @@ absent in every language they have.
 | `FnSin` | — | ❌ MISSING |
 | `FnTan` | — | ❌ MISSING |
 
-Blind spots requiring corpus gap-fill at C0b: 36 Russian spellings of
-pre-existing functions, both spellings of `СтрЗаменить`,
+Blind spots requiring corpus gap-fill at C0b — 52 in total: 34 Russian
+spellings of pre-existing functions, both spellings of `СтрЗаменить`,
 `АВТОНОМЕРЗАПИСИ`, `СГРУППИРОВАНОПО` and `РАЗМЕРХРАНИМЫХДАННЫХ`, the
 Russian spellings of `Лев` and `Прав`, the seven mathematical
 functions, and the `DATEDIFFERENCE` alternation. The new spellings enter
@@ -690,10 +690,73 @@ already contain `Date` and `ДАТА`, and the snapshot already records them
 as `TypeDate`. Those two lines are the pin that the removal changes
 nothing.
 
+### C0b outcome
+
+Fourteen thematic entries landed, numbered 082–095, closing all 52 blind
+spots:
+
+- **082** aggregate functions russian — `СУММА`, `СРЕДНЕЕ`, `МИНИМУМ`,
+  `МАКСИМУМ`, `КОЛИЧЕСТВО`.
+- **083** date part functions russian — the ten date-component
+  functions from `ГОД` to `СЕКУНДА`.
+- **084** date arithmetic functions russian — `НАЧАЛОПЕРИОДА`,
+  `КОНЕЦПЕРИОДА`, `ДОБАВИТЬКДАТЕ`, `РАЗНОСТЬДАТ`, with `ДАТАВРЕМЯ`
+  nested as the literal it is.
+- **085** string functions russian — `ПОДСТРОКА`, `ДЛИНАСТРОКИ`,
+  `СТРНАЙТИ`, `ВРЕГ`, `НРЕГ`, and the three `СОКР*` spellings in one
+  line, so the entry doubles as the longest-match guard for
+  `СОКРЛП` over `СОКРЛ`.
+- **086** numeric, type and null functions russian — `ОКР`, `ЦЕЛ`,
+  `ТИПЗНАЧЕНИЯ`, `ЕСТЬNULL`, `УНИКАЛЬНЫЙИДЕНТИФИКАТОР`, and
+  `ПРЕДСТАВЛЕНИЕ` next to `ПРЕДСТАВЛЕНИЕССЫЛКИ`, the second
+  longest-match pair.
+- **087** empty-table keyword and empty-ref selector russian — both
+  non-function variants in the grammatical position the source gives
+  them: `ПУСТАЯТАБЛИЦА.(…)` in the selection list and
+  `ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)` in a filter.
+- **088** left and right substring russian — `ЛЕВ`, `ПРАВ`.
+- **089** join keywords keep the english left and right — `ЛЕВОЕ`,
+  `ПРАВОЕ`, `LEFT`, `RIGHT` around `СОЕДИНЕНИЕ` / `JOIN`. This entry
+  exists to be *unchanged* by C2: it is the pin that adding `FnLeft`
+  and `FnRight` does not disturb the join keywords.
+- **090** string replacement bilingual — `СтрЗаменить`, `StrReplace`.
+- **091** record autonumber bilingual — `АВТОНОМЕРЗАПИСИ`,
+  `RECORDAUTONUMBER`.
+- **092** grouped by probe bilingual — `СГРУППИРОВАНОПО`, `GROUPEDBY`,
+  the latter also guarding longest match over `GROUP`.
+- **093** stored data size bilingual — `РАЗМЕРХРАНИМЫХДАННЫХ`,
+  `STOREDDATASIZE`.
+- **094** trigonometric and exponential functions — the seven missing
+  mathematical functions next to the four the lexer already had, so the
+  entry contrasts them directly.
+- **095** date difference alternate english spelling —
+  `DATEDIFFERENCE`.
+
+The regenerated snapshot confirms all three halves of the C0a audit:
+
+- All 34 previously-unpinned Russian spellings tokenise to their `Fn*`
+  variants, so the preserved regexes accept the Russian side of the
+  vocabulary at the byte level and not only on paper.
+- All 18 spellings that the slice adds tokenise to `Ident`: `ЛЕВ`,
+  `ПРАВ`, `СтрЗаменить`, `StrReplace`, `АВТОНОМЕРЗАПИСИ`,
+  `RECORDAUTONUMBER`, `СГРУППИРОВАНОПО`, `GROUPEDBY`,
+  `РАЗМЕРХРАНИМЫХДАННЫХ`, `STOREDDATASIZE`, `ACos`, `ASin`, `ATan`,
+  `Cos`, `Sin`, `Tan`, `Exp`, `DATEDIFFERENCE`. This is the pre-change
+  behaviour the audit predicted, and it is now pinned; the C2 diff on
+  these 18 lines is the record of the behaviour change. Each of the 18
+  spellings occurs in exactly one corpus entry, so the expected diff is
+  18 lines and no others.
+- Entry 089 renders `KwLeft`/`KwRight` for all four join spellings, and
+  entry 087 renders `FnEmptyTable` and `FnEmptyRef` in their canonical
+  positions.
+
 ## Commit trail
 
-- C0a — this attestation document authored. Sole change: addition of
-  `docs/legal/sdbl-clean-room-slice4.md`.
+- `eb49bba3` (2026-07-27) — C0a: this attestation document authored.
+  Sole change: addition of `docs/legal/sdbl-clean-room-slice4.md`.
+- C0b — corpus entries 082–095 added to
+  `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`; snapshot
+  regenerated via `UPDATE_EXPECT=1`. See § C0b outcome.
 
 ## Licensing note
 
