@@ -504,3 +504,54 @@ fn the_drain_does_not_promote_a_nested_query() {
         1,
     );
 }
+
+#[test]
+fn a_separator_ends_the_leftover_at_any_depth() {
+    // A separator cannot belong to a paren group in this language, so an
+    // unclosed group in the leftover must not hide it.
+    let input = "SELECT A FROM T 42 (; SELECT B FROM U";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert_eq!(
+        parse
+            .syntax_node()
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+            .count(),
+        2,
+    );
+}
+
+#[test]
+fn a_query_keyword_inside_a_group_is_not_a_package_member() {
+    // Inside parens it is a subquery; inside braces it is extension text.
+    // Either way the lowerer must not be handed it as a member of its own.
+    for input in [
+        "ВЫБРАТЬ Ф(А X ВЫБРАТЬ Б ИЗ У)",
+        "SELECT A FROM T 42 {SELECT B FROM U}",
+        "ВЫБРАТЬ А ИЗ Т 42 (ВЫБРАТЬ Б ИЗ У)",
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+                .count(),
+            1,
+            "`{input}`",
+        );
+    }
+}
+
+#[test]
+fn an_error_at_a_separator_points_at_the_separator() {
+    // Not bumping the separator is only half of it: an error still marked
+    // as "the token was taken" is placed on the previous token, so the
+    // complaint lands on the word before the gap instead of in it.
+    let input = "УНИЧТОЖИТЬ;";
+    let parse = parse_sdbl(input);
+    let at_semicolon = syntax::TextSize::from(input.find(';').unwrap() as u32);
+    assert_eq!(parse.errors()[0].range(), syntax::TextRange::empty(at_semicolon));
+}

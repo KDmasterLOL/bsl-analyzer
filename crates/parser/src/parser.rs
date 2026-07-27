@@ -82,6 +82,25 @@ impl<'a> Parser<'a> {
         self.pos >= self.tokens.len()
     }
 
+    pub(crate) fn token_cursor(&self) -> usize {
+        self.pos
+    }
+
+    /// Net nesting introduced between `from` and the current position:
+    /// opened groups minus closed ones. A grammar rule that gave up inside
+    /// an unclosed group leaves this above zero, which is the only way a
+    /// caller can tell that the position it was handed is not top level.
+    pub(crate) fn nesting_delta_since(&self, from: usize) -> i32 {
+        self.tokens[from.min(self.tokens.len())..self.pos.min(self.tokens.len())].iter().fold(
+            0i32,
+            |depth, t| match t.kind {
+                TokenKind::LParen | TokenKind::LBrace => depth + 1,
+                TokenKind::RParen | TokenKind::RBrace => depth - 1,
+                _ => depth,
+            },
+        )
+    }
+
     pub fn eat(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
             self.bump();
@@ -135,8 +154,11 @@ impl<'a> Parser<'a> {
 
     pub fn error(&mut self) {
         let found = self.current();
-        let recovery =
-            if found.is_none() { RecoveryKind::MissingToken } else { RecoveryKind::BumpToken };
+        let recovery = if found.is_none() || self.at_statement_separator() {
+            RecoveryKind::MissingToken
+        } else {
+            RecoveryKind::BumpToken
+        };
         let err = ParseError::Unexpected { found, recovery };
 
         if recovery == RecoveryKind::MissingToken {
@@ -151,7 +173,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn error_custom(&mut self, msg: &'static str) {
-        let recovery = if self.current().is_none() {
+        let recovery = if self.current().is_none() || self.at_statement_separator() {
             RecoveryKind::MissingToken
         } else {
             RecoveryKind::BumpToken
@@ -175,14 +197,19 @@ impl<'a> Parser<'a> {
         m.complete(self, NodeKind::Error);
     }
 
+    /// A statement separator is never the token an error is *about*. It is
+    /// the boundary that lets whatever comes after it still be parsed, so
+    /// reporting at one behaves like reporting at end of input: the
+    /// complaint is recorded where the missing element should have been,
+    /// and the separator stays for the caller.
+    fn at_statement_separator(&self) -> bool {
+        self.at(TokenKind::Semicolon)
+    }
+
     fn emit_error(&mut self, err: ParseError) {
         debug_assert!(matches!(err.recovery(), RecoveryKind::BumpToken | RecoveryKind::Custom));
         let m = self.start();
-        // Reporting is implemented as taking the offending token, but a
-        // statement separator is never the offending token — it is the
-        // boundary that lets whatever comes after it still be parsed.
-        // Taking it turns one bad statement into the loss of the next.
-        if !self.at_end() && !self.at(TokenKind::Semicolon) {
+        if !self.at_end() {
             self.bump();
         }
         self.events.push(Event::Error(err));

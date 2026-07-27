@@ -534,6 +534,35 @@ start is right at the top level and wrong inside a paren group, where the
 query start belongs to a subquery — without the depth count the drain
 handed the lowerer a subquery dressed as a package member.
 
+### The root fix needed a second half
+
+Not bumping the separator was only half of what "report at a separator"
+means. The error still carried `RecoveryKind::BumpToken`, and the sink
+computes that kind's range from the *previous* token — so every complaint
+made next to a `;` landed on the word before the gap instead of in it.
+`УНИЧТОЖИТЬ;` underlined `УНИЧТОЖИТЬ` rather than pointing at where the
+name should have been. The kind is now chosen where the other kinds are
+chosen: standing on a separator is treated exactly like standing at end of
+input, which is what it is from the rule's point of view. This affects the
+BSL grammar identically.
+
+Two more findings were the drain's new depth counter applied too widely
+and not widely enough at once. A separator cannot belong to a paren group
+in this language, so guarding the separator check by depth let an unclosed
+`(` in the leftover swallow the next member. A query keyword *can* belong
+to a group — a subquery inside parens, extension text inside braces — so
+the depth count had to cover braces too.
+
+The fourth finding was subtler and needed something the parser did not
+have. A rule that gives up inside an unclosed group hands back a position
+that is not top level, and the package loop had no way to know: the group
+was opened by the grammar, not by the drain, so the drain's local counter
+could not see it. `ВЫБРАТЬ Ф(А X ВЫБРАТЬ Б ИЗ У)` therefore produced two
+package members, the second of which `sdbl-hir` would have lowered as a
+query in its own right. The parser now offers the net nesting a rule
+introduced, and the loop asks before treating a query keyword as a new
+member.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -629,9 +658,12 @@ are covered by entries A6–A8 above.
   Parser tests 636 → 638. One lens of this round did not run at all — the
   task file had grown past the argument-size limit — so this round covers
   one perspective, not two.
-- C7 — the fourth round, with both lenses. Three findings, all one class
-  and all confirmed: an inner recovery consuming the package separator.
-  Closed at the root rather than per site. Parser tests 638 → 640.
+- C7 `efea2e7e` — the fourth round, with both lenses. Three findings, all
+  one class and all confirmed: an inner recovery consuming the package
+  separator. Closed at the root rather than per site. Parser tests
+  638 → 640.
+- C8 — the fifth round. Four findings, three of them in the fourth round's
+  own fix. Parser tests 640 → 643.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

@@ -56,6 +56,10 @@ pub fn query_package(p: &mut Parser) {
     // members are parsed only while the separators survive is a package that
     // loses good queries behind bad ones.
     let mut a_query_is_due = true;
+    // A rule that gave up inside an unclosed `(` or `{` hands back a
+    // position that is not top level. A query keyword there belongs to that
+    // group, not to the package.
+    let mut open_groups = 0i32;
 
     p.skip_trivia();
 
@@ -72,6 +76,7 @@ pub fn query_package(p: &mut Parser) {
             }
             p.bump();
             a_query_is_due = true;
+            open_groups = 0;
             continue;
         }
 
@@ -80,15 +85,19 @@ pub fn query_package(p: &mut Parser) {
         }
 
         if a_query_is_due {
+            let mark = p.token_cursor();
             queries(p);
             a_query_is_due = false;
-        } else if at_query_start(p) {
+            open_groups += p.nesting_delta_since(mark);
+        } else if open_groups <= 0 && at_query_start(p) {
             // A query where a separator should be. Recognising it is what
             // keeps the rest of the package parseable, but the package is
             // still malformed and silence here would turn a bad package into
             // two good queries.
             p.error_custom_no_bump("ожидался разделитель ';' между запросами");
+            let mark = p.token_cursor();
             queries(p);
+            open_groups += p.nesting_delta_since(mark);
         } else if !drain_to_boundary(p) {
             break;
         }
@@ -124,22 +133,23 @@ fn drain_to_boundary(p: &mut Parser) -> bool {
 
     let leftover = p.start();
     let mut took_anything = false;
-    let mut paren_depth = 0i32;
+    let mut depth = 0i32;
 
-    while !p.at_end() && !(p.at(TokenKind::Semicolon) && paren_depth == 0) {
+    // A separator cannot belong to a group in this language, so it ends the
+    // leftover at any depth. A query start can belong to one — inside
+    // parens it is a subquery, inside braces it is extension text — and is
+    // a boundary only at the top.
+    while !p.at_end() && !p.at(TokenKind::Semicolon) {
         p.check_iteration_limit();
 
-        // A query start inside a paren group belongs to that group, not to
-        // the package. Promoting it would hand the lowerer a subquery
-        // dressed as a top-level one.
-        if took_anything && paren_depth == 0 && at_query_start(p) {
+        if took_anything && depth == 0 && at_query_start(p) {
             break;
         }
 
-        if p.at(TokenKind::LParen) {
-            paren_depth += 1;
-        } else if p.at(TokenKind::RParen) && paren_depth > 0 {
-            paren_depth -= 1;
+        if p.at(TokenKind::LParen) || p.at(TokenKind::LBrace) {
+            depth += 1;
+        } else if (p.at(TokenKind::RParen) || p.at(TokenKind::RBrace)) && depth > 0 {
+            depth -= 1;
         }
 
         p.bump();
