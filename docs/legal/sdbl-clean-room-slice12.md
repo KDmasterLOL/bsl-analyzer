@@ -18,7 +18,9 @@ The slice therefore has a third possible verdict the plan did not
 anticipate, and which turns out to carry most of the work: **neither**.
 A behaviour that is not required by the syntax and that no one would
 choose on purpose is a defect, and calling it an allowance in a legal
-document would be a false statement. Four such behaviours were found.
+document would be a false statement. Six such behaviours were found —
+four by reading the code, and two more only after the first four were
+fixed, because the fix is what made them legible.
 
 ## Why this slice differs from its predecessors
 
@@ -125,7 +127,9 @@ Every site is classified:
 - **R** — required by the official syntax. The parser is implementing
   the language; nothing to justify.
 - **A** — an intentional allowance. Not in the language; kept on purpose
-  for editor behaviour, with the reason stated.
+  for editor behaviour, with the reason stated. A15 and A16 were created
+  by this slice rather than found by it: adding a rule adds the question
+  of what to do when the input does not match it.
 - **D** — neither. A behaviour that is not the language and that is not
   wanted. C2 changes these.
 
@@ -135,7 +139,7 @@ Every site is classified:
 |---|---|---|
 | R1 | `lexer` `SdblTokenKind::Comment` | `//` to end of line. Глава 8 §8.4.3 defines it and says comments are ignored when the query runs. Not a convenience; the master document's fifth scope bullet misreads it. |
 | R2 | `select.rs` `query_extension` / `eat_query_extensions` | Brace regions consumed verbatim. Attested by Slice 1-addendum. |
-| R3 | `expressions.rs` `at_property_name` | Keywords admitted after a dot as property names. The language allows a field named `И`; the lexer cannot know. |
+| R3 | `expressions.rs` `at_property_name` | A handful of keywords are admitted after a dot as property names. Only a name can appear in that position, so the position resolves what the spelling cannot: the lexer has already decided that `В` is `IN`, and after a dot that decision is simply wrong. Not a tolerance — reading the position is what the grammar requires. |
 
 ### A — intentional allowances
 
@@ -155,6 +159,8 @@ Every site is classified:
 | A12 | `select.rs:911` `limitations` | `РАЗЛИЧНЫЕ` / `ПЕРВЫЕ` / `РАЗРЕШЕННЫЕ` in any order and repeated. Attested by Slice 7-addendum allowances #1–#2. |
 | A13 | `select.rs:753` `order_by_item` | `УБЫВ ИЕРАРХИЯ` accepted, though the canonical `<Порядок>` has only `ИЕРАРХИЯ УБЫВ`. Kept: it is a plausible slip, and rejecting a word order the language merely does not list buys nothing. See § Source questions. |
 | A14 | `parser.rs:227` `check_iteration_limit` | A stuck-position guard on every unbounded loop. Not a language property at all; a liveness property of the parser. |
+| A15 | `select.rs` `totals_periods_modifier` | The rule allows at most two boundary arguments; the parser takes any number. Counting them is a check with no recovery value — a third argument is a mistake the user can see, and refusing to parse it would only hide the rest of the clause. |
+| A16 | `select.rs` `totals_periods_modifier` | An unclosed `ПЕРИОДАМИ(` is taken and left quiet, like the half-typed clause keywords of A1–A5. |
 
 ### D — neither the language nor a decision
 

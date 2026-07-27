@@ -1459,11 +1459,12 @@ accidentally from upstream grammar or old tests.
 Every recovery rule is documented as either required by the official
 syntax, or intentionally kept for editor behaviour. Auditing the surface
 produced a third verdict the plan did not allow for, and it carried most
-of the work: **neither**. Twenty-one sites were classified — three
-implement the language, fourteen are allowances with their reasons
-stated, and four were behaviours nobody had decided.
+of the work: **neither**. Twenty-five sites were classified — three
+implement the language, sixteen are allowances with their reasons
+stated, and six were behaviours nobody had decided. Two of the six were
+invisible until the other four were fixed.
 
-### The four, and the one mechanism behind them
+### The mechanism behind them
 
 `query_package` ended its loop at the first token that was neither `;`
 nor the end of input, and nothing consumed the rest. The remainder was
@@ -1480,6 +1481,14 @@ including a `ИЗ`, and any query in a package following a bad one.
 Slice 12 parses the three forms and drains the rest into a reported error
 node, in that order — SDBL parse errors reach the user, so draining first
 would have flagged every query using a form the parser had never handled.
+
+Draining then exposed two more of the same kind, which no reading of the
+code beforehand had surfaced: a selection list left empty took the next
+clause's keyword as its only field, and `top_clause` reported a missing
+count by bumping whatever stood in its place, which was that same
+keyword. Both now report without moving. The second is the fix
+Slice 7-addendum deferred here by name; the first is why fixing only the
+second would not have been enough.
 
 ### The five scope bullets, re-examined
 
@@ -1535,7 +1544,10 @@ discarding was silent.
 - `docs/legal/sdbl-clean-room-slice12.md` — the attestation.
 
 Commit trail: C0a `18b5bb70`, C0b `27eb6e92`, C1 `80350945`,
-C2 `da3eeaa0`, C3 in the attestation's own trail.
+C2 `da3eeaa0`, C2b `01d9cd6d`, C3 `7aaf669c`. Two earlier commits landed
+under this slice's name in April 2026 without an attestation and are
+covered by it now: `9d418084` and `88439afa`, both on the recovery
+helpers' clause-keyword stop.
 
 ## Slice 13: `sdbl-hir` reattachment
 
