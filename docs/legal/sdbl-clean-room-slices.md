@@ -10,16 +10,16 @@ independently.
 
 ## Status as of 2026-07-27
 
-Closed and attested: Slices 1, 2, 2-addendum, 3a, 3b and 4 on the lexer
-side; Slices 6, 7, 7-addendum, 8, 8-addendum, 9, 10a, 10b and 11 on the
-parser side.
+Closed and attested: Slices 1, 2, 2-addendum, 3a, 3b, 4 and 5 on the
+lexer side; Slices 6, 7, 7-addendum, 8, 8-addendum, 9, 10a, 10b and 11
+on the parser side. Every lexer vocabulary is now attested; the only
+unattested lexer material is the brace pair below.
 
 Open:
 
 | Slice | Area | State |
 |---|---|---|
 | 0 | SDBL test corpus | triaged into buckets A/B/C, but bucket C never rewritten and `3aa29b99` removed the bucket labels |
-| 5 | Virtual tables, external data sources | not started |
 | 1-addendum | Brace pair `LBrace` / `RBrace` | not started; recommended by Slice 3b (see below) |
 | 12 | Recovery / IDE allowances | fixes landed, no attestation |
 | 13 | `sdbl-hir` reattachment | not started |
@@ -34,8 +34,8 @@ those two. They are punctuation rather than vocabulary, so folding them into a
 vocabulary slice would be the same category error that lost the map in the first
 place; the recommendation is a small **Slice 1-addendum** deriving them from the
 official documentation of the query-language extension that gives `{…}` its
-meaning. Until it runs, the lexer cannot be declared clean, whatever Slice 5
-does.
+meaning. Until it runs, the lexer cannot be declared clean, even though every
+vocabulary slice has now landed.
 
 Two things changed after the last slice landed and are recorded here so the
 programme is not resumed on stale assumptions:
@@ -48,9 +48,9 @@ programme is not resumed on stale assumptions:
 - `3aa29b99` removed the `CLEAN-ROOM` / `LEGACY` banners and the test-corpus
   bucket classification from the source. Attestation citations that point at
   those banners no longer resolve, and the remaining unrewritten surface is no
-  longer visible in the code. Slices 3b and 4 restored the markers on the
-  vocabularies they own and on those still pending; only Slice 5's `Vt*` block
-  still carries a `LEGACY` banner.
+  longer visible in the code. Slices 3b, 4 and 5 restored the markers on the
+  vocabularies they own; no `LEGACY (pending)` banner remains, and the only
+  `LEGACY` marker left is the `unowned` note on the brace pair.
 
 ## Legal framing
 
@@ -328,24 +328,91 @@ grammar decision.
   added at C3.
 - `docs/legal/sdbl-clean-room-slice4.md` — the attestation.
 
-## Slice 5: virtual table and external-source handling
+## Slice 5: virtual tables and external data sources (lexer)
+
+**Status: complete (2026-07-27).** See
+[`sdbl-clean-room-slice5.md`](sdbl-clean-room-slice5.md) for the
+attestation. Commit trail: C0a `39bee739`, C0b `63cf6f76`, C1
+`c494f586`, C2 `25b64892`, C3 landed with the attestation.
+
+Slice 5 is the last vocabulary slice on the lexer side. It claims the
+`Vt*` family together with the `MdoExternalDataSource` root that
+Slice 3b deferred here.
 
 ### Goal
 
 Isolate the trickiest vocabulary/context subsystem.
 
+### Source
+
+The 1C:Enterprise 8.3.27 syntax assistant section «Работа с запросами →
+Таблицы запросов» — the same canonical inventory Slice 3b used for
+table roots. Each virtual table has its own article whose headline
+carries the whole dotted path bilingually, so one line attests both
+spellings of a suffix. The ITS textbook chapter «Виртуальные таблицы»
+corroborates the concept and the `СрезПоследних` example.
+
 ### Scope
 
-- virtual table suffixes
-- `DOT`-sensitive table resolution
-- external data source mode
-- any special field names that currently require dedicated lexer states
+18 lexer token variants: 7 preserved, 11 added. The added eleven are
+`VtExtDimensions`, `VtRecordsWithExtDimensions`, `VtScheduleData`,
+`VtAdjustedEffectivePeriod`, `VtBoundaries`, `VtPoints`,
+`VtTasksByPerformer`, `VtTable`, `VtCube`, `VtDimensionTable` and
+`VtChanges`. The external-source cluster is the one that most needed
+them: `MdoExternalDataSource` was useless alone, because every
+external-source path continues through `Таблица`, `Куб` or
+`Куб.<Имя>.ТаблицаИзмерения`, and none of those three had a variant.
+
+`VtChanges` takes an English-only alternation. The Russian `Изменения`
+is byte-identical to the `ДЛЯ ИЗМЕНЕНИЯ (FOR UPDATE)` clause keyword,
+so the colliding spelling stays with Slice 2's `KwUpdate` and the free
+spelling gets the new variant — the mirror of the Slice 4 `Лев` / `Прав`
+case, and resolved by the same rule.
+
+`База<Имя базового регистра расчета>` is documented but gets no
+variant: the word is glued to the base register's name, and
+`РегистрРасчета.Начисления.БазаОсновныеНачисления` measurably tokenises
+as a single `Ident`. The variant would be born unreachable, like the
+`FnDate` Slice 4 removed. The same reasoning excludes the
+resource-derived field suffixes.
+
+### Two scope bullets that turned out to be empty
+
+The scope recorded here named four things. Two do not exist at the
+lexer layer, and the attestation records that rather than inventing
+state to satisfy the checklist:
+
+- **`DOT`-sensitive table resolution** — the lexer keeps no record of
+  what preceded the current position, so `Остатки` alone and `Остатки`
+  after two dots emit the same token. Separating the readings is the
+  parser's work.
+- **Special field names requiring dedicated lexer states** — there is
+  one mode in the crate, `strings_mode`, and it is Slice 1 material. No
+  field name is a token, so none needs a state.
+
+### Behaviour change
+
+Additive and parser-tree-invariant. The converter maps every `Vt*`
+variant to `TokenKind::Ident`, so the twenty-one affected spellings
+reach the grammar exactly as they did when they lexed as `Ident`;
+`cargo test -p parser` is unchanged at 596. Regenerating the golden
+corpus over all 110 entries moved 22 lines and no others.
 
 ### Files
 
-- `crates/lexer/src/sdbl/mod.rs`
-- `crates/parser/src/sdbl_token_converter.rs`
-- SDBL parser tests
+- `crates/lexer/src/sdbl/mod.rs` — the `CLEAN-ROOM Slice 5` banner
+  replacing the file's last `LEGACY (Slice 5 pending)` one, per-variant
+  provenance docstrings, the thematic index, and the module docstring
+  bullet.
+- `crates/parser/src/sdbl_token_converter.rs` — eleven variants added
+  to the shared `Vt* => T::Ident` arm.
+- `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` — entries
+  096–110 closing 28 bilingual blind spots.
+- `crates/lexer/tests/sdbl_golden_corpus.rs` — snapshot regenerated at
+  C0b and at C2.
+- `crates/lexer/tests/sdbl_slice5_virtual_tables.rs` — 23 acceptance
+  tests added at C3.
+- `docs/legal/sdbl-clean-room-slice5.md` — the attestation.
 
 ## Slice 6: parser root and package skeleton
 

@@ -1,6 +1,6 @@
 # SDBL Slice 5 — Clean-Room Attestation (virtual tables and external data sources)
 
-**Status:** in progress (2026-07-27).
+**Status:** complete (2026-07-27).
 
 This document attests the clean-room authorship of the Slice 5 material
 of the SDBL lexer, per the staged migration plan in
@@ -19,8 +19,8 @@ unattested lexer material is the brace pair recorded by Slice 3b
 
 ## Status
 
-The Slice 5 attestation flips from "in progress" to "complete" at phase
-C3, with the absolute-date stamp at the top of this document. The
+The Slice 5 attestation flipped from "in progress" to "complete" at
+phase C3, with the absolute-date stamp at the top of this document. The
 C0a / C0b / C1 / C2 / C3 landings are atomic; the absolute-last trailing
 commit on the branch (the Anti-Hilbert disclosure) is necessarily not
 named in the enumeration, mirroring the Slice 1, 2, 6, 7, 8, 9, 10a,
@@ -50,7 +50,12 @@ The paths claimed as clean-room Slice 5 authorship are:
   against the extended corpus at C0b and again at C2 when the eleven new
   variants start emitting.
 - `crates/lexer/tests/sdbl_slice5_virtual_tables.rs` — the spec-driven
-  acceptance test file born at C3.
+  acceptance test file born at C3, 23 tests: 3 canonical-form sweeps
+  over the 17 bilingual pairs and the English-only `Changes`,
+  1 case-insensitivity sweep, 1 spelling-to-kind distinctness check,
+  5 longest-match guards, 4 pins on the spellings and prefixes this
+  slice deliberately did not take, 1 pin on the lexer's
+  dot-insensitivity, and 8 structural integration tests.
 
 ### The 18 claimed variants
 
@@ -544,8 +549,9 @@ live. Pre-Slice-5 baseline test counts (post-Slice-4, `develop` as of
    (single snapshot test) throughout; the snapshot content changes at
    C0b and again at C2.
 9. `cargo test -p lexer --test sdbl_slice5_virtual_tables` — file does
-   **not exist** pre-Slice-5.
-10. `cargo test -p lexer --tests` — **277 passed** pre-Slice-5.
+   **not exist** pre-Slice-5; **23 passed** post-Slice-5.
+10. `cargo test -p lexer --tests` — **277 passed** pre-Slice-5,
+    **300 passed** post-Slice-5 (277 + 23, matching item 9).
 11. `cargo test -p parser` — **596 passed** both before and after; the
     converter edit is additive and every `Vt*` variant maps to the same
     `TokenKind::Ident` before and after.
@@ -658,9 +664,20 @@ The regenerated snapshot confirms all three directions of the C0a audit:
   Slice 5` banner replacing the last `LEGACY (Slice 5 pending)` one.
   Comments only: no declaration moved and no regex changed, so the
   golden corpus snapshot needed no regeneration.
-- C2 — per-variant provenance docstrings and the thematic index, the
-  eleven added variants, the converter arm extension, and the corpus
-  snapshot flip. See § C2 outcome.
+- `25b64892` (2026-07-27) — C2: per-variant provenance docstrings and
+  the thematic index, the eleven added variants, the converter arm
+  extension, and the corpus snapshot flip. See § C2 outcome.
+- C3 — the `sdbl_slice5_virtual_tables.rs` acceptance suite (23 tests),
+  this attestation's flip to complete, and the master-document Slice 5
+  section.
+- Close-out: a single trailing commit strikes item 3 from the exit
+  criteria in `sdbl-provenance-2026-07-audit.md` and pins the C3 SHA
+  explicitly in the trail above. The exit-criteria edit is deliberately
+  last: that document's § Finding 2 is under read-quarantine for
+  clean-room authors, and touching the file surfaces its contents, so
+  the edit waits until the authorship it could taint is finished. The
+  Anti-Hilbert disclosure: this trailing commit's own SHA is NOT named
+  in this enumeration — it cannot be, by construction.
 
 ## Licensing note
 
