@@ -578,9 +578,12 @@ fn query_body_clauses(p: &mut Parser) {
 }
 
 /// Consumes any run of `{…}` query-language extension blocks at the current
-/// position. These braces mark sections a user may customize at runtime
-/// (`{ГДЕ …}`, `{ВЫБРАТЬ …}`, `{УПОРЯДОЧИТЬ ПО …}`); their inner text is taken
-/// verbatim so the surrounding query still parses and keeps its diagnostics.
+/// position. These braces mark sections a user may customize at runtime: the
+/// data-composition documentation defines `{ВЫБРАТЬ …}`, `{ГДЕ …}` and
+/// `{ХАРАКТЕРИСТИКИ …}`, and configurations also contain undocumented forms
+/// such as `{УПОРЯДОЧИТЬ ПО …}`. Their inner text is taken verbatim, so the
+/// surrounding query parses and keeps its diagnostics whichever element
+/// appears.
 pub(super) fn eat_query_extensions(p: &mut Parser) {
     p.skip_trivia();
     while p.at(TokenKind::LBrace) {

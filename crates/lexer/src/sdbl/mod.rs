@@ -68,9 +68,29 @@ pub enum SdblTokenKind {
     //
     // Attestation: `docs/legal/sdbl-clean-room-slice1-addendum.md`.
     // ===================================================================
+    /// `{` — opens a data-composition query-extension instruction.
+    ///
+    /// The braces mark a section a user may customise at runtime. The
+    /// documented elements are `{ВЫБРАТЬ …}` / `{SELECT …}`, the field
+    /// aliases available for display; `{ГДЕ …}` / `{WHERE …}`, the
+    /// fields available for filtering; `{ХАРАКТЕРИСТИКИ …}` /
+    /// `{CHARACTERISTICS …}`, where to find characteristic types and
+    /// values for a type; and the parameter form `{&Параметр}` inside a
+    /// virtual table's argument list.
+    ///
+    /// Emitting these as tokens rather than [`SdblTokenKind::Error`] is
+    /// what lets the parser skip the region and keep the diagnostics of
+    /// the surrounding query.
     #[token("{")]
     LBrace,
 
+    /// `}` — closes a data-composition query-extension instruction; see
+    /// [`SdblTokenKind::LBrace`].
+    ///
+    /// A region may nest, and an unbalanced brace on either side is
+    /// tokenised rather than rejected: query texts are routinely
+    /// assembled by string concatenation, so a literal that begins or
+    /// ends mid-extension is ordinary input.
     #[token("}")]
     RBrace,
 

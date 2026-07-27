@@ -444,9 +444,18 @@ spellings owned elsewhere and are pinned as they are: `Ссылка` renders
 - `5475fe6d` (2026-07-27) — C0a: this attestation document authored.
   Sole change: addition of
   `docs/legal/sdbl-clean-room-slice1-addendum.md`.
-- C0b — corpus entries 111–119 added to
+- `6715b5b3` (2026-07-27) — C0b: corpus entries 111–119 added to
   `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`; snapshot
   regenerated via `UPDATE_EXPECT=1`. See § C0b outcome.
+- `ca597ec7` (2026-07-27) — C1: module docstring and the `CLEAN-ROOM
+  Slice 1-addendum` banner replacing the `LEGACY (unowned)` note.
+  Comments only.
+- C2 — per-variant provenance docstrings on the two tokens, and the
+  correction of the `eat_query_extensions` doc comment. Comments only
+  in both crates: 20 inserted lines in the lexer, one rewritten doc
+  comment in the parser, no declaration or token touched, so the golden
+  corpus snapshot needed no regeneration and `cargo test -p parser`
+  stayed at 596.
 
 ## Licensing note
 
