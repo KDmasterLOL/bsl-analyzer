@@ -111,7 +111,11 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         | S::MdoTask
         | S::MdoExternalDataSource
         | S::MdoConstant
-        | S::MdoSequence => T::Ident,
+        | S::MdoConstants
+        | S::MdoSequence
+        | S::MdoDocumentJournal
+        | S::MdoExchangePlan
+        | S::MdoFilterCriterion => T::Ident,
 
         S::FnStringLength
         | S::FnStrFind

@@ -79,7 +79,8 @@ Four are born in this slice as the C0a audit's Option A ADD outcome:
 This is a deliberate widening of the scope recorded for Slice 3b in the
 master document, which named 14 variants. The master document counted
 what the lexer had; the audit counted what the source attests. See
-§ Coverage gap for the reasoning and § Behaviour change for the cost.
+§ Audit results — coverage for the reasoning and § Behaviour change for
+the cost.
 
 ### Out of scope
 
@@ -287,6 +288,37 @@ words while they still tokenise as `Ident`, so the snapshot records the
 pre-change behaviour; C2 flips those snapshot lines to the new kinds.
 The flip is the audit trail of the behaviour change, in the same shape
 as the Slice 2-addendum `KwPeriods` corpus flip.
+
+### C2 outcome
+
+The measured blast radius matches the prediction exactly. Regenerating
+the snapshot over the whole 81-entry corpus changed **8 lines and no
+others**:
+
+```
+-  Ident @0  "ЖурналДокументов"     +  MdoDocumentJournal @0  "ЖурналДокументов"
+-  Ident @48 "DocumentJournal"      +  MdoDocumentJournal @48 "DocumentJournal"
+-  Ident @0  "ПланОбмена"           +  MdoExchangePlan    @0  "ПланОбмена"
+-  Ident @36 "ExchangePlan"         +  MdoExchangePlan    @36 "ExchangePlan"
+-  Ident @0  "КритерийОтбора"       +  MdoFilterCriterion @0  "КритерийОтбора"
+-  Ident @48 "FilterCriterion"      +  MdoFilterCriterion @48 "FilterCriterion"
+-  Ident @22 "Константы"            +  MdoConstants       @22 "Константы"
+-  Ident @56 "Constants"            +  MdoConstants       @56 "Constants"
+```
+
+Four roots, two spellings each. No pre-existing token kind moved, no
+offset shifted, and the `Константа` occurrence in entry 076 kept
+`MdoConstant` while the `Константы` occurrence in entry 080 became
+`MdoConstants` — the one-letter pair resolves the way the audit says it
+does, and the longest-match analysis for `DocumentJournal` over
+`Document` holds in practice.
+
+Test counts after C2: `lexer` 203 passing (unchanged — the corpus
+snapshot is a single test whose content changed), `parser` 596 passing
+(unchanged), `clippy -p lexer -p parser --all-targets --all-features
+-- -D warnings` clean. The unchanged parser count is the empirical form
+of the parser-tree-invariance claim: the four words reach the grammar as
+`TokenKind::Ident` exactly as before.
 
 ## The `Error` fallback variant
 
@@ -570,12 +602,18 @@ The regenerated snapshot confirms both halves of the C0a audit:
 
 - `3419ac6d` (2026-07-27) — C0a: this attestation document authored.
   Sole change: addition of `docs/legal/sdbl-clean-room-slice3b.md`.
-- `<C0b>` (2026-07-27) — C0b: corpus entries 074–081 added to
+- `f88f604b` (2026-07-27) — C0b: corpus entries 074–081 added to
   `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`; snapshot
   regenerated via `UPDATE_EXPECT=1`. See § C0b outcome.
-- `<C1>` — C1: banner restoration and relocation; pure refactor.
-- `<C2>` — C2: provenance docstrings, the four added variants, the
-  converter arm extension, and the corpus snapshot flip.
+- `164e82f9` (2026-07-27) — C1: module docstring, `CLEAN-ROOM` banners
+  over the metadata-object roots and the `Error` fallback, `LEGACY`
+  banners over the Slice 4 and Slice 5 vocabularies, and the
+  `LEGACY (unowned)` note on the brace pair. Comments only: no
+  declaration moved and no regex changed, so the golden corpus snapshot
+  needed no regeneration.
+- `<C2>` (2026-07-27) — C2: per-variant provenance docstrings and the
+  thematic index, the four added variants, the converter arm extension,
+  and the corpus snapshot flip. See § C2 outcome.
 - `<C3>` — C3: acceptance suite, attestation flip to complete,
   master-document update.
 - Anti-Hilbert close-out: a single trailing fixup commit pins the C3 SHA

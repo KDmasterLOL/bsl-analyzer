@@ -432,52 +432,154 @@ pub enum SdblTokenKind {
 
     // ===================================================================
     // CLEAN-ROOM Slice 3b — metadata-object table vocabulary
-    // (in progress)
     //
     // Table roots that name a metadata object as a query data source.
+    // Every spelling below is the bilingual headline of an article in
+    // the 1C:Enterprise 8.3.27 syntax assistant, section «Работа
+    // с запросами → Таблицы запросов», which is the canonical inventory
+    // of query tables; the ITS query-language textbook names it as such
+    // (<https://its.1c.ru/db/pubqlang/content/7/hdoc>). Table names
+    // exist in both languages by design — Developer's Reference Глава 8
+    // §8.2, «Имя таблицы может быть задано на английском и русском
+    // языках» — and are case-insensitive per §8.4.5, which is what the
+    // `(?i)` flag expresses.
+    //
     // Attestation: `docs/legal/sdbl-clean-room-slice3b.md`.
+    //
+    // Index (navigational only; the `#[regex]` attributes remain the
+    // single source of truth, since logos requires the pattern at the
+    // declaration site):
+    //
+    //   reference-type roots  MdoCatalog, MdoDocument, MdoEnum,
+    //                         MdoChartOfCharacteristicTypes,
+    //                         MdoChartOfAccounts,
+    //                         MdoChartOfCalculationTypes,
+    //                         MdoExchangePlan, MdoBusinessProcess,
+    //                         MdoTask
+    //   register roots        MdoInformationRegister,
+    //                         MdoAccumulationRegister,
+    //                         MdoAccountingRegister,
+    //                         MdoCalculationRegister
+    //   other real-table      MdoDocumentJournal, MdoConstant,
+    //   roots                 MdoConstants, MdoSequence,
+    //                         MdoFilterCriterion
     // ===================================================================
+    /// `Справочник.<Имя справочника>` / `Catalog.<Имя справочника>`.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.4 lists
+    /// `Справочник (Catalog)` among the predefined-value types usable in
+    /// `ЗНАЧЕНИЕ(...)` — <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>.
     #[regex(r"(?i)справочник|(?i)catalog")]
     MdoCatalog,
 
+    /// `Документ.<Имя документа>` / `Document.<Имя документа>`.
     #[regex(r"(?i)документ|(?i)document")]
     MdoDocument,
 
+    /// `ЖурналДокументов.<Имя журнала документов>` /
+    /// `DocumentJournal.<Имя журнала документов>`.
+    ///
+    /// Longest-match wins over [`MdoDocument`], whose Russian and
+    /// English spellings are both proper prefixes of this one.
+    #[regex(r"(?i)журналдокументов|(?i)documentjournal")]
+    MdoDocumentJournal,
+
+    /// `РегистрСведений.<Имя регистра сведений>` /
+    /// `InformationRegister.<Имя регистра сведений>`.
     #[regex(r"(?i)регистрсведений|(?i)informationregister")]
     MdoInformationRegister,
 
+    /// `РегистрНакопления.<Имя регистра накопления>` /
+    /// `AccumulationRegister.<Имя регистра накопления>`.
     #[regex(r"(?i)регистрнакопления|(?i)accumulationregister")]
     MdoAccumulationRegister,
 
+    /// `РегистрБухгалтерии.<Имя регистра бухгалтерии>` /
+    /// `AccountingRegister.<Имя регистра бухгалтерии>`.
     #[regex(r"(?i)регистрбухгалтерии|(?i)accountingregister")]
     MdoAccountingRegister,
 
+    /// `РегистрРасчета.<Имя регистра расчета>` /
+    /// `CalculationRegister.<Имя регистра расчета>`.
     #[regex(r"(?i)регистррасчета|(?i)calculationregister")]
     MdoCalculationRegister,
 
+    /// `ПланСчетов.<Имя плана счетов>` /
+    /// `ChartOfAccounts.<Имя плана счетов>`.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.4.
     #[regex(r"(?i)плансчетов|(?i)chartofaccounts")]
     MdoChartOfAccounts,
 
+    /// `ПланВидовРасчета.<Имя плана видов расчета>` /
+    /// `ChartOfCalculationTypes.<Имя плана видов расчета>`.
+    ///
+    /// The canonical Russian spelling ends in the singular genitive
+    /// `Расчета`, not `Расчетов`.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.4.
     #[regex(r"(?i)планвидоврасчета|(?i)chartofcalculationtypes")]
     MdoChartOfCalculationTypes,
 
+    /// `ПланВидовХарактеристик.<Имя плана видов характеристик>` /
+    /// `ChartOfCharacteristicTypes.<Имя плана видов характеристик>`.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.4.
     #[regex(r"(?i)планвидовхарактеристик|(?i)chartofcharacteristictypes")]
     MdoChartOfCharacteristicTypes,
 
+    /// `ПланОбмена.<Имя плана обмена>` /
+    /// `ExchangePlan.<Имя плана обмена>`.
+    #[regex(r"(?i)планобмена|(?i)exchangeplan")]
+    MdoExchangePlan,
+
+    /// `Перечисление.<Имя перечисления>` / `Enum.<Имя перечисления>`.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.4, which
+    /// also gives the canonical `ЗНАЧЕНИЕ(Перечисление.ВидыТоваров.Услуга)`
+    /// form.
     #[regex(r"(?i)перечисление|(?i)enum")]
     MdoEnum,
 
+    /// `БизнесПроцесс.<Имя бизнес-процесса>` /
+    /// `BusinessProcess.<Имя бизнес-процесса>`.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.4, in the
+    /// route-point form
+    /// `БизнесПроцесс.<Имя>.ТочкаМаршрута.<Имя точки>`.
     #[regex(r"(?i)бизнеспроцесс|(?i)businessprocess")]
     MdoBusinessProcess,
 
+    /// `Задача.<Имя задачи>` / `Task.<Имя задачи>`.
     #[regex(r"(?i)задача|(?i)task")]
     MdoTask,
 
+    /// `Константа.<Имя константы>` / `Constant.<Const name>` — the table
+    /// of one named constant.
+    ///
+    /// Distinct from [`MdoConstants`], the aggregate table of all
+    /// constants; the two spellings differ by their final letter only.
     #[regex(r"(?i)константа|(?i)constant")]
     MdoConstant,
 
+    /// `Константы` / `Constants` — the aggregate table holding every
+    /// constant.
+    ///
+    /// Unlike the other roots this one takes no name part: it is a
+    /// complete table reference on its own. Distinct from
+    /// [`MdoConstant`]; see that variant.
+    #[regex(r"(?i)константы|(?i)constants")]
+    MdoConstants,
+
+    /// `Последовательность.<Имя последовательности>` /
+    /// `Sequence.<Имя последовательности>`.
     #[regex(r"(?i)последовательность|(?i)sequence")]
     MdoSequence,
+
+    /// `КритерийОтбора.<Имя критерия отбора>` /
+    /// `FilterCriterion.<Имя критерия отбора>`.
+    #[regex(r"(?i)критерийотбора|(?i)filtercriterion")]
+    MdoFilterCriterion,
 
     // ===================================================================
     // LEGACY (Slice 5 pending — virtual tables and external data sources)
@@ -507,10 +609,19 @@ pub enum SdblTokenKind {
     VtDrCrTurnovers,
 
     // ===================================================================
-    // CLEAN-ROOM Slice 3b — lexer error fallback (in progress)
+    // CLEAN-ROOM Slice 3b — lexer error fallback
     //
     // Attestation: `docs/legal/sdbl-clean-room-slice3b.md`.
     // ===================================================================
+    /// Substituted for a failed match, so that input no rule accepts
+    /// still reaches the parser as a token covering its own byte range.
+    ///
+    /// This is not vocabulary and carries no pattern: no 1C source
+    /// defines an error token, because the documented query language
+    /// describes what is accepted rather than how a tool should
+    /// represent what is not. Keeping the offending span in the stream
+    /// is what lets an editor point at it instead of at whatever
+    /// followed.
     Error,
 }
 

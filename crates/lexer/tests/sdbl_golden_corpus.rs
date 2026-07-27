@@ -1490,31 +1490,31 @@ fn golden_corpus() {
           Newline @208 "\n"
 
         ---- 077 slice3b document journal bilingual
-          Ident @0 "ЖурналДокументов"
+          MdoDocumentJournal @0 "ЖурналДокументов"
           Dot @32 "."
           Ident @33 "Продажи"
           Whitespace @47 " "
-          Ident @48 "DocumentJournal"
+          MdoDocumentJournal @48 "DocumentJournal"
           Dot @63 "."
           Ident @64 "Sales"
           Newline @69 "\n"
 
         ---- 078 slice3b exchange plan bilingual
-          Ident @0 "ПланОбмена"
+          MdoExchangePlan @0 "ПланОбмена"
           Dot @20 "."
           Ident @21 "Филиалы"
           Whitespace @35 " "
-          Ident @36 "ExchangePlan"
+          MdoExchangePlan @36 "ExchangePlan"
           Dot @48 "."
           Ident @49 "Branches"
           Newline @57 "\n"
 
         ---- 079 slice3b filter criterion bilingual
-          Ident @0 "КритерийОтбора"
+          MdoFilterCriterion @0 "КритерийОтбора"
           Dot @28 "."
           Ident @29 "Связанные"
           Whitespace @47 " "
-          Ident @48 "FilterCriterion"
+          MdoFilterCriterion @48 "FilterCriterion"
           Dot @63 "."
           Ident @64 "Related"
           Newline @71 "\n"
@@ -1526,7 +1526,7 @@ fn golden_corpus() {
           Whitespace @16 " "
           KwFrom @17 "ИЗ"
           Whitespace @21 " "
-          Ident @22 "Константы"
+          MdoConstants @22 "Константы"
           Semicolon @40 ";"
           Whitespace @41 " "
           KwSelect @42 "SELECT"
@@ -1535,7 +1535,7 @@ fn golden_corpus() {
           Whitespace @50 " "
           KwFrom @51 "FROM"
           Whitespace @55 " "
-          Ident @56 "Constants"
+          MdoConstants @56 "Constants"
           Newline @65 "\n"
 
         ---- 081 slice3b unmatched byte error fallback
