@@ -86,19 +86,29 @@ impl<'a> Parser<'a> {
         self.pos
     }
 
-    /// Net nesting introduced between `from` and the current position:
-    /// opened groups minus closed ones. A grammar rule that gave up inside
-    /// an unclosed group leaves this above zero, which is the only way a
-    /// caller can tell that the position it was handed is not top level.
-    pub(crate) fn nesting_delta_since(&self, from: usize) -> i32 {
-        self.tokens[from.min(self.tokens.len())..self.pos.min(self.tokens.len())].iter().fold(
-            0i32,
-            |depth, t| match t.kind {
-                TokenKind::LParen | TokenKind::LBrace => depth + 1,
-                TokenKind::RParen | TokenKind::RBrace => depth - 1,
-                _ => depth,
-            },
-        )
+    /// Whether any group opened after `from` is still open at the current
+    /// position. A grammar rule that gave up inside an unclosed group leaves
+    /// one open, which is the only way a caller can tell that the position it
+    /// was handed is not top level.
+    ///
+    /// The two kinds are counted apart, and a closer with nothing to close is
+    /// ignored rather than driving a counter negative: `( }` leaves the paren
+    /// open, which is what it does to a reader, and a stray `)` does not
+    /// cancel a brace that is still waiting.
+    pub(crate) fn has_open_group_since(&self, from: usize) -> bool {
+        let (mut parens, mut braces) = (0u32, 0u32);
+
+        for t in &self.tokens[from.min(self.tokens.len())..self.pos.min(self.tokens.len())] {
+            match t.kind {
+                TokenKind::LParen => parens += 1,
+                TokenKind::RParen => parens = parens.saturating_sub(1),
+                TokenKind::LBrace => braces += 1,
+                TokenKind::RBrace => braces = braces.saturating_sub(1),
+                _ => {}
+            }
+        }
+
+        parens > 0 || braces > 0
     }
 
     pub fn eat(&mut self, kind: TokenKind) -> bool {
@@ -123,8 +133,11 @@ impl<'a> Parser<'a> {
         }
 
         let found = self.current();
-        let recovery =
-            if found.is_none() { RecoveryKind::MissingToken } else { RecoveryKind::BumpToken };
+        let recovery = if found.is_none() || self.at_statement_separator() {
+            RecoveryKind::MissingToken
+        } else {
+            RecoveryKind::BumpToken
+        };
         let err = ParseError::Expected { expected: smallvec![kind], found, recovery };
 
         if recovery == RecoveryKind::MissingToken {

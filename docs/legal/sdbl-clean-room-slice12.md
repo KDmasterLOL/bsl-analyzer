@@ -563,6 +563,32 @@ query in its own right. The parser now offers the net nesting a rule
 introduced, and the loop asks before treating a query keyword as a new
 member.
 
+### Nesting kept in two places agreed with itself only by luck
+
+The fifth round's fix gave the package loop a way to ask whether a rule
+had left a group open. The sixth round found four ways that answer could
+be wrong, and they share one cause: the bookkeeping existed twice — an
+accumulator in the loop and a local counter in the drain — and neither
+knew what the other had seen.
+
+A group closed *by the drain* never reached the loop's accumulator, so the
+state stuck and every later top-level query in that package was swallowed.
+And both counters treated the two bracket kinds as one arithmetic balance,
+so `( }` cancelled to zero and a query still inside an unclosed paren was
+promoted to a package member.
+
+There is now one answer to the question, computed rather than
+accumulated: everything since the last separator is one member's worth of
+tokens, and nesting is read from that whole span, with parens and braces
+counted apart and a closer that has nothing to close ignored rather than
+driving a count negative. Two counters cannot disagree if there is one.
+
+The fourth finding was that the separator rule had been applied to two of
+the three paths that report errors. `Parser::expect` is the third, and it
+was still marking a `;` as the offending token — so `SELECT A FROM ;
+SELECT B FROM U`, which is missing only a source, also got told its
+separator was missing.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -662,8 +688,12 @@ are covered by entries A6–A8 above.
   one class and all confirmed: an inner recovery consuming the package
   separator. Closed at the root rather than per site. Parser tests
   638 → 640.
-- C8 — the fifth round. Four findings, three of them in the fourth round's
-  own fix. Parser tests 640 → 643.
+- C8 `76f4e5ad` — the fifth round. Four findings, three of them in the
+  fourth round's own fix. Parser tests 640 → 643.
+- C9 — the sixth round, narrowed to the two commits that touch the shared
+  parser, because the whole slice's diff had grown past what the review
+  tool can pass to a lens. Four findings, all in the fifth round's own fix.
+  Parser tests 643 → 645.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

@@ -1537,7 +1537,7 @@ discarding was silent.
   `totals_group_item`, `totals_periods_modifier`, `totals_group_alias`;
 - `crates/parser/src/grammar/sdbl/expressions.rs` — the recovery banner;
 - `crates/parser/tests/sdbl_parser_tests.rs` — 12 coverage pins;
-- `crates/parser/tests/sdbl_recovery_and_allowances.rs` — 34 acceptance
+- `crates/parser/tests/sdbl_recovery_and_allowances.rs` — 36 acceptance
   tests;
 - `docs/legal/sdbl-select-mini-spec.md` — the control-point grammar and
   the ordering-field word order;
@@ -1553,7 +1553,7 @@ which turns a silent loss into a silent acceptance. Both are fixed, along
 with a leading comma that cost a whole query and an explicit alias that
 both under- and over-restricted its name.
 
-Five review rounds were run, each because the one before it had found
+Six review rounds were run, each because the one before it had found
 defects inside its own predecessor's fixes. The second round
 found the same thing one level deeper: making the drain stop at the
 separator assumed every recovery path leaves the separator alone, and
@@ -1573,7 +1573,8 @@ well, since the reasoning is the same there.
 
 Commit trail: C0a `18b5bb70`, C0b `27eb6e92`, C1 `80350945`,
 C2 `da3eeaa0`, C2b `01d9cd6d`, C3 `7aaf669c`, C4 `3aebeb9b`,
-C5 `7a7fb54d`, C6 `f8c9d9e4`, C7 `efea2e7e`, C8 the fifth round's fixes. Two earlier commits landed
+C5 `7a7fb54d`, C6 `f8c9d9e4`, C7 `efea2e7e`, C8 `76f4e5ad`, C9 the sixth
+round's fixes. Two earlier commits landed
 under this slice's name in April 2026 without an attestation and are
 covered by it now: `9d418084` and `88439afa`, both on the recovery
 helpers' clause-keyword stop.

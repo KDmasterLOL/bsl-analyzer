@@ -555,3 +555,57 @@ fn an_error_at_a_separator_points_at_the_separator() {
     let at_semicolon = syntax::TextSize::from(input.find(';').unwrap() as u32);
     assert_eq!(parse.errors()[0].range(), syntax::TextRange::empty(at_semicolon));
 }
+
+#[test]
+fn nesting_is_counted_per_kind_and_from_the_whole_member() {
+    // A closer of the wrong kind does not close the group that is open, and
+    // a group closed by the drain counts as closed for what follows. Both
+    // fail if nesting is one arithmetic balance accumulated in two places.
+    let cases: [(&str, usize); 4] = [
+        // The `}` must not cancel the `(`, so the second query is inside it.
+        ("SELECT A FROM T 42 ( } SELECT B FROM U", 1),
+        ("SELECT F(A X } SELECT B FROM U)", 1),
+        // Here the drain closes the call, so what follows is a member again.
+        ("ВЫБРАТЬ Ф(А X ВЫБРАТЬ Б ИЗ У) ВЫБРАТЬ В ИЗ W", 2),
+        // And a separator still ends the member whatever is open.
+        ("SELECT A FROM T 42 (; SELECT B FROM U)", 2),
+    ];
+
+    for (input, wanted) in cases {
+        let parse = parse_sdbl(input);
+        assert_eq!(
+            usize::from(parse.syntax_node().text_range().len()),
+            input.len(),
+            "`{input}` must be covered completely",
+        );
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+                .count(),
+            wanted,
+            "`{input}`",
+        );
+    }
+}
+
+#[test]
+fn an_expected_token_missing_at_a_separator_leaves_it_alone() {
+    // `expect` is a third path to reporting, next to `error` and
+    // `error_custom`, and it has to follow the same rule about separators.
+    let parse = parse_sdbl("SELECT A FROM ; SELECT B FROM U");
+    assert!(
+        !parse.errors().iter().any(|e| e.message().contains("разделитель")),
+        "the separator is present: {:#?}",
+        parse.errors(),
+    );
+    assert_eq!(
+        parse
+            .syntax_node()
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+            .count(),
+        2,
+    );
+}

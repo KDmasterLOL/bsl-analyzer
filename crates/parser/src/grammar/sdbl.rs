@@ -56,12 +56,15 @@ pub fn query_package(p: &mut Parser) {
     // members are parsed only while the separators survive is a package that
     // loses good queries behind bad ones.
     let mut a_query_is_due = true;
-    // A rule that gave up inside an unclosed `(` or `{` hands back a
-    // position that is not top level. A query keyword there belongs to that
-    // group, not to the package.
-    let mut open_groups = 0i32;
 
     p.skip_trivia();
+
+    // Everything since the last separator is one package member's worth of
+    // tokens. Nesting is read from that whole span rather than accumulated
+    // as the loop goes: a group opened by a rule that gave up and closed
+    // later by the drain has to be seen as closed, and two counters kept
+    // apart never agree on that.
+    let mut member_start = p.token_cursor();
 
     while !p.at_end() {
         p.check_iteration_limit();
@@ -76,7 +79,7 @@ pub fn query_package(p: &mut Parser) {
             }
             p.bump();
             a_query_is_due = true;
-            open_groups = 0;
+            member_start = p.token_cursor();
             continue;
         }
 
@@ -84,21 +87,19 @@ pub fn query_package(p: &mut Parser) {
             break;
         }
 
+        let inside_group = p.has_open_group_since(member_start);
+
         if a_query_is_due {
-            let mark = p.token_cursor();
             queries(p);
             a_query_is_due = false;
-            open_groups += p.nesting_delta_since(mark);
-        } else if open_groups <= 0 && at_query_start(p) {
+        } else if !inside_group && at_query_start(p) {
             // A query where a separator should be. Recognising it is what
             // keeps the rest of the package parseable, but the package is
             // still malformed and silence here would turn a bad package into
             // two good queries.
             p.error_custom_no_bump("ожидался разделитель ';' между запросами");
-            let mark = p.token_cursor();
             queries(p);
-            open_groups += p.nesting_delta_since(mark);
-        } else if !drain_to_boundary(p) {
+        } else if !drain_to_boundary(p, member_start) {
             break;
         }
     }
@@ -120,11 +121,11 @@ fn at_query_start(p: &Parser) -> bool {
 /// parse reports success, so a consumer cannot tell a clean query from half
 /// of one.
 ///
-/// The boundary is a separator *or* the start of the next query. Stopping at
-/// the separator alone would be enough only if every recovery path left it
-/// alone, and they do not; recognising a query start as well is what makes
-/// "one bad member costs only itself" true rather than merely intended.
-fn drain_to_boundary(p: &mut Parser) -> bool {
+/// A separator cannot belong to a group in this language, so it ends the
+/// leftover at any depth. A query start can belong to one — inside parens it
+/// is a subquery, inside braces it is extension text — and is a boundary only
+/// where nothing opened since `member_start` is still open.
+fn drain_to_boundary(p: &mut Parser, member_start: usize) -> bool {
     p.skip_trivia();
 
     if p.at_end() || p.at(TokenKind::Semicolon) {
@@ -133,23 +134,12 @@ fn drain_to_boundary(p: &mut Parser) -> bool {
 
     let leftover = p.start();
     let mut took_anything = false;
-    let mut depth = 0i32;
 
-    // A separator cannot belong to a group in this language, so it ends the
-    // leftover at any depth. A query start can belong to one — inside
-    // parens it is a subquery, inside braces it is extension text — and is
-    // a boundary only at the top.
     while !p.at_end() && !p.at(TokenKind::Semicolon) {
         p.check_iteration_limit();
 
-        if took_anything && depth == 0 && at_query_start(p) {
+        if took_anything && at_query_start(p) && !p.has_open_group_since(member_start) {
             break;
-        }
-
-        if p.at(TokenKind::LParen) || p.at(TokenKind::LBrace) {
-            depth += 1;
-        } else if (p.at(TokenKind::RParen) || p.at(TokenKind::RBrace)) && depth > 0 {
-            depth -= 1;
         }
 
         p.bump();
