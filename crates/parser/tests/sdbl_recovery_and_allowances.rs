@@ -354,3 +354,70 @@ fn coverage_holds_across_the_shapes_the_parser_owns() {
         accepted(input);
     }
 }
+
+#[test]
+fn a_bad_member_keeps_the_next_query_even_when_it_ate_the_separator() {
+    // Several recovery paths report by bumping a token, and the token can be
+    // the separator. The package loop must not depend on the separator
+    // surviving, or "one bad member costs only itself" holds by luck.
+    // `SDBL_QUERY` counts every `ВЫБРАТЬ`, nested ones included; the DROP
+    // case is counted by its own node because it has no `ВЫБРАТЬ` of its own.
+    for (input, kind, wanted) in [
+        ("УНИЧТОЖИТЬ ; ВЫБРАТЬ A ИЗ T", SyntaxKind::SDBL_QUERY, 1),
+        ("УНИЧТОЖИТЬ ; ВЫБРАТЬ A ИЗ T", SyntaxKind::SDBL_DROP_QUERY, 1),
+        ("ВЫБРАТЬ ПЕРВЫЕ ; ВЫБРАТЬ Б ИЗ У", SyntaxKind::SDBL_QUERY, 2),
+        ("ВЫБРАТЬ А ИЗ ; ВЫБРАТЬ Б ИЗ У", SyntaxKind::SDBL_QUERY, 2),
+        ("ВЫБРАТЬ (ВЫБРАТЬ ); ВЫБРАТЬ А ИЗ Т", SyntaxKind::SDBL_QUERY, 3),
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(
+            usize::from(parse.syntax_node().text_range().len()),
+            input.len(),
+            "`{input}` must be covered completely",
+        );
+        let found = parse.syntax_node().descendants().filter(|n| n.kind() == kind).count();
+        assert_eq!(found, wanted, "`{input}`: {kind:?} count");
+    }
+}
+
+#[test]
+fn a_period_boundary_is_a_date_or_a_parameter() {
+    accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ, &Н, &К)");
+    accepted(
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(2006,6,28), ДАТАВРЕМЯ(2006,6,28))",
+    );
+    for bad in [
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ, 42)",
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ, \"текст\")",
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ, Поле.Реквизит)",
+    ] {
+        let parse = parse_sdbl(bad);
+        assert!(parse.has_errors(), "`{bad}`: the rule allows only a date or a parameter");
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), bad.len());
+    }
+}
+
+#[test]
+fn only_the_descending_direction_pairs_with_hierarchy() {
+    accepted("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н УБЫВ ИЕРАРХИЯ");
+    accepted("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИЕРАРХИЯ УБЫВ");
+    for bad in [
+        "ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ВОЗР ИЕРАРХИЯ",
+        "ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИЕРАРХИЯ ВОЗР",
+    ] {
+        assert!(parse_sdbl(bad).has_errors(), "`{bad}` is not one of the four orderings");
+        assert_eq!(uncovered_len(bad), 0);
+    }
+}
+
+#[test]
+fn a_missing_hierarchy_does_not_also_report_a_conflict_with_it() {
+    // `ТОЛЬКО ПЕРИОДАМИ(…)` is one mistake, not two: the alternative was
+    // never taken, so nothing can conflict with it.
+    let parse = parse_sdbl("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ТОЛЬКО ПЕРИОДАМИ(ДЕНЬ)");
+    assert_eq!(parse.errors().len(), 1, "got: {:#?}", parse.errors());
+}
+
+fn uncovered_len(input: &str) -> usize {
+    input.len() - usize::from(parse_sdbl(input).syntax_node().text_range().len())
+}

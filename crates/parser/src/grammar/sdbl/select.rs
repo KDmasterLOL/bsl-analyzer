@@ -205,7 +205,8 @@ pub(super) fn selected_fields(p: &mut Parser) {
     // is absent. Anything else — a stray comma, a token no rule accepts — is
     // a list with something wrong inside it, and the list parser's own
     // recovery handles that better than giving up here would.
-    let list_is_absent = is_clause_keyword(p) || p.at(TokenKind::Semicolon) || p.at_end();
+    let list_is_absent =
+        is_clause_keyword(p) || p.at(TokenKind::Semicolon) || p.at(TokenKind::RParen) || p.at_end();
 
     if !list_is_absent {
         super::expressions::parse_delimited_list(
@@ -795,17 +796,32 @@ fn order_by_item(p: &mut Parser) {
     super::expressions::expression(p);
     p.skip_trivia();
 
+    // Of the four documented orderings, `ИЕРАРХИЯ` may be preceded by
+    // nothing and followed by `УБЫВ`. The reverse, `УБЫВ ИЕРАРХИЯ`, is not
+    // among them and is tolerated; `ВОЗР ИЕРАРХИЯ` is not among them either
+    // and is not — one stated tolerance, not a general permission.
+    let descending_came_first = at_sdbl_keyword(p, "DESC", "УБЫВ");
     let direction_came_first = eat_order_direction(p);
 
     if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
+        if direction_came_first && !descending_came_first {
+            p.error_custom_no_bump("'ИЕРАРХИЯ' / 'HIERARCHY' сочетается только с 'УБЫВ' / 'DESC'");
+        }
+
         p.bump();
         p.skip_trivia();
 
-        // Of the four documented orderings only `ИЕРАРХИЯ УБЫВ` puts a
-        // direction after the hierarchy, and only the descending one.
-        if !direction_came_first && at_sdbl_keyword(p, "DESC", "УБЫВ") {
-            p.bump();
-            p.skip_trivia();
+        if !direction_came_first {
+            if at_sdbl_keyword(p, "DESC", "УБЫВ") {
+                p.bump();
+                p.skip_trivia();
+            } else if at_sdbl_keyword(p, "ASC", "ВОЗР") {
+                p.error_custom_no_bump(
+                    "'ИЕРАРХИЯ' / 'HIERARCHY' сочетается только с 'УБЫВ' / 'DESC'",
+                );
+                p.bump();
+                p.skip_trivia();
+            }
         }
     }
 }
@@ -967,6 +983,14 @@ fn at_period_name(p: &Parser) -> bool {
     PERIOD_NAMES.iter().any(|(en, ru)| at_sdbl_keyword(p, en, ru))
 }
 
+/// `<Литерал типа DATE> | <Идентификатор параметра>` — what the rule allows
+/// a period boundary to be.
+fn at_period_boundary(p: &Parser) -> bool {
+    p.at(TokenKind::Ampersand)
+        || (at_sdbl_keyword(p, "DATETIME", "ДАТАВРЕМЯ")
+            && p.nth_non_trivia(0) == Some(TokenKind::LParen))
+}
+
 fn at_periods_keyword(p: &Parser) -> bool {
     at_sdbl_keyword(p, "PERIODS", "ПЕРИОДАМИ")
 }
@@ -993,10 +1017,14 @@ fn totals_group_modifier(p: &mut Parser) {
         if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
             p.bump();
             p.skip_trivia();
+            true
         } else {
             p.error_custom_no_bump("ожидалось 'ИЕРАРХИЯ' / 'HIERARCHY' после 'ТОЛЬКО' / 'ONLY'");
+            // The alternative was never taken, so what follows cannot
+            // conflict with it. Saying otherwise would be a second message
+            // about a word that is not there.
+            false
         }
-        true
     } else if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
         p.bump();
         p.skip_trivia();
@@ -1056,6 +1084,9 @@ fn totals_periods_modifier(p: &mut Parser) {
         p.skip_trivia();
 
         if super::expressions::is_expression_start(p) {
+            if !at_period_boundary(p) {
+                p.error_custom_no_bump("границей периода может быть литерал даты или параметр");
+            }
             super::expressions::expression(p);
             p.skip_trivia();
         } else {
@@ -1136,7 +1167,7 @@ fn top_clause(p: &mut Parser) {
     // `expect` reports by bumping the offending token, which would eat the
     // next clause's keyword and cost that clause its parse. Say the same
     // thing without moving when the count is simply not there.
-    if is_clause_keyword(p) || p.at_end() {
+    if is_clause_keyword(p) || p.at(TokenKind::Semicolon) || p.at_end() {
         p.error_custom_no_bump("ожидалось количество после 'ПЕРВЫЕ' / 'TOP'");
     } else {
         p.expect(TokenKind::Decimal);

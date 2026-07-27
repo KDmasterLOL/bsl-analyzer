@@ -159,8 +159,8 @@ Every site is classified:
 | A12 | `select.rs:911` `limitations` | `РАЗЛИЧНЫЕ` / `ПЕРВЫЕ` / `РАЗРЕШЕННЫЕ` in any order and repeated. Attested by Slice 7-addendum allowances #1–#2. |
 | A13 | `select.rs:753` `order_by_item` | `УБЫВ ИЕРАРХИЯ` accepted, though the canonical `<Порядок>` has only `ИЕРАРХИЯ УБЫВ`. Kept: it is a plausible slip, and rejecting a word order the language merely does not list buys nothing. See § Source questions. |
 | A14 | `parser.rs:227` `check_iteration_limit` | A stuck-position guard on every unbounded loop. Not a language property at all; a liveness property of the parser. |
-| A15 | `select.rs` `totals_periods_modifier` | The rule allows at most two boundary arguments; the parser takes any number. A missing boundary after a comma *is* reported; a third present one is not. Counting present arguments is a check with no recovery value, and refusing to parse them would only hide the rest of the clause. |
-| A16 | `select.rs` `totals_periods_modifier` | An unclosed `ПЕРИОДАМИ(` at end of input is taken and left quiet, like the half-typed clause keywords of A1–A5. With a clause still to come it is reported: there the paren is not being typed, it is missing. |
+| A15 | `select.rs` `totals_periods_modifier` | The rule allows at most two boundary arguments; the parser takes any number. A missing boundary after a comma is reported, and so is one that is neither a date literal nor a parameter, but a third *well-formed* boundary is not. Counting present arguments is a check with no recovery value, and refusing to parse them would only hide the rest of the clause. |
+| A16 | `select.rs` `totals_periods_modifier` | At end of input, a `ПЕРИОДАМИ` whose paren is not open yet or not closed yet is taken and left quiet — the same case as the half-typed clause keywords of A1–A5, and quiet for the same reason. With a clause still to come, both are reported: there the paren is not being typed, it is missing. |
 | A17 | `select.rs` `totals_group_modifier`, `totals_periods_modifier` | Where the rule is broken but the text is unambiguous — a period name outside the ten, `ИЕРАРХИЯ` and `ПЕРИОДАМИ` together — the parser reports and then consumes anyway. Refusing would cost the clause its shape to make a point the diagnostic already makes. |
 | A18 | `select.rs` `totals_group_alias` | A *bare* alias is taken on the wide clause-keyword guard, an explicit one on the narrow `is_body_clause_keyword`. A bare alias cannot be told from a following clause by anything but its spelling, so the wide guard is the price of supporting it; after `КАК` there is no such ambiguity, and a name that spells a keyword is still a name — the same reading `source_alias` and the `ПОМЕСТИТЬ` name already take. |
 
@@ -467,6 +467,43 @@ The remaining findings were arithmetic in this document and the master
 document: counts not updated after the inventory grew, and a corpus
 figure that had been refreshed in one document and not the other.
 
+### What the second review round changed
+
+The first round's fixes were themselves reviewed, because two of that
+round's findings had been defects inside earlier fixes of this same
+slice. The second round returned ten findings; nine held and were fixed,
+one was declined.
+
+The one that mattered was a class, not an instance. Making the drain stop
+at the separator assumed that every inner recovery path leaves the
+separator where it found it — and several do not, because they report by
+bumping a token, and the token they bump can be the `;`. So `УНИЧТОЖИТЬ ;
+ВЫБРАТЬ A ИЗ T` lost the good query anyway, and so did three other shapes.
+The fix is not another guard per site: the package loop no longer depends
+on the separator surviving at all. It runs while there is input left,
+skips separators wherever it finds them, and the drain stops at a
+separator *or* at the start of the next query. That is the same shape the
+BSL entry point has, and the invariant now holds by construction rather
+than by everyone downstream being careful.
+
+Four smaller ones were the rule again being normalised without being
+enforced: a period boundary could be any expression rather than a date
+literal or a parameter; `ВОЗР ИЕРАРХИЯ` was accepted although the single
+declared tolerance covers only `УБЫВ ИЕРАРХИЯ`; a closing paren did not
+count as the end of an empty selection list, so an empty subquery
+swallowed the separator after it; and a separator did not count as a
+missing `ПЕРВЫЕ` count. One was a false message: `ТОЛЬКО` with no
+`ИЕРАРХИЯ` also claimed a conflict with `ПЕРИОДАМИ`, about a word that
+was not in the input.
+
+**The declined finding.** `ПЕРИОДАМИ` with no parenthesis at all at end of
+input is accepted in silence, and the review asked for it to be reported
+on the grounds that the opening paren is mandatory. It is — but so is the
+`ПО` after `СГРУППИРОВАТЬ`, and A1–A5 stay quiet about that for the same
+reason: at end of input the user is mid-word, not mistaken. Reporting here
+and not there would be the inconsistency. A16's wording was too narrow to
+cover this and has been widened; the behaviour stands.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -549,9 +586,13 @@ are covered by entries A6–A8 above.
   5 on the closed lists its rules enumerate, 5 on the tolerances kept
   on purpose, and 4 on nothing leaving the parser without a word.
   Parser tests 608 → 628.
-- C4 — the review pass. Seven substantive findings and six small ones,
-  all reproduced before being acted on and all confirmed. Parser tests
-  628 → 632.
+- C4 `3aebeb9b` — the first review round. Seven substantive findings and
+  six small ones, all reproduced before being acted on and all confirmed.
+  Parser tests 628 → 632.
+- C5 — the second review round, run because two of the first round's
+  findings sat inside the first round's own fixes. Ten more findings, nine
+  acted on and one declined with a reason. Parser tests 632 → 636; the
+  acceptance suite grows from 23 tests to 27.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

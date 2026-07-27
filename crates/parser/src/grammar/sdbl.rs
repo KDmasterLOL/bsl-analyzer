@@ -50,68 +50,92 @@ pub(super) const LIST_RECOVERY: TokenSet =
 pub fn query_package(p: &mut Parser) {
     let m = p.start();
 
-    p.skip_trivia();
-    if !p.at_end() {
-        queries(p);
-    }
+    // The loop is driven by "there is input left", not by "the separator is
+    // where I left it". Recovery inside a query may consume a `;` — several
+    // paths do, by reporting through a token bump — and a package whose
+    // members are parsed only while the separators survive is a package that
+    // loses good queries behind bad ones.
+    let mut a_query_is_due = true;
 
-    loop {
+    p.skip_trivia();
+
+    while !p.at_end() {
         p.check_iteration_limit();
         p.skip_trivia();
 
-        drain_to_separator(p);
-
-        if !p.at(TokenKind::Semicolon) {
-            break;
+        if p.at(TokenKind::Semicolon) {
+            p.bump();
+            a_query_is_due = true;
+            continue;
         }
-
-        p.bump();
-        p.skip_trivia();
 
         if p.at_end() {
             break;
         }
 
-        queries(p);
+        if a_query_is_due || at_query_start(p) {
+            queries(p);
+            a_query_is_due = false;
+        } else if !drain_to_boundary(p) {
+            break;
+        }
     }
 
     m.complete(p, NodeKind::SdblQueryPackage);
 }
 
-/// Takes whatever the query rules refused, up to the next separator, so
-/// that the tree's text is the source text.
+fn at_query_start(p: &Parser) -> bool {
+    select::at_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ")
+        || select::at_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ")
+}
+
+/// Takes whatever the query rules refused, up to the next boundary, so that
+/// the tree's text is the source text. Returns whether anything was taken.
 ///
-/// A query stops short whenever a clause is out of order, a modifier is
-/// one this grammar does not know, or the text is simply wrong. Without
-/// this the remainder is not merely unparsed — it is absent from the tree,
-/// and the parse reports success, so a consumer cannot tell a clean query
-/// from half of one.
+/// A query stops short whenever a clause is out of order, a modifier is one
+/// this grammar does not know, or the text is simply wrong. Without this the
+/// remainder is not merely unparsed — it is absent from the tree, and the
+/// parse reports success, so a consumer cannot tell a clean query from half
+/// of one.
 ///
-/// Stopping at the separator rather than at the end of input is the whole
-/// point of doing this inside the loop: a package is a sequence, one bad
-/// member of it must not cost the rest, and a consumer that walks the
-/// package's queries would otherwise never see the ones that follow.
-fn drain_to_separator(p: &mut Parser) {
+/// The boundary is a separator *or* the start of the next query. Stopping at
+/// the separator alone would be enough only if every recovery path left it
+/// alone, and they do not; recognising a query start as well is what makes
+/// "one bad member costs only itself" true rather than merely intended.
+fn drain_to_boundary(p: &mut Parser) -> bool {
     p.skip_trivia();
 
     if p.at_end() || p.at(TokenKind::Semicolon) {
-        return;
+        return false;
     }
 
     let leftover = p.start();
+    let mut took_anything = false;
 
     while !p.at_end() && !p.at(TokenKind::Semicolon) {
         p.check_iteration_limit();
+
+        if took_anything && at_query_start(p) {
+            break;
+        }
+
         p.bump();
+        took_anything = true;
     }
 
-    p.emit_error_at_marker(
-        leftover,
-        ParseError::Custom {
-            message: "не разобран остаток текста запроса",
-            recovery: RecoveryKind::RecoverySpan,
-        },
-    );
+    if took_anything {
+        p.emit_error_at_marker(
+            leftover,
+            ParseError::Custom {
+                message: "не разобран остаток текста запроса",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+    } else {
+        leftover.abandon(p);
+    }
+
+    took_anything
 }
 
 fn queries(p: &mut Parser) {

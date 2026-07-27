@@ -912,7 +912,10 @@ OVERALL/ОБЩИЕ via Slice 2 LEGACY block (KwOverall).
 
 PERIODS structured-modifier coverage was **NOT** verified in chapter 39 by
 direct dump read at C0a time; Slice 11 cites only the canonical OVERALL
-form. Any future PERIODS support is owned by Slice 12.
+form. **Closed by Slice 12**, which found the rule in the primary source
+rather than the textbook: Глава 8 §8.4.16 carries the whole control-point
+rule, including the ten period names and the two optional boundaries, and
+§8.4.16.4 works an example through.
 
 ## IDE-recovery allowances (Slice 11 extension)
 
@@ -933,7 +936,9 @@ local allowance. Likewise, the structured PERIODS / ONLY / HIERARCHY-in-TOTALS
 modifier language forms are **NOT** in this list — Slice 11 narrows the
 TOTALS BY mini-spec to the actually-supported flat-list shape; structured-
 modifier promotion (both the language-form scope and the parser-shape work)
-is deferred to Slice 12.
+was deferred to Slice 12 and landed there. The modifiers are parsed and the
+rule's mandatory parts are enforced; what remains open is their reading,
+which is Slice 13's.
 
 1. **OVERALL / ОБЩИЕ as a TOTALS BY group — flat-Ident parser shape.** The
    `OVERALL`/`ОБЩИЕ` language form is ITS-attested (chapter 39 — see §TOTALS
@@ -948,8 +953,11 @@ is deferred to Slice 12.
    a bare `SdblColumnRef` expression. Slice 13 will own the semantic
    interpretation of this `SdblColumnRef` shape as a TOTALS-group marker.
    The flat-Ident parser shape (rather than a structured TOTALS-marker
-   NodeKind) is the Slice 11 implementation choice; promotion to a structured
-   marker, if desired, is Slice 12 territory.
+   NodeKind) is the Slice 11 implementation choice. Slice 12 examined it and
+   deliberately left it alone: two official sources disagree on where
+   `ОБЩИЕ` goes, only one of the two forms occurs in practice, and changing
+   the shape of the form that *is* written for the sake of one that is not
+   would have moved work into Slice 13 without settling anything.
 
 2. **ASC/DESC bilingual identifiers consumed via `p.at_keyword`.** The
    `order_by_item` helper calls `p.at_keyword("ASC") || p.at_keyword("ВОЗР") ||
@@ -957,8 +965,8 @@ is deferred to Slice 12.
    through `at_sdbl_keyword` (which goes through the Slice 2 keyword
    vocabulary). The two paths are behaviourally equivalent because
    `p.at_keyword` is case-insensitive Ident matching, but the inconsistency is
-   documented; routing through `at_sdbl_keyword` is a stylistic fix candidate
-   deferred to Slice 12. See §ORDER BY.
+   documented; routing through `at_sdbl_keyword` was deferred to Slice 12 and
+   done there. See §ORDER BY.
 
 3. **Missing-keyword recoveries (early-return shape).** `where_clause`
    delegates fully to `logical_expression(p)` (which has its own internal
