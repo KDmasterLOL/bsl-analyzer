@@ -4440,3 +4440,157 @@ fn test_query_extension_as_first_virtual_table_arg_no_errors() {
          ИЗ РегистрНакопления.ТоварыНаСкладах.Остатки({(Номенклатура).*}) КАК Т",
     );
 }
+
+// =====================================================================
+// Coverage of the input by the syntax tree
+//
+// A Rowan tree is full-fidelity: its text is the source text. The SDBL
+// entry point does not maintain that today — when no rule will take the
+// current token, the rest of the input is simply not consumed, and the
+// parse still reports success. The tests below record what is dropped,
+// so that any change to it has to be deliberate.
+//
+// `uncovered_tail` returns exactly the suffix missing from the tree.
+// An empty string is the healthy answer.
+// =====================================================================
+
+fn uncovered_tail(input: &str) -> &str {
+    let parse = parse_sdbl(input);
+    let covered = usize::from(parse.syntax_node().text_range().len());
+    &input[covered..]
+}
+
+fn assert_silently_dropped(input: &str, expected_tail: &str) {
+    assert_eq!(uncovered_tail(input), expected_tail, "dropped text for `{input}`");
+    let parse = parse_sdbl(input);
+    assert!(
+        !parse.has_errors(),
+        "the drop is silent today; an error here means the behaviour moved: {:#?}",
+        parse.errors(),
+    );
+}
+
+#[test]
+fn test_trailing_tokens_after_a_query_are_dropped_current_behavior() {
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ФУНК(Х)", "(Х)");
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ЫЫЫ ЭЭЭ", "ЭЭЭ");
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т 42", "42");
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т \"хвост\"", "\"хвост\"");
+}
+
+#[test]
+fn test_dropped_tail_swallows_the_next_query_of_a_package_current_behavior() {
+    // The worst shape of the loss: a following query, its FROM clause and
+    // all, never reaches the tree, and nothing says so.
+    assert_silently_dropped(
+        "ВЫБРАТЬ А ИЗ Т ГДЕ А = 1 ФУНК(Х); ВЫБРАТЬ 2 ИЗ У",
+        "ФУНК(Х); ВЫБРАТЬ 2 ИЗ У",
+    );
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т; ВЫБРАТЬ 2 ИЗ У"), "");
+}
+
+#[test]
+fn test_totals_periods_modifier_is_dropped_current_behavior() {
+    assert_silently_dropped(
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ)",
+        "ПЕРИОДАМИ(ДЕНЬ)",
+    );
+    assert_silently_dropped(
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(2006,6,28), ДАТАВРЕМЯ(2006,6,28))",
+        "ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(2006,6,28), ДАТАВРЕМЯ(2006,6,28))",
+    );
+    assert_silently_dropped(
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ИЕРАРХИЯ, П ПЕРИОДАМИ(ДЕНЬ)",
+        "ПЕРИОДАМИ(ДЕНЬ)",
+    );
+}
+
+#[test]
+fn test_totals_control_point_alias_is_dropped_current_behavior() {
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н КАК Группа", "КАК Группа");
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н Группа", "Группа");
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ИЕРАРХИЯ КАК Г", "КАК Г");
+}
+
+#[test]
+fn test_totals_modifiers_the_parser_does_consume() {
+    // These two forms already survive, which is why only PERIODS and the
+    // alias appear above.
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ИЕРАРХИЯ"), "");
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ТОЛЬКО ИЕРАРХИЯ"), "");
+}
+
+#[test]
+fn test_overall_prefix_form_is_dropped_current_behavior() {
+    // `ПО ОБЩИЕ <список>` without a separator loses the list; the
+    // comma-separated form survives.
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО ОБЩИЕ Н", "Н");
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО ОБЩИЕ"), "");
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО ОБЩИЕ, Н"), "");
+}
+
+#[test]
+fn test_order_by_hierarchy_then_direction_is_dropped_current_behavior() {
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИЕРАРХИЯ УБЫВ", "УБЫВ");
+    // The reverse word order is what the parser accepts today.
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н УБЫВ ИЕРАРХИЯ"), "");
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИЕРАРХИЯ"), "");
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н УБЫВ"), "");
+}
+
+#[test]
+fn test_a_clause_out_of_order_is_dropped_current_behavior() {
+    // Clause order is not tolerated at all: a clause in the wrong place is
+    // never looked for, and the tail loss then deletes it. Only the three
+    // trailing clauses below are genuinely order-free.
+    assert_silently_dropped("ВЫБРАТЬ А ГДЕ А=1 ИЗ Т", "ИЗ Т");
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т СГРУППИРОВАТЬ ПО Н ГДЕ А=1", "ГДЕ А=1");
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИМЕЮЩИЕ А>0 СГРУППИРОВАТЬ ПО Н", "СГРУППИРОВАТЬ ПО Н");
+    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИНДЕКСИРОВАТЬ ПО Н ГДЕ А=1", "ГДЕ А=1");
+}
+
+#[test]
+fn test_the_three_trailing_clauses_are_genuinely_order_free() {
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИТОГИ СУММА(А) ПО Н"), "");
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н УПОРЯДОЧИТЬ ПО Н"), "");
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т АВТОУПОРЯДОЧИВАНИЕ УПОРЯДОЧИТЬ ПО Н"), "");
+}
+
+#[test]
+fn test_a_clause_keyword_typed_without_its_body_is_accepted_in_silence() {
+    // Deliberate: the words are typed before what must follow them, and
+    // an error on every keystroke in between would be noise. This must
+    // not change.
+    for input in [
+        "ВЫБРАТЬ А ИЗ Т СГРУППИРОВАТЬ",
+        "ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ",
+        "ВЫБРАТЬ А ИЗ Т ИНДЕКСИРОВАТЬ",
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ",
+        "ВЫБРАТЬ А ИЗ Т ДЛЯ",
+    ] {
+        assert_eq!(uncovered_tail(input), "", "`{input}`");
+        assert!(!parse_sdbl(input).has_errors(), "`{input}` must stay quiet");
+    }
+}
+
+#[test]
+fn test_comments_are_trivia_and_cost_no_coverage() {
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А // хвост\nИЗ Т"), "");
+    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т // хвост"), "");
+    assert_eq!(uncovered_tail("// пусто"), "");
+}
+
+#[test]
+fn test_well_formed_queries_are_covered_completely() {
+    for input in [
+        "ВЫБРАТЬ * ИЗ Справочник.Товары",
+        "ВЫБРАТЬ РАЗЛИЧНЫЕ ПЕРВЫЕ 10 Т.Код КАК К ИЗ Справочник.Товары КАК Т",
+        "ВЫБРАТЬ А ИЗ Т ГДЕ А=1 СГРУППИРОВАТЬ ПО Н ИМЕЮЩИЕ А>0",
+        "ВЫБРАТЬ А ИЗ Т ЛЕВОЕ СОЕДИНЕНИЕ У ПО Т.А = У.А",
+        "ВЫБРАТЬ А ИЗ Т ОБЪЕДИНИТЬ ВСЕ ВЫБРАТЬ Б ИЗ У",
+        "ВЫБРАТЬ А ПОМЕСТИТЬ Врем ИЗ Т; УНИЧТОЖИТЬ Врем",
+        "ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Товары КАК Т {ГДЕ Т.Поле}",
+    ] {
+        assert_eq!(uncovered_tail(input), "", "`{input}`");
+    }
+}
