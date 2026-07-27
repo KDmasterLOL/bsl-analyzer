@@ -609,3 +609,43 @@ fn an_expected_token_missing_at_a_separator_leaves_it_alone() {
         2,
     );
 }
+
+#[test]
+fn brackets_inside_an_extension_region_say_nothing_about_the_structure() {
+    // A brace region is taken verbatim, so whatever brackets it contains
+    // belong to its text and not to the package around it.
+    for (input, wanted) in [
+        ("SELECT A { ) ( } SELECT B", 2usize),
+        ("SELECT A FROM T { ( } SELECT B FROM U", 2),
+        // The region itself still nests: an unclosed brace holds the rest.
+        ("SELECT A FROM T { ( SELECT B FROM U", 1),
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+                .count(),
+            wanted,
+            "`{input}`",
+        );
+    }
+}
+
+#[test]
+fn recovery_stays_linear_on_a_long_malformed_package() {
+    // Deciding whether a query keyword is a package member must not cost a
+    // rescan of everything before it: a run-on package is exactly the input
+    // an editor sees while a query is being written, and quadratic work here
+    // is a freeze rather than a wrong answer. The iteration limiter does not
+    // catch it, because the scanning happens inside one iteration.
+    let run_on = format!("SELECT A FROM T 42 ({}", " SELECT".repeat(20_000));
+    let parse = parse_sdbl(&run_on);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), run_on.len());
+
+    let no_separators = "SELECT A ".repeat(20_000);
+    let parse = parse_sdbl(&no_separators);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), no_separators.len());
+}

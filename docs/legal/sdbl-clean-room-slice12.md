@@ -604,6 +604,32 @@ was still marking a `;` as the offending token — so `SELECT A FROM ;
 SELECT B FROM U`, which is missing only a source, also got told its
 separator was missing.
 
+### Correct and quadratic is not correct
+
+Replacing two disagreeing counters with one computed answer fixed the
+disagreement and introduced a worse problem. The answer was computed by
+scanning the member's tokens from its start, and a member only ends at a
+separator — so on a package written without separators, every query
+keyword rescanned everything before it. A hundred thousand of them is
+five billion token checks. The iteration limiter does not see this,
+because the scanning happens inside a single iteration; the parser simply
+stops responding. For an editor, that input is not exotic: a run-on
+package is what a half-written query looks like.
+
+The count is now kept where the tokens go by. `bump` is the only way a
+token is consumed and the position never rewinds, so it is the one place
+that sees each token exactly once — counting anywhere else means either
+counting twice or rescanning. A caller records the count when a member
+begins and compares; the answer is constant-time, and the same input now
+parses in tens of milliseconds.
+
+The second finding fell out of the same move. Brackets inside a `{…}`
+region belong to that region's verbatim text and say nothing about the
+structure around it, so they must not be counted at all — `SELECT A { ) (
+} SELECT B` has a complete extension and two queries, not an unclosed
+paren swallowing the second. Counting is skipped while a brace region is
+open.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -705,10 +731,12 @@ are covered by entries A6–A8 above.
   638 → 640.
 - C8 `76f4e5ad` — the fifth round. Four findings, three of them in the
   fourth round's own fix. Parser tests 640 → 643.
-- C9 — the sixth round, narrowed to the two commits that touch the shared
-  parser, because the whole slice's diff had grown past what the review
-  tool can pass to a lens. Four findings, all in the fifth round's own fix.
-  Parser tests 643 → 645.
+- C9 `77dee744` — the sixth round, narrowed to the two commits that touch
+  the shared parser, because the whole slice's diff had grown past what the
+  review tool can pass to a lens. Four findings, all in the fifth round's
+  own fix. Parser tests 643 → 645.
+- C10 — the seventh round. Two findings, both in the sixth round's own fix,
+  one of them a freeze rather than a wrong answer. Parser tests 645 → 647.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

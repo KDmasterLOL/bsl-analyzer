@@ -14,6 +14,8 @@ pub struct Parser<'a> {
     events: Vec<Event>,
     iteration_count: usize,
     recent_positions: Vec<usize>,
+    paren_depth: u32,
+    brace_depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -24,6 +26,8 @@ impl<'a> Parser<'a> {
             events: Vec::new(),
             iteration_count: 0,
             recent_positions: Vec::with_capacity(POSITION_HISTORY_SIZE),
+            paren_depth: 0,
+            brace_depth: 0,
         }
     }
 
@@ -82,35 +86,6 @@ impl<'a> Parser<'a> {
         self.pos >= self.tokens.len()
     }
 
-    pub(crate) fn token_cursor(&self) -> usize {
-        self.pos
-    }
-
-    /// Whether any group opened after `from` is still open at the current
-    /// position. A grammar rule that gave up inside an unclosed group leaves
-    /// one open, which is the only way a caller can tell that the position it
-    /// was handed is not top level.
-    ///
-    /// The two kinds are counted apart, and a closer with nothing to close is
-    /// ignored rather than driving a counter negative: `( }` leaves the paren
-    /// open, which is what it does to a reader, and a stray `)` does not
-    /// cancel a brace that is still waiting.
-    pub(crate) fn has_open_group_since(&self, from: usize) -> bool {
-        let (mut parens, mut braces) = (0u32, 0u32);
-
-        for t in &self.tokens[from.min(self.tokens.len())..self.pos.min(self.tokens.len())] {
-            match t.kind {
-                TokenKind::LParen => parens += 1,
-                TokenKind::RParen => parens = parens.saturating_sub(1),
-                TokenKind::LBrace => braces += 1,
-                TokenKind::RBrace => braces = braces.saturating_sub(1),
-                _ => {}
-            }
-        }
-
-        parens > 0 || braces > 0
-    }
-
     pub fn eat(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
             self.bump();
@@ -122,9 +97,43 @@ impl<'a> Parser<'a> {
 
     pub fn bump(&mut self) {
         if let Some(kind) = self.current() {
+            self.track_group(kind);
             self.events.push(Event::Token { kind });
             self.pos += 1;
         }
+    }
+
+    /// Maintains the open-group count as tokens go by.
+    ///
+    /// Kept here because `bump` is the only way a token is consumed and the
+    /// position never rewinds, so this is the one place that sees every
+    /// token exactly once. Counting it anywhere else means counting it twice
+    /// or rescanning, and rescanning a growing prefix on every decision is
+    /// quadratic on a long malformed input.
+    ///
+    /// The two kinds are counted apart so that a closer of one kind cannot
+    /// cancel an opener of the other. Parens inside a brace region are not
+    /// counted at all: that region's content is taken verbatim, so its
+    /// brackets say nothing about the structure around it.
+    fn track_group(&mut self, kind: TokenKind) {
+        match kind {
+            TokenKind::LBrace => self.brace_depth += 1,
+            TokenKind::RBrace => self.brace_depth = self.brace_depth.saturating_sub(1),
+            TokenKind::LParen if self.brace_depth == 0 => self.paren_depth += 1,
+            TokenKind::RParen if self.brace_depth == 0 => {
+                self.paren_depth = self.paren_depth.saturating_sub(1)
+            }
+            _ => {}
+        }
+    }
+
+    /// How many groups are open at the current position.
+    ///
+    /// A caller compares this against the value it saw earlier to learn
+    /// whether the rule it just ran left something open — which is the only
+    /// way to tell that the position it was handed is not top level.
+    pub(crate) fn open_group_count(&self) -> u32 {
+        self.paren_depth + self.brace_depth
     }
 
     pub fn expect(&mut self, kind: TokenKind) -> bool {
