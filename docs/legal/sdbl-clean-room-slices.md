@@ -1514,10 +1514,12 @@ false:
 ### Measured on a production configuration
 
 27 677 query literals. The drain reports 851 of them; only **68** are
-queries that produced no diagnostic before. A third of the leftovers are
-query templates carrying substitution placeholders that are not SDBL
-until substituted — text that was never being parsed, only truncated in
-silence, with the graph index blind past that point.
+queries that produced no diagnostic before. A large share of the
+leftovers begin at a `#Имя`, `%1` or `[Имя]` marker. The query language
+has no substitution facility — these are possible only because a query
+lives in a string literal, and a literal may hold anything — so the
+reports are correct: that text is not a query. It was never being parsed,
+only truncated in silence, with the graph index blind past that point.
 
 29 queries still lose bytes, all ending inside an unterminated string
 literal, one of them not even on a character boundary. That shortfall is

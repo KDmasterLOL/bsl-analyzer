@@ -396,14 +396,29 @@ query that was clean and now is not. The other 783 were already lit up.
 
 Grouping the 851 by what the leftover starts with: 209 begin at a `КАК`,
 149 at a `%1`/`%2`/`%3`, 116 at a `(Титульный,…`, and a further 24 at a
-`#Имя` or `[Имя]`. Sampling the `КАК` class shows it is the placeholder
-class too — the queries read `ИЗ #ТаблицаПланаОбмена КАК ПланОбмена`, and
-it is the `#Имя` before the alias that the grammar cannot place. These are
-query *templates*: text carrying substitution markers that is not SDBL
-until the marker is replaced at runtime. They were never being parsed;
-they were being truncated in silence, and the graph index has been blind
-past that point for as long as the entry point has existed. Making that
-visible is the point of the change, and the number above is its price.
+`#Имя` or `[Имя]`. Sampling the `КАК` class shows the same cause — the
+queries read `ИЗ #ТаблицаПланаОбмена КАК ПланОбмена`, and it is the `#Имя`
+before the alias that the grammar cannot place.
+
+None of these markers are query syntax. The query language has no
+substitution facility at all; what makes them possible is only that a
+query lives in a string literal, and a string literal may contain
+anything. Writing them is a practice the platform does not sanction and
+one that is discouraged in all but rare cases, however common it has
+become in practice.
+
+That matters for how the 851 should be read. They are not the price of
+this change and not noise it introduces: they are correct reports about
+text that is not a query. What the change did was make them visible. The
+text was never being parsed — it was being truncated in silence, and the
+graph index has been blind past that point for as long as the entry point
+has existed. The number is a measure of how widespread the practice is in
+one configuration, not a measure of what the analyzer got wrong.
+
+The commit message of C2 describes these same leftovers as "query
+templates … not SDBL until they are substituted", which reads as though
+substitution were a facility of the language. It is not, and history is
+not rewritten for it — the corrected account is the one above.
 
 ### One defect this surfaced and did not fix
 
