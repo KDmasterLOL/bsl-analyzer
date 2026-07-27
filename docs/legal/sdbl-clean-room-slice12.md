@@ -159,12 +159,14 @@ Every site is classified:
 | A12 | `select.rs:911` `limitations` | `РАЗЛИЧНЫЕ` / `ПЕРВЫЕ` / `РАЗРЕШЕННЫЕ` in any order and repeated. Attested by Slice 7-addendum allowances #1–#2. |
 | A13 | `select.rs:753` `order_by_item` | `УБЫВ ИЕРАРХИЯ` accepted, though the canonical `<Порядок>` has only `ИЕРАРХИЯ УБЫВ`. Kept: it is a plausible slip, and rejecting a word order the language merely does not list buys nothing. See § Source questions. |
 | A14 | `parser.rs:227` `check_iteration_limit` | A stuck-position guard on every unbounded loop. Not a language property at all; a liveness property of the parser. |
-| A15 | `select.rs` `totals_periods_modifier` | The rule allows at most two boundary arguments; the parser takes any number. Counting them is a check with no recovery value — a third argument is a mistake the user can see, and refusing to parse it would only hide the rest of the clause. |
-| A16 | `select.rs` `totals_periods_modifier` | An unclosed `ПЕРИОДАМИ(` is taken and left quiet, like the half-typed clause keywords of A1–A5. |
+| A15 | `select.rs` `totals_periods_modifier` | The rule allows at most two boundary arguments; the parser takes any number. A missing boundary after a comma *is* reported; a third present one is not. Counting present arguments is a check with no recovery value, and refusing to parse them would only hide the rest of the clause. |
+| A16 | `select.rs` `totals_periods_modifier` | An unclosed `ПЕРИОДАМИ(` at end of input is taken and left quiet, like the half-typed clause keywords of A1–A5. With a clause still to come it is reported: there the paren is not being typed, it is missing. |
+| A17 | `select.rs` `totals_group_modifier`, `totals_periods_modifier` | Where the rule is broken but the text is unambiguous — a period name outside the ten, `ИЕРАРХИЯ` and `ПЕРИОДАМИ` together — the parser reports and then consumes anyway. Refusing would cost the clause its shape to make a point the diagnostic already makes. |
+| A18 | `select.rs` `totals_group_alias` | A *bare* alias is taken on the wide clause-keyword guard, an explicit one on the narrow `is_body_clause_keyword`. A bare alias cannot be told from a following clause by anything but its spelling, so the wide guard is the price of supporting it; after `КАК` there is no such ambiguity, and a name that spells a keyword is still a name — the same reading `source_alias` and the `ПОМЕСТИТЬ` name already take. |
 
 ### D — neither the language nor a decision
 
-Stated as they were found, before C2. All four are closed.
+Stated as they were found, before the rewrite. All six are closed.
 
 | # | Site | What happened |
 |---|---|---|
@@ -383,15 +385,15 @@ extracted from 21 114 modules:
 
 | | |
 |---|---|
-| queries that produce the new leftover error | 865 (3.1%) |
+| queries that produce the new leftover error | 851 (3.1%) |
 | of those, queries that produced **no** diagnostic before | **72 (0.26%)** |
-| of those, queries already carrying another parse error | 793 |
+| of those, queries already carrying another parse error | 779 |
 | queries whose tree still does not cover the input | 29 (0.1%) |
 
 The 0.26% is the number that matters for the decision the owner made: a
-query that was clean and now is not. The other 793 were already lit up.
+query that was clean and now is not. The other 779 were already lit up.
 
-Grouping the 865 by what the leftover starts with: 209 begin at a `КАК`,
+Grouping the 851 by what the leftover starts with: 209 begin at a `КАК`,
 149 at a `%1`/`%2`/`%3`, 116 at a `(Титульный,…`, and a further 24 at a
 `#Имя` or `[Имя]`. Sampling the `КАК` class shows it is the placeholder
 class too — the queries read `ИЗ #ТаблицаПланаОбмена КАК ПланОбмена`, and
@@ -412,6 +414,58 @@ parser is given, so a shortfall means the shortfall is upstream, in the
 lexer's string mode or in the conversion of a BSL literal to SDBL text.
 That is a different layer, and the lexer is closed and attested; the
 finding is recorded here rather than acted on.
+
+### What the review changed
+
+The two-lens review of the whole slice returned thirteen findings. Every
+one was reproduced first; every one held. Two of them were behaviours I
+had written into this document as deliberate, which is the reason the
+document is worth having: a claim of intent is checkable, and these did
+not check out.
+
+**The drain stopped at the end of input rather than at the separator.**
+So a package whose first query was bad still lost the rest — not the
+text, which the drain now covered, but the *structure*: the following
+queries sat inside an error node, and a consumer that walks a package's
+queries never saw them. Fixing the text loss and leaving the structural
+loss is worse than either, because the diagnostic says the problem is
+handled. The drain now runs inside the package loop and stops at the
+next `;`, so one bad member of a package costs its own parse and nothing
+else.
+
+**The modifier rule was implemented as permissive sequential `if`s.**
+The rule gives alternatives — `[[ТОЛЬКО] ИЕРАРХИЯ] | [ПЕРИОДАМИ(…)]` —
+and a closed list of ten period names, and marks several parts
+mandatory. The first implementation took each part with an independent
+optional `if`, which accepted `ИЕРАРХИЯ ПЕРИОДАМИ(…)`, `ПЕРИОДАМИ(СМЕНА)`,
+`ПЕРИОДАМИ()`, `ПЕРИОДАМИ` with no parens at all, a trailing comma with
+no boundary, and `ТОЛЬКО` with no `ИЕРАРХИЯ`. Normalising a rule while
+enforcing none of it turns a silent loss into a silent acceptance, which
+is the same defect wearing the other coat. Each of those is now
+reported, and reported without moving, so the clause after it still
+parses.
+
+**`ИЕРАРХИЯ ВОЗР` was accepted.** The four documented orderings put only
+the descending direction after the hierarchy. Taking the direction with
+the same shared helper as before quietly widened the language past the
+one tolerance the slice had declared.
+
+**`КАК` written out did not commit to a name**, and the name it did
+accept was filtered by the wide clause-keyword guard rather than the
+narrow one every other explicit alias in this grammar uses. So
+`ПО Н КАК, П` passed in silence while `AS Inner` — a perfectly good alias
+whose name happens to spell a JOIN keyword — produced a false error.
+
+**A leading comma in the selection list cost the whole query.** The
+empty-list guard treated any token that cannot start a field as an
+absent list, and then the drain took everything after it. Only a clause
+keyword, a separator or the end of input means the list is absent; a
+stray comma means a list with something wrong inside it, and the list
+parser's own recovery handles that far better.
+
+The remaining findings were arithmetic in this document and the master
+document: counts not updated after the inventory grew, and a corpus
+figure that had been refreshed in one document and not the other.
 
 ### A test that was asserting something false
 
@@ -495,6 +549,9 @@ are covered by entries A6–A8 above.
   5 on the closed lists its rules enumerate, 5 on the tolerances kept
   on purpose, and 4 on nothing leaving the parser without a word.
   Parser tests 608 → 628.
+- C4 — the review pass. Seven substantive findings and six small ones,
+  all reproduced before being acted on and all confirmed. Parser tests
+  628 → 632.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

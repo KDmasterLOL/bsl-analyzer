@@ -263,9 +263,67 @@ fn a_misplaced_clause_is_named() {
 
 #[test]
 fn a_following_query_is_never_swallowed() {
-    leftover_reported(
-        "ВЫБРАТЬ А ИЗ Т ГДЕ А = 1 ФУНК(Х); ВЫБРАТЬ 2 ИЗ У",
-        "ФУНК(Х); ВЫБРАТЬ 2 ИЗ У",
+    // The leftover ends at the separator, so a bad query costs its own
+    // parse and nothing else in the package.
+    let input = "ВЫБРАТЬ А ИЗ Т ГДЕ А = 1 ФУНК(Х); ВЫБРАТЬ 2 ИЗ У; ВЫБРАТЬ 3 ИЗ В";
+    leftover_reported(input, "ФУНК(Х)");
+    let root = parse_sdbl(input).syntax_node();
+    assert_eq!(
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_QUERY).count(),
+        3,
+        "one bad member of a package must not cost the others their parse",
+    );
+}
+
+#[test]
+fn the_mandatory_parts_of_a_periods_modifier_are_reported() {
+    // Every part the rule marks mandatory, and the alternative it is not
+    // allowed to combine with. All are reported; none costs the text.
+    for (input, what) in [
+        ("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ КАК Г", "no opening paren"),
+        ("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ()", "no period name"),
+        ("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(СМЕНА)", "not one of the ten"),
+        ("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ,)", "boundary missing"),
+        ("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ИЕРАРХИЯ ПЕРИОДАМИ(ДЕНЬ)", "exclusive with hierarchy"),
+        ("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ТОЛЬКО", "ONLY without HIERARCHY"),
+    ] {
+        let parse = parse_sdbl(input);
+        assert!(parse.has_errors(), "{what}: `{input}` must be reported");
+        assert_eq!(
+            usize::from(parse.syntax_node().text_range().len()),
+            input.len(),
+            "{what}: reporting must not cost the text",
+        );
+    }
+}
+
+#[test]
+fn an_explicit_alias_commits_to_a_name() {
+    // `КАК` written out means a name follows; its absence is reported.
+    let parse = parse_sdbl("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н КАК, П");
+    assert!(parse.has_errors());
+
+    // But a name that happens to spell a keyword is still a name, as it is
+    // everywhere else an explicit alias is parsed.
+    accepted("SELECT A FROM T TOTALS SUM(A) BY N AS Inner");
+    accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н КАК Итоги");
+}
+
+#[test]
+fn a_stray_comma_costs_only_its_own_field() {
+    // A separator with nothing before it is a list with something wrong in
+    // it, not an absent list; the clauses after it still parse.
+    let input = "ВЫБРАТЬ , А ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert!(parse.has_errors());
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert_eq!(
+        parse
+            .syntax_node()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE)
+            .count(),
+        1,
     );
 }
 

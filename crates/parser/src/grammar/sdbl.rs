@@ -59,6 +59,8 @@ pub fn query_package(p: &mut Parser) {
         p.check_iteration_limit();
         p.skip_trivia();
 
+        drain_to_separator(p);
+
         if !p.at(TokenKind::Semicolon) {
             break;
         }
@@ -73,30 +75,32 @@ pub fn query_package(p: &mut Parser) {
         queries(p);
     }
 
-    drain_unconsumed_input(p);
-
     m.complete(p, NodeKind::SdblQueryPackage);
 }
 
-/// Takes whatever the package loop refused, so that the tree's text is
-/// the source text.
+/// Takes whatever the query rules refused, up to the next separator, so
+/// that the tree's text is the source text.
 ///
-/// The loop above ends at the first token that is neither `;` nor the end
-/// of input, which happens whenever a clause is out of order, a modifier
-/// is one the grammar here does not know, or the query is simply wrong.
-/// Without this the remainder is not merely unparsed — it is absent from
-/// the tree, and the parse reports success, so a consumer cannot tell a
-/// clean query from half of one.
-fn drain_unconsumed_input(p: &mut Parser) {
+/// A query stops short whenever a clause is out of order, a modifier is
+/// one this grammar does not know, or the text is simply wrong. Without
+/// this the remainder is not merely unparsed — it is absent from the tree,
+/// and the parse reports success, so a consumer cannot tell a clean query
+/// from half of one.
+///
+/// Stopping at the separator rather than at the end of input is the whole
+/// point of doing this inside the loop: a package is a sequence, one bad
+/// member of it must not cost the rest, and a consumer that walks the
+/// package's queries would otherwise never see the ones that follow.
+fn drain_to_separator(p: &mut Parser) {
     p.skip_trivia();
 
-    if p.at_end() {
+    if p.at_end() || p.at(TokenKind::Semicolon) {
         return;
     }
 
     let leftover = p.start();
 
-    while !p.at_end() {
+    while !p.at_end() && !p.at(TokenKind::Semicolon) {
         p.check_iteration_limit();
         p.bump();
     }

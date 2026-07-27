@@ -201,7 +201,13 @@ pub(super) fn selected_fields(p: &mut Parser) {
     // turns a selection list the user has not typed yet — or one whose
     // qualifier failed to parse — into a field made of the next clause's
     // keyword, and the clause it belonged to is then never recognised.
-    if is_field_start(p) {
+    // Only a clause keyword, a separator or the end of input means the list
+    // is absent. Anything else — a stray comma, a token no rule accepts — is
+    // a list with something wrong inside it, and the list parser's own
+    // recovery handles that better than giving up here would.
+    let list_is_absent = is_clause_keyword(p) || p.at(TokenKind::Semicolon) || p.at_end();
+
+    if !list_is_absent {
         super::expressions::parse_delimited_list(
             p,
             TokenKind::Comma,
@@ -791,19 +797,21 @@ fn order_by_item(p: &mut Parser) {
 
     let direction_came_first = eat_order_direction(p);
 
-    if p.at_keyword("HIERARCHY") || p.at_keyword("ИЕРАРХИЯ") {
+    if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
         p.bump();
         p.skip_trivia();
 
-        if !direction_came_first {
-            eat_order_direction(p);
+        // Of the four documented orderings only `ИЕРАРХИЯ УБЫВ` puts a
+        // direction after the hierarchy, and only the descending one.
+        if !direction_came_first && at_sdbl_keyword(p, "DESC", "УБЫВ") {
+            p.bump();
+            p.skip_trivia();
         }
     }
 }
 
 fn eat_order_direction(p: &mut Parser) -> bool {
-    if p.at_keyword("ASC") || p.at_keyword("ВОЗР") || p.at_keyword("DESC") || p.at_keyword("УБЫВ")
-    {
+    if at_sdbl_keyword(p, "ASC", "ВОЗР") || at_sdbl_keyword(p, "DESC", "УБЫВ") {
         p.bump();
         p.skip_trivia();
         true
@@ -941,48 +949,107 @@ fn totals_by_clause(p: &mut Parser) {
 // Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entries D2–D3.
 // =====================================================================
 
+/// The ten period names, in both spellings, as the rule enumerates them.
+const PERIOD_NAMES: &[(&str, &str)] = &[
+    ("SECOND", "СЕКУНДА"),
+    ("MINUTE", "МИНУТА"),
+    ("HOUR", "ЧАС"),
+    ("DAY", "ДЕНЬ"),
+    ("WEEK", "НЕДЕЛЯ"),
+    ("MONTH", "МЕСЯЦ"),
+    ("QUARTER", "КВАРТАЛ"),
+    ("YEAR", "ГОД"),
+    ("TENDAYS", "ДЕКАДА"),
+    ("HALFYEAR", "ПОЛУГОДИЕ"),
+];
+
+fn at_period_name(p: &Parser) -> bool {
+    PERIOD_NAMES.iter().any(|(en, ru)| at_sdbl_keyword(p, en, ru))
+}
+
+fn at_periods_keyword(p: &Parser) -> bool {
+    at_sdbl_keyword(p, "PERIODS", "ПЕРИОДАМИ")
+}
+
 fn totals_group_item(p: &mut Parser) {
     super::expressions::expression(p);
     p.skip_trivia();
 
-    if p.at_keyword("ONLY") || p.at_keyword("ТОЛЬКО") {
+    totals_group_modifier(p);
+    totals_group_alias(p);
+}
+
+/// `[[ТОЛЬКО] ИЕРАРХИЯ] | [ПЕРИОДАМИ(…)]`.
+///
+/// The rule offers these as alternatives, not as a sequence, so taking
+/// one rules out the other. A control point carrying both is reported and
+/// then consumed anyway: the reading is wrong, but dropping the text
+/// would be worse.
+fn totals_group_modifier(p: &mut Parser) {
+    let took_hierarchy = if at_sdbl_keyword(p, "ONLY", "ТОЛЬКО") {
         p.bump();
         p.skip_trivia();
-    }
 
-    if p.at_keyword("HIERARCHY") || p.at_keyword("ИЕРАРХИЯ") {
+        if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
+            p.bump();
+            p.skip_trivia();
+        } else {
+            p.error_custom_no_bump("ожидалось 'ИЕРАРХИЯ' / 'HIERARCHY' после 'ТОЛЬКО' / 'ONLY'");
+        }
+        true
+    } else if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
         p.bump();
         p.skip_trivia();
-    }
+        true
+    } else {
+        false
+    };
 
-    if p.at_keyword("PERIODS") || p.at_keyword("ПЕРИОДАМИ") {
+    if at_periods_keyword(p) {
+        if took_hierarchy {
+            p.error_custom_no_bump(
+                "'ИЕРАРХИЯ' / 'HIERARCHY' и 'ПЕРИОДАМИ' / 'PERIODS' исключают друг друга",
+            );
+        }
         totals_periods_modifier(p);
     }
-
-    totals_group_alias(p);
 }
 
 /// `ПЕРИОДАМИ(<вид периода> [, <граница>] [, <граница>])`.
 ///
-/// The period name is one of a closed list of words and is taken as a
-/// token; the two boundaries are a date literal or a parameter, and are
-/// taken as expressions so that their structure survives. An unclosed
-/// paren is left where it is — the package drain reports it.
+/// Every part the rule marks mandatory is reported when it is missing —
+/// but reported without moving, so the clause that follows still gets
+/// parsed. The period name comes from a closed list of ten words; the
+/// boundaries are a date literal or a parameter, taken as expressions so
+/// that their structure survives for the semantic layer.
 fn totals_periods_modifier(p: &mut Parser) {
     p.bump();
     p.skip_trivia();
 
     if !p.at(TokenKind::LParen) {
+        if !p.at_end() {
+            p.error_custom_no_bump("ожидалась '(' после 'ПЕРИОДАМИ' / 'PERIODS'");
+        }
         return;
     }
     p.bump();
     p.skip_trivia();
 
-    if p.at(TokenKind::Ident) && !is_clause_keyword(p) {
+    if at_period_name(p) {
         p.bump();
         p.skip_trivia();
+    } else if p.at(TokenKind::Ident) && !is_clause_keyword(p) {
+        // A word in the right place that is not one of the ten. Take it,
+        // so the modifier still has a shape, and say what is wrong with it.
+        p.error_custom_no_bump("неизвестный вид периода");
+        p.bump();
+        p.skip_trivia();
+    } else {
+        p.error_custom_no_bump("ожидался вид периода");
     }
 
+    // The rule allows two boundaries. A third is a mistake the user can
+    // see; counting them here would only cost the rest of the clause.
     while p.at(TokenKind::Comma) {
         p.check_iteration_limit();
         p.bump();
@@ -991,25 +1058,40 @@ fn totals_periods_modifier(p: &mut Parser) {
         if super::expressions::is_expression_start(p) {
             super::expressions::expression(p);
             p.skip_trivia();
+        } else {
+            p.error_custom_no_bump("ожидалась граница периода после запятой");
         }
     }
 
     if p.at(TokenKind::RParen) {
         p.bump();
         p.skip_trivia();
+    } else if !p.at_end() {
+        // At end of input this is a query being typed and says nothing;
+        // with a clause still to come the paren is simply unclosed.
+        p.error_custom_no_bump("не закрыта скобка после 'ПЕРИОДАМИ' / 'PERIODS'");
     }
 }
 
 /// The trailing `[[КАК] <Псевдоним поля>]` of a control point.
 ///
-/// The alias may be written bare, so any identifier that is not a clause
-/// keyword is taken here. A control point is the last thing in a query,
-/// which makes an over-eager alias cheap: there is nothing after it to
-/// swallow but the next clause, and clause keywords are excluded.
+/// Written out, `КАК` commits to a name and its absence is reported. A
+/// bare alias cannot be told from a following clause by anything but the
+/// spelling, so that form keeps the wide guard; an explicit one uses the
+/// same narrow guard as the other explicit aliases in this grammar,
+/// because a name that spells a keyword is still a name.
 fn totals_group_alias(p: &mut Parser) {
     if at_sdbl_keyword(p, "AS", "КАК") {
         eat_sdbl_keyword(p, "AS", "КАК");
         p.skip_trivia();
+
+        if p.at(TokenKind::Ident) && !is_body_clause_keyword(p) {
+            p.bump();
+            p.skip_trivia();
+        } else {
+            p.error_custom_no_bump("ожидался псевдоним после 'КАК' / 'AS'");
+        }
+        return;
     }
 
     if p.at(TokenKind::Ident) && !is_clause_keyword(p) {

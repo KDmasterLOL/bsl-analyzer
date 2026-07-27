@@ -1459,8 +1459,8 @@ accidentally from upstream grammar or old tests.
 Every recovery rule is documented as either required by the official
 syntax, or intentionally kept for editor behaviour. Auditing the surface
 produced a third verdict the plan did not allow for, and it carried most
-of the work: **neither**. Twenty-five sites were classified — three
-implement the language, sixteen are allowances with their reasons
+of the work: **neither**. Twenty-seven sites were classified — three
+implement the language, eighteen are allowances with their reasons
 stated, and six were behaviours nobody had decided. Two of the six were
 invisible until the other four were fixed.
 
@@ -1543,8 +1543,18 @@ discarding was silent.
   the ordering-field word order;
 - `docs/legal/sdbl-clean-room-slice12.md` — the attestation.
 
+A two-lens review of the whole slice returned thirteen findings, all
+reproduced and all confirmed. The load-bearing one: the drain stopped at
+the end of input rather than at the package separator, so a bad first
+query still cost the following ones their parse — the text was covered,
+the structure was not, and the diagnostic said the problem was handled.
+Next to it, the modifier rule had been normalised without being enforced,
+which turns a silent loss into a silent acceptance. Both are fixed, along
+with a leading comma that cost a whole query and an explicit alias that
+both under- and over-restricted its name.
+
 Commit trail: C0a `18b5bb70`, C0b `27eb6e92`, C1 `80350945`,
-C2 `da3eeaa0`, C2b `01d9cd6d`, C3 `7aaf669c`. Two earlier commits landed
+C2 `da3eeaa0`, C2b `01d9cd6d`, C3 `7aaf669c`, C4 the review fixes. Two earlier commits landed
 under this slice's name in April 2026 without an attestation and are
 covered by it now: `9d418084` and `88439afa`, both on the recovery
 helpers' clause-keyword stop.

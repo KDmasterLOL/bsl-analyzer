@@ -4513,12 +4513,23 @@ fn test_trailing_tokens_after_a_query_are_reported() {
 
 #[test]
 fn test_a_bad_query_no_longer_swallows_the_next_one_in_the_package() {
+    use syntax::SyntaxKind;
     // The shape that made the loss worth fixing: a following query, its
-    // FROM clause and all, used to vanish without a word.
-    assert_leftover_reported(
-        "ВЫБРАТЬ А ИЗ Т ГДЕ А = 1 ФУНК(Х); ВЫБРАТЬ 2 ИЗ У",
-        "ФУНК(Х); ВЫБРАТЬ 2 ИЗ У",
+    // FROM clause and all, used to vanish without a word. Reporting the
+    // leftover is only half of it — the leftover has to end at the
+    // separator, or the next query is still lost to every consumer that
+    // walks the package.
+    let input = "ВЫБРАТЬ А ИЗ Т ГДЕ А = 1 ФУНК(Х); ВЫБРАТЬ 2 ИЗ У";
+    assert_leftover_reported(input, "ФУНК(Х)");
+
+    let root = parse_sdbl(input).syntax_node();
+    assert_eq!(
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_QUERY).count(),
+        2,
+        "both queries must be in the tree as queries, not as error text",
     );
+    assert_eq!(root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count(), 2,);
+
     assert_accepted("ВЫБРАТЬ А ИЗ Т; ВЫБРАТЬ 2 ИЗ У");
 }
 
