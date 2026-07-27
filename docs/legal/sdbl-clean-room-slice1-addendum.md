@@ -187,12 +187,24 @@ In Slices 3b, 4 and 5 a gap of this shape was an Option A ADD. Here the
 answer is the opposite (repository owner's decision, 2026-07-27), and
 the reasons are specific rather than a change of policy.
 
-**The parser cannot see the difference.** `query_extension` in
-`crates/parser/src/grammar/sdbl/select.rs` consumes a brace-balanced
-region by calling `p.bump()` on every token regardless of kind, tracking
-only brace depth. Token kinds inside a `{…}` region are invisible to the
-syntax tree, so a `CHARACTERISTICS` variant would be a distinction the
-tree never observes.
+**The distinction is erased before the tree, and not by the brace
+region.** `query_extension` in
+`crates/parser/src/grammar/sdbl/select.rs` bumps every token of a
+brace-balanced region into an `SDBL_QUERY_EXTENSION` node, tracking only
+depth. That does not hide the tokens: `p.bump()` emits an
+`Event::Token`, so they become children of the node and keep their
+kinds. Parsing `ВЫБРАТЬ 1 {ГДЕ A И B}` puts `L_BRACE`, `KW_AND` and
+`R_BRACE` inside the extension node, verbatim.
+
+What erases keyword identity is one step earlier. In
+`crates/parser/src/sdbl_token_converter.rs` every `Kw*`, `Fn*`, `Mdo*`
+and `Vt*` variant maps to `TokenKind::Ident`, so `ГДЕ` reaches the tree
+as `IDENT` whatever the lexer called it — while `И`, which the converter
+maps to `TokenKind::KwAnd`, survives as `KW_AND`. A `CHARACTERISTICS`
+variant would therefore either follow the convention every keyword
+family already follows and be invisible to the tree, or break it and
+require parser-side grammar — which belongs to a slice that interprets
+the region rather than skips it, not to this one.
 
 **The lexer cannot see the context.** These words are keywords only
 inside braces, and the lexer has no state — it does not know whether a
@@ -268,7 +280,15 @@ snapshot diff is therefore additive-only: no existing line changes.
 
 That absence is itself worth stating. The slice's value is not a fix but
 a record: two tokens that no attestation named now have one, and two
-tokens that no test exercised now have a suite.
+tokens with no coverage of their own now have a suite that names them.
+
+Not "no coverage at all" — the distinction matters for the record.
+`537527eb` shipped four parser tests that drive both braces end to end
+(`test_query_extension_where_block_no_errors`,
+`…_produces_extension_node`, `…_nested_braces_no_errors` and
+`…_unbalanced_brace_is_tolerated`), so the tokens were exercised. What
+they assert is parser outcomes — no errors, an extension node, tolerance
+— never a token kind, and no attestation named the tokens at all.
 
 ## Marker restoration
 
@@ -402,8 +422,11 @@ about them.
 | braces inside a string literal | ❌ MISSING |
 | English `{SELECT …}` / `{WHERE …}` | ❌ MISSING |
 
-Ten blind spots, which is every observable property the pair has. They
-are closed at C0b. Because the slice changes no behaviour, the entries
+Ten blind spots in the corpus, which is every observable property of the
+pair that a token-level test can pin. They are closed at C0b. The
+parser-level behaviour — balanced, nested and unbalanced regions — was
+already covered by the four tests `537527eb` shipped; what was missing
+was coverage that names the tokens. Because the slice changes no behaviour, the entries
 are written once and their snapshot lines never move again — unlike the
 vocabulary slices, where the C0b snapshot was a before-picture.
 

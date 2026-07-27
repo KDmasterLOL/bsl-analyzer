@@ -1398,12 +1398,19 @@ rather than `Error`.
 
 The nine `ХАРАКТЕРИСТИКИ` keywords the same article defines are
 **deliberately not added**, which reverses the Option A ADD outcome of
-Slices 3b, 4 and 5. Three measurements drive it: the parser consumes a
-brace region by bumping every token regardless of kind, so the tree
-never observes the distinction; the lexer has no state and cannot know a
-region is open; and the words occur overwhelmingly outside braces —
-`Характеристики` appears 2696 times as an ordinary identifier in a
+Slices 3b, 4 and 5. Three reasons drive it. Keyword identity is
+erased at the converter, where every `Kw*`, `Fn*`, `Mdo*` and `Vt*`
+variant maps to `TokenKind::Ident`, so a `CHARACTERISTICS` variant would
+either follow that convention and be invisible to the tree or break it
+and need parser-side grammar. The lexer has no state and cannot know a
+brace region is open. And the words occur overwhelmingly outside braces
+— `Характеристики` appears 2696 times as an ordinary identifier in a
 production configuration against 195 inside an extension.
+
+Note that the brace region itself hides nothing: `p.bump()` emits an
+`Event::Token`, so the tokens of a `{…}` region are children of the
+`SDBL_QUERY_EXTENSION` node and keep their kinds. What is opaque is the
+grammatical interpretation of the contents, not the tokens.
 
 ### Behaviour change
 
