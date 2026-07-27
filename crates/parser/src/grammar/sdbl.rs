@@ -56,7 +56,7 @@ pub fn query_package(p: &mut Parser) {
     // members are parsed only while the separators survive is a package that
     // loses good queries behind bad ones.
     let mut a_query_is_due = true;
-    let mut already_said_so = false;
+    let mut member_has_tokens = false;
 
     p.skip_trivia();
 
@@ -72,14 +72,10 @@ pub fn query_package(p: &mut Parser) {
         p.skip_trivia();
 
         if p.at(TokenKind::Semicolon) {
-            if a_query_is_due {
-                // Two separators in a row: a member of the sequence is
-                // missing. Trailing separators are not this — there the loop
-                // ends at the input rather than at another separator.
-                p.error_custom_no_bump("ожидался запрос между разделителями");
-            }
+            complain_about_a_missing_member(p, a_query_is_due, member_has_tokens);
             p.bump();
             a_query_is_due = true;
+            member_has_tokens = false;
             p.reset_group_tracking();
             continue;
         }
@@ -105,25 +101,44 @@ pub fn query_package(p: &mut Parser) {
                 // malformed and silence would turn it into two good queries.
                 p.error_custom_no_bump("ожидался разделитель ';' между запросами");
             }
+            // Whatever is wrong inside the member is the query rule's to
+            // report — including a missing `ВЫБРАТЬ`, which it already says.
+            // The loop only speaks for members the query rule never sees.
             queries(p);
             a_query_is_due = false;
-            already_said_so = false;
+            member_has_tokens = true;
+        } else if drain_to_boundary(p, a_query_is_due) {
+            member_has_tokens = true;
         } else {
-            // Dropping a token does not mean a member stopped being due, so
-            // the flag stays: `; ) ИЗ Т` still owes the package a member and
-            // the clause keyword after the junk still starts one. Only the
-            // complaint is one per member.
-            if a_query_is_due && !already_said_so {
-                p.error_custom_no_bump("ожидалось 'ВЫБРАТЬ' / 'SELECT'");
-                already_said_so = true;
-            }
-            if !drain_to_boundary(p, a_query_is_due) {
-                break;
-            }
+            break;
         }
     }
 
+    // At the end of the input an owed member with nothing in it is just a
+    // trailing separator, which is not a missing member.
+    if member_has_tokens {
+        complain_about_a_missing_member(p, a_query_is_due, member_has_tokens);
+    }
+
     m.complete(p, NodeKind::SdblQueryPackage);
+}
+
+/// Says once, at the end of a member, that no query was found in it.
+///
+/// The loop speaks only for members no query rule ever saw. When one did
+/// run, whatever was wrong inside is that rule's to report — a missing
+/// `ВЫБРАТЬ` included — and a second voice here would double every
+/// incomplete query's diagnosis.
+fn complain_about_a_missing_member(p: &mut Parser, a_query_is_due: bool, had_tokens: bool) {
+    if !a_query_is_due {
+        return;
+    }
+
+    if had_tokens {
+        p.error_custom_no_bump("ожидалось 'ВЫБРАТЬ' / 'SELECT'");
+    } else {
+        p.error_custom_no_bump("ожидался запрос между разделителями");
+    }
 }
 
 fn at_query_start(p: &Parser) -> bool {
@@ -155,17 +170,21 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
 
     let leftover = p.start();
     let mut took_anything = false;
+    let mut after_a_dot = false;
 
     while !p.at_end() && !p.at(TokenKind::Semicolon) {
         p.check_iteration_limit();
 
+        // After a dot the word is a property name, whatever it spells. `T.ИЗ`
+        // is one fragment being skipped, not a fragment and then a query.
         let could_begin_a_member =
-            at_query_start(p) || (member_is_due && select::is_clause_keyword(p));
+            !after_a_dot && (at_query_start(p) || (member_is_due && select::is_clause_keyword(p)));
 
         if took_anything && could_begin_a_member && p.open_group_count() == 0 {
             break;
         }
 
+        after_a_dot = p.at(TokenKind::Dot);
         p.bump();
         took_anything = true;
     }

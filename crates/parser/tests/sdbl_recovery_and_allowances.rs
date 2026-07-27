@@ -760,3 +760,50 @@ fn dropped_junk_does_not_cancel_the_member_it_precedes() {
         );
     }
 }
+
+#[test]
+fn a_member_is_complained_about_once_and_by_one_voice() {
+    // Two voices can report a member with no query in it: the query rule,
+    // which says so when it runs, and the loop, which speaks for members no
+    // rule ever saw. Only one of them may speak per member.
+    let counted = |input: &str| {
+        parse_sdbl(input)
+            .errors()
+            .iter()
+            .filter(|e| {
+                let m = e.message().to_lowercase();
+                m.contains("'выбрать' / 'select'") || m.contains("между разделителями")
+            })
+            .count()
+    };
+
+    // Junk, then an incomplete query the rule reports itself.
+    assert_eq!(counted("SELECT A FROM T; ) FROM Products"), 1);
+    // Junk that reaches a separator: nobody else will speak for it.
+    assert_eq!(counted("SELECT A FROM T; ); SELECT B FROM U"), 1);
+    // Two members short, two complaints — the state does not leak across
+    // the separator between them.
+    assert_eq!(counted("SELECT A FROM T; ); 42"), 2);
+    // A separator at the end owes nothing.
+    assert_eq!(counted("ВЫБРАТЬ А ИЗ Т;"), 0);
+    assert_eq!(counted("ВЫБРАТЬ А ИЗ Т;;ВЫБРАТЬ Б ИЗ У"), 1);
+}
+
+#[test]
+fn a_clause_keyword_after_a_dot_is_a_property_name() {
+    // `T.ИЗ` is one fragment being skipped. Treating the word after the dot
+    // as the start of something mints a query node where there is no query.
+    for input in ["T.FROM", "Т.ИЗ", "Т.ГДЕ", "T.TOTALS"] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .descendants()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_QUERY)
+                .count(),
+            0,
+            "`{input}` contains no query",
+        );
+    }
+}

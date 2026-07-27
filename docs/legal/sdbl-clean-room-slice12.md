@@ -689,6 +689,32 @@ The flag now survives the drop, and the drain stops at a clause keyword
 while a member is still owed, so the query after the junk is reached. What
 is one-per-member is the complaint, not the debt.
 
+### Two voices reporting the same silence
+
+Three of the eleventh round's four findings were the same mistake seen
+from different inputs: the loop and the query rule both reported a member
+with no query in it. The rule says so when it runs; the loop had been
+saying so before letting it run, so an incomplete query got its diagnosis
+twice. And the flag meant to keep the loop to one complaint per member was
+not cleared at the separator, so a second short member inherited the
+first's silence and got none.
+
+Patching three sites would have been patching one rule stated three ways.
+The rule is: the loop speaks only for members no query rule ever saw, and
+it speaks at the end of the member, where it knows whether anything was in
+it at all. Everything else — including a missing `ВЫБРАТЬ` in a member the
+rule did see — belongs to the rule.
+
+Stating it that way immediately caught a fourth case the review had not
+raised: a trailing separator owes nothing, and the end-of-input complaint
+had started firing on it. An owed member with no tokens at the end of the
+input is not a missing member; it is a `;` and then nothing.
+
+The remaining finding was the drain stopping at a clause keyword that
+followed a dot. `T.ИЗ` is one fragment being skipped, not a fragment and
+then a query, and treating the word after the dot as a beginning minted a
+query node where no query exists.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -802,8 +828,10 @@ are covered by entries A6–A8 above.
 - C12 `09ceb39e` — the ninth round. Three findings, one class, and the
   class is the fourth round's again at a deeper level. Parser tests
   648 → 650.
-- C13 — the tenth round. One finding, in the ninth round's own fix. One
-  lens found nothing. Parser tests 650 → 651.
+- C13 `9cf16871` — the tenth round. One finding, in the ninth round's own
+  fix. One lens found nothing. Parser tests 650 → 651.
+- C14 — the eleventh round. Four findings, all in the tenth round's own
+  bookkeeping. Parser tests 651 → 653.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert
