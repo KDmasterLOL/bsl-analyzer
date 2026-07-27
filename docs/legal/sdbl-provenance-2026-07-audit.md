@@ -153,11 +153,13 @@ expression, and the slices already completed are why so little else remains.
 
 Not everything has been through the clean-room process.
 
-- **Lexer vocabularies.** Slices 3b, 4 and 5 have not been started: the
-  metadata-object type names, the query-function names, and the virtual-table
-  names. These lists were transcribed from upstream in the first commit and
-  have not been re-derived from 1C documentation since. Their present contents
-  already diverge from upstream, but no attestation covers them.
+- **Lexer vocabularies.** Slice 3b closed the metadata-object type names on
+  2026-07-27. Slices 4 and 5 have not been started: the query-function names
+  and the virtual-table names. These lists were transcribed from upstream in
+  the first commit and have not been re-derived from 1C documentation since.
+  Their present contents already diverge from upstream, but no attestation
+  covers them. Separately, `LBrace` and `RBrace` are covered by no attestation
+  and owned by no slice; see item 5 of the exit criteria.
 - **`sdbl-hir`.** Slice 13 has not been started. Roughly 13.8k lines. It is not
   unexamined: `parser-sdbl-hir-audit.md` assesses it as medium risk and records
   that no direct evidence of copying from `bsl-parser` was found. What has never
@@ -217,46 +219,62 @@ No single checklist existed before; this is it.
 
 For `lexer`:
 
-1. Slice 3b — metadata-object type vocabulary re-derived and attested.
+1. ~~Slice 3b — metadata-object type vocabulary re-derived and attested.~~
+   Done 2026-07-27, `sdbl-clean-room-slice3b.md`. It landed 18 variants
+   rather than 14: the audit found four canonical table roots that the lexer
+   never had.
 2. Slice 4 — query-function vocabulary re-derived and attested.
 3. Slice 5 — virtual-table vocabulary and external-data-source handling.
-4. The `Error` fallback variant re-derived. The Slice 3a attestation names it
-   explicitly as the closing step of the lexer work, and it is still the original
-   line from `2ccf30bc`. Note that “no `LEGACY` marker remains” is no longer a
-   usable check: `3aa29b99` removed every marker, so that test now passes
-   vacuously. Check the vocabularies themselves.
+4. ~~The `Error` fallback variant re-derived.~~ Done 2026-07-27 with Slice 3b,
+   which classifies it Tier D: it carries no pattern, and no 1C source defines
+   an error token because the documented language describes what is accepted,
+   not how a tool represents what is not.
+5. `LBrace` / `RBrace` re-derived and attested. **This item did not exist when
+   the list was written and is the reason the list was not exhaustive.** The
+   brace pair was added by `537527eb` (2026-06-16), after every closed lexer
+   slice, so no attestation could have covered it and none does. Slice 3b found
+   it while restoring the markers, closed the class at exactly two variants by
+   partitioning all 154 `SdblTokenKind` variants, and recommends a separate
+   Slice 1-addendum rather than absorbing punctuation into a vocabulary slice.
+
+   Note that “no `LEGACY` marker remains” is no longer a usable check:
+   `3aa29b99` removed every marker, so that test now passes vacuously. Slice 3b
+   restored markers for the vocabularies it owns and for those still pending,
+   but the closed slices' banners are still absent by choice — check the
+   vocabularies themselves, and treat this numbered list, not the source, as
+   the inventory.
 
 For `parser` (SDBL side):
 
-5. Slice 12 — recovery and IDE allowances attested.
-6. Rule naming reviewed. See the non-action below before acting on this.
+6. Slice 12 — recovery and IDE allowances attested.
+7. Rule naming reviewed. See the non-action below before acting on this.
 
 For `sdbl-hir`:
 
-7. Slice 13 — compare against `bsl-language-server`'s lowering, not only against
+8. Slice 13 — compare against `bsl-language-server`'s lowering, not only against
    the grammar, then rewrite whatever the comparison finds.
 
 For test material:
 
-8. Slice 0 — bucket C of the SDBL test corpus rewritten, and the bucket
+9. Slice 0 — bucket C of the SDBL test corpus rewritten, and the bucket
    classification restored in some durable form. Upstream-shaped test data is a
    provenance class of its own; a crate is not clean because its implementation
    is clean.
 
 For `parser` as a crate:
 
-9. The BSL grammar layer needs its own plan. Until it exists, `parser` and
+10. The BSL grammar layer needs its own plan. Until it exists, `parser` and
    `lexer` cannot become Tier A even with SDBL fully clean, because the two
    languages share the crates.
 
 Cross-cutting:
 
-10. Provenance notes in this directory updated to match the code.
-11. `NOTICE` and `LICENSING.md` updated.
+11. Provenance notes in this directory updated to match the code.
+12. `NOTICE` and `LICENSING.md` updated.
 
 ## Options, including one not previously considered
 
-**A. Finish the slices.** Items 1–8 above. Bounded and well understood; item 7
+**A. Finish the slices.** Items 1–9 above. Bounded and well understood; item 7
 is the expensive one.
 
 **B. Split SDBL into its own crates.** Only helps if the goal is to publish the

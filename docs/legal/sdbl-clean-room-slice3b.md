@@ -1,6 +1,6 @@
 # SDBL Slice 3b — Clean-Room Attestation (metadata-object table vocabulary + `Error` fallback)
 
-**Status:** in progress (C0a landed 2026-07-27).
+**Status:** complete (2026-07-27).
 
 This document attests the clean-room authorship of the Slice 3b material
 of the SDBL lexer, per the staged migration plan in
@@ -22,13 +22,11 @@ which is still the line introduced by the repository's first SDBL commit
 
 ## Status
 
-The Slice 3b attestation flips from "in progress" to "complete" at phase
-C3 with an absolute-date stamp at the top of this document. Until then,
-the document is a working artefact. The C0b / C1 / C2 landings are
-atomic but the §Commit trail placeholder for the C3 SHA only resolves on
-the C3 commit itself; the absolute-last trailing commit on the branch
-(the Anti-Hilbert disclosure) is necessarily not named in the
-enumeration, mirroring the Slice 1, 2, 6, 7, 8, 9, 10a, 10b, 11,
+The Slice 3b attestation flipped from "in progress" to "complete" at
+phase C3, with the absolute-date stamp at the top of this document. The
+C0a / C0b / C1 / C2 / C3 landings are atomic; the absolute-last trailing
+commit on the branch (the Anti-Hilbert disclosure) is necessarily not
+named in the enumeration, mirroring the Slice 1, 2, 6, 7, 8, 9, 10a, 10b, 11,
 Slice 7-addendum, Slice 8-addendum, Slice 2-addendum and Slice 3a
 precedents.
 
@@ -58,7 +56,10 @@ The paths claimed as clean-room Slice 3b authorship are:
   against the extended corpus at C0b and again at C2 when the four new
   variants start emitting.
 - `crates/lexer/tests/sdbl_slice3b_metadata_objects.rs` — the
-  spec-driven acceptance test file born at C3.
+  spec-driven acceptance test file born at C3, 49 tests: 36 bilingual
+  canonical-form pins (18 roots × 2 spellings), 1 case-insensitivity
+  sweep, 4 longest-match and distinctness guards, 5 structural
+  integration tests, and 3 `Error`-fallback tests.
 
 ### The 18 claimed table-root variants
 
@@ -511,12 +512,12 @@ live. Pre-Slice-3b baseline test counts (post-Slice-3a, `develop` as of
    (single snapshot test) throughout; the snapshot content changes at
    C0b and again at C2.
 7. `cargo test -p lexer --test sdbl_slice3b_metadata_objects` — file
-   does **not exist** pre-Slice-3b; the C3 acceptance suite count is
-   recorded here at C3.
-8. `cargo test -p lexer --tests` — **203 passed** pre-Slice-3b.
-9. `cargo test -p parser` — parser-side counts unchanged; the converter
-   edit is additive and the four affected words map to the same
-   `TokenKind::Ident` before and after.
+   does **not exist** pre-Slice-3b; **49 passed** post-Slice-3b.
+8. `cargo test -p lexer --tests` — **203 passed** pre-Slice-3b,
+   **252 passed** post-Slice-3b (203 + 49, matching item 7).
+9. `cargo test -p parser` — **596 passed** both before and after; the
+   converter edit is additive and the four affected words map to the
+   same `TokenKind::Ident` before and after.
 10. `cargo build --workspace --all-targets`.
 11. `cargo clippy -p lexer -p parser --all-targets --all-features
     -- -D warnings`.
@@ -611,11 +612,14 @@ The regenerated snapshot confirms both halves of the C0a audit:
   `LEGACY (unowned)` note on the brace pair. Comments only: no
   declaration moved and no regex changed, so the golden corpus snapshot
   needed no regeneration.
-- `<C2>` (2026-07-27) — C2: per-variant provenance docstrings and the
-  thematic index, the four added variants, the converter arm extension,
-  and the corpus snapshot flip. See § C2 outcome.
-- `<C3>` — C3: acceptance suite, attestation flip to complete,
-  master-document update.
+- `c97dd622` (2026-07-27) — C2: per-variant provenance docstrings and
+  the thematic index, the four added variants, the converter arm
+  extension, and the corpus snapshot flip. See § C2 outcome.
+- `<C3>` (2026-07-27) — C3: the `sdbl_slice3b_metadata_objects.rs`
+  acceptance suite (49 tests), this attestation's flip to complete, the
+  master-document Slice 3b section, and the correction of the exit
+  criteria in `sdbl-provenance-2026-07-audit.md` for the unowned brace
+  tokens.
 - Anti-Hilbert close-out: a single trailing fixup commit pins the C3 SHA
   explicitly in the trail above. The Anti-Hilbert disclosure: this
   trailing commit's own SHA is NOT named in this enumeration — it cannot

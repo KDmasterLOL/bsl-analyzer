@@ -10,21 +10,32 @@ independently.
 
 ## Status as of 2026-07-27
 
-Closed and attested: Slices 1, 2, 2-addendum and 3a on the lexer side; Slices 6,
-7, 7-addendum, 8, 8-addendum, 9, 10a, 10b and 11 on the parser side.
+Closed and attested: Slices 1, 2, 2-addendum, 3a and 3b on the lexer side;
+Slices 6, 7, 7-addendum, 8, 8-addendum, 9, 10a, 10b and 11 on the parser side.
 
 Open:
 
 | Slice | Area | State |
 |---|---|---|
 | 0 | SDBL test corpus | triaged into buckets A/B/C, but bucket C never rewritten and `3aa29b99` removed the bucket labels |
-| 3b | Metadata-object type vocabulary | not started |
 | 4 | Query-function vocabulary | not started |
 | 5 | Virtual tables, external data sources | not started |
+| 1-addendum | Brace pair `LBrace` / `RBrace` | not started; recommended by Slice 3b (see below) |
 | 12 | Recovery / IDE allowances | fixes landed, no attestation |
 | 13 | `sdbl-hir` reattachment | not started |
 
 No slice has ever covered the BSL grammar layer, and no plan for it exists.
+
+Slice 3b surfaced a gap that predates it and belongs to no slice: `LBrace` and
+`RBrace` were added after every closed lexer slice had landed, and no
+attestation names them. Partitioning all 154 `SdblTokenKind` variants against
+the closed attestations and the pending families closes that class at exactly
+those two. They are punctuation rather than vocabulary, so folding them into a
+vocabulary slice would be the same category error that lost the map in the first
+place; the recommendation is a small **Slice 1-addendum** deriving them from the
+official documentation of the query-language extension that gives `{…}` its
+meaning. Until it runs, the lexer cannot be declared clean, whatever Slices 4
+and 5 do.
 
 Two things changed after the last slice landed and are recorded here so the
 programme is not resumed on stale assumptions:
@@ -213,10 +224,11 @@ sub-slices by the codex pair-mode plan-review (2026-05-07):
   unambiguous and direct (4 primitive type literals,
   `LitUndefined`, 2 narrow `Period*` keywords). Status: complete
   (2026-05-07) — see §Slice 3a below.
-- **Slice 3b** owns the 14 metadata-object variants (`Mdo*`
-  excluding `MdoExternalDataSource`) which require a per-variant
-  discrepancy audit to determine the right tier classification per
-  variant. Status: pending.
+- **Slice 3b** owns the metadata-object table-root variants. Status:
+  complete (2026-07-27) — see §Slice 3b below. Its per-variant
+  discrepancy audit found the 14 pre-existing `Mdo*` spellings correct
+  and four canonical table roots missing from the lexer, so the slice
+  landed 18 variants rather than the planned 14.
 - The platform-late `MdoExternalDataSource` variant is deferred to
   master-doc Slice 5, which already owns external-source handling.
 
@@ -1151,6 +1163,75 @@ Codex pair-mode review pass: 2 plan-review rounds + 1 C0a
 document review + 1 C2 source review; 1 BLOCKER (LitUndefined
 converter mapping claim — addressed inline before C2 commit), 4
 STRONG (all addressed inline), multiple VERIFIED.
+
+## Slice 3b: metadata-object table vocabulary + `Error` fallback (lexer)
+
+**Status: complete (2026-07-27).** See
+[`sdbl-clean-room-slice3b.md`](sdbl-clean-room-slice3b.md) for the
+attestation. Commit trail: C0a `3419ac6d`, C0b `f88f604b`, C1
+`164e82f9`, C2 `c97dd622`, C3 landed with the attestation.
+
+Slice 3b is the second sub-slice carved out of master-doc Slice 3. It
+claims the metadata-object table roots — the words that name a metadata
+object as a query data source — and, as the closing step of the lexer
+work named by the Slice 3a attestation, the `Error` fallback variant.
+
+The primary source is the 1C:Enterprise 8.3.27 syntax assistant section
+«Работа с запросами → Таблицы запросов», adopted for this slice on the
+repository owner's decision. It is the only source that attests all 18
+Russian/English pairs: the ITS dumps carry bilingual pairs for just five
+roots (Developer's Reference Глава 8 §8.4.4), and the pubqlang textbook
+explicitly defers to the syntax assistant for the table inventory. Each
+article headline is bilingual, so one canonical line attests both
+spellings of a root.
+
+### Scope
+
+18 lexer token variants plus the `Error` fallback. Fourteen `Mdo*`
+variants pre-existed; four are born here because the audit found them
+missing from the lexer while the source defines them:
+`MdoDocumentJournal`, `MdoExchangePlan`, `MdoFilterCriterion`,
+`MdoConstants`. The last is the aggregate constants table `Константы`
+(no name part), distinct from the `Константа` already present and one
+letter away from it. `MdoExternalDataSource` stays with Slice 5.
+
+### Behaviour change
+
+Additive and parser-tree-invariant. The converter maps every `Mdo*`
+variant to `TokenKind::Ident` through one shared arm, so the four words
+reach the grammar exactly as they did when they lexed as `Ident`;
+`cargo test -p parser` is unchanged at 596. Regenerating the golden
+corpus over all 81 entries moved 8 lines and no others.
+
+Unlike Slices 2-addendum and 3a, this slice is **not lexer-only**: the
+converter's match is exhaustive over `SdblTokenKind`, so a new variant
+without a new arm does not compile. The edit carries no grammar
+decision.
+
+### Files
+
+- `crates/lexer/src/sdbl/mod.rs` — the `CLEAN-ROOM Slice 3b` banners
+  over the table roots and over `Error`, per-variant provenance
+  docstrings, the thematic index, the restored module docstring, and the
+  `LEGACY` banners naming Slice 4, Slice 5 and the unowned brace pair.
+- `crates/parser/src/sdbl_token_converter.rs` — four variants appended
+  to the shared `Mdo* => T::Ident` arm.
+- `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` — entries 074–081
+  closing 19 bilingual blind spots.
+- `crates/lexer/tests/sdbl_golden_corpus.rs` — snapshot regenerated at
+  C0b and at C2.
+- `crates/lexer/tests/sdbl_slice3b_metadata_objects.rs` — 49 acceptance
+  tests added at C3.
+- `docs/legal/sdbl-clean-room-slice3b.md` — the attestation.
+
+### Notes
+
+The slice also restores the provenance map that `3aa29b99` erased from
+`crates/lexer/src/sdbl/mod.rs`, for the vocabularies it owns and for
+those still pending. Banners and per-variant docstrings for the closed
+Slices 1, 2, 2-addendum and 3a are deliberately **not** restored; the
+module docstring says so explicitly, so that a missing banner is not
+read as a missing attestation.
 
 ## Slice 12: recovery and IDE allowances
 
