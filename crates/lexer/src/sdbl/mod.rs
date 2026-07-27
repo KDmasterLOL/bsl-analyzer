@@ -1,3 +1,24 @@
+//! SDBL (1C:Enterprise query language) lexer.
+//!
+//! ## Provenance
+//!
+//! The token vocabulary is being re-derived from official 1C sources one
+//! vocabulary at a time. Each re-derived group carries a `CLEAN-ROOM`
+//! banner naming the attestation document that records its sources;
+//! everything still awaiting re-derivation carries a `LEGACY` banner
+//! naming the slice that owns it.
+//!
+//! - Slice 3b — metadata-object table vocabulary and the `Error`
+//!   fallback: `docs/legal/sdbl-clean-room-slice3b.md`.
+//!
+//! The lexer core, the structural keyword vocabulary, the clause-keyword
+//! leftovers and the primitive-type vocabulary are attested by
+//! `docs/legal/sdbl-clean-room-slice{1,2,2-addendum,3a}.md`. Their
+//! in-file banners were removed in a repository-wide comment prune and
+//! are not restored here, so absence of a banner above a declaration
+//! does not imply absence of an attestation — the attestation documents
+//! are authoritative on scope.
+
 mod strings_mode;
 
 use logos::Logos;
@@ -20,6 +41,9 @@ pub enum SdblTokenKind {
     #[token(")")]
     RParen,
 
+    // LEGACY (unowned) — the brace pair postdates every closed lexer
+    // attestation and no pending slice claims it. See
+    // `docs/legal/sdbl-clean-room-slice3b.md` § Unowned brace tokens.
     #[token("{")]
     LBrace,
 
@@ -274,6 +298,12 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)полугодие|(?i)halfyear")]
     PeriodHalfYear,
 
+    // ===================================================================
+    // LEGACY (Slice 4 pending — query-function vocabulary)
+    //
+    // Aggregate, date, string, numeric and type/presentation functions.
+    // Not yet re-derived from official 1C sources.
+    // ===================================================================
     #[regex(r"(?i)сумма|(?i)sum")]
     FnSum,
 
@@ -400,6 +430,13 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)уникальныйидентификатор|(?i)uuid")]
     FnUUID,
 
+    // ===================================================================
+    // CLEAN-ROOM Slice 3b — metadata-object table vocabulary
+    // (in progress)
+    //
+    // Table roots that name a metadata object as a query data source.
+    // Attestation: `docs/legal/sdbl-clean-room-slice3b.md`.
+    // ===================================================================
     #[regex(r"(?i)справочник|(?i)catalog")]
     MdoCatalog,
 
@@ -442,6 +479,12 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)последовательность|(?i)sequence")]
     MdoSequence,
 
+    // ===================================================================
+    // LEGACY (Slice 5 pending — virtual tables and external data sources)
+    //
+    // Virtual-table suffixes and the external-data-source table root.
+    // Not yet re-derived from official 1C sources.
+    // ===================================================================
     #[regex(r"(?i)внешнийисточникданных|(?i)externaldatasource")]
     MdoExternalDataSource,
 
@@ -463,6 +506,11 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)оборотыдткт|(?i)drcrturnovers")]
     VtDrCrTurnovers,
 
+    // ===================================================================
+    // CLEAN-ROOM Slice 3b — lexer error fallback (in progress)
+    //
+    // Attestation: `docs/legal/sdbl-clean-room-slice3b.md`.
+    // ===================================================================
     Error,
 }
 
