@@ -1537,7 +1537,7 @@ discarding was silent.
   `totals_group_item`, `totals_periods_modifier`, `totals_group_alias`;
 - `crates/parser/src/grammar/sdbl/expressions.rs` — the recovery banner;
 - `crates/parser/tests/sdbl_parser_tests.rs` — 12 coverage pins;
-- `crates/parser/tests/sdbl_recovery_and_allowances.rs` — 29 acceptance
+- `crates/parser/tests/sdbl_recovery_and_allowances.rs` — 31 acceptance
   tests;
 - `docs/legal/sdbl-select-mini-spec.md` — the control-point grammar and
   the ordering-field word order;
@@ -1553,7 +1553,7 @@ which turns a silent loss into a silent acceptance. Both are fixed, along
 with a leading comma that cost a whole query and an explicit alias that
 both under- and over-restricted its name.
 
-Three review rounds were run, each because the one before it had found
+Four review rounds were run, each because the one before it had found
 defects inside its own predecessor's fixes. The second round
 found the same thing one level deeper: making the drain stop at the
 separator assumed every recovery path leaves the separator alone, and
@@ -1564,11 +1564,16 @@ A round that finds nothing is the only honest signal to stop.
 
 The third round proved the point again: fixing the package loop had made
 a run-on package and an empty member silently acceptable, where before
-they were at least reported. Both are reported again.
+they were at least reported. The fourth found why three rounds had kept
+missing it — `Parser::emit_error` reports by consuming the offending
+token, and standing on a `;` that token is the separator. Every earlier
+fix had been compensating in the caller for a loss inflicted below it. A
+separator is now never taken as an offending token, in the BSL grammar as
+well, since the reasoning is the same there.
 
 Commit trail: C0a `18b5bb70`, C0b `27eb6e92`, C1 `80350945`,
 C2 `da3eeaa0`, C2b `01d9cd6d`, C3 `7aaf669c`, C4 `3aebeb9b`,
-C5 `7a7fb54d`, C6 the third round's fixes. Two earlier commits landed
+C5 `7a7fb54d`, C6 `f8c9d9e4`, C7 the fourth round's fixes. Two earlier commits landed
 under this slice's name in April 2026 without an attestation and are
 covered by it now: `9d418084` and `88439afa`, both on the recovery
 helpers' clause-keyword stop.

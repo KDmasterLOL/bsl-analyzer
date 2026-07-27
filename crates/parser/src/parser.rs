@@ -178,7 +178,11 @@ impl<'a> Parser<'a> {
     fn emit_error(&mut self, err: ParseError) {
         debug_assert!(matches!(err.recovery(), RecoveryKind::BumpToken | RecoveryKind::Custom));
         let m = self.start();
-        if !self.at_end() {
+        // Reporting is implemented as taking the offending token, but a
+        // statement separator is never the offending token — it is the
+        // boundary that lets whatever comes after it still be parsed.
+        // Taking it turns one bad statement into the loss of the next.
+        if !self.at_end() && !self.at(TokenKind::Semicolon) {
             self.bump();
         }
         self.events.push(Event::Error(err));

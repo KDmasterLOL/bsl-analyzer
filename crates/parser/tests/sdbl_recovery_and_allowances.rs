@@ -458,3 +458,49 @@ fn a_closing_paren_ends_a_missing_top_count() {
         parse.errors(),
     );
 }
+
+#[test]
+fn a_separator_survives_the_recovery_that_reports_next_to_it() {
+    // Reporting is implemented as taking the offending token, and for a
+    // while the offending token could be the separator. Then the package
+    // loop either blamed the next query for a separator that was there, or
+    // let a recovery keep parsing straight through it.
+    let after_drop = parse_sdbl("УНИЧТОЖИТЬ ; ВЫБРАТЬ A ИЗ T");
+    assert!(
+        !after_drop.errors().iter().any(|e| e.message().contains("разделитель")),
+        "the separator is present, so nothing may report it missing: {:#?}",
+        after_drop.errors(),
+    );
+    assert!(parse_sdbl("УНИЧТОЖИТЬ ;; ВЫБРАТЬ A ИЗ T")
+        .errors()
+        .iter()
+        .any(|e| e.message().contains("между разделителями")));
+
+    let after_join = parse_sdbl("ВЫБРАТЬ A ИЗ T СОЕДИНЕНИЕ U ; ВЫБРАТЬ B ИЗ V");
+    assert_eq!(
+        after_join
+            .syntax_node()
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+            .count(),
+        2,
+        "a recovery that reports mid-clause must not swallow the next member",
+    );
+}
+
+#[test]
+fn the_drain_does_not_promote_a_nested_query() {
+    // A query start inside a paren group belongs to that group. Promoting it
+    // would hand the lowerer a subquery dressed as a package member.
+    let input = "ВЫБРАТЬ А ИЗ Т 42 (ВЫБРАТЬ Б ИЗ У)";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert_eq!(
+        parse
+            .syntax_node()
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+            .count(),
+        1,
+    );
+}

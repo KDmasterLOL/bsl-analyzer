@@ -124,12 +124,22 @@ fn drain_to_boundary(p: &mut Parser) -> bool {
 
     let leftover = p.start();
     let mut took_anything = false;
+    let mut paren_depth = 0i32;
 
-    while !p.at_end() && !p.at(TokenKind::Semicolon) {
+    while !p.at_end() && !(p.at(TokenKind::Semicolon) && paren_depth == 0) {
         p.check_iteration_limit();
 
-        if took_anything && at_query_start(p) {
+        // A query start inside a paren group belongs to that group, not to
+        // the package. Promoting it would hand the lowerer a subquery
+        // dressed as a top-level one.
+        if took_anything && paren_depth == 0 && at_query_start(p) {
             break;
+        }
+
+        if p.at(TokenKind::LParen) {
+            paren_depth += 1;
+        } else if p.at(TokenKind::RParen) && paren_depth > 0 {
+            paren_depth -= 1;
         }
 
         p.bump();

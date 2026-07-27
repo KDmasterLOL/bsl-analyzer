@@ -505,6 +505,35 @@ reason: at end of input the user is mid-word, not mistaken. Reporting here
 and not there would be the inconsistency. A16's wording was too narrow to
 cover this and has been widened; the behaviour stands.
 
+### Where the separator problem actually was
+
+Three rounds circled the same thing and each fixed it one level too high.
+The drain was made to stop at the separator; then the package loop was
+made not to depend on the separator being there; then the loop was made to
+report when it was genuinely absent. The fourth round showed why none of
+that was enough: `Parser::emit_error` reports by taking the offending
+token, and when the parser is standing on a `;` the token it takes is the
+separator itself.
+
+Everything downstream was compensation. A recovery that consumed the
+separator and returned immediately could be papered over by recognising
+the next query's first word — but a recovery that consumed it and *kept
+going*, as the missing-`ON` path in a `JOIN` does, absorbed the next
+query's `ВЫБРАТЬ` into the broken clause before the loop ever got control
+back. No amount of care in the caller can fix that.
+
+So the fix is in `emit_error`: a statement separator is never the
+offending token. It is the boundary that lets what follows still be
+parsed, and taking it converts one bad statement into the loss of the
+next. This is shared with the BSL grammar, where the same reasoning
+applies and where the whole workspace's tests confirm it changes nothing
+else.
+
+The drain also learned paren depth in the same pass. Stopping at a query
+start is right at the top level and wrong inside a paren group, where the
+query start belongs to a subquery — without the depth count the drain
+handed the lowerer a subquery dressed as a package member.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -600,6 +629,9 @@ are covered by entries A6–A8 above.
   Parser tests 636 → 638. One lens of this round did not run at all — the
   task file had grown past the argument-size limit — so this round covers
   one perspective, not two.
+- C7 — the fourth round, with both lenses. Three findings, all one class
+  and all confirmed: an inner recovery consuming the package separator.
+  Closed at the root rather than per site. Parser tests 638 → 640.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert
