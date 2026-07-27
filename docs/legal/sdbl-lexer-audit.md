@@ -1,5 +1,12 @@
 # SDBL Lexer Audit
 
+> **Superseded on current state — retained as historical record.** This note was
+> written in April 2026 without access to the upstream grammar. Its conclusion
+> that the token inventory was derived is now proven from this repository's own
+> history. Its risk assessment of the code describes the tree before Slices 1,
+> 2, 2-addendum and 3a landed and overstates what remains today. See
+> `sdbl-provenance-2026-07-audit.md`.
+
 ## Scope
 
 This note records a focused provenance assessment for:

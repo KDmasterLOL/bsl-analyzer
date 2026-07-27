@@ -1,5 +1,13 @@
 # Audit: `crates/parser/src/grammar/sdbl/select.rs`
 
+> **Superseded on current state — retained as historical record.** Written in
+> April 2026 by reasoning from rule names, without access to the upstream
+> grammar. Its premise — that the file was written against the upstream grammar
+> text — is now proven from this repository's own history. Its assessment of the
+> file predates Slices 6 through 11; the rule bodies it describes as
+> grammar-derived have since been rewritten and now differ structurally from
+> upstream. See `sdbl-provenance-2026-07-audit.md`.
+
 ## Goal
 
 This note evaluates `crates/parser/src/grammar/sdbl/select.rs` as a provenance

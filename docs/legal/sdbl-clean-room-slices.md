@@ -8,6 +8,38 @@ The goal is not to rewrite the whole subsystem at once, but to isolate the work
 into bounded chunks that can be implemented, audited, and validated
 independently.
 
+## Status as of 2026-07-27
+
+Closed and attested: Slices 1, 2, 2-addendum and 3a on the lexer side; Slices 6,
+7, 7-addendum, 8, 8-addendum, 9, 10a, 10b and 11 on the parser side.
+
+Open:
+
+| Slice | Area | State |
+|---|---|---|
+| 0 | SDBL test corpus | triaged into buckets A/B/C, but bucket C never rewritten and `3aa29b99` removed the bucket labels |
+| 3b | Metadata-object type vocabulary | not started |
+| 4 | Query-function vocabulary | not started |
+| 5 | Virtual tables, external data sources | not started |
+| 12 | Recovery / IDE allowances | fixes landed, no attestation |
+| 13 | `sdbl-hir` reattachment | not started |
+
+No slice has ever covered the BSL grammar layer, and no plan for it exists.
+
+Two things changed after the last slice landed and are recorded here so the
+programme is not resumed on stale assumptions:
+
+- The upstream grammars were compared against the current tree in July 2026.
+  Today's SDBL layer diverges from upstream in token inventory, token
+  granularity, lexical modes, rule decomposition and operator precedence; what
+  remains similar is largely rule naming. See
+  `sdbl-provenance-2026-07-audit.md`, which also carries the exit criteria.
+- `3aa29b99` removed the `CLEAN-ROOM` / `LEGACY` banners and the test-corpus
+  bucket classification from the source. Attestation citations that point at
+  those banners no longer resolve, and the remaining unrewritten surface is no
+  longer visible in the code. Restoring markers on the vocabularies owned by
+  Slices 3b, 4 and 5 would close this gap.
+
 ## Legal framing
 
 ### Working ownership note
@@ -200,8 +232,8 @@ Separate the most provenance-sensitive catalogs into their own owned tables.
 
 ### Files
 
-- likely extracted from `crates/lexer/src/sdbl.rs` into dedicated local tables or
-  modules
+- likely extracted from `crates/lexer/src/sdbl/mod.rs` into dedicated local
+  tables or modules
 
 ## Slice 4: function vocabulary
 
@@ -238,7 +270,7 @@ Isolate the trickiest vocabulary/context subsystem.
 
 ### Files
 
-- `crates/lexer/src/sdbl.rs`
+- `crates/lexer/src/sdbl/mod.rs`
 - `crates/parser/src/sdbl_token_converter.rs`
 - SDBL parser tests
 

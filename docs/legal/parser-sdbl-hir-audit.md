@@ -1,5 +1,12 @@
 # Parser / SDBL HIR Audit
 
+> **Partially superseded — retained as historical record.** Its parser and lexer
+> assessments predate Slices 1 through 11; see
+> `sdbl-provenance-2026-07-audit.md` for the current state. Its `sdbl-hir`
+> section is still the only assessment that exists for that crate, and the crate
+> remains unaudited. The legal framing in this note is still the project's
+> working position.
+
 ## Scope
 
 This note records the current provenance assessment for:

@@ -1,5 +1,10 @@
 # Parser Architecture Map
 
+> **Layer map still accurate; risk commentary is stale.** The architectural
+> separation described here holds. The open question it poses — how much of the
+> grammar-expression layer still reflects upstream work — has since been
+> answered for SDBL in `sdbl-provenance-2026-07-audit.md`.
+
 ## Purpose
 
 This note separates the `crates/parser` codebase into architectural layers for

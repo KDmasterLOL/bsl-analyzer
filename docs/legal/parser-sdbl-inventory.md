@@ -1,5 +1,11 @@
 # Parser / SDBL Inventory
 
+> **Risk levels are stale — retained as historical record.** The per-file risk
+> ratings date from April 2026 and predate the clean-room slices. The
+> line-by-line audit this document lists as a pending action has since been
+> performed: see `sdbl-provenance-2026-07-audit.md`. The fixture inventory below
+> remains accurate.
+
 ## Purpose
 
 This document is a concrete inventory of grammar-related files and parser/SDBL

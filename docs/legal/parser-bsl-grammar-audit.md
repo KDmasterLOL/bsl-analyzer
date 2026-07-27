@@ -1,5 +1,15 @@
 # Parser BSL Grammar Audit
 
+> **Still current, and its premise is now supported by the repository's own
+> history.** Unlike the SDBL notes, this assessment has not been overtaken by
+> rewrite work: no clean-room slice has ever touched the BSL grammar layer. Note
+> that the evidence here is weaker in form than for SDBL — the initial commit
+> names the upstream grammars in its planning document rather than in the BSL
+> source files, and a header referencing `BSLLexer.g4` appeared only in
+> `fe2f7ed2`; `BSLParser.g4` was never named in a BSL parser file. This layer is
+> the reason `parser` and `lexer` cannot become Tier A on SDBL progress alone.
+> See `sdbl-provenance-2026-07-audit.md`.
+
 ## Scope
 
 This note is a focused provenance assessment for the hand-written BSL grammar
