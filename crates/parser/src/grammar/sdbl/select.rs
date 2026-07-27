@@ -196,13 +196,27 @@ fn query(p: &mut Parser) {
 pub(super) fn selected_fields(p: &mut Parser) {
     let m = p.start();
 
-    super::expressions::parse_delimited_list(
-        p,
-        TokenKind::Comma,
-        &super::LIST_RECOVERY,
-        is_field_start,
-        selected_field,
-    );
+    // The list parser takes its first item unconditionally, and an
+    // expression asked to start on a clause keyword takes it anyway. That
+    // turns a selection list the user has not typed yet — or one whose
+    // qualifier failed to parse — into a field made of the next clause's
+    // keyword, and the clause it belonged to is then never recognised.
+    if is_field_start(p) {
+        super::expressions::parse_delimited_list(
+            p,
+            TokenKind::Comma,
+            &super::LIST_RECOVERY,
+            is_field_start,
+            selected_field,
+        );
+    } else if !p.at_end() {
+        // The list is mandatory, so its absence is worth saying — but say
+        // it without moving, or the clause keyword that revealed the
+        // absence is the thing that gets consumed. At end of input this
+        // stays quiet: that is a query being typed, not one missing a
+        // selection.
+        p.error_custom_no_bump("ожидался список полей выборки после 'ВЫБРАТЬ' / 'SELECT'");
+    }
 
     m.complete(p, NodeKind::SdblFieldList);
 }
@@ -1037,7 +1051,14 @@ fn top_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "TOP", "ПЕРВЫЕ");
     p.skip_trivia();
 
-    p.expect(TokenKind::Decimal);
+    // `expect` reports by bumping the offending token, which would eat the
+    // next clause's keyword and cost that clause its parse. Say the same
+    // thing without moving when the count is simply not there.
+    if is_clause_keyword(p) || p.at_end() {
+        p.error_custom_no_bump("ожидалось количество после 'ПЕРВЫЕ' / 'TOP'");
+    } else {
+        p.expect(TokenKind::Decimal);
+    }
 
     m.complete(p, NodeKind::SdblTopClause);
 }

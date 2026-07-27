@@ -249,12 +249,17 @@ explicitly so future slices know which behaviours are intentional.
    then exits because the following `ИЗ` is not a limitation
    keyword. The remaining tokens are consumed by the outer
    `selected_fields` parser without identifying `ИЗ` as the
-   FROM keyword (current preserved IDE-recovery boundary;
-   see test
-   `crates/parser/tests/sdbl_parser_tests.rs::test_slice7adn_top_missing_decimal_recovery`).
-   A tighter recovery (recognise FROM/clause-keyword
-   boundary, emit empty error sub-node instead of consuming)
-   is deferred to Slice 12.
+   FROM keyword.
+
+   **Closed by Slice 12.** The tighter recovery this entry
+   deferred is in place: an empty selection list no longer
+   takes the next clause's keyword as its only field, and a
+   `ПЕРВЫЕ` with nothing at all where the count belongs
+   reports without moving. `ВЫБРАТЬ ПЕРВЫЕ A ИЗ Т` still puts
+   the `A` into an error sub-node, which is where it belongs,
+   but the `ИЗ Т` after it is now a FROM clause. The two
+   audit-gate tests that pinned the old boundary assert the
+   new one.
 
 ### Tier classification (Slice 7-addendum extension)
 
@@ -703,6 +708,14 @@ modifier, preserving the flat-sibling layout (the IDENT token sits next to
 the expression node and the ASC/DESC token, all flat at the
 `SdblOrderClause` level).
 
+Slice 12 corrected the word order. The Developer's Reference §8.4.15 gives
+an ordering field exactly four alternatives —
+`ВОЗР | УБЫВ | ИЕРАРХИЯ | ИЕРАРХИЯ УБЫВ` — and the arrangement above takes
+three of them while dropping the `УБЫВ` of the fourth on the floor. The
+parser now accepts a direction after `ИЕРАРХИЯ` as well as before it. The
+before-it order is not among the four and is kept as a stated tolerance;
+see `docs/legal/sdbl-clean-room-slice12.md` entry A13.
+
 Bilingual ASC/ВОЗР, DESC/УБЫВ, HIERARCHY/ИЕРАРХИЯ pairs are attested in the
 lexer Slice 2 LEGACY block at `crates/lexer/src/sdbl/mod.rs:485-489, 491-492`
 (KwAsc, KwDesc, KwHierarchy variants).
@@ -827,8 +840,25 @@ totals-by-clause :=
   (BY|ПО) totals-group-list
 totals-aggregate-list := expression (',' expression)*
 totals-group-list     := totals-group (',' totals-group)*
-totals-group          := expression
+totals-group          := expression totals-group-modifier? totals-group-alias?
+
+totals-group-modifier :=
+    (ONLY|ТОЛЬКО)? (HIERARCHY|ИЕРАРХИЯ)
+  | (PERIODS|ПЕРИОДАМИ) '(' period-name (',' expression)* ')'
+totals-group-alias    := (AS|КАК)? identifier
+period-name           := SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|QUARTER|YEAR
+                       | TENDAYS|HALFYEAR
+                       | СЕКУНДА|МИНУТА|ЧАС|ДЕНЬ|НЕДЕЛЯ|МЕСЯЦ|КВАРТАЛ|ГОД
+                       | ДЕКАДА|ПОЛУГОДИЕ
 ```
+
+The control-point modifiers and alias were added by Slice 12 from the
+Developer's Reference rule for `<Контрольная точка>` at
+`https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` §8.4.16; before
+that the parser consumed `ТОЛЬКО`/`ИЕРАРХИЯ` and nothing else, and the
+rest of the query was discarded without a word. The rule allows at most
+two boundary arguments; the parser accepts any number, which is a
+tolerance rather than a reading of the source.
 
 ### AST-shape contract (Slice 11 extension)
 
@@ -852,18 +882,27 @@ out before consuming another clause's starter as a pre-BY aggregate. Without
 this guard, `ИТОГИ ИЗ T` would consume `ИЗ` as a pre-BY expression. This
 guard is preserved by the Slice 11 rewrite.
 
-### What is NOT supported in Slice 11
+### Modifier support, and what is still open
 
-The structured-modifier forms `ONLY/ТОЛЬКО`, `HIERARCHY/ИЕРАРХИЯ` (in TOTALS
-context), and `PERIODS/ПЕРИОДЫ(...)` are **NOT** supported as structured
-TOTALS modifiers in Slice 11. The pre-Slice-11 parser at
-`crates/parser/src/grammar/sdbl/select.rs:1397-1405` carries an explicit
-`// TODO: Add proper support for OVERALL, HIERARCHY, PERIODS` comment
-confirming the flat-list shape is the actually-supported form. Their
-structured-modifier promotion is deferred to Slice 12 (the IDE-recovery /
-grammar-extension owner). Lexer keyword pairs (KwOnly, KwHierarchy,
-KwPeriods) are attested in the Slice 2 LEGACY block but are not consumed as
-structured modifiers under Slice 11.
+Slice 11 supported neither `ПЕРИОДАМИ(…)` nor the control-point alias and
+deferred both. Slice 12 added them, along with the `ИЕРАРХИЯ УБЫВ` word
+order on `ORDER BY` that the reference rule lists and the parser did not
+take. All are consumed as tokens and expressions of the enclosing clause
+node; none is promoted into a node of its own, so the shape
+`crates/sdbl-hir` reads is the same shape Slice 11 left.
+
+What is still open is the *reading*, not the parsing. That a control point
+carrying `ПЕРИОДАМИ` means date completion, that an omitted boundary
+defaults to the first and last dates in the result, and that `ОБЩИЕ` marks
+the overall-totals row rather than naming a field, are all semantic
+questions owned by Slice 13.
+
+`ОБЩИЕ` keeps the flat-identifier shape of §IDE-recovery allowance #1.
+The Developer's Reference writes it as a prefix keyword with no separator
+and the textbook writes it inside the list with a comma; the comma form is
+the only one that occurs in practice, so Slice 12 left the shape alone
+rather than change the form that is written for the sake of one that is
+not. See `docs/legal/sdbl-clean-room-slice12.md` § Source questions.
 
 ### ITS coverage
 

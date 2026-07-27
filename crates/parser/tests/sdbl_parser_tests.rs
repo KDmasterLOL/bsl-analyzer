@@ -3975,13 +3975,28 @@ fn test_slice7adn_top_missing_decimal_recovery() {
     let from_clauses_count =
         root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
     assert_eq!(
-        from_clauses_count, 0,
-        "Pre-rewrite parser current shape: NO SdblFromClause emitted for \
-         `ВЫБРАТЬ ПЕРВЫЕ A ИЗ Т` because `ИЗ` falls through to \
-         selected_fields as a bare SdblColumnRef. Got: {} SdblFromClause \
-         nodes (a regression that promotes recovery quality must update \
-         this test plus the §IDE-recovery allowance Q3 documentation).",
+        from_clauses_count, 1,
+        "The clause after a failed count must survive: an empty selection \
+         list no longer takes the next clause's keyword as its only field. \
+         Got: {} SdblFromClause nodes.",
         from_clauses_count,
+    );
+}
+
+#[test]
+fn test_top_without_any_count_leaves_the_next_clause_alone() {
+    use syntax::SyntaxKind;
+    // Nothing at all where the count belongs: the complaint is made
+    // without moving, so `ИЗ` is still there to be recognised.
+    let parse = parse_sdbl("ВЫБРАТЬ ПЕРВЫЕ ИЗ Т");
+    assert!(parse.has_errors(), "a missing count must still be reported");
+    assert_eq!(
+        parse
+            .syntax_node()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE)
+            .count(),
+        1,
     );
 }
 

@@ -1,6 +1,6 @@
 # SDBL Slice 12 — Clean-Room Attestation (recovery and IDE allowances)
 
-**Status:** in progress (C0a, 2026-07-27).
+**Status:** complete (2026-07-27).
 
 This document attests the clean-room authorship of the Slice 12 material
 of the SDBL parser, per the staged migration plan in
@@ -58,8 +58,10 @@ The paths claimed as clean-room Slice 12 authorship are:
 - `docs/legal/sdbl-select-mini-spec.md` — the §TOTALS BY grammar,
   narrowed by Slice 11 to the flat-list shape, and the per-slice
   §IDE-recovery allowance blocks, which this slice consolidates;
-- `crates/parser/tests/sdbl_slice12_recovery.rs` — the acceptance suite
-  born at C3;
+- `crates/parser/tests/sdbl_parser_tests.rs` — the coverage pins added at
+  C0b and turned over at C2;
+- `crates/parser/tests/sdbl_recovery_and_allowances.rs` — the acceptance
+  suite born at C3, 20 tests;
 - this document.
 
 ### Out of scope, and why
@@ -156,15 +158,26 @@ Every site is classified:
 
 ### D — neither the language nor a decision
 
-| # | Site | What actually happens |
+Stated as they were found, before C2. All four are closed.
+
+| # | Site | What happened |
 |---|---|---|
 | D1 | `sdbl.rs:12-38` `query_package` | **The tail of the input is dropped.** The package loop ends as soon as the current token is not `;`, and nothing consumes what remains. No error is emitted, and the syntax tree covers less text than it was given. |
 | D2 | `select.rs:881` `totals_group_item` | `ПЕРИОДАМИ(…)` is not consumed. Since it is the last thing in the query, D1 then deletes it. |
 | D3 | `select.rs:881` `totals_group_item` | A control-point alias, with or without `КАК`, is not consumed, and D1 deletes it. |
 | D4 | `select.rs:759` `order_by_item` | The canonical `ИЕРАРХИЯ УБЫВ` loses its `УБЫВ` to D1. The parser accepts only the reverse order, which the source does not list. |
+| D5 | `select.rs` `selected_fields` | The list parser takes its first item unconditionally, and an expression asked to start on a clause keyword takes it anyway. A selection list that is empty — because it has not been typed, or because the qualifier before it failed — becomes a field made of the *next clause's* keyword, and that clause is then never recognised. |
+| D6 | `select.rs` `top_clause` | `Parser::expect` reports a missing count by bumping whatever is there, which for `ВЫБРАТЬ ПЕРВЫЕ ИЗ Т` is the `ИЗ`. Slice 7-addendum recorded this as allowance Q3 and deferred the fix here. |
 
 D1 is the mechanism; D2–D4 are documented, valid query forms that fall
 into it. That relationship is the finding of this slice.
+
+D5 and D6 were not in the C0a inventory. They surfaced at C2, because
+draining the leftover is what made them legible: with the remainder
+discarded in silence there was nothing to see, and with it reported the
+message named the wrong thing. D6 is the deferral Slice 7-addendum left
+here in so many words; D5 is the reason D6's narrow fix would not have
+been enough on its own.
 
 ## The silent tail loss
 
@@ -309,16 +322,27 @@ The textbook article's worked listing puts it in the list, with a comma:
   Поставщик
 ```
 
-Both are official; neither is a misprint. The parser today accepts the
-comma form (`ОБЩИЕ` falls through as a bare identifier expression — Slice
-11 allowance #1) and loses the prefix form to D1. Rather than choose
-between two sources that are each canonical in their own document, C2
-accepts the union: `ОБЩИЕ` immediately after `ПО` is consumed whether or
-not a comma follows it. This is the same resolution Slice 4 reached for
-`РАЗНОСТЬДАТ`, where two spellings each had a source and both were
-accepted.
+Both are official; neither is a misprint. The parser accepts the comma
+form — `ОБЩИЕ` falls through as a bare identifier expression, Slice 11
+allowance #1 — and lost the prefix form to D1.
 
-## Behaviour change planned for C2
+C0a planned to accept the union, by consuming `ОБЩИЕ` as a prefix keyword
+whether or not a comma followed. C2 did not do that, on a measurement.
+In the production configuration checked here, every `ПО ОБЩИЕ` is either
+followed by a comma or ends the clause; the comma-less form with a
+following list does not occur once. Promoting `ОБЩИЕ` to a prefix keyword
+would therefore have changed the tree shape of the form that *is* written,
+for the sake of one that is not — and that shape is Slice 11's stated
+allowance and Slice 13's to interpret.
+
+So the shape is left alone. The prefix form stops losing text as a side
+effect of the control-point alias (`Н` in `ПО ОБЩИЕ Н` is taken as the
+alias of `ОБЩИЕ`), which restores the invariant without deciding the
+reading. What the reading should be stays open, and the disagreement
+between the two sources is recorded here rather than resolved by a
+parser that has no standing to resolve it.
+
+## Behaviour change
 
 In this order, which is not free:
 
@@ -345,10 +369,67 @@ The owner's decision, recorded 2026-07-27, was the full scope with a
 visible diagnostic, over the two narrower options offered (drain only,
 or attestation with no behaviour change at all).
 
+### C2 outcome, measured
+
+Against a production 1C configuration held locally as this project's
+extension testbed and not part of this repository — 27 677 query literals
+extracted from 21 114 modules:
+
+| | |
+|---|---|
+| queries that produce the new leftover error | 865 (3.1%) |
+| of those, queries that produced **no** diagnostic before | **72 (0.26%)** |
+| of those, queries already carrying another parse error | 793 |
+| queries whose tree still does not cover the input | 29 (0.1%) |
+
+The 0.26% is the number that matters for the decision the owner made: a
+query that was clean and now is not. The other 793 were already lit up.
+
+Grouping the 865 by what the leftover starts with: 209 begin at a `КАК`,
+149 at a `%1`/`%2`/`%3`, 116 at a `(Титульный,…`, and a further 24 at a
+`#Имя` or `[Имя]`. Sampling the `КАК` class shows it is the placeholder
+class too — the queries read `ИЗ #ТаблицаПланаОбмена КАК ПланОбмена`, and
+it is the `#Имя` before the alias that the grammar cannot place. These are
+query *templates*: text carrying substitution markers that is not SDBL
+until the marker is replaced at runtime. They were never being parsed;
+they were being truncated in silence, and the graph index has been blind
+past that point for as long as the entry point has existed. Making that
+visible is the point of the change, and the number above is its price.
+
+### One defect this surfaced and did not fix
+
+**An unterminated string literal still costs coverage.** 29 of the
+27 677 remain short even with the drain in place, and in one case the
+tree's text range ends *inside a character* rather than between two. All
+of them end inside an unclosed `"`. The drain bumps every token the
+parser is given, so a shortfall means the shortfall is upstream, in the
+lexer's string mode or in the conversion of a BSL literal to SDBL text.
+That is a different layer, and the lexer is closed and attested; the
+finding is recorded here rather than acted on.
+
+### A test that was asserting something false
+
+`test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
+УНИЧТОЖИТЬ ВТ` to `check_no_errors` and passed. `ПОМЕСТИТЬ` precedes `ИЗ`
+in the canonical rule, and in the testbed configuration every one of the
+several hundred `ПОМЕСТИТЬ` clauses is written that way. The test's input
+had the two the wrong way round, so half of it was being discarded, and
+the assertion "no errors" was true only because the discarding was
+silent. The input is corrected to the documented order and the misordered
+form joins the leftover cases.
+
+This is the clearest single argument for the slice. A test whose whole
+purpose is to check that a query package parses had been quietly checking
+half a query package instead, for as long as it has existed, and no
+amount of reading the test would have revealed it.
+
 ## What this slice does not do
 
 - **It does not make clause order free.** See § The five scope bullets,
   item 2.
+- **It does not settle where `ОБЩИЕ` goes.** Two official sources
+  disagree; the parser keeps the shape it had and merely stops losing
+  text on the form it does not model. See § Source questions.
 - **It does not promote modifiers into their own node kinds.** The AST
   shape is held constant so that `sdbl-hir` stays Slice 13's.
 - **It does not interpret the modifiers.** That a `ПЕРИОДАМИ` control
@@ -359,10 +440,10 @@ or attestation with no behaviour change at all).
   there is nothing this slice would improve, and the deferral is
   discharged rather than carried forward again.
 
-## Blind spots to pin at C0b
+## Blind spots pinned at C0b
 
-The regression pins added before any behaviour change, each recording
-today's answer so that C2 has to move it deliberately:
+The regression pins added before any behaviour change, each recording the
+pre-rewrite answer so that C2 had to move it deliberately:
 
 1. the tail-loss class itself — trailing token, trailing call, a whole
    following query in a package;
@@ -376,14 +457,42 @@ today's answer so that C2 has to move it deliberately:
 8. the coverage invariant itself, as a property: for a corpus of inputs,
    tree text length equals source length.
 
+Twelve tests. The helper returns the *missing suffix* rather than a byte
+count, so a failure reads as the text that went missing. Seven moved at
+C2 and are now written the other way round; five were there to hold still
+and did.
+
 ## Commit trail
 
-- C0a — this document, as the sole change.
+Slice 12 was not empty before this session. Two fixes landed under its
+name in April 2026 and were never attested — `9d418084`, aligning
+`recover_to_delimiter` with the any-depth clause-keyword stop, and
+`88439afa`, splitting that stop into hard clauses and query
+starters/combiners across all three recovery helpers. They are the
+"fixes landed, no attestation" the master document recorded, and they
+are covered by entries A6–A8 above.
 
-The remaining entries are filled in as they land. The absolute-last
-commit on the branch is the one that edits this trail, and is therefore
-necessarily not named in it — the anti-Hilbert disclosure shared with
-every closed slice in this programme.
+- C0a `18b5bb70` — this document, as the sole change;
+- C0b `27eb6e92` — the twelve coverage pins, parser tests 596 → 608;
+- C1 `80350945` — the clean-room banners and the module docstring the
+  parser had been without since the comment prune; comments only,
+  97 insertions, 0 deletions, test count unmoved;
+- C2 `da3eeaa0` — the modifiers, then the drain; the seven pins turned
+  over; one snapshot in `crates/ide-diagnostics` gains a line;
+- C2b — `selected_fields` and `top_clause` (D5, D6), found because the
+  drain made them legible; Slice 7-addendum's two audit-gate tests turned
+  over; the same snapshot re-taken, and it now names the missing
+  selection list where before it named an unparsed remainder;
+- C3 — this document's status flip, the mini-spec and master-document
+  updates, and `crates/parser/tests/sdbl_recovery_and_allowances.rs`,
+  20 tests: 6 on the worked examples the Developer's Reference gives,
+  5 on the closed lists its rules enumerate, 5 on the tolerances kept
+  on purpose, and 4 on nothing leaving the parser without a word.
+  Parser tests 608 → 628.
+
+The absolute-last commit on the branch is the one that edits this trail,
+and is therefore necessarily not named in it — the anti-Hilbert
+disclosure shared with every closed slice in this programme.
 
 ## Licensing note
 

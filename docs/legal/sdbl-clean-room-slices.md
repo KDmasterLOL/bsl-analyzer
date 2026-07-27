@@ -12,16 +12,21 @@ independently.
 
 Closed and attested: Slices 1, 2, 2-addendum, 3a, 3b, 4, 5 and
 1-addendum on the lexer side; Slices 6, 7, 7-addendum, 8, 8-addendum, 9,
-10a, 10b and 11 on the parser side. **The lexer is now fully attested**:
-every `SdblTokenKind` variant is covered, and no `LEGACY` marker remains
-in `crates/lexer/src/sdbl/mod.rs`.
+10a, 10b, 11 and 12 on the parser side. **The lexer is now fully
+attested**: every `SdblTokenKind` variant is covered, and no `LEGACY`
+marker remains in `crates/lexer/src/sdbl/mod.rs`.
+
+Slice 12 also closed the deferrals the parser slices had been passing
+forward: Slice 9's recovery hardening (discharged as needing no change,
+not carried on again), Slice 11's structured TOTALS modifiers, and
+Slice 2-addendum's `KwPeriods`, which had been a token the grammar never
+consumed.
 
 Open:
 
 | Slice | Area | State |
 |---|---|---|
 | 0 | SDBL test corpus | triaged into buckets A/B/C, but bucket C never rewritten and `3aa29b99` removed the bucket labels |
-| 12 | Recovery / IDE allowances | fixes landed, no attestation |
 | 13 | `sdbl-hir` reattachment | not started |
 
 No slice has ever covered the BSL grammar layer, and no plan for it exists.
@@ -581,7 +586,8 @@ Commit trail (4 phases, each a single anchor commit):
 - C2 `5b8168a6` (clean-room rewrite + tiered A1/B/C/D
   per-function provenance; audit-gate decision **Option B
   PRESERVE** for both `Parser::error()`-bumps with
-  recovery hardening deferred to Slice 12);
+  recovery hardening deferred to Slice 12, which discharged it
+  as needing no change);
 - C3 `9af02c0b` (2026-04-25): attestation +
   `crates/parser/tests/sdbl_slice9_joins.rs` (17 spec-
   driven AST-shape acceptance tests organised into
@@ -606,7 +612,8 @@ error case (the recovery-quality gap is marginal, not a
 production-correctness bug like Slice 10b's `column_or_function`
 clause-keyword hijack); Slice 9's clean-room scope is the
 happy-path JOIN grammar; recovery hardening lives naturally
-under Slice 12's IDE-recovery rewrite. The audit-gate tests
+under Slice 12's IDE-recovery rewrite, which examined both and left
+them as they were. The audit-gate tests
 `test_slice9_missing_join_keyword_current_behavior` and
 `test_slice9_missing_on_current_behavior` (added in C0) flip
 roles from "pre-rewrite regression gate" to "post-rewrite
@@ -866,7 +873,7 @@ to `OrderByItem` + HIR regression test) is owned by Slice 13 since
 `crates/sdbl-hir/**` is read-only per Slice 11's parser-only
 scope. The remaining audit-gate decisions defaulted to
 **Option B PRESERVE** per Slice 9 pattern (recovery hardening
-deferred to Slice 12).
+deferred to Slice 12, which landed it).
 
 After Slice 11 landed, the residual `LEGACY` banner in
 `select.rs` shrunk from `LEGACY (Slices 5, 11 pending)` to
@@ -891,7 +898,7 @@ addendum, the residual block shrinks further to
 - `AUTOORDER`
 - `TOTALS ... BY` (narrowed flat-list shape; structured
   ONLY/HIERARCHY-in-TOTALS/PERIODS modifier promotion deferred
-  to Slice 12)
+  to Slice 12, which landed it)
 - `FOR UPDATE`
 - `INDEX BY`
 
@@ -1110,7 +1117,7 @@ canonical EBNF + canonical example. Parser-tree-invariant: the
 token converter at
 `crates/parser/src/sdbl_token_converter.rs` already maps
 `KwPeriods → TokenKind::Ident` and Slice 11 explicitly defers
-structured PERIODS handling to Slice 12, so no observable
+structured PERIODS handling to Slice 12 — where it landed — so no observable
 parse-tree shape changes today. See attestation § Behaviour
 change for the full Option A decision rationale.
 
@@ -1439,26 +1446,96 @@ never been pinned.
 
 ## Slice 12: recovery and IDE allowances
 
+**Status: complete (2026-07-27).** Attestation:
+[`sdbl-clean-room-slice12.md`](sdbl-clean-room-slice12.md).
+
 ### Goal
 
 Reintroduce non-normative parser behavior deliberately, instead of inheriting it
 accidentally from upstream grammar or old tests.
 
-### Scope
+### Principle, and the verdict it was missing
 
-- incomplete queries while typing
-- flexible clause ordering retained for IDE usefulness
-- conservative error nodes
-- multiline query string artifacts
-- convenience handling such as line comments if the project still wants them
+Every recovery rule is documented as either required by the official
+syntax, or intentionally kept for editor behaviour. Auditing the surface
+produced a third verdict the plan did not allow for, and it carried most
+of the work: **neither**. Twenty-one sites were classified — three
+implement the language, fourteen are allowances with their reasons
+stated, and four were behaviours nobody had decided.
 
-### Principle
+### The four, and the one mechanism behind them
 
-Every recovery rule in this slice should be explicitly documented as:
+`query_package` ended its loop at the first token that was neither `;`
+nor the end of input, and nothing consumed the rest. The remainder was
+not merely unparsed; it was absent from the tree, and the parse reported
+success. The BSL entry point `grammar::source_file` loops until end of
+input and cannot do this, so the asymmetry ran one way — an oversight,
+not a decision.
 
-- required by official syntax
-or
-- intentionally kept for editor/IDE behavior
+Three documented, valid query forms fell into it: `ПЕРИОДАМИ(…)` on a
+totals control point, the control point's alias, and the canonical
+`ИЕРАРХИЯ УБЫВ` word order. So did any clause written out of order,
+including a `ИЗ`, and any query in a package following a bad one.
+
+Slice 12 parses the three forms and drains the rest into a reported error
+node, in that order — SDBL parse errors reach the user, so draining first
+would have flagged every query using a form the parser had never handled.
+
+### The five scope bullets, re-examined
+
+The original scope listed five concerns. Two were empty and one was
+false:
+
+1. **Incomplete queries while typing** — real, working, and now recorded
+   as deliberate.
+2. **Flexible clause ordering retained for IDE usefulness** — *did not
+   exist*. `query_body_clauses` tests for six clauses in a fixed order,
+   once each; a clause out of place was never looked for and was then
+   deleted by the tail loss. Only the three trailing clauses are genuinely
+   order-free. The claim is corrected, not implemented: free clause order
+   is a grammar change with no source behind it, and what an editor needs
+   is for the misplaced clause to be *visible*.
+3. **Conservative error nodes** — there was no node at all. This was the
+   work.
+4. **Multiline query string artifacts** — handled a layer down, in
+   `crates/syntax/src/sdbl_query.rs`. Not a grammar concern.
+5. **Line comments "if the project still wants them"** — comments are
+   canonical syntax (Глава 8 §8.4.3). There was no want to exercise.
+
+### Measured on a production configuration
+
+27 677 query literals. The drain reports 851 of them; only **72** are
+queries that produced no diagnostic before. A third of the leftovers are
+query templates carrying substitution placeholders that are not SDBL
+until substituted — text that was never being parsed, only truncated in
+silence, with the graph index blind past that point.
+
+29 queries still lose bytes, all ending inside an unterminated string
+literal, one of them not even on a character boundary. That shortfall is
+upstream of the grammar and is recorded rather than fixed.
+
+`test_batch_with_drop` turned out to have been asserting something false
+since it was written: its input put `ПОМЕСТИТЬ` after `ИЗ`, so half the
+package was discarded, and `check_no_errors` passed only because the
+discarding was silent.
+
+### Files
+
+- `crates/parser/src/grammar/sdbl.rs` — the module docstring, the
+  `CLEAN-ROOM Slice 12` banner and `drain_unconsumed_input`;
+- `crates/parser/src/grammar/sdbl/select.rs` — the banners over the
+  recovery helpers and the two control-point items; `order_by_item`,
+  `totals_group_item`, `totals_periods_modifier`, `totals_group_alias`;
+- `crates/parser/src/grammar/sdbl/expressions.rs` — the recovery banner;
+- `crates/parser/tests/sdbl_parser_tests.rs` — 12 coverage pins;
+- `crates/parser/tests/sdbl_recovery_and_allowances.rs` — 20 acceptance
+  tests;
+- `docs/legal/sdbl-select-mini-spec.md` — the control-point grammar and
+  the ordering-field word order;
+- `docs/legal/sdbl-clean-room-slice12.md` — the attestation.
+
+Commit trail: C0a `18b5bb70`, C0b `27eb6e92`, C1 `80350945`,
+C2 `da3eeaa0`, C3 in the attestation's own trail.
 
 ## Slice 13: `sdbl-hir` reattachment
 
