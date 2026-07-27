@@ -532,10 +532,68 @@ C2 snapshot diff is the record of the behaviour change.
 the entry pins that the glued form stays a single `Ident`, which is the
 claim § The `База` prefix is not a token rests on.
 
+### C0b outcome
+
+Fifteen thematic entries landed, numbered 096–110, closing all 28 blind
+spots:
+
+- **096** information register slices russian — `СрезПервых`,
+  `СрезПоследних`.
+- **097** accumulation register virtual tables russian — `Остатки`,
+  `Обороты`, `ОстаткиИОбороты`, the last also guarding longest match
+  over the first.
+- **098** accounting register virtual tables russian — `ОборотыДтКт`
+  next to the two new accounting suffixes `Субконто` and
+  `ДвиженияССубконто`, so the entry contrasts them directly.
+- **099** accounting register virtual tables english — `ExtDimensions`,
+  `RecordsWithExtDimensions`.
+- **100** / **101** calculation register virtual tables, russian then
+  english — `ДанныеГрафика`, `ФактическийПериодДействия`,
+  `ScheduleData`, `AdjustedEffectivePeriod`.
+- **102** base register prefix stays one identifier — the entry that
+  pins § The `База` prefix is not a token, in both languages.
+- **103** sequence boundaries and route points bilingual — `Границы`,
+  `Boundaries`, `Точки`, `Points`.
+- **104** tasks by performer bilingual — `ЗадачиПоИсполнителю`,
+  `TasksByPerformer`.
+- **105** / **106** external data source table, russian then english —
+  `Таблица`, `Table`, each under the `ВнешнийИсточникДанных` root, whose
+  Russian spelling had no corpus entry until now.
+- **107** external data source cube dimension table bilingual — the full
+  six-component path `…Куб.<Имя>.ТаблицаИзмерения.<Имя>` and its English
+  form, which also guards longest match for `ТаблицаИзмерения` over
+  `Таблица`.
+- **108** change registration table english — `Changes` under two
+  different roots.
+- **109** change registration russian keeps the update keyword —
+  `Справочник.Товары.Изменения` next to `… ДЛЯ ИЗМЕНЕНИЯ`, both
+  rendering `KwUpdate`. This entry exists to be *unchanged* by C2.
+- **110** identifiers starting with a virtual table suffix —
+  `КубическийМетр`, `ТаблицаТоваров`, `ГраницыДиапазона`,
+  `ТочкаМаршрута`, `Changeset`, `Tableau`.
+
+The regenerated snapshot confirms all three directions of the C0a audit:
+
+- All 7 previously-unpinned Russian spellings tokenise to their `Vt*` and
+  `MdoExternalDataSource` variants, so the preserved regexes accept the
+  Russian side of the vocabulary at the byte level.
+- All 21 spellings that the slice adds tokenise to `Ident`. Counting
+  occurrences rather than spellings, they occupy exactly 22 snapshot
+  lines — `Changes` appears twice in entry 108 — so the expected C2 diff
+  is 22 lines and no others, bounded by construction rather than by
+  assertion.
+- Entry 102 renders `БазаОсновныеНачисления` and `BaseMainAccruals` as
+  single `Ident` tokens, entry 109 renders `KwUpdate` for both
+  `Изменения` positions, and entry 110 renders `Ident` for all six
+  prefix-sharing identifiers.
+
 ## Commit trail
 
-- C0a — this attestation document authored. Sole change: addition of
-  `docs/legal/sdbl-clean-room-slice5.md`.
+- `39bee739` (2026-07-27) — C0a: this attestation document authored.
+  Sole change: addition of `docs/legal/sdbl-clean-room-slice5.md`.
+- C0b — corpus entries 096–110 added to
+  `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`; snapshot
+  regenerated via `UPDATE_EXPECT=1`. See § C0b outcome.
 
 ## Licensing note
 

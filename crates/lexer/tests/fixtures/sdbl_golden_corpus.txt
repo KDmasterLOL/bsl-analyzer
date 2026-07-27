@@ -188,3 +188,33 @@ TOTALS SUM(X) BY PERIODS(TENDAYS, &S, &E), PERIODS(HALFYEAR, &T, &U)
 ВЫБРАТЬ ACos(X), ASin(X), ATan(X), Cos(X), Sin(X), Tan(X), Exp(X), Log(X), Log10(X), Pow(X, 2), Sqrt(X)
 ---- 095 slice4 date difference alternate english spelling
 SELECT DATEDIFFERENCE(Start, Finish, DAY)
+---- 096 slice5 information register slices russian
+ВЫБРАТЬ 1 ИЗ РегистрСведений.Цены.СрезПервых, РегистрСведений.Цены.СрезПоследних
+---- 097 slice5 accumulation register virtual tables russian
+ВЫБРАТЬ 1 ИЗ РегистрНакопления.Товары.Остатки, РегистрНакопления.Товары.Обороты, РегистрНакопления.Товары.ОстаткиИОбороты
+---- 098 slice5 accounting register virtual tables russian
+ВЫБРАТЬ 1 ИЗ РегистрБухгалтерии.Хозрасчетный.ОборотыДтКт, РегистрБухгалтерии.Хозрасчетный.Субконто, РегистрБухгалтерии.Хозрасчетный.ДвиженияССубконто
+---- 099 slice5 accounting register virtual tables english
+SELECT 1 FROM AccountingRegister.Main.ExtDimensions, AccountingRegister.Main.RecordsWithExtDimensions
+---- 100 slice5 calculation register virtual tables russian
+ВЫБРАТЬ 1 ИЗ РегистрРасчета.Начисления.ДанныеГрафика, РегистрРасчета.Начисления.ФактическийПериодДействия
+---- 101 slice5 calculation register virtual tables english
+SELECT 1 FROM CalculationRegister.Accruals.ScheduleData, CalculationRegister.Accruals.AdjustedEffectivePeriod
+---- 102 slice5 base register prefix stays one identifier
+РегистрРасчета.Начисления.БазаОсновныеНачисления CalculationRegister.Accruals.BaseMainAccruals
+---- 103 slice5 sequence boundaries and route points bilingual
+Последовательность.Проведение.Границы Sequence.Posting.Boundaries БизнесПроцесс.Согласование.Точки BusinessProcess.Approval.Points
+---- 104 slice5 tasks by performer bilingual
+Задача.Поручение.ЗадачиПоИсполнителю Task.Assignment.TasksByPerformer
+---- 105 slice5 external data source table russian
+ВЫБРАТЬ 1 ИЗ ВнешнийИсточникДанных.Склад.Таблица.Позиции
+---- 106 slice5 external data source table english
+SELECT 1 FROM ExternalDataSource.Depot.Table.Items
+---- 107 slice5 external data source cube dimension table bilingual
+ВнешнийИсточникДанных.Склад.Куб.Продажи.ТаблицаИзмерения.Интервалы ExternalDataSource.Depot.Cube.Sales.DimensionTable.Intervals
+---- 108 slice5 change registration table english
+SELECT 1 FROM Catalog.Goods.Changes, AccumulationRegister.Stock.Changes
+---- 109 slice5 change registration russian keeps the update keyword
+ВЫБРАТЬ 1 ИЗ Справочник.Товары.Изменения; ВЫБРАТЬ 1 ИЗ Т ДЛЯ ИЗМЕНЕНИЯ
+---- 110 slice5 identifiers starting with a virtual table suffix
+КубическийМетр ТаблицаТоваров ГраницыДиапазона ТочкаМаршрута Changeset Tableau
