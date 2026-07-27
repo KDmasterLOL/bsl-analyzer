@@ -830,8 +830,10 @@ are covered by entries A6–A8 above.
   648 → 650.
 - C13 `9cf16871` — the tenth round. One finding, in the ninth round's own
   fix. One lens found nothing. Parser tests 650 → 651.
-- C14 — the eleventh round. Four findings, all in the tenth round's own
-  bookkeeping. Parser tests 651 → 653.
+- C14 `2e358746` — the eleventh round. Four findings, all in the tenth
+  round's own bookkeeping. Parser tests 651 → 653.
+- C15 — the twelfth round. One finding, and one this document had already
+  named as a risk without testing it. Parser tests 653 → 654.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

@@ -141,6 +141,13 @@ fn complain_about_a_missing_member(p: &mut Parser, a_query_is_due: bool, had_tok
     }
 }
 
+fn at_trivia(p: &Parser) -> bool {
+    matches!(
+        p.current(),
+        Some(TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline | TokenKind::Bom)
+    )
+}
+
 fn at_query_start(p: &Parser) -> bool {
     select::at_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ")
         || select::at_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ")
@@ -184,7 +191,13 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
             break;
         }
 
-        after_a_dot = p.at(TokenKind::Dot);
+        // Trivia does not end the reach of the dot: `Т . ИЗ` is still one
+        // property access being skipped, and the expression layer reads it
+        // the same way.
+        if !at_trivia(p) {
+            after_a_dot = p.at(TokenKind::Dot);
+        }
+
         p.bump();
         took_anything = true;
     }

@@ -807,3 +807,23 @@ fn a_clause_keyword_after_a_dot_is_a_property_name() {
         );
     }
 }
+
+#[test]
+fn a_dot_reaches_across_the_space_after_it() {
+    // `Т . ИЗ` is one property access being skipped. Whitespace between the
+    // dot and the name does not make the name a beginning, and the
+    // expression layer reads it the same way.
+    for input in ["T . ИЗ", "T. FROM", "Т.\tИЗ", "T .\n TOTALS", "T . // c\n ИЗ"] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .descendants()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_QUERY)
+                .count(),
+            0,
+            "`{input}` contains no query",
+        );
+    }
+}
