@@ -76,6 +76,10 @@ impl<'a> Parser<'a> {
         self.current().is_some_and(|k| set.contains(k))
     }
 
+    pub fn current_text(&self) -> &str {
+        self.tokens.get(self.pos).map_or("", |t| t.text.as_str())
+    }
+
     pub fn at_keyword(&self, text: &str) -> bool {
         if let Some(token) = self.tokens.get(self.pos) {
             token.kind == TokenKind::Ident && stdx::case::eq_ignore_case(&token.text, text)

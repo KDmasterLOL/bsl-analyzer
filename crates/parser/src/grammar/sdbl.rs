@@ -143,8 +143,19 @@ fn complain_about_a_missing_member(p: &mut Parser, a_query_is_due: bool, had_tok
 
 /// Whether the current token can be the last one of a name a dot may
 /// qualify: a word, a parameter, or the closing paren of a cast.
+///
+/// Two of those are not settled by the token kind alone. A parameter
+/// arrives whole, sigil and name in one token, so its kind is shared with
+/// a sigil that names nothing; and a paren that closes nothing closes no
+/// cast either. Either one spells a name only in the leftover's
+/// imagination, and a dot behind it would hide the query behind that.
 fn ends_a_name(p: &Parser) -> bool {
-    matches!(p.current(), Some(TokenKind::Ident | TokenKind::Ampersand | TokenKind::RParen))
+    match p.current() {
+        Some(TokenKind::Ident) => true,
+        Some(TokenKind::Ampersand) => p.current_text().chars().count() > 1,
+        Some(TokenKind::RParen) => p.open_group_count() > 0,
+        _ => false,
+    }
 }
 
 fn at_trivia(p: &Parser) -> bool {

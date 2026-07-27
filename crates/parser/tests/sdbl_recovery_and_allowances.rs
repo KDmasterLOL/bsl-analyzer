@@ -893,7 +893,12 @@ fn a_dot_with_nothing_before_it_shields_nothing() {
     // a name in front of it to qualify; without one — at the start of the
     // leftover, or after another dot — it is junk of its own and must not
     // hide what follows.
-    for input in [". SELECT A", ".. SELECT A", ". . SELECT A", "+ . SELECT A"] {
+    // Two of the receivers cannot be told apart by token kind: a parameter
+    // arrives whole, so a lone sigil shares its kind, and a paren that
+    // closes nothing closes no cast.
+    for input in
+        [". SELECT A", ".. SELECT A", ". . SELECT A", "+ . SELECT A", "). SELECT A", "&. SELECT A"]
+    {
         let parse = parse_sdbl(input);
         assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
         assert_eq!(

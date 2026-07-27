@@ -864,6 +864,46 @@ A zero difference is worth nothing without evidence the measurement could
 have seen one, so a positive control was run alongside: the input from the
 first finding above is classified differently by the two builds.
 
+### Two receivers a token kind cannot tell apart
+
+Auditing the expression layer as a whole file — it had only ever been read
+as a diff before — returned eight findings. Two are this slice's own, and
+both are in the rule that decides what a dot qualifies: it asks the token
+kind, and the kind lies twice. A parameter arrives whole, sigil and name
+in one token, so a lone `&` is indistinguishable from `&Имя` by kind; and
+a paren that closes nothing closes no cast. Either one made the dot behind
+it hide a real query, so `). ВЫБРАТЬ А` lost its query node.
+
+Both are regressions of this slice, and measured as such: before it, those
+inputs kept their query node and lost their tail instead. They now keep
+both.
+
+### A boundary is a position, not a word
+
+The remaining six are one class, and all six predate this slice: a clause
+keyword of the *current* query is not protected the way the start of the
+next query is, so recovery inside an expression eats the clause that
+follows it. `ВЫБРАТЬ ВЫБОР КОГДА А ТОГДА Б ИЗ Т` loses its `ИЗ`, and
+`ВЫБРАТЬ А + ИЗ Т` reads `ИЗ` as the missing operand and reports nothing
+at all.
+
+Adding clause keywords to the grammar's boundary was tried and reverted.
+It closes five of the six in one line, and over every string literal in
+the testbed configuration it improves two queries and worsens none. It
+also breaks a legal one: a subquery aliased `КАК Итоги` — a word that is
+also the `ИТОГИ` clause — stops being read as an alias. Fixing malformed
+input by rejecting valid input is the trade this document already refused
+once, and it fails for a reason worth writing down rather than working
+around: **a boundary is a position, not a word.** `ИТОГИ` bounds a clause
+where a clause may start and names a table where a name may stand, and a
+predicate the parser consults with no idea which rule is asking cannot
+tell those apart.
+
+What the mechanism would need is for the enclosing rule to declare the
+boundary at the point it descends, rather than for the grammar to declare
+it once for the whole parse. That is the same thing the BSL block
+terminators need, and both are tracked together outside this slice.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -991,9 +1031,13 @@ are covered by entries A6–A8 above.
 - C18 `b4241dd7` — the corpus figures retaken.
 - C19 `508b2908` — the audit re-run. Four findings: three fixed here, one
   already tracked as a defect of the BSL grammar. Parser tests 659 → 662.
-- C20 — the audit run again, because the previous round found defects.
-  Three findings: two fixed here, one already tracked as a defect of the
-  BSL grammar for the second round running. Parser tests 662 → 663.
+- C20 `ae120bf9` — the audit run again, because the previous round found
+  defects. Three findings: two fixed here, one already tracked as a defect
+  of the BSL grammar for the second round running. Parser tests 662 → 663.
+- C21 — the audit again, widened to the expression layer, which had never
+  been read as a whole file. Eight findings: two are this slice's own and
+  fixed here; six predate it, are one class, and are tracked with the BSL
+  terminators, which turn out to be the same class. Parser tests 663.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert
