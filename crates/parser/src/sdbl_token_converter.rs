@@ -148,7 +148,18 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         | S::VtBalance
         | S::VtTurnovers
         | S::VtBalanceAndTurnovers
-        | S::VtDrCrTurnovers => T::Ident,
+        | S::VtDrCrTurnovers
+        | S::VtExtDimensions
+        | S::VtRecordsWithExtDimensions
+        | S::VtScheduleData
+        | S::VtAdjustedEffectivePeriod
+        | S::VtBoundaries
+        | S::VtPoints
+        | S::VtTasksByPerformer
+        | S::VtTable
+        | S::VtCube
+        | S::VtDimensionTable
+        | S::VtChanges => T::Ident,
 
         S::PeriodTenDays | S::PeriodHalfYear => T::Ident,
 

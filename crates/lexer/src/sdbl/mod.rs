@@ -858,27 +858,179 @@ pub enum SdblTokenKind {
     // after two dots. Separating the two readings is the parser's work.
     //
     // Attestation: `docs/legal/sdbl-clean-room-slice5.md`.
+    //
+    // Index (navigational only; the `#[regex]` attributes remain the
+    // single source of truth, since logos requires the pattern at the
+    // declaration site). Grouped by the real table each suffix hangs
+    // off:
+    //
+    //   external-source root  MdoExternalDataSource
+    //   information register  VtSliceFirst, VtSliceLast
+    //   accumulation and      VtBalance, VtTurnovers,
+    //   accounting registers  VtBalanceAndTurnovers, VtDrCrTurnovers,
+    //                         VtExtDimensions,
+    //                         VtRecordsWithExtDimensions
+    //   calculation register  VtScheduleData,
+    //                         VtAdjustedEffectivePeriod
+    //   sequence, business    VtBoundaries, VtPoints,
+    //   process, task         VtTasksByPerformer
+    //   external source       VtTable, VtCube, VtDimensionTable
+    //   every root            VtChanges
+    //
+    // Two documented virtual tables have no variant here.
+    // `База<Имя базового регистра расчета>` is a prefix glued to a
+    // register name, so it is never a token on its own; recognising it
+    // is name resolution over a metadata catalogue. And the Russian
+    // half of `Изменения (Changes)` stays with
+    // [`SdblTokenKind::KwUpdate`]; see that variant.
     // ===================================================================
+    /// `ВнешнийИсточникДанных.<Имя внешнего источника данных>` /
+    /// `ExternalDataSource.<Имя внешнего источника данных>` — the root
+    /// of every external-source path.
+    ///
+    /// Deferred here by Slice 3b, which owns the other table roots,
+    /// because an external-source path is only complete once it
+    /// continues through [`SdblTokenKind::VtTable`] or
+    /// [`SdblTokenKind::VtCube`].
     #[regex(r"(?i)внешнийисточникданных|(?i)externaldatasource")]
     MdoExternalDataSource,
 
+    /// `РегистрСведений.<Имя>.СрезПервых` /
+    /// `InformationRegister.<Имя>.SliceFirst` — the earliest record per
+    /// combination of dimensions.
     #[regex(r"(?i)срезпервых|(?i)slicefirst")]
     VtSliceFirst,
 
+    /// `РегистрСведений.<Имя>.СрезПоследних` /
+    /// `InformationRegister.<Имя>.SliceLast` — the latest record per
+    /// combination of dimensions.
+    ///
+    /// Second attestation: the ITS query-language textbook uses
+    /// `РегистрСведений.Цены.СрезПоследних` as its worked example of a
+    /// virtual table — <https://its.1c.ru/db/pubqlang/content/9/hdoc>.
     #[regex(r"(?i)срезпоследних|(?i)slicelast")]
     VtSliceLast,
 
+    /// `РегистрНакопления.<Имя>.Остатки` /
+    /// `AccumulationRegister.<Имя>.Balance`, and the same suffix on an
+    /// accounting register.
+    ///
+    /// The canonical English is the singular `Balance` against the
+    /// plural Russian `Остатки`.
     #[regex(r"(?i)остатки|(?i)balance")]
     VtBalance,
 
+    /// `РегистрНакопления.<Имя>.Обороты` /
+    /// `AccumulationRegister.<Имя>.Turnovers`, and the same suffix on an
+    /// accounting register.
     #[regex(r"(?i)обороты|(?i)turnovers")]
     VtTurnovers,
 
+    /// `РегистрНакопления.<Имя>.ОстаткиИОбороты` /
+    /// `AccumulationRegister.<Имя>.BalanceAndTurnovers`.
+    ///
+    /// Longest-match wins over [`VtBalance`], whose Russian and English
+    /// spellings are both proper prefixes of this one. The Russian form
+    /// carries the conjunction `И` inside the word, giving the doubled
+    /// `ии`.
     #[regex(r"(?i)остаткииобороты|(?i)balanceandturnovers")]
     VtBalanceAndTurnovers,
 
+    /// `РегистрБухгалтерии.<Имя>.ОборотыДтКт` /
+    /// `AccountingRegister.<Имя>.DrCrTurnovers` — turnovers broken down
+    /// by corresponding debit and credit account.
+    ///
+    /// Longest-match wins over [`VtTurnovers`], whose Russian spelling
+    /// is a proper prefix of this one.
     #[regex(r"(?i)оборотыдткт|(?i)drcrturnovers")]
     VtDrCrTurnovers,
+
+    /// `РегистрБухгалтерии.<Имя>.Субконто` /
+    /// `AccountingRegister.<Имя>.ExtDimensions` — the extra-dimension
+    /// values of the register's records.
+    ///
+    /// Second attestation: the ITS query-language textbook chapter on
+    /// the `Субконто` parameter —
+    /// <https://its.1c.ru/db/pubqlang/content/114/hdoc>.
+    #[regex(r"(?i)субконто|(?i)extdimensions")]
+    VtExtDimensions,
+
+    /// `РегистрБухгалтерии.<Имя>.ДвиженияССубконто` /
+    /// `AccountingRegister.<Имя>.RecordsWithExtDimensions` — the
+    /// register's records joined to their extra dimensions.
+    #[regex(r"(?i)движенияссубконто|(?i)recordswithextdimensions")]
+    VtRecordsWithExtDimensions,
+
+    /// `РегистрРасчета.<Имя>.ДанныеГрафика` /
+    /// `CalculationRegister.<Имя>.ScheduleData` — the schedule values
+    /// underlying the register's action periods.
+    #[regex(r"(?i)данныеграфика|(?i)scheduledata")]
+    VtScheduleData,
+
+    /// `РегистрРасчета.<Имя>.ФактическийПериодДействия` /
+    /// `CalculationRegister.<Имя>.AdjustedEffectivePeriod` — action
+    /// periods after displacement by higher-priority records.
+    #[regex(r"(?i)фактическийпериоддействия|(?i)adjustedeffectiveperiod")]
+    VtAdjustedEffectivePeriod,
+
+    /// `Последовательность.<Имя>.Границы` /
+    /// `Sequence.<Имя>.Boundaries` — the sequence's boundary per set of
+    /// dimension values.
+    #[regex(r"(?i)границы|(?i)boundaries")]
+    VtBoundaries,
+
+    /// `БизнесПроцесс.<Имя>.Точки` / `BusinessProcess.<Имя>.Points` —
+    /// the route points of the business process.
+    ///
+    /// Distinct from `ТочкаМаршрута (RoutePoint)`, which is a field and
+    /// an element of a predefined-data path, and therefore stays an
+    /// identifier.
+    #[regex(r"(?i)точки|(?i)points")]
+    VtPoints,
+
+    /// `Задача.<Имя>.ЗадачиПоИсполнителю` /
+    /// `Task.<Имя>.TasksByPerformer` — tasks resolved through the
+    /// addressing attributes of their performer.
+    #[regex(r"(?i)задачипоисполнителю|(?i)tasksbyperformer")]
+    VtTasksByPerformer,
+
+    /// `ВнешнийИсточникДанных.<Имя>.Таблица.<Имя таблицы>` /
+    /// `ExternalDataSource.<Имя>.Table.<Имя таблицы>`.
+    #[regex(r"(?i)таблица|(?i)table")]
+    VtTable,
+
+    /// `ВнешнийИсточникДанных.<Имя>.Куб.<Имя куба>` /
+    /// `ExternalDataSource.<Имя>.Cube.<Имя куба>`.
+    #[regex(r"(?i)куб|(?i)cube")]
+    VtCube,
+
+    /// `ВнешнийИсточникДанных.<Имя>.Куб.<Имя куба>.ТаблицаИзмерения.<Имя таблицы>` /
+    /// `ExternalDataSource.<Имя>.Cube.<Имя куба>.DimensionTable.<Имя таблицы>`.
+    ///
+    /// Longest-match wins over [`VtTable`], whose Russian spelling is a
+    /// proper prefix of this one; the English pair is the other way
+    /// round, and `table` cannot be entered part way through
+    /// `dimensiontable` because matching starts at a token boundary.
+    #[regex(r"(?i)таблицаизмерения|(?i)dimensiontable")]
+    VtDimensionTable,
+
+    /// `<Корень>.<Имя>.Изменения` / `<Root>.<Имя>.Changes` — the
+    /// change-registration table, defined for fourteen roots.
+    ///
+    /// English spelling only. The Russian `Изменения` is byte-identical
+    /// to the `ДЛЯ ИЗМЕНЕНИЯ (FOR UPDATE)` clause keyword, which
+    /// [`SdblTokenKind::KwUpdate`] already claims; a lexer cannot tell
+    /// the two apart, because the difference is grammatical position.
+    /// Leaving `Изменения` on the clause keyword keeps `ДЛЯ ИЗМЕНЕНИЯ`
+    /// correct and hands the table reading to the parser, which sees the
+    /// preceding dot.
+    ///
+    /// This is the mirror of [`SdblTokenKind::FnLeft`], where the
+    /// collision fell on the English spelling and the Russian one was
+    /// free. The rule is the same in both directions: the colliding
+    /// spelling stays with the incumbent owner.
+    #[regex(r"(?i)changes")]
+    VtChanges,
 
     // ===================================================================
     // CLEAN-ROOM Slice 3b — lexer error fallback

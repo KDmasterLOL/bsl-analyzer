@@ -372,6 +372,66 @@ new suffixes while they still tokenise as `Ident`, so the snapshot
 records the pre-change behaviour; C2 flips those snapshot lines to the
 new kinds.
 
+### C2 outcome
+
+The measured blast radius matches the C0b bound exactly. Regenerating
+the snapshot over the whole 110-entry corpus changed **22 lines and no
+others**:
+
+```
+-  Ident @170 "Субконто"                  +  VtExtDimensions            @170
+-  Ident @250 "ДвиженияССубконто"         +  VtRecordsWithExtDimensions @250
+-  Ident @38  "ExtDimensions"             +  VtExtDimensions            @38
+-  Ident @77  "RecordsWithExtDimensions"  +  VtRecordsWithExtDimensions @77
+-  Ident @72  "ДанныеГрафика"             +  VtScheduleData             @72
+-  Ident @150 "ФактическийПериодДействия" +  VtAdjustedEffectivePeriod  @150
+-  Ident @43  "ScheduleData"              +  VtScheduleData             @43
+-  Ident @86  "AdjustedEffectivePeriod"   +  VtAdjustedEffectivePeriod  @86
+-  Ident @58  "Границы"                   +  VtBoundaries               @58
+-  Ident @90  "Boundaries"                +  VtBoundaries               @90
+-  Ident @153 "Точки"                     +  VtPoints                   @153
+-  Ident @189 "Points"                    +  VtPoints                   @189
+-  Ident @32  "ЗадачиПоИсполнителю"       +  VtTasksByPerformer         @32
+-  Ident @87  "TasksByPerformer"          +  VtTasksByPerformer         @87
+-  Ident @76  "Таблица"                   +  VtTable                    @76
+-  Ident @39  "Table"                     +  VtTable                    @39
+-  Ident @54  "Куб"                       +  VtCube                     @54
+-  Ident @76  "ТаблицаИзмерения"          +  VtDimensionTable           @76
+-  Ident @153 "Cube"                      +  VtCube                     @153
+-  Ident @164 "DimensionTable"            +  VtDimensionTable           @164
+-  Ident @28  "Changes"                   +  VtChanges                  @28
+-  Ident @64  "Changes"                   +  VtChanges                  @64
+```
+
+Every claim the audit makes is visible in what did **not** change:
+
+- No pre-existing token kind moved and no offset shifted.
+- Entry 102 still renders `БазаОсновныеНачисления` and
+  `BaseMainAccruals` as single `Ident` tokens, so refusing the `База`
+  variant is measured rather than asserted.
+- Entry 109 still renders `KwUpdate` for both `Изменения` positions, so
+  giving `VtChanges` an English-only alternation left `ДЛЯ ИЗМЕНЕНИЯ`
+  and `Справочник.Товары.Изменения` exactly where they were.
+- Entry 110 still renders `Ident` for `КубическийМетр`,
+  `ТаблицаТоваров`, `ГраницыДиапазона`, `ТочкаМаршрута`, `Changeset`
+  and `Tableau` — the six identifiers that share a prefix with a new
+  suffix.
+- Entries 096–098 keep the six pre-existing suffixes on their old
+  kinds, so the preserved regexes accept exactly the text they accepted
+  before.
+- In entry 107 the six-component external-source path resolves
+  `ТаблицаИзмерения` to `VtDimensionTable` while entry 105 resolves the
+  bare `Таблица` to `VtTable`, confirming the longest-match reading of
+  that pair.
+
+`SdblTokenKind` goes from 170 variants to 181, of which 17 are `Vt*`.
+
+Test counts after C2: `lexer` 277 passing (unchanged — the corpus
+snapshot is a single test whose content changed), `parser` 596 passing
+(unchanged), `clippy -p lexer -p parser --all-targets --all-features
+-- -D warnings` clean. The unchanged parser count is the empirical form
+of the parser-tree-invariance claim.
+
 ## Marker restoration
 
 Slices 3b and 4 restored the provenance map that `3aa29b99` erased from
@@ -591,9 +651,16 @@ The regenerated snapshot confirms all three directions of the C0a audit:
 
 - `39bee739` (2026-07-27) — C0a: this attestation document authored.
   Sole change: addition of `docs/legal/sdbl-clean-room-slice5.md`.
-- C0b — corpus entries 096–110 added to
+- `63cf6f76` (2026-07-27) — C0b: corpus entries 096–110 added to
   `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`; snapshot
   regenerated via `UPDATE_EXPECT=1`. See § C0b outcome.
+- `c494f586` (2026-07-27) — C1: module docstring and the `CLEAN-ROOM
+  Slice 5` banner replacing the last `LEGACY (Slice 5 pending)` one.
+  Comments only: no declaration moved and no regex changed, so the
+  golden corpus snapshot needed no regeneration.
+- C2 — per-variant provenance docstrings and the thematic index, the
+  eleven added variants, the converter arm extension, and the corpus
+  snapshot flip. See § C2 outcome.
 
 ## Licensing note
 
