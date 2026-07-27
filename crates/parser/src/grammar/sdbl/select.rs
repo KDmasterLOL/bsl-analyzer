@@ -986,6 +986,8 @@ fn at_period_name(p: &Parser) -> bool {
 /// `<Литерал типа DATE> | <Идентификатор параметра>` — what the rule allows
 /// a period boundary to be.
 fn at_period_boundary(p: &Parser) -> bool {
+    // A parameter arrives as one token, name included, so `Ampersand` here
+    // means a whole `&Имя` rather than the sigil alone.
     p.at(TokenKind::Ampersand)
         || (at_sdbl_keyword(p, "DATETIME", "ДАТАВРЕМЯ")
             && p.nth_non_trivia(0) == Some(TokenKind::LParen))
@@ -1167,7 +1169,7 @@ fn top_clause(p: &mut Parser) {
     // `expect` reports by bumping the offending token, which would eat the
     // next clause's keyword and cost that clause its parse. Say the same
     // thing without moving when the count is simply not there.
-    if is_clause_keyword(p) || p.at(TokenKind::Semicolon) || p.at_end() {
+    if is_clause_keyword(p) || p.at(TokenKind::Semicolon) || p.at(TokenKind::RParen) || p.at_end() {
         p.error_custom_no_bump("ожидалось количество после 'ПЕРВЫЕ' / 'TOP'");
     } else {
         p.expect(TokenKind::Decimal);

@@ -64,6 +64,12 @@ pub fn query_package(p: &mut Parser) {
         p.skip_trivia();
 
         if p.at(TokenKind::Semicolon) {
+            if a_query_is_due {
+                // Two separators in a row: a member of the sequence is
+                // missing. Trailing separators are not this — there the loop
+                // ends at the input rather than at another separator.
+                p.error_custom_no_bump("ожидался запрос между разделителями");
+            }
             p.bump();
             a_query_is_due = true;
             continue;
@@ -73,9 +79,16 @@ pub fn query_package(p: &mut Parser) {
             break;
         }
 
-        if a_query_is_due || at_query_start(p) {
+        if a_query_is_due {
             queries(p);
             a_query_is_due = false;
+        } else if at_query_start(p) {
+            // A query where a separator should be. Recognising it is what
+            // keeps the rest of the package parseable, but the package is
+            // still malformed and silence here would turn a bad package into
+            // two good queries.
+            p.error_custom_no_bump("ожидался разделитель ';' между запросами");
+            queries(p);
         } else if !drain_to_boundary(p) {
             break;
         }

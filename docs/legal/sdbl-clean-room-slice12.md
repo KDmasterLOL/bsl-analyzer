@@ -162,6 +162,7 @@ Every site is classified:
 | A15 | `select.rs` `totals_periods_modifier` | The rule allows at most two boundary arguments; the parser takes any number. A missing boundary after a comma is reported, and so is one that is neither a date literal nor a parameter, but a third *well-formed* boundary is not. Counting present arguments is a check with no recovery value, and refusing to parse them would only hide the rest of the clause. |
 | A16 | `select.rs` `totals_periods_modifier` | At end of input, a `ПЕРИОДАМИ` whose paren is not open yet or not closed yet is taken and left quiet — the same case as the half-typed clause keywords of A1–A5, and quiet for the same reason. With a clause still to come, both are reported: there the paren is not being typed, it is missing. |
 | A17 | `select.rs` `totals_group_modifier`, `totals_periods_modifier` | Where the rule is broken but the text is unambiguous — a period name outside the ten, `ИЕРАРХИЯ` and `ПЕРИОДАМИ` together — the parser reports and then consumes anyway. Refusing would cost the clause its shape to make a point the diagnostic already makes. |
+| A19 | `select.rs` `at_period_boundary` | The boundary check reads the first token: a parameter, or `ДАТАВРЕМЯ` followed by `(`. Three shapes get through it. An expression *built from* a boundary (`&П + 1`) passes, because reading the whole boundary would mean inspecting the parsed node. A bare `&` passes, and this one is not a choice: `crates/parser/src/sdbl_token_converter.rs` maps both `Parameter` and `Ampersand` to `TokenKind::Ampersand`, so at parser level a named parameter and a lone sigil are the same token — telling them apart belongs to the converter, which is Slice 13's. And `ДАТАВРЕМЯ(Поле)` passes, because validating a date literal's arguments is the date-literal rule, not this one. |
 | A18 | `select.rs` `totals_group_alias` | A *bare* alias is taken on the wide clause-keyword guard, an explicit one on the narrow `is_body_clause_keyword`. A bare alias cannot be told from a following clause by anything but its spelling, so the wide guard is the price of supporting it; after `КАК` there is no such ambiguity, and a name that spells a keyword is still a name — the same reading `source_alias` and the `ПОМЕСТИТЬ` name already take. |
 
 ### D — neither the language nor a decision
@@ -386,12 +387,12 @@ extracted from 21 114 modules:
 | | |
 |---|---|
 | queries that produce the new leftover error | 851 (3.1%) |
-| of those, queries that produced **no** diagnostic before | **72 (0.26%)** |
-| of those, queries already carrying another parse error | 779 |
+| of those, queries that produced **no** diagnostic before | **68 (0.25%)** |
+| of those, queries already carrying another parse error | 783 |
 | queries whose tree still does not cover the input | 29 (0.1%) |
 
-The 0.26% is the number that matters for the decision the owner made: a
-query that was clean and now is not. The other 779 were already lit up.
+The 0.25% is the number that matters for the decision the owner made: a
+query that was clean and now is not. The other 783 were already lit up.
 
 Grouping the 851 by what the leftover starts with: 209 begin at a `КАК`,
 149 at a `%1`/`%2`/`%3`, 116 at a `(Титульный,…`, and a further 24 at a
@@ -589,10 +590,16 @@ are covered by entries A6–A8 above.
 - C4 `3aebeb9b` — the first review round. Seven substantive findings and
   six small ones, all reproduced before being acted on and all confirmed.
   Parser tests 628 → 632.
-- C5 — the second review round, run because two of the first round's
-  findings sat inside the first round's own fixes. Ten more findings, nine
-  acted on and one declined with a reason. Parser tests 632 → 636; the
-  acceptance suite grows from 23 tests to 27.
+- C5 `7a7fb54d` — the second review round, run because two of the first
+  round's findings sat inside the first round's own fixes. Ten more
+  findings, nine acted on and one declined with a reason. Parser tests
+  632 → 636; the acceptance suite grows from 23 tests to 27.
+- C6 — the third round. Five findings, two of them regressions introduced
+  by C5's own fix: a package with no separator between its members, and an
+  empty member between two separators, had both become silently acceptable.
+  Parser tests 636 → 638. One lens of this round did not run at all — the
+  task file had grown past the argument-size limit — so this round covers
+  one perspective, not two.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

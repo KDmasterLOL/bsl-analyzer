@@ -421,3 +421,40 @@ fn a_missing_hierarchy_does_not_also_report_a_conflict_with_it() {
 fn uncovered_len(input: &str) -> usize {
     input.len() - usize::from(parse_sdbl(input).syntax_node().text_range().len())
 }
+
+#[test]
+fn a_package_says_when_its_members_are_not_separated() {
+    // Recognising a query where a separator should be is what keeps the rest
+    // of the package parseable; saying nothing about it would turn one bad
+    // package into two good queries.
+    let run_on = "ВЫБРАТЬ А ИЗ Т ВЫБРАТЬ Б ИЗ У";
+    let parse = parse_sdbl(run_on);
+    assert!(parse.has_errors(), "a missing separator must be reported");
+    assert_eq!(
+        parse.syntax_node().descendants().filter(|n| n.kind() == SyntaxKind::SDBL_QUERY).count(),
+        2,
+        "and both queries must still be parsed",
+    );
+
+    // A member missing between two separators is reported too.
+    assert!(parse_sdbl("ВЫБРАТЬ А ИЗ Т;;ВЫБРАТЬ Б ИЗ У").has_errors());
+
+    // A separator at the end is not a missing member.
+    accepted("ВЫБРАТЬ А ИЗ Т;");
+    accepted("ВЫБРАТЬ А ИЗ Т ОБЪЕДИНИТЬ ВЫБРАТЬ Б ИЗ У");
+}
+
+#[test]
+fn a_closing_paren_ends_a_missing_top_count() {
+    // Inside a subquery the paren is structure, not a count. Consuming it
+    // would cost the subquery its closing paren and the outer query its
+    // shape.
+    let input = "ВЫБРАТЬ (ВЫБРАТЬ ПЕРВЫЕ)";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert!(
+        !parse.errors().iter().any(|e| e.message().contains("Ожидалось ')'")),
+        "the paren is still there, so nothing may ask for another: {:#?}",
+        parse.errors(),
+    );
+}

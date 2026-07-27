@@ -1459,8 +1459,8 @@ accidentally from upstream grammar or old tests.
 Every recovery rule is documented as either required by the official
 syntax, or intentionally kept for editor behaviour. Auditing the surface
 produced a third verdict the plan did not allow for, and it carried most
-of the work: **neither**. Twenty-seven sites were classified — three
-implement the language, eighteen are allowances with their reasons
+of the work: **neither**. Twenty-eight sites were classified — three
+implement the language, nineteen are allowances with their reasons
 stated, and six were behaviours nobody had decided. Two of the six were
 invisible until the other four were fixed.
 
@@ -1513,7 +1513,7 @@ false:
 
 ### Measured on a production configuration
 
-27 677 query literals. The drain reports 851 of them; only **72** are
+27 677 query literals. The drain reports 851 of them; only **68** are
 queries that produced no diagnostic before. A third of the leftovers are
 query templates carrying substitution placeholders that are not SDBL
 until substituted — text that was never being parsed, only truncated in
@@ -1537,7 +1537,7 @@ discarding was silent.
   `totals_group_item`, `totals_periods_modifier`, `totals_group_alias`;
 - `crates/parser/src/grammar/sdbl/expressions.rs` — the recovery banner;
 - `crates/parser/tests/sdbl_parser_tests.rs` — 12 coverage pins;
-- `crates/parser/tests/sdbl_recovery_and_allowances.rs` — 27 acceptance
+- `crates/parser/tests/sdbl_recovery_and_allowances.rs` — 29 acceptance
   tests;
 - `docs/legal/sdbl-select-mini-spec.md` — the control-point grammar and
   the ordering-field word order;
@@ -1553,8 +1553,8 @@ which turns a silent loss into a silent acceptance. Both are fixed, along
 with a leading comma that cost a whole query and an explicit alias that
 both under- and over-restricted its name.
 
-Two review rounds were run, the second because two of the first round's
-findings were defects inside the first round's own fixes. The second round
+Three review rounds were run, each because the one before it had found
+defects inside its own predecessor's fixes. The second round
 found the same thing one level deeper: making the drain stop at the
 separator assumed every recovery path leaves the separator alone, and
 several bump it as their way of reporting. The package loop no longer
@@ -1562,9 +1562,13 @@ depends on that — it runs while input remains, skips separators wherever
 they are, and the drain stops at a separator or at the next query's start.
 A round that finds nothing is the only honest signal to stop.
 
+The third round proved the point again: fixing the package loop had made
+a run-on package and an empty member silently acceptable, where before
+they were at least reported. Both are reported again.
+
 Commit trail: C0a `18b5bb70`, C0b `27eb6e92`, C1 `80350945`,
-C2 `da3eeaa0`, C2b `01d9cd6d`, C3 `7aaf669c`, C4 `3aebeb9b`, C5 the second
-round's fixes. Two earlier commits landed
+C2 `da3eeaa0`, C2b `01d9cd6d`, C3 `7aaf669c`, C4 `3aebeb9b`,
+C5 `7a7fb54d`, C6 the third round's fixes. Two earlier commits landed
 under this slice's name in April 2026 without an attestation and are
 covered by it now: `9d418084` and `88439afa`, both on the recovery
 helpers' clause-keyword stop.

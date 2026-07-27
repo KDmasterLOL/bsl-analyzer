@@ -844,8 +844,9 @@ totals-group          := expression totals-group-modifier? totals-group-alias?
 
 totals-group-modifier :=
     (ONLY|ТОЛЬКО)? (HIERARCHY|ИЕРАРХИЯ)
-  | (PERIODS|ПЕРИОДАМИ) '(' period-name (',' expression)* ')'
+  | (PERIODS|ПЕРИОДАМИ) '(' period-name (',' period-boundary)* ')'
 totals-group-alias    := (AS|КАК)? identifier
+period-boundary       := date-literal | parameter
 period-name           := SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|QUARTER|YEAR
                        | TENDAYS|HALFYEAR
                        | СЕКУНДА|МИНУТА|ЧАС|ДЕНЬ|НЕДЕЛЯ|МЕСЯЦ|КВАРТАЛ|ГОД
@@ -856,9 +857,11 @@ The control-point modifiers and alias were added by Slice 12 from the
 Developer's Reference rule for `<Контрольная точка>` at
 `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` §8.4.16; before
 that the parser consumed `ТОЛЬКО`/`ИЕРАРХИЯ` and nothing else, and the
-rest of the query was discarded without a word. The rule allows at most
-two boundary arguments; the parser accepts any number, which is a
-tolerance rather than a reading of the source.
+rest of the query was discarded without a word. The rule allows at most two boundary arguments; the parser accepts any
+number, which is a tolerance rather than a reading of the source. A
+boundary that is neither a date literal nor a parameter is reported —
+see `docs/legal/sdbl-clean-room-slice12.md` entry A19 for the three
+shapes that still get through that check and why.
 
 ### AST-shape contract (Slice 11 extension)
 
