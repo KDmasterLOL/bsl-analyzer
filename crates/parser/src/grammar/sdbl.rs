@@ -87,20 +87,33 @@ pub fn query_package(p: &mut Parser) {
             break;
         }
 
-        let inside_group = p.open_group_count() > 0;
+        // A query keyword at the top level starts a member. So does a clause
+        // keyword when a member is due: `ИЗ Т` with no `ВЫБРАТЬ` yet is a
+        // query being written, and the field-list slice guarantees it a node
+        // to hang on to. What must not start one is a token that begins
+        // nothing — forcing a query rule onto a `)` mints an empty member,
+        // and the lowerer walks those.
+        let at_top_level = p.open_group_count() == 0;
+        let starts_a_member =
+            at_top_level && (at_query_start(p) || (a_query_is_due && select::is_clause_keyword(p)));
 
-        if a_query_is_due {
+        if starts_a_member {
+            if !a_query_is_due {
+                // A query where a separator should be. Recognising it keeps
+                // the rest of the package parseable, but the package is still
+                // malformed and silence would turn it into two good queries.
+                p.error_custom_no_bump("ожидался разделитель ';' между запросами");
+            }
             queries(p);
             a_query_is_due = false;
-        } else if !inside_group && at_query_start(p) {
-            // A query where a separator should be. Recognising it is what
-            // keeps the rest of the package parseable, but the package is
-            // still malformed and silence here would turn a bad package into
-            // two good queries.
-            p.error_custom_no_bump("ожидался разделитель ';' между запросами");
-            queries(p);
-        } else if !drain_to_boundary(p) {
-            break;
+        } else {
+            if a_query_is_due {
+                p.error_custom_no_bump("ожидалось 'ВЫБРАТЬ' / 'SELECT'");
+                a_query_is_due = false;
+            }
+            if !drain_to_boundary(p) {
+                break;
+            }
         }
     }
 

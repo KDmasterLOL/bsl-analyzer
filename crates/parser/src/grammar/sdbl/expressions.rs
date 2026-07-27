@@ -137,10 +137,13 @@ fn recover_to_delimiter(p: &mut Parser) {
             }
         }
 
-        if paren_depth == 0
-            && brace_depth == 0
-            && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon))
-        {
+        // A separator ends the skipped fragment at any depth: it is the
+        // boundary between package members, and no depth of ours outranks it.
+        if p.at(TokenKind::Semicolon) {
+            break;
+        }
+
+        if paren_depth == 0 && brace_depth == 0 && p.at(TokenKind::Comma) {
             break;
         }
 

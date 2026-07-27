@@ -673,3 +673,63 @@ fn a_group_left_open_by_one_member_does_not_reach_the_next() {
         );
     }
 }
+
+#[test]
+fn nothing_may_run_past_a_separator() {
+    // Reporting is not the only way a rule can swallow the boundary. An
+    // extension region reads to its closing brace, and both skip-ahead
+    // recoveries used to stop at a separator only while their own local
+    // depth was zero. A separator outranks every depth any of them keeps.
+    for (input, wanted) in [
+        ("SELECT A FROM T {; SELECT B FROM U", 2usize),
+        ("SELECT A FROM T {foo; SELECT B FROM U", 2),
+        ("SELECT F(A X (; ) SELECT B FROM U", 2),
+        ("SELECT A FROM T.V(A X (; ) SELECT B FROM U", 2),
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+                .count(),
+            wanted,
+            "`{input}`",
+        );
+    }
+}
+
+#[test]
+fn a_member_is_not_minted_for_a_token_that_begins_nothing() {
+    // After a separator a query is due, but forcing a query rule onto a `)`
+    // produces an empty member node, and the lowerer walks those. A clause
+    // keyword is different: `ИЗ Т` with no `ВЫБРАТЬ` yet is a query being
+    // written, and the field-list slice guarantees it a node.
+    for (input, queries) in [
+        ("ВЫБРАТЬ А ИЗ Т; ) ВЫБРАТЬ Б ИЗ У", 2usize),
+        ("ВЫБРАТЬ А ИЗ Т; 42 ВЫБРАТЬ Б ИЗ У", 2),
+        ("FROM Products", 1),
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .descendants()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_QUERY)
+                .count(),
+            queries,
+            "`{input}`",
+        );
+    }
+
+    // A string that is not a query at all gets no query node and does get a
+    // complaint.
+    let parse = parse_sdbl("ЫЫЫ");
+    assert!(parse.has_errors());
+    assert_eq!(
+        parse.syntax_node().descendants().filter(|n| n.kind() == SyntaxKind::SDBL_QUERY).count(),
+        0,
+    );
+}

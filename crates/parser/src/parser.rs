@@ -117,6 +117,14 @@ impl<'a> Parser<'a> {
     /// brackets say nothing about the structure around it.
     fn track_group(&mut self, kind: TokenKind) {
         match kind {
+            // A group cannot span a statement separator, so consuming one
+            // closes whatever was open — wherever it is consumed. Tying this
+            // to the one caller that happens to notice the separator would
+            // leave every rule that swallows one holding stale depth.
+            TokenKind::Semicolon => {
+                self.paren_depth = 0;
+                self.brace_depth = 0;
+            }
             TokenKind::LBrace => self.brace_depth += 1,
             TokenKind::RBrace => self.brace_depth = self.brace_depth.saturating_sub(1),
             TokenKind::LParen if self.brace_depth == 0 => self.paren_depth += 1,

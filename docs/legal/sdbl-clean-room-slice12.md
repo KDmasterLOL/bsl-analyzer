@@ -652,6 +652,29 @@ revision smuggled into a performance fix. The wording change is its own
 commit, `edf05a6e`; the review saw them together because the base it was
 given reached back two commits. Nothing was mixed.
 
+### The separator rule reached the last three places that ignored it
+
+The fourth round stopped errors from consuming a separator. The ninth
+found three rules that consume one without reporting anything at all: a
+brace region reads to its closing brace and takes whatever is in between,
+and both skip-ahead recoveries stopped at a separator only while their own
+local depth was zero. So an unclosed `{` swallowed the rest of the
+package in silence, and a recovery inside a paren swallowed the boundary
+and left the outer group standing.
+
+The rule is now stated in each of them and, more importantly, in `bump`
+itself: consuming a separator closes whatever grouping was open, wherever
+it is consumed. Tying that to the one caller that happens to notice the
+separator was what let every other path keep stale depth.
+
+Fixing the swallow exposed a behaviour that had been hiding behind it.
+After a separator a query is due, and the loop used to force a query rule
+to run whatever came next — which on a `)` mints an empty member node, and
+`sdbl-hir` walks those. It now runs one only where something can begin a
+member. A clause keyword still counts: `ИЗ Т` with no `ВЫБРАТЬ` yet is a
+query being written, and Slice 7 guarantees it a node to hang on to, which
+is a contract this slice must not quietly break. A `)` is not.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -760,8 +783,10 @@ are covered by entries A6–A8 above.
 - C10 `b23695ff` — the seventh round. Two findings, both in the sixth
   round's own fix, one of them a freeze rather than a wrong answer. Parser
   tests 645 → 647.
-- C11 — the eighth round. Two findings held and one was refuted. Parser
-  tests 647 → 648.
+- C11 `0bcbdf4a` — the eighth round. Two findings held and one was
+  refuted. Parser tests 647 → 648.
+- C12 — the ninth round. Three findings, one class, and the class is the
+  fourth round's again at a deeper level. Parser tests 648 → 650.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

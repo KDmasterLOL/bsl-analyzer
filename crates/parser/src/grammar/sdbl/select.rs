@@ -637,6 +637,13 @@ fn query_extension(p: &mut Parser) {
             break;
         }
 
+        // An unclosed `{` is tolerated, but tolerating it must not cost the
+        // rest of the package: a separator ends the region whether or not
+        // its brace was ever closed.
+        if p.at(TokenKind::Semicolon) {
+            break;
+        }
+
         if p.at(TokenKind::LBrace) {
             depth += 1;
             p.bump();
@@ -1238,7 +1245,11 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             }
         }
 
-        if paren_depth == 0 && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon)) {
+        if p.at(TokenKind::Semicolon) {
+            break;
+        }
+
+        if paren_depth == 0 && p.at(TokenKind::Comma) {
             break;
         }
 
