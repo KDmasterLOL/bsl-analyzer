@@ -31,6 +31,7 @@ use crate::event::NodeKind;
 use crate::parser::Parser;
 use crate::token_set::TokenSet;
 use lexer::TokenKind;
+use parser_error::{ParseError, RecoveryKind};
 
 pub(super) const LIST_RECOVERY: TokenSet =
     TokenSet::new(&[TokenKind::RParen, TokenKind::Semicolon]);
@@ -72,7 +73,41 @@ pub fn query_package(p: &mut Parser) {
         queries(p);
     }
 
+    drain_unconsumed_input(p);
+
     m.complete(p, NodeKind::SdblQueryPackage);
+}
+
+/// Takes whatever the package loop refused, so that the tree's text is
+/// the source text.
+///
+/// The loop above ends at the first token that is neither `;` nor the end
+/// of input, which happens whenever a clause is out of order, a modifier
+/// is one the grammar here does not know, or the query is simply wrong.
+/// Without this the remainder is not merely unparsed — it is absent from
+/// the tree, and the parse reports success, so a consumer cannot tell a
+/// clean query from half of one.
+fn drain_unconsumed_input(p: &mut Parser) {
+    p.skip_trivia();
+
+    if p.at_end() {
+        return;
+    }
+
+    let leftover = p.start();
+
+    while !p.at_end() {
+        p.check_iteration_limit();
+        p.bump();
+    }
+
+    p.emit_error_at_marker(
+        leftover,
+        ParseError::Custom {
+            message: "не разобран остаток текста запроса",
+            recovery: RecoveryKind::RecoverySpan,
+        },
+    );
 }
 
 fn queries(p: &mut Parser) {

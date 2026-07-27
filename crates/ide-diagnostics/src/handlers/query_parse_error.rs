@@ -97,6 +97,9 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
+                QueryParseError @ 7:15..7:31
+                  message: Не разобран остаток текста запроса
+                  severity: Warning
                 QueryParseError @ 11:61..11:61
                   message: Неожиданный конец файла
                   severity: Warning

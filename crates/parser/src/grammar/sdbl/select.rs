@@ -775,15 +775,26 @@ fn order_by_item(p: &mut Parser) {
     super::expressions::expression(p);
     p.skip_trivia();
 
-    if p.at_keyword("ASC") || p.at_keyword("ВОЗР") || p.at_keyword("DESC") || p.at_keyword("УБЫВ")
-    {
-        p.bump();
-        p.skip_trivia();
-    }
+    let direction_came_first = eat_order_direction(p);
 
     if p.at_keyword("HIERARCHY") || p.at_keyword("ИЕРАРХИЯ") {
         p.bump();
         p.skip_trivia();
+
+        if !direction_came_first {
+            eat_order_direction(p);
+        }
+    }
+}
+
+fn eat_order_direction(p: &mut Parser) -> bool {
+    if p.at_keyword("ASC") || p.at_keyword("ВОЗР") || p.at_keyword("DESC") || p.at_keyword("УБЫВ")
+    {
+        p.bump();
+        p.skip_trivia();
+        true
+    } else {
+        false
     }
 }
 
@@ -926,6 +937,68 @@ fn totals_group_item(p: &mut Parser) {
     }
 
     if p.at_keyword("HIERARCHY") || p.at_keyword("ИЕРАРХИЯ") {
+        p.bump();
+        p.skip_trivia();
+    }
+
+    if p.at_keyword("PERIODS") || p.at_keyword("ПЕРИОДАМИ") {
+        totals_periods_modifier(p);
+    }
+
+    totals_group_alias(p);
+}
+
+/// `ПЕРИОДАМИ(<вид периода> [, <граница>] [, <граница>])`.
+///
+/// The period name is one of a closed list of words and is taken as a
+/// token; the two boundaries are a date literal or a parameter, and are
+/// taken as expressions so that their structure survives. An unclosed
+/// paren is left where it is — the package drain reports it.
+fn totals_periods_modifier(p: &mut Parser) {
+    p.bump();
+    p.skip_trivia();
+
+    if !p.at(TokenKind::LParen) {
+        return;
+    }
+    p.bump();
+    p.skip_trivia();
+
+    if p.at(TokenKind::Ident) && !is_clause_keyword(p) {
+        p.bump();
+        p.skip_trivia();
+    }
+
+    while p.at(TokenKind::Comma) {
+        p.check_iteration_limit();
+        p.bump();
+        p.skip_trivia();
+
+        if super::expressions::is_expression_start(p) {
+            super::expressions::expression(p);
+            p.skip_trivia();
+        }
+    }
+
+    if p.at(TokenKind::RParen) {
+        p.bump();
+        p.skip_trivia();
+    }
+}
+
+/// The trailing `[[КАК] <Псевдоним поля>]` of a control point.
+///
+/// The alias may be written bare, so any identifier that is not a clause
+/// keyword is taken here. A control point is the last thing in a query,
+/// which makes an over-eager alias cheap: there is nothing after it to
+/// swallow but the next clause, and clause keywords are excluded.
+fn totals_group_alias(p: &mut Parser) {
+    if at_sdbl_keyword(p, "AS", "КАК") {
+        eat_sdbl_keyword(p, "AS", "КАК");
+        p.skip_trivia();
+    }
+
+    if p.at(TokenKind::Ident) && !is_clause_keyword(p) {
         p.bump();
         p.skip_trivia();
     }

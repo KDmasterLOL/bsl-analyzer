@@ -2023,7 +2023,9 @@ fn test_drop_table_english() {
 
 #[test]
 fn test_batch_with_drop() {
-    check_no_errors("ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ; УНИЧТОЖИТЬ ВТ");
+    // `ПОМЕСТИТЬ` precedes `ИЗ`, which is both the documented order and the
+    // only one that occurs in practice.
+    check_no_errors("ВЫБРАТЬ Поле ПОМЕСТИТЬ ВТ ИЗ Таблица; УНИЧТОЖИТЬ ВТ");
 }
 
 #[test]
@@ -4445,13 +4447,11 @@ fn test_query_extension_as_first_virtual_table_arg_no_errors() {
 // Coverage of the input by the syntax tree
 //
 // A Rowan tree is full-fidelity: its text is the source text. The SDBL
-// entry point does not maintain that today — when no rule will take the
-// current token, the rest of the input is simply not consumed, and the
-// parse still reports success. The tests below record what is dropped,
-// so that any change to it has to be deliberate.
-//
-// `uncovered_tail` returns exactly the suffix missing from the tree.
-// An empty string is the healthy answer.
+// entry point maintains that by draining whatever its rules refuse into
+// a trailing error node, so nothing can leave the parser unaccounted
+// for. `uncovered_tail` therefore answers the empty string for every
+// input, well-formed or not, and the interesting question moves to
+// whether the leftover was reported and what it contains.
 // =====================================================================
 
 fn uncovered_tail(input: &str) -> &str {
@@ -4460,107 +4460,120 @@ fn uncovered_tail(input: &str) -> &str {
     &input[covered..]
 }
 
-fn assert_silently_dropped(input: &str, expected_tail: &str) {
-    assert_eq!(uncovered_tail(input), expected_tail, "dropped text for `{input}`");
+/// Asserts that `input` is fully covered and that the part the grammar
+/// could not place was reported rather than discarded.
+fn assert_leftover_reported(input: &str, expected_leftover: &str) {
+    assert_eq!(uncovered_tail(input), "", "nothing may leave the tree for `{input}`");
+
     let parse = parse_sdbl(input);
+    let reported: Vec<_> = parse
+        .errors()
+        .iter()
+        .map(|e| {
+            let r = e.range();
+            input[usize::from(r.start())..usize::from(r.end())].trim().to_string()
+        })
+        .collect();
+
     assert!(
-        !parse.has_errors(),
-        "the drop is silent today; an error here means the behaviour moved: {:#?}",
-        parse.errors(),
+        reported.iter().any(|text| text == expected_leftover),
+        "expected `{expected_leftover}` to be reported for `{input}`; got {reported:?}",
     );
 }
 
-#[test]
-fn test_trailing_tokens_after_a_query_are_dropped_current_behavior() {
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ФУНК(Х)", "(Х)");
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ЫЫЫ ЭЭЭ", "ЭЭЭ");
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т 42", "42");
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т \"хвост\"", "\"хвост\"");
+/// Asserts that `input` is fully covered and drew no complaint.
+fn assert_accepted(input: &str) {
+    assert_eq!(uncovered_tail(input), "", "nothing may leave the tree for `{input}`");
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "`{input}` must parse cleanly: {:#?}", parse.errors());
 }
 
 #[test]
-fn test_dropped_tail_swallows_the_next_query_of_a_package_current_behavior() {
-    // The worst shape of the loss: a following query, its FROM clause and
-    // all, never reaches the tree, and nothing says so.
-    assert_silently_dropped(
+fn test_trailing_tokens_after_a_query_are_reported() {
+    assert_leftover_reported("ВЫБРАТЬ А ИЗ Т ФУНК(Х)", "(Х)");
+    assert_leftover_reported("ВЫБРАТЬ А ИЗ Т ЫЫЫ ЭЭЭ", "ЭЭЭ");
+    assert_leftover_reported("ВЫБРАТЬ А ИЗ Т 42", "42");
+    assert_leftover_reported("ВЫБРАТЬ А ИЗ Т \"хвост\"", "\"хвост\"");
+}
+
+#[test]
+fn test_a_bad_query_no_longer_swallows_the_next_one_in_the_package() {
+    // The shape that made the loss worth fixing: a following query, its
+    // FROM clause and all, used to vanish without a word.
+    assert_leftover_reported(
         "ВЫБРАТЬ А ИЗ Т ГДЕ А = 1 ФУНК(Х); ВЫБРАТЬ 2 ИЗ У",
         "ФУНК(Х); ВЫБРАТЬ 2 ИЗ У",
     );
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т; ВЫБРАТЬ 2 ИЗ У"), "");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т; ВЫБРАТЬ 2 ИЗ У");
 }
 
 #[test]
-fn test_totals_periods_modifier_is_dropped_current_behavior() {
-    assert_silently_dropped(
-        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ)",
-        "ПЕРИОДАМИ(ДЕНЬ)",
-    );
-    assert_silently_dropped(
+fn test_totals_periods_modifier_is_parsed() {
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ)");
+    assert_accepted(
         "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(2006,6,28), ДАТАВРЕМЯ(2006,6,28))",
-        "ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(2006,6,28), ДАТАВРЕМЯ(2006,6,28))",
     );
-    assert_silently_dropped(
-        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ИЕРАРХИЯ, П ПЕРИОДАМИ(ДЕНЬ)",
-        "ПЕРИОДАМИ(ДЕНЬ)",
-    );
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ИЕРАРХИЯ, П ПЕРИОДАМИ(ДЕНЬ)");
+    // A modifier whose paren is not closed yet is a query mid-typing, and
+    // is treated like the other half-typed clauses: taken, and quiet.
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ");
 }
 
 #[test]
-fn test_totals_control_point_alias_is_dropped_current_behavior() {
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н КАК Группа", "КАК Группа");
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н Группа", "Группа");
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ИЕРАРХИЯ КАК Г", "КАК Г");
+fn test_totals_control_point_alias_is_parsed() {
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н КАК Группа");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н Группа");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ИЕРАРХИЯ КАК Г");
 }
 
 #[test]
-fn test_totals_modifiers_the_parser_does_consume() {
-    // These two forms already survive, which is why only PERIODS and the
-    // alias appear above.
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ИЕРАРХИЯ"), "");
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ТОЛЬКО ИЕРАРХИЯ"), "");
+fn test_totals_hierarchy_modifiers_still_parse() {
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ИЕРАРХИЯ");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н ТОЛЬКО ИЕРАРХИЯ");
 }
 
 #[test]
-fn test_overall_prefix_form_is_dropped_current_behavior() {
-    // `ПО ОБЩИЕ <список>` without a separator loses the list; the
-    // comma-separated form survives.
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО ОБЩИЕ Н", "Н");
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО ОБЩИЕ"), "");
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО ОБЩИЕ, Н"), "");
+fn test_overall_keeps_its_shape_and_loses_nothing() {
+    // The reference rule writes `ПО ОБЩИЕ <список>` with no separator and
+    // the textbook writes it with a comma. The comma form is the one that
+    // occurs in practice and the one whose tree shape is settled; the
+    // other now merely stops losing text, its reading left open.
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО ОБЩИЕ");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО ОБЩИЕ, Н");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО ОБЩИЕ Н");
 }
 
 #[test]
-fn test_order_by_hierarchy_then_direction_is_dropped_current_behavior() {
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИЕРАРХИЯ УБЫВ", "УБЫВ");
-    // The reverse word order is what the parser accepts today.
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н УБЫВ ИЕРАРХИЯ"), "");
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИЕРАРХИЯ"), "");
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н УБЫВ"), "");
+fn test_order_by_takes_all_four_documented_orderings() {
+    assert_accepted("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ВОЗР");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н УБЫВ");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИЕРАРХИЯ");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИЕРАРХИЯ УБЫВ");
+    // Not among the four, tolerated as a plausible slip.
+    assert_accepted("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н УБЫВ ИЕРАРХИЯ");
 }
 
 #[test]
-fn test_a_clause_out_of_order_is_dropped_current_behavior() {
-    // Clause order is not tolerated at all: a clause in the wrong place is
-    // never looked for, and the tail loss then deletes it. Only the three
-    // trailing clauses below are genuinely order-free.
-    assert_silently_dropped("ВЫБРАТЬ А ГДЕ А=1 ИЗ Т", "ИЗ Т");
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т СГРУППИРОВАТЬ ПО Н ГДЕ А=1", "ГДЕ А=1");
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИМЕЮЩИЕ А>0 СГРУППИРОВАТЬ ПО Н", "СГРУППИРОВАТЬ ПО Н");
-    assert_silently_dropped("ВЫБРАТЬ А ИЗ Т ИНДЕКСИРОВАТЬ ПО Н ГДЕ А=1", "ГДЕ А=1");
+fn test_a_clause_out_of_order_is_reported_not_dropped() {
+    assert_leftover_reported("ВЫБРАТЬ А ГДЕ А=1 ИЗ Т", "ИЗ Т");
+    assert_leftover_reported("ВЫБРАТЬ А ИЗ Т СГРУППИРОВАТЬ ПО Н ГДЕ А=1", "ГДЕ А=1");
+    assert_leftover_reported("ВЫБРАТЬ А ИЗ Т ИМЕЮЩИЕ А>0 СГРУППИРОВАТЬ ПО Н", "СГРУППИРОВАТЬ ПО Н");
+    assert_leftover_reported("ВЫБРАТЬ А ИЗ Т ИНДЕКСИРОВАТЬ ПО Н ГДЕ А=1", "ГДЕ А=1");
+    assert_leftover_reported("ВЫБРАТЬ А ИЗ Т ПОМЕСТИТЬ ВТ", "ПОМЕСТИТЬ ВТ");
 }
 
 #[test]
 fn test_the_three_trailing_clauses_are_genuinely_order_free() {
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИТОГИ СУММА(А) ПО Н"), "");
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н УПОРЯДОЧИТЬ ПО Н"), "");
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т АВТОУПОРЯДОЧИВАНИЕ УПОРЯДОЧИТЬ ПО Н"), "");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО Н ИТОГИ СУММА(А) ПО Н");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н УПОРЯДОЧИТЬ ПО Н");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т АВТОУПОРЯДОЧИВАНИЕ УПОРЯДОЧИТЬ ПО Н");
 }
 
 #[test]
 fn test_a_clause_keyword_typed_without_its_body_is_accepted_in_silence() {
     // Deliberate: the words are typed before what must follow them, and
-    // an error on every keystroke in between would be noise. This must
-    // not change.
+    // an error on every keystroke in between would be noise. The drain
+    // must not turn these into diagnostics.
     for input in [
         "ВЫБРАТЬ А ИЗ Т СГРУППИРОВАТЬ",
         "ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ",
@@ -4568,16 +4581,15 @@ fn test_a_clause_keyword_typed_without_its_body_is_accepted_in_silence() {
         "ВЫБРАТЬ А ИЗ Т ИТОГИ",
         "ВЫБРАТЬ А ИЗ Т ДЛЯ",
     ] {
-        assert_eq!(uncovered_tail(input), "", "`{input}`");
-        assert!(!parse_sdbl(input).has_errors(), "`{input}` must stay quiet");
+        assert_accepted(input);
     }
 }
 
 #[test]
 fn test_comments_are_trivia_and_cost_no_coverage() {
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А // хвост\nИЗ Т"), "");
-    assert_eq!(uncovered_tail("ВЫБРАТЬ А ИЗ Т // хвост"), "");
-    assert_eq!(uncovered_tail("// пусто"), "");
+    assert_accepted("ВЫБРАТЬ А // хвост\nИЗ Т");
+    assert_accepted("ВЫБРАТЬ А ИЗ Т // хвост");
+    assert_accepted("// пусто");
 }
 
 #[test]
@@ -4591,6 +4603,6 @@ fn test_well_formed_queries_are_covered_completely() {
         "ВЫБРАТЬ А ПОМЕСТИТЬ Врем ИЗ Т; УНИЧТОЖИТЬ Врем",
         "ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Товары КАК Т {ГДЕ Т.Поле}",
     ] {
-        assert_eq!(uncovered_tail(input), "", "`{input}`");
+        assert_accepted(input);
     }
 }
