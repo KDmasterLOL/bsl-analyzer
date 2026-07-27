@@ -12,10 +12,11 @@
 //!   `docs/legal/sdbl-clean-room-slice4.md`.
 //! - Slice 5 — virtual tables and external data sources:
 //!   `docs/legal/sdbl-clean-room-slice5.md`.
+//! - Slice 1-addendum — the query-extension brace pair:
+//!   `docs/legal/sdbl-clean-room-slice1-addendum.md`.
 //!
-//! No vocabulary awaits re-derivation any more. The one `LEGACY` banner
-//! left marks the brace pair, which belongs to no slice at all and is
-//! labelled unowned rather than pending.
+//! Nothing awaits re-derivation any more, and no `LEGACY` banner
+//! remains: every `SdblTokenKind` variant is covered by an attestation.
 //!
 //! The lexer core, the structural keyword vocabulary, the clause-keyword
 //! leftovers and the primitive-type vocabulary are attested by
@@ -47,9 +48,26 @@ pub enum SdblTokenKind {
     #[token(")")]
     RParen,
 
-    // LEGACY (unowned) — the brace pair postdates every closed lexer
-    // attestation and no pending slice claims it. See
-    // `docs/legal/sdbl-clean-room-slice3b.md` § Unowned brace tokens.
+    // ===================================================================
+    // CLEAN-ROOM Slice 1-addendum — query-extension brace pair
+    //
+    // Braces are not part of the query language. They come from the
+    // data-composition extension of it, whose canonical article —
+    // 1C:Enterprise 8.3.27 syntax assistant, «Расширение языка запросов
+    // для системы компоновки данных» — defines the whole construct as
+    // «специальных синтаксических инструкций, заключаемых в фигурные
+    // скобки и помещаемых непосредственно в текст запроса». Developer's
+    // Reference Глава 8 describes the base language without a single
+    // brace, which is the other half of the attestation.
+    //
+    // The extension's own keywords are deliberately not tokens: they
+    // are keywords only inside a brace region, the lexer has no state
+    // and so cannot know that a region is open, and their spellings
+    // (`Характеристики`, `ПолеЗначения`, …) are ordinary attribute and
+    // tabular-section names everywhere else.
+    //
+    // Attestation: `docs/legal/sdbl-clean-room-slice1-addendum.md`.
+    // ===================================================================
     #[token("{")]
     LBrace,
 
