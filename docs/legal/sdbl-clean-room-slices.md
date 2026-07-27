@@ -10,15 +10,15 @@ independently.
 
 ## Status as of 2026-07-27
 
-Closed and attested: Slices 1, 2, 2-addendum, 3a and 3b on the lexer side;
-Slices 6, 7, 7-addendum, 8, 8-addendum, 9, 10a, 10b and 11 on the parser side.
+Closed and attested: Slices 1, 2, 2-addendum, 3a, 3b and 4 on the lexer
+side; Slices 6, 7, 7-addendum, 8, 8-addendum, 9, 10a, 10b and 11 on the
+parser side.
 
 Open:
 
 | Slice | Area | State |
 |---|---|---|
 | 0 | SDBL test corpus | triaged into buckets A/B/C, but bucket C never rewritten and `3aa29b99` removed the bucket labels |
-| 4 | Query-function vocabulary | not started |
 | 5 | Virtual tables, external data sources | not started |
 | 1-addendum | Brace pair `LBrace` / `RBrace` | not started; recommended by Slice 3b (see below) |
 | 12 | Recovery / IDE allowances | fixes landed, no attestation |
@@ -34,8 +34,8 @@ those two. They are punctuation rather than vocabulary, so folding them into a
 vocabulary slice would be the same category error that lost the map in the first
 place; the recommendation is a small **Slice 1-addendum** deriving them from the
 official documentation of the query-language extension that gives `{…}` its
-meaning. Until it runs, the lexer cannot be declared clean, whatever Slices 4
-and 5 do.
+meaning. Until it runs, the lexer cannot be declared clean, whatever Slice 5
+does.
 
 Two things changed after the last slice landed and are recorded here so the
 programme is not resumed on stale assumptions:
@@ -48,8 +48,9 @@ programme is not resumed on stale assumptions:
 - `3aa29b99` removed the `CLEAN-ROOM` / `LEGACY` banners and the test-corpus
   bucket classification from the source. Attestation citations that point at
   those banners no longer resolve, and the remaining unrewritten surface is no
-  longer visible in the code. Restoring markers on the vocabularies owned by
-  Slices 3b, 4 and 5 would close this gap.
+  longer visible in the code. Slices 3b and 4 restored the markers on the
+  vocabularies they own and on those still pending; only Slice 5's `Vt*` block
+  still carries a `LEGACY` banner.
 
 ## Legal framing
 
@@ -247,25 +248,85 @@ Separate the most provenance-sensitive catalogs into their own owned tables.
 - likely extracted from `crates/lexer/src/sdbl/mod.rs` into dedicated local
   tables or modules
 
-## Slice 4: function vocabulary
+## Slice 4: query-function vocabulary (lexer)
+
+**Status: complete (2026-07-27).** See
+[`sdbl-clean-room-slice4.md`](sdbl-clean-room-slice4.md) for the
+attestation. Commit trail: C0a `eb49bba3`, C0b `c874f43b`, C1
+`93e63cbc`, C2 `975a4f2b`, C3 landed with the attestation.
 
 ### Goal
 
 Rebuild SDBL function names from official 1C query-language behavior rather than
 from upstream grammar inventory.
 
+### Source
+
+The primary source is the 1C:Enterprise 8.3.27 syntax assistant book
+«Синтаксис текста запросов», which ships with the platform as a
+separate help book from the object-model one Slice 3b used. Its article
+«Функции языка запросов» is the complete grouped index of query
+functions; its article «Двуязычное представление ключевых слов» is a
+bilingual keyword table strictly more complete than the Developer's
+Reference §8.4.5 one — it alone carries `АВТОНОМЕРЗАПИСИ`,
+`ПРЕДСТАВЛЕНИЕССЫЛКИ`, `РАЗНОСТЬДАТ`, `СГРУППИРОВАНОПО` and
+`УНИКАЛЬНЫЙИДЕНТИФИКАТОР`. Per-function articles carry a bilingual
+headline for everything the table omits.
+
 ### Scope
 
-- aggregate functions
-- date/time functions
-- string functions
-- type/presentation helpers
+54 lexer token variants: 41 preserved, 13 added, 1 removed. The added
+thirteen are `FnLeft`, `FnRight`, `FnStrReplace`, `FnRecordAutoNumber`,
+`FnGroupedBy`, `FnStoredDataSize` and the seven mathematical functions
+`FnExp`, `FnACos`, `FnASin`, `FnATan`, `FnCos`, `FnSin`, `FnTan` — the
+lexer had four of the eleven mathematical functions and missed the rest.
+`FnDateDiff` additionally accepts `DATEDIFFERENCE`, the second English
+spelling the source's own English article uses.
+
+The removed variant is `FnDate`: `TypeDate` declares the identical
+pattern earlier, and logos' derived priority beats the literal
+`priority = 2` written on `FnDate`, so it was emitted for no input at
+all. `ДАТА` is a type name in the source and Slice 3a's `TypeDate` is
+its attested owner.
+
+Three variants named `Fn*` are not functions and are documented as what
+they are rather than renamed: the `ДАТАВРЕМЯ` date literal, the
+`ПУСТАЯТАБЛИЦА` selection-list keyword, and the `ПустаяСсылка`
+predefined-data selector.
+
+`СТРОКА (String)` is a documented function with no variant of its own:
+its spelling is the primitive type name, already claimed by Slice 3a's
+`TypeString`. `Лев` and `Прав` take Russian-only alternations because
+their English spellings are byte-identical to the join keywords `LEFT`
+and `RIGHT`; the parser separates those readings by the following `(`.
+
+### Behaviour change
+
+Additive and parser-tree-invariant. The converter maps every `Fn*`
+variant to `TokenKind::Ident`, so the twenty affected spellings reach
+the grammar exactly as they did when they lexed as `Ident`;
+`cargo test -p parser` is unchanged at 596. Regenerating the golden
+corpus over all 95 entries moved 18 lines and no others.
+
+Like Slice 3b, this slice is **not lexer-only**: the converter's match
+is exhaustive over `SdblTokenKind`, so neither a new variant nor a
+removed one compiles without touching an arm. The edit carries no
+grammar decision.
 
 ### Files
 
-- lexer token inventory
-- parser expression entry points
-- tests
+- `crates/lexer/src/sdbl/mod.rs` — the `CLEAN-ROOM Slice 4` banner
+  replacing the `LEGACY (Slice 4 pending)` one, per-variant provenance
+  docstrings, the thematic index, and the module docstring bullet.
+- `crates/parser/src/sdbl_token_converter.rs` — thirteen variants added
+  to the shared `Fn* => T::Ident` arms, `FnDate` removed from its arm.
+- `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` — entries
+  082–095 closing 52 bilingual blind spots.
+- `crates/lexer/tests/sdbl_golden_corpus.rs` — snapshot regenerated at
+  C0b and at C2.
+- `crates/lexer/tests/sdbl_slice4_functions.rs` — 25 acceptance tests
+  added at C3.
+- `docs/legal/sdbl-clean-room-slice4.md` — the attestation.
 
 ## Slice 5: virtual table and external-source handling
 

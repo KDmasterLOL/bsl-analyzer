@@ -1,6 +1,6 @@
 # SDBL Slice 4 — Clean-Room Attestation (query-function vocabulary)
 
-**Status:** in progress (2026-07-27).
+**Status:** complete (2026-07-27).
 
 This document attests the clean-room authorship of the Slice 4 material
 of the SDBL lexer, per the staged migration plan in
@@ -14,8 +14,8 @@ here. The slice therefore lands **54** variants.
 
 ## Status
 
-The Slice 4 attestation flips from "in progress" to "complete" at phase
-C3, with the absolute-date stamp at the top of this document. The
+The Slice 4 attestation flipped from "in progress" to "complete" at
+phase C3, with the absolute-date stamp at the top of this document. The
 C0a / C0b / C1 / C2 / C3 landings are atomic; the absolute-last trailing
 commit on the branch (the Anti-Hilbert disclosure) is necessarily not
 named in the enumeration, mirroring the Slice 1, 2, 6, 7, 8, 9, 10a,
@@ -47,7 +47,12 @@ The paths claimed as clean-room Slice 4 authorship are:
   against the extended corpus at C0b and again at C2 when the thirteen
   new variants start emitting.
 - `crates/lexer/tests/sdbl_slice4_functions.rs` — the spec-driven
-  acceptance test file born at C3.
+  acceptance test file born at C3, 25 tests: 4 canonical-form sweeps
+  over the 41 bilingual, 2 Russian-only and 11 Latin-only spellings,
+  1 case-insensitivity sweep, 1 spelling-to-kind distinctness check,
+  1 pin on the two documented English names of `РАЗНОСТЬДАТ`,
+  6 longest-match guards, 4 pins on the spellings shared with other
+  vocabularies, and 7 structural integration tests.
 
 ### The 54 claimed variants
 
@@ -662,8 +667,9 @@ live. Pre-Slice-4 baseline test counts (post-Slice-3b, `develop` as of
    (single snapshot test) throughout; the snapshot content changes at
    C0b and again at C2.
 8. `cargo test -p lexer --test sdbl_slice4_functions` — file does
-   **not exist** pre-Slice-4.
-9. `cargo test -p lexer --tests` — **252 passed** pre-Slice-4.
+   **not exist** pre-Slice-4; **25 passed** post-Slice-4.
+9. `cargo test -p lexer --tests` — **252 passed** pre-Slice-4,
+   **277 passed** post-Slice-4 (252 + 25, matching item 8).
 10. `cargo test -p parser` — **596 passed** both before and after; the
     converter edit is additive and every `Fn*` variant maps to the same
     `TokenKind::Ident` before and after.
@@ -820,10 +826,23 @@ The regenerated snapshot confirms all three halves of the C0a audit:
   `CLEAN-ROOM Slice 4` banner replacing the `LEGACY (Slice 4 pending)`
   one. Comments only: no declaration moved and no regex changed, so the
   golden corpus snapshot needed no regeneration.
-- C2 — per-variant provenance docstrings and the thematic index, the
-  thirteen added variants, the `FnDate` removal, the `datedifference`
-  alternation, the converter arm edits, and the corpus snapshot flip.
-  See § C2 outcome.
+- `975a4f2b` (2026-07-27) — C2: per-variant provenance docstrings and
+  the thematic index, the thirteen added variants, the `FnDate`
+  removal, the `datedifference` alternation, the converter arm edits,
+  and the corpus snapshot flip. See § C2 outcome.
+- C3 — the `sdbl_slice4_functions.rs` acceptance suite (25 tests), this
+  attestation's flip to complete, and the master-document Slice 4
+  section.
+- Close-out: a single trailing commit strikes item 2 from the exit
+  criteria in `sdbl-provenance-2026-07-audit.md` and pins the C3 SHA
+  explicitly in the trail above. The exit-criteria edit is deliberately
+  last: that document's § Finding 2 is under read-quarantine for
+  clean-room authors, and touching the file surfaces its contents, so
+  the edit waits until the authorship it could taint is finished. The
+  Anti-Hilbert disclosure: this trailing commit's own SHA is NOT named
+  in this enumeration — it cannot be, by construction. The Slice 1, 2, 6, 7, 8, 9, 10a, 10b, 11,
+  Slice 7-addendum, Slice 8-addendum, Slice 2-addendum, Slice 3a and
+  Slice 3b attestations all share this pattern.
 
 ## Licensing note
 
