@@ -667,9 +667,9 @@ The regenerated snapshot confirms all three directions of the C0a audit:
 - `25b64892` (2026-07-27) — C2: per-variant provenance docstrings and
   the thematic index, the eleven added variants, the converter arm
   extension, and the corpus snapshot flip. See § C2 outcome.
-- C3 — the `sdbl_slice5_virtual_tables.rs` acceptance suite (23 tests),
-  this attestation's flip to complete, and the master-document Slice 5
-  section.
+- `56c7f72f` (2026-07-27) — C3: the `sdbl_slice5_virtual_tables.rs`
+  acceptance suite (23 tests), this attestation's flip to complete, and
+  the master-document Slice 5 section.
 - Close-out: a single trailing commit strikes item 3 from the exit
   criteria in `sdbl-provenance-2026-07-audit.md` and pins the C3 SHA
   explicitly in the trail above. The exit-criteria edit is deliberately

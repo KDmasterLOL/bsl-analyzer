@@ -153,13 +153,13 @@ expression, and the slices already completed are why so little else remains.
 
 Not everything has been through the clean-room process.
 
-- **Lexer vocabularies.** Slice 3b closed the metadata-object type names and
-  Slice 4 the query-function names, both on 2026-07-27. Slice 5 has not been
-  started: the virtual-table names. That list was transcribed from upstream in
-  the first commit and has not been re-derived from 1C documentation since.
-  Its present contents already diverge from upstream, but no attestation
-  covers it. Separately, `LBrace` and `RBrace` are covered by no attestation
-  and owned by no slice; see item 5 of the exit criteria.
+- **Lexer vocabularies.** Closed. Slices 3b, 4 and 5 re-derived the
+  metadata-object type names, the query-function names and the virtual-table
+  names, all on 2026-07-27, and every vocabulary block in
+  `crates/lexer/src/sdbl/mod.rs` now carries a `CLEAN-ROOM` banner naming its
+  attestation. What remains on the lexer side is not a vocabulary: `LBrace`
+  and `RBrace` are covered by no attestation and owned by no slice; see item 5
+  of the exit criteria.
 - **`sdbl-hir`.** Slice 13 has not been started. Roughly 13.8k lines. It is not
   unexamined: `parser-sdbl-hir-audit.md` assesses it as medium risk and records
   that no direct evidence of copying from `bsl-parser` was found. What has never
@@ -192,8 +192,11 @@ current `develop` those citations no longer resolve, and the remaining
 unrewritten surface is no longer visible in the code. The acceptance test files
 survived, so the substantive work is intact; what was lost is the map.
 
-Restoring markers on the still-unrewritten vocabulary blocks would close this
-gap cheaply. It is a code change and needs its own decision.
+Slices 3b, 4 and 5 restored the map for the vocabularies they own, so the
+`CLEAN-ROOM` banners resolve again and the one remaining `LEGACY` marker names
+the brace pair as unowned. The banners of the closed Slices 1, 2, 2-addendum
+and 3a were deliberately not restored, and the module docstring says so, so
+that a missing banner is not read as a missing attestation.
 
 ## What this means for licensing
 
@@ -229,7 +232,14 @@ For `lexer`:
    variant at all — including seven of the eleven mathematical ones — and one
    variant, `FnDate`, that was emitted for no input because `TypeDate`
    declares the identical pattern earlier.
-3. Slice 5 — virtual-table vocabulary and external-data-source handling.
+3. ~~Slice 5 — virtual-table vocabulary and external-data-source handling.~~
+   Done 2026-07-27, `sdbl-clean-room-slice5.md`. It landed 18 variants where
+   the lexer had 7: the audit found eleven documented virtual-table suffixes
+   with no variant, among them all three an external-source path needs after
+   its root. Two documented tables were refused on measurement rather than
+   taste — `База<Имя>`, whose name is glued to a register name and so is never
+   a token, and the Russian half of `Изменения (Changes)`, which belongs to
+   the `ДЛЯ ИЗМЕНЕНИЯ` clause keyword.
 4. ~~The `Error` fallback variant re-derived.~~ Done 2026-07-27 with Slice 3b,
    which classifies it Tier D: it carries no pattern, and no 1C source defines
    an error token because the documented language describes what is accepted,
@@ -243,11 +253,12 @@ For `lexer`:
    Slice 1-addendum rather than absorbing punctuation into a vocabulary slice.
 
    Note that “no `LEGACY` marker remains” is no longer a usable check:
-   `3aa29b99` removed every marker, so that test now passes vacuously. Slices 3b
-   and 4 restored markers for the vocabularies they own and for those still
-   pending — after Slice 4 only the `Vt*` block still carries a `LEGACY`
-   banner — but the closed slices' banners are still absent by choice. Check
-   the vocabularies themselves, and treat this numbered list, not the source, as
+   `3aa29b99` removed every marker, so that test now passes vacuously. Slices 3b,
+   4 and 5 restored markers for the vocabularies they own, and after Slice 5 no
+   `LEGACY (pending)` banner remains anywhere — the only `LEGACY` marker left
+   is the `unowned` note over the brace pair, which is this item, now the sole
+   open lexer entry on this list. The closed slices' banners are still absent
+   by choice. Check the vocabularies themselves, and treat this numbered list, not the source, as
    the inventory.
 
 For `parser` (SDBL side):
