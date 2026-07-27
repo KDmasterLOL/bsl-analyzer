@@ -129,11 +129,24 @@ impl<'a> Parser<'a> {
 
     /// How many groups are open at the current position.
     ///
-    /// A caller compares this against the value it saw earlier to learn
-    /// whether the rule it just ran left something open — which is the only
-    /// way to tell that the position it was handed is not top level.
+    /// Tells a caller whether the rule it just ran left something open —
+    /// which is the only way to know that the position it was handed is not
+    /// top level.
     pub(crate) fn open_group_count(&self) -> u32 {
         self.paren_depth + self.brace_depth
+    }
+
+    /// Declares that whatever was open before this point is closed as far as
+    /// grouping is concerned.
+    ///
+    /// A statement separator is that point: a group cannot span one. Without
+    /// saying so, an unclosed group in a bad statement outlives it — an
+    /// unclosed `{` would go on suppressing the paren count in every
+    /// statement after it, and a depth left standing would let the next
+    /// statement close it and open its own without the total ever changing.
+    pub(crate) fn reset_group_tracking(&mut self) {
+        self.paren_depth = 0;
+        self.brace_depth = 0;
     }
 
     pub fn expect(&mut self, kind: TokenKind) -> bool {

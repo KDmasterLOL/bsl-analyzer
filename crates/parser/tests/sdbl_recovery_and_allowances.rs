@@ -649,3 +649,27 @@ fn recovery_stays_linear_on_a_long_malformed_package() {
     let parse = parse_sdbl(&no_separators);
     assert_eq!(usize::from(parse.syntax_node().text_range().len()), no_separators.len());
 }
+
+#[test]
+fn a_group_left_open_by_one_member_does_not_reach_the_next() {
+    // A group cannot span a separator. An unclosed brace that outlived its
+    // member would go on suppressing the paren count in every member after
+    // it, and a depth left standing would let the next member close it and
+    // open its own without the total ever moving.
+    for (input, wanted) in [
+        ("SELECT A FROM T 42 {; SELECT A FROM T 42 ( SELECT B FROM U", 2usize),
+        ("SELECT A FROM T 42 (; SELECT A FROM T ) 42 ( SELECT B FROM U", 2),
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+                .count(),
+            wanted,
+            "`{input}`",
+        );
+    }
+}

@@ -59,13 +59,12 @@ pub fn query_package(p: &mut Parser) {
 
     p.skip_trivia();
 
-    // What matters is whether the current member left a group open, so the
-    // count is read against the one standing when the member began. The
-    // parser keeps that count as tokens go by, which is both the single
-    // place that sees them all and the only way to answer in constant time:
-    // rescanning the member's prefix before every decision is quadratic on
-    // a long malformed one.
-    let mut groups_at_member_start = p.open_group_count();
+    // A group cannot span a separator, so each member starts with none open
+    // and "is this position inside a group" is simply "is anything open".
+    // The parser keeps the count as tokens go by — the single place that
+    // sees them all, and the only way to answer in constant time, since
+    // rescanning a member's prefix before every decision is quadratic on a
+    // long malformed one.
 
     while !p.at_end() {
         p.check_iteration_limit();
@@ -80,7 +79,7 @@ pub fn query_package(p: &mut Parser) {
             }
             p.bump();
             a_query_is_due = true;
-            groups_at_member_start = p.open_group_count();
+            p.reset_group_tracking();
             continue;
         }
 
@@ -88,7 +87,7 @@ pub fn query_package(p: &mut Parser) {
             break;
         }
 
-        let inside_group = p.open_group_count() > groups_at_member_start;
+        let inside_group = p.open_group_count() > 0;
 
         if a_query_is_due {
             queries(p);
@@ -100,7 +99,7 @@ pub fn query_package(p: &mut Parser) {
             // two good queries.
             p.error_custom_no_bump("ожидался разделитель ';' между запросами");
             queries(p);
-        } else if !drain_to_boundary(p, groups_at_member_start) {
+        } else if !drain_to_boundary(p) {
             break;
         }
     }
@@ -125,8 +124,8 @@ fn at_query_start(p: &Parser) -> bool {
 /// A separator cannot belong to a group in this language, so it ends the
 /// leftover at any depth. A query start can belong to one — inside parens it
 /// is a subquery, inside braces it is extension text — and is a boundary only
-/// where nothing opened since the member began is still open.
-fn drain_to_boundary(p: &mut Parser, groups_at_member_start: u32) -> bool {
+/// where nothing this member opened is still open.
+fn drain_to_boundary(p: &mut Parser) -> bool {
     p.skip_trivia();
 
     if p.at_end() || p.at(TokenKind::Semicolon) {
@@ -139,7 +138,7 @@ fn drain_to_boundary(p: &mut Parser, groups_at_member_start: u32) -> bool {
     while !p.at_end() && !p.at(TokenKind::Semicolon) {
         p.check_iteration_limit();
 
-        if took_anything && at_query_start(p) && p.open_group_count() <= groups_at_member_start {
+        if took_anything && at_query_start(p) && p.open_group_count() == 0 {
             break;
         }
 

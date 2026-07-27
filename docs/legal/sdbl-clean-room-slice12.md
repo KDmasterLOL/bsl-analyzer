@@ -630,6 +630,28 @@ structure around it, so they must not be counted at all — `SELECT A { ) (
 paren swallowing the second. Counting is skipped while a brace region is
 open.
 
+### A counter that outlived what it was counting
+
+Moving the count into `bump` gave it the parser's lifetime, and a package
+member's lifetime is shorter than that: a group cannot span a separator.
+The state leaked across one in two ways. An unclosed `{` left by a bad
+member kept the opaque-region rule switched on, so every paren in every
+member after it went uncounted. And comparing totals could not tell
+"closed the inherited group and opened my own" from "changed nothing",
+so a query inside a fresh paren was promoted to a member of the package.
+
+A separator now resets the count. That is not a patch on the comparison —
+it is the rule itself, stated once: what a member left open is that
+member's business, and the next one starts level. The baseline the loop
+used to carry disappears with it, because after a reset the baseline is
+always nothing.
+
+One finding of that round was refuted rather than fixed. It read the
+change of wording about substitution markers as an unrelated legal
+revision smuggled into a performance fix. The wording change is its own
+commit, `edf05a6e`; the review saw them together because the base it was
+given reached back two commits. Nothing was mixed.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -735,8 +757,11 @@ are covered by entries A6–A8 above.
   the shared parser, because the whole slice's diff had grown past what the
   review tool can pass to a lens. Four findings, all in the fifth round's
   own fix. Parser tests 643 → 645.
-- C10 — the seventh round. Two findings, both in the sixth round's own fix,
-  one of them a freeze rather than a wrong answer. Parser tests 645 → 647.
+- C10 `b23695ff` — the seventh round. Two findings, both in the sixth
+  round's own fix, one of them a freeze rather than a wrong answer. Parser
+  tests 645 → 647.
+- C11 — the eighth round. Two findings held and one was refuted. Parser
+  tests 647 → 648.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert
