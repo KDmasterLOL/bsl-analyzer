@@ -157,9 +157,9 @@ Not everything has been through the clean-room process.
   metadata-object type names, the query-function names and the virtual-table
   names, all on 2026-07-27, and every vocabulary block in
   `crates/lexer/src/sdbl/mod.rs` now carries a `CLEAN-ROOM` banner naming its
-  attestation. What remains on the lexer side is not a vocabulary: `LBrace`
-  and `RBrace` are covered by no attestation and owned by no slice; see item 5
-  of the exit criteria.
+  attestation. The brace pair, which is punctuation rather than vocabulary and
+  which no slice owned, was closed by Slice 1-addendum on the same date; see
+  item 5 of the exit criteria. Nothing on the lexer side remains.
 - **`sdbl-hir`.** Slice 13 has not been started. Roughly 13.8k lines. It is not
   unexamined: `parser-sdbl-hir-audit.md` assesses it as medium risk and records
   that no direct evidence of copying from `bsl-parser` was found. What has never
@@ -244,22 +244,33 @@ For `lexer`:
    which classifies it Tier D: it carries no pattern, and no 1C source defines
    an error token because the documented language describes what is accepted,
    not how a tool represents what is not.
-5. `LBrace` / `RBrace` re-derived and attested. **This item did not exist when
-   the list was written and is the reason the list was not exhaustive.** The
-   brace pair was added by `537527eb` (2026-06-16), after every closed lexer
-   slice, so no attestation could have covered it and none does. Slice 3b found
+5. ~~`LBrace` / `RBrace` re-derived and attested.~~ **This item did not exist
+   when the list was written and is the reason the list was not exhaustive.**
+   The brace pair was added by `537527eb` (2026-06-16), after every closed lexer
+   slice, so no attestation could have covered it and none did. Slice 3b found
    it while restoring the markers, closed the class at exactly two variants by
-   partitioning all 154 `SdblTokenKind` variants, and recommends a separate
+   partitioning all 154 `SdblTokenKind` variants, and recommended a separate
    Slice 1-addendum rather than absorbing punctuation into a vocabulary slice.
 
-   Note that “no `LEGACY` marker remains” is no longer a usable check:
-   `3aa29b99` removed every marker, so that test now passes vacuously. Slices 3b,
-   4 and 5 restored markers for the vocabularies they own, and after Slice 5 no
-   `LEGACY (pending)` banner remains anywhere — the only `LEGACY` marker left
-   is the `unowned` note over the brace pair, which is this item, now the sole
-   open lexer entry on this list. The closed slices' banners are still absent
-   by choice. Check the vocabularies themselves, and treat this numbered list, not the source, as
-   the inventory.
+   Done 2026-07-27, `sdbl-clean-room-slice1-addendum.md`. The source is the
+   data-composition article that defines the braces; Глава 8 supplies the
+   negative half, that the base query language has no braces at all. The slice
+   changed no behaviour — the only one in the programme that did not — and it
+   refused the nine `ХАРАКТЕРИСТИКИ` keywords the same article defines, on the
+   measurement that `Характеристики` occurs 2696 times as an ordinary
+   identifier in a production configuration against 195 inside an extension.
+
+   **With this item struck, the lexer side of this checklist is complete**:
+   every `SdblTokenKind` variant is covered by an attestation.
+
+   Note that “no `LEGACY` marker remains” became usable again only by
+   accident of sequencing: `3aa29b99` removed every marker, so for a year the
+   test passed vacuously. Slices 3b, 4, 5 and 1-addendum restored the markers
+   and then retired them one by one, and no `LEGACY` marker of any kind is left
+   in `crates/lexer/src/sdbl/mod.rs`. That is now a true signal rather than a
+   vacuous one, but it is still the weaker check: the banners of the closed
+   Slices 1, 2, 2-addendum and 3a were deliberately not restored, so treat this
+   numbered list, not the source, as the inventory.
 
 For `parser` (SDBL side):
 

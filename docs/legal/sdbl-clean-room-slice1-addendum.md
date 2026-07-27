@@ -483,9 +483,14 @@ spellings owned elsewhere and are pinned as they are: `Ссылка` renders
   one rewritten doc comment in the parser, no declaration or token
   touched, so the golden corpus snapshot needed no regeneration and
   `cargo test -p parser` stayed at 596.
-- C3 — the `sdbl_slice1_addendum_braces.rs` acceptance suite (14 tests),
-  this attestation's flip to complete, and the master-document
-  Slice 1-addendum section.
+- `1d9c75e6` (2026-07-27) — C3: the `sdbl_slice1_addendum_braces.rs`
+  acceptance suite (14 tests), this attestation's flip to complete, and
+  the master-document Slice 1-addendum section.
+- `e8e6b23d` (2026-07-27) — review correction: the account of where
+  token kinds are erased, and the overstated claim that the braces had
+  no test coverage. See § The nine extension keywords are deliberately
+  not added and § Behaviour change; both were reproduced before being
+  rewritten.
 - Close-out: a single trailing commit strikes item 5 from the exit
   criteria in `sdbl-provenance-2026-07-audit.md`, closing the lexer side
   of that checklist, and pins the C3 SHA explicitly in the trail above.
