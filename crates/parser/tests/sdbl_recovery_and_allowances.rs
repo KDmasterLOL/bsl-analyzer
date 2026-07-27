@@ -949,3 +949,49 @@ fn an_operand_left_unwritten_costs_only_its_own_query() {
     accepted("ВЫБРАТЬ А ИЗ (ВЫБРАТЬ Б ИЗ У) КАК Вложенный");
     accepted("ВЫБРАТЬ А ИЗ Т ГДЕ А В (ВЫБРАТЬ Б ИЗ У)");
 }
+
+#[test]
+fn a_name_left_unwritten_costs_only_its_own_query() {
+    // Every keyword of this language arrives as an identifier, so a rule
+    // that asks only for the kind takes the word beginning the next query
+    // for a table, an alias or a type — and the package loses that query.
+    for input in [
+        "ВЫБРАТЬ А ПОМЕСТИТЬ ВЫБРАТЬ Б ИЗ У",
+        "ВЫБРАТЬ А ИЗ Т ДЛЯ ИЗМЕНЕНИЯ ВЫБРАТЬ Б ИЗ У",
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н КАК ВЫБРАТЬ Б ИЗ У",
+        "ВЫБРАТЬ А ССЫЛКА ВЫБРАТЬ Б ИЗ У",
+        "УНИЧТОЖИТЬ ВЫБРАТЬ Б ИЗ У",
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| matches!(
+                    n.kind(),
+                    SyntaxKind::SDBL_SELECT_QUERY | SyntaxKind::SDBL_DROP_QUERY
+                ))
+                .count(),
+            2,
+            "`{input}` holds two queries: {:#?}",
+            parse.errors(),
+        );
+    }
+}
+
+#[test]
+fn a_rule_that_takes_nothing_still_ends_its_loop() {
+    // A list of aggregates asks whether an expression starts here and then
+    // parses one. Answering yes for a word no rule may take leaves the loop
+    // with nothing consumed and no reason to stop, and the parse never
+    // returns — the one failure an editor cannot recover from.
+    for input in [
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ УНИЧТОЖИТЬ У",
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ ВЫБРАТЬ Б ИЗ У",
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А), ВЫБРАТЬ Б ИЗ У",
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    }
+}

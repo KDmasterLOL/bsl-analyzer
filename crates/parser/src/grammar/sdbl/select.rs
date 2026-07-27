@@ -340,7 +340,7 @@ fn into_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
     p.skip_trivia();
 
-    if p.at(TokenKind::Ident) {
+    if super::at_name(p) {
         let table_m = p.start();
         p.bump();
         table_m.complete(p, NodeKind::SdblTempTableName);
@@ -872,7 +872,7 @@ fn for_update_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "UPDATE", "ИЗМЕНЕНИЯ");
     p.skip_trivia();
 
-    if p.at(TokenKind::Ident) && !is_clause_keyword(p) {
+    if super::at_name(p) && !is_clause_keyword(p) {
         p.bump();
         while p.at(TokenKind::Dot) {
             p.check_iteration_limit();
@@ -927,6 +927,7 @@ fn totals_by_clause(p: &mut Parser) {
     p.skip_trivia();
 
     while !p.at_end() {
+        p.check_iteration_limit();
         p.skip_trivia();
 
         if at_sdbl_keyword(p, "BY", "ПО") {
@@ -1084,7 +1085,7 @@ fn totals_periods_modifier(p: &mut Parser) {
     if at_period_name(p) {
         p.bump();
         p.skip_trivia();
-    } else if p.at(TokenKind::Ident) && !is_clause_keyword(p) {
+    } else if super::at_name(p) && !is_clause_keyword(p) {
         // A word in the right place that is not one of the ten. Take it,
         // so the modifier still has a shape, and say what is wrong with it.
         p.error_custom_no_bump("неизвестный вид периода");
@@ -1134,7 +1135,7 @@ fn totals_group_alias(p: &mut Parser) {
         eat_sdbl_keyword(p, "AS", "КАК");
         p.skip_trivia();
 
-        if p.at(TokenKind::Ident) && !is_body_clause_keyword(p) {
+        if super::at_name(p) && !is_body_clause_keyword(p) {
             p.bump();
             p.skip_trivia();
         } else {
@@ -1143,14 +1144,14 @@ fn totals_group_alias(p: &mut Parser) {
         return;
     }
 
-    if p.at(TokenKind::Ident) && !is_clause_keyword(p) {
+    if super::at_name(p) && !is_clause_keyword(p) {
         p.bump();
         p.skip_trivia();
     }
 }
 
 fn is_identifier_token(p: &Parser) -> bool {
-    p.at(TokenKind::Ident)
+    super::at_name(p)
 }
 
 fn is_limitation_keyword(p: &Parser) -> bool {

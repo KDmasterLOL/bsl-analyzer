@@ -144,14 +144,19 @@ fn complain_about_a_missing_member(p: &mut Parser, a_query_is_due: bool, had_tok
 /// Whether the current token can be the last one of a name a dot may
 /// qualify: a word, a parameter, or the closing paren of a cast.
 ///
-/// Two of those are not settled by the token kind alone. A parameter
+/// None of those is settled by the token kind alone. A keyword shares its
+/// kind with every name, and one standing on its own is a clause the
+/// leftover walked past, not a table waiting for its field. A parameter
 /// arrives whole, sigil and name in one token, so its kind is shared with
-/// a sigil that names nothing; and a paren that closes nothing closes no
-/// cast either. Either one spells a name only in the leftover's
-/// imagination, and a dot behind it would hide the query behind that.
-fn ends_a_name(p: &Parser) -> bool {
+/// a sigil that names nothing. And a paren that closes nothing closes no
+/// cast either. Each spells a name only in the leftover's imagination, and
+/// a dot behind it would hide the query behind that.
+///
+/// `is_property` is the one thing the kind cannot see: after a dot, a
+/// keyword is the name of a field and does end one.
+fn ends_a_name(p: &Parser, is_property: bool) -> bool {
     match p.current() {
-        Some(TokenKind::Ident) => true,
+        Some(TokenKind::Ident) => is_property || !select::is_clause_keyword(p),
         Some(TokenKind::Ampersand) => p.current_text().chars().count() > 1,
         Some(TokenKind::RParen) => p.open_group_count() > 0,
         _ => false,
@@ -174,6 +179,16 @@ pub fn at_query_boundary(p: &Parser) -> bool {
 fn at_query_start(p: &Parser) -> bool {
     select::at_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ")
         || select::at_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ")
+}
+
+/// A word standing where a name may stand.
+///
+/// Every keyword of this language reaches the parser as an identifier, so
+/// a rule that asks only for the kind will accept the word that begins the
+/// next query as a table, an alias or a type — and the package then loses
+/// that query. Rules that read a bare name ask this instead.
+pub(super) fn at_name(p: &Parser) -> bool {
+    p.at(TokenKind::Ident) && !at_query_start(p)
 }
 
 /// Takes whatever the query rules refused, up to the next boundary, so that
@@ -224,8 +239,9 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
             // A dot qualifies the name in front of it. A dot with no name
             // there — a second dot, an operator, the start of the leftover —
             // is junk of its own and must not shield what follows.
+            let is_property = after_a_dot;
             after_a_dot = p.at(TokenKind::Dot) && after_a_receiver;
-            after_a_receiver = ends_a_name(p);
+            after_a_receiver = ends_a_name(p, is_property);
         }
 
         p.bump();

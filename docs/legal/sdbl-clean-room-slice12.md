@@ -904,6 +904,54 @@ boundary at the point it descends, rather than for the grammar to declare
 it once for the whole parse. That is the same thing the BSL block
 terminators need, and both are tracked together outside this slice.
 
+### The parse that never returned
+
+The worst defect of the slice was found in its fifth closing round, and it
+was the slice's own. `ВЫБРАТЬ А ИЗ Т ИТОГИ УНИЧТОЖИТЬ У` did not parse
+wrongly — it did not finish. For an editor that is the one failure with no
+recovery.
+
+Two mistakes had to meet. The list of aggregates asks whether an
+expression starts here and then parses one; it answered yes for
+`УНИЧТОЖИТЬ`, because the question was only ever "is this a word that is
+not a clause keyword". Then the rule it called refused to take that word,
+correctly — the boundary this slice introduced says no rule may — and
+consumed nothing. The loop had no check that anything had been consumed,
+so it asked again, forever.
+
+Both halves are fixed, because either alone would leave the trap set. The
+word that begins a query begins no expression, so the loop now ends
+through its own exit; and the loop counts its turns like every other loop
+in the file, which it alone did not. That guard aborts the parse rather
+than returning a tree, so it is a backstop and not the answer.
+
+The lesson is narrower than "add a guard". A boundary is a promise that
+some rule will not advance, and every loop that calls a rule and expects
+advancement is a place that promise can hang. Introducing the boundary
+without auditing those loops is what made a correct refusal into a freeze.
+
+### A word standing where a name may stand
+
+The same round found the other half of the boundary's reach. Rules that
+read a bare name — the temporary table after `ПОМЕСТИТЬ`, the tables of
+`ДЛЯ ИЗМЕНЕНИЯ`, a control point's alias, the type after `ССЫЛКА`, a cast's
+type, the period kind — each asked only for the token kind. Every keyword
+of this language arrives as an identifier, so each of them would take
+`ВЫБРАТЬ` for a name and cost the package the query it begins.
+
+`УНИЧТОЖИТЬ` had been fixed at its own site two rounds earlier. That was
+the representative, not the class; the class is every rule that reads a
+name, and it is now one predicate that all of them ask.
+
+Last, the leftover's dot rule once more: a keyword standing alone is a
+clause the leftover walked past, not a table waiting for its field, so
+`ИЗ. ВЫБРАТЬ А` no longer hides the query behind the dot. After a dot the
+same word *is* a field name, and that case is kept.
+
+Measured over the testbed configuration again — 3 142 814 literals, with a
+positive control — nothing changed. These inputs do not occur in committed
+code, which is the point: they occur in editor buffers.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -1038,6 +1086,9 @@ are covered by entries A6–A8 above.
   been read as a whole file. Eight findings: two are this slice's own and
   fixed here; six predate it, are one class, and are tracked with the BSL
   terminators, which turn out to be the same class. Parser tests 663.
+- C22 — the audit again. Three findings, all confirmed and all this
+  slice's own, one of them a parse that never returns. Parser tests
+  663 → 665.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

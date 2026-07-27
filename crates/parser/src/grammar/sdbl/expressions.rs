@@ -13,7 +13,13 @@ pub(super) fn is_expression_start(p: &Parser) -> bool {
         | Some(TokenKind::KwFalse)
         | Some(TokenKind::KwUndefined) => true,
 
-        Some(TokenKind::Ident) => !super::select::is_clause_keyword(p),
+        // The word that begins the next query begins no expression. Saying
+        // otherwise sends a rule that will refuse it a token it must not
+        // take, and a loop that expects an expression to be consumed then
+        // has nothing to consume and no reason to stop.
+        Some(TokenKind::Ident) => {
+            !super::select::is_clause_keyword(p) && !super::at_query_boundary(p)
+        }
 
         Some(TokenKind::Plus)
         | Some(TokenKind::Minus)
@@ -563,7 +569,7 @@ fn predicate_expr(p: &mut Parser) {
         p.bump();
         p.skip_trivia();
 
-        if p.at(TokenKind::Ident) {
+        if super::at_name(p) {
             p.bump();
             p.skip_trivia();
 
@@ -605,7 +611,7 @@ fn is_cast_function(p: &Parser) -> bool {
 fn parse_cast_type(p: &mut Parser) {
     let m = p.start();
 
-    if p.at(TokenKind::Ident) {
+    if super::at_name(p) {
         let is_number_type = p.at_keyword("NUMBER") || p.at_keyword("ЧИСЛО");
 
         p.bump();
