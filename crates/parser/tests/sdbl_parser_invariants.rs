@@ -114,19 +114,20 @@ fn breach(input: &str) -> Option<String> {
         }
     }
 
-    // A query node comes either from a query keyword in the text or from a
-    // member that a clause keyword began, and a member is begun by a
-    // separator or by a run-on query. That sum is the ceiling; anything
-    // above it is a node the parser invented.
+    // A query node needs something in the text to justify it: a query
+    // keyword, a separator that starts another member, or a combiner, which
+    // says in so many words that there is a query on each side of it.
+    // Anything above that sum is a node the parser invented.
     let keywords = count_query_keywords(input);
     let separators = input.matches(';').count();
-    let ceiling = keywords + separators + 1;
+    let combiners = count_combiners(input);
+    let ceiling = keywords + separators + combiners + 1;
 
     let queries = root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_QUERY).count();
     if queries > ceiling {
         return Some(format!(
             "{queries} query nodes, but at most {ceiling} could be justified \
-             ({keywords} query keywords, {separators} separators)"
+             ({keywords} query keywords, {separators} separators, {combiners} combiners)"
         ));
     }
 
@@ -136,8 +137,11 @@ fn breach(input: &str) -> Option<String> {
         .errors()
         .iter()
         .filter(|e| {
+            // Matched exactly: "ожидался список полей выборки после
+            // 'ВЫБРАТЬ' / 'SELECT'" is a different gap and mentions the
+            // same words.
             let m = e.message().to_lowercase();
-            m.contains("'выбрать' / 'select'") || m.contains("между разделителями")
+            m == "ожидалось 'выбрать' / 'select'" || m.contains("между разделителями")
         })
         .count();
     if complaints > ceiling {
@@ -153,6 +157,13 @@ fn breach(input: &str) -> Option<String> {
     }
 
     None
+}
+
+/// A combiner names a query on either side of itself, so it justifies a
+/// slot even where neither side has a keyword of its own.
+fn count_combiners(input: &str) -> usize {
+    let upper = input.to_uppercase();
+    ["ОБЪЕДИНИТЬ", "UNION"].iter().map(|k| upper.matches(k).count()).sum()
 }
 
 fn count_query_keywords(input: &str) -> usize {

@@ -148,6 +148,12 @@ fn at_trivia(p: &Parser) -> bool {
     )
 }
 
+/// The start of a query is a boundary for the whole grammar: no rule may
+/// report an error by taking it, or the package loses the member it begins.
+pub fn at_query_boundary(p: &Parser) -> bool {
+    at_query_start(p)
+}
+
 fn at_query_start(p: &Parser) -> bool {
     select::at_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ")
         || select::at_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ")
@@ -197,7 +203,9 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
         if p.at(TokenKind::Newline) {
             after_a_dot = false;
         } else if !at_trivia(p) {
-            after_a_dot = p.at(TokenKind::Dot);
+            // A dot qualifies only what precedes it. A dot with nothing in
+            // front is junk of its own and must not shield what follows.
+            after_a_dot = p.at(TokenKind::Dot) && took_anything;
         }
 
         p.bump();

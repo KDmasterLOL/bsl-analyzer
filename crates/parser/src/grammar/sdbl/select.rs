@@ -170,7 +170,16 @@ fn query(p: &mut Parser) {
     let m = p.start();
 
     if !eat_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ") {
-        p.error_custom("ожидалось 'ВЫБРАТЬ' / 'SELECT'");
+        // The word is missing, not wrong: what stands here belongs to the
+        // rest of the query. Taking it would cost the query the clause it
+        // starts with, and would put the complaint on that clause instead
+        // of on the gap in front of it.
+        //
+        // The rule still stops here. Carrying on would parse a body for a
+        // query that has no keyword, and this rule is also reached
+        // speculatively — from a parenthesised source, where Slice 8
+        // requires `ИЗ (&Tmp)` to yield no field of its own.
+        p.error_custom_no_bump("ожидалось 'ВЫБРАТЬ' / 'SELECT'");
         m.complete(p, NodeKind::SdblQuery);
         return;
     }

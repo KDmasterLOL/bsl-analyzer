@@ -790,6 +790,42 @@ boundary a recovery must not cross is not only `;`. Verified against the
 slice's base commit, where it behaves identically, so it predates this
 work — and the BSL grammar has no slice at all.
 
+### The boundary belongs to the grammar, not to one rule
+
+Re-auditing found the separator class once more, and this time it could
+not be closed by naming another token. A rule deep inside a construct
+cannot know what encloses it, so it cannot know which token it must not
+take: an unfinished `CASE` reported its missing `END` by eating the
+`SELECT` of the next package member, and `УНИЧТОЖИТЬ` took that same
+`SELECT` for the name of a table.
+
+The parser now lets a grammar name its own boundaries once. `;` remains
+the built-in one; the SDBL grammar adds the start of a query, and every
+rule inherits it without knowing it exists. That is also the mechanism the
+BSL grammar needs for its block terminators, which is the third finding
+and is tracked on its own — it predates this slice, and the BSL grammar
+has no slice of its own to fix it in.
+
+Two smaller ones. A missing `ВЫБРАТЬ` was reported by taking the word that
+followed, so the complaint landed on the clause after the gap instead of
+in it. And a dot with nothing in front of it was treated as qualifying
+what came after, so a single stray `.` hid the whole query behind it.
+
+### What was reverted, and why
+
+Reporting the missing `ВЫБРАТЬ` without taking the word raised the
+question of whether the rule should then parse on and give the incomplete
+query its clauses. It should not, and the attempt is recorded here because
+it broke two attested contracts before the tests caught it: Slice 8
+requires `ИЗ (&Tmp)` to yield no field of its own, and the same rule is
+reached speculatively from a parenthesised source. The properties caught a
+third consequence — a query with no keyword parsing a body produced two
+complaints about the same gap.
+
+What the audit asked for was the range of the complaint. That is fixed.
+Parsing a body for a query that has no keyword was not asked for, and it
+belongs to whoever owns the field-list slice, not here.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -911,9 +947,12 @@ are covered by entries A6–A8 above.
   had already named as a risk without testing it. Parser tests 653 → 654.
 - C16 `ecb73b45` — properties instead of a thirteenth round, on the
   owner's decision. Parser tests 654 → 657.
-- C17 — the closing audit of the package loop and the shared parser as
-  whole files rather than as a diff. Three findings: two fixed, one
-  pre-existing and outside this slice. Parser tests 657 → 659.
+- C17 `420878d5` — the closing audit of the package loop and the shared
+  parser as whole files rather than as a diff. Three findings: two fixed,
+  one pre-existing and outside this slice. Parser tests 657 → 659.
+- C18 `b4241dd7` — the corpus figures retaken.
+- C19 — the audit re-run. Four findings: three fixed here, one already
+  tracked as a defect of the BSL grammar. Parser tests 659 → 662.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

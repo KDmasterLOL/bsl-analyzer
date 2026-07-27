@@ -863,3 +863,43 @@ fn a_dot_reaches_across_the_space_after_it() {
         );
     }
 }
+
+#[test]
+fn no_rule_reports_by_taking_the_next_query_away() {
+    use syntax::{TextRange, TextSize};
+
+    // A rule deep inside a construct cannot know what encloses it, so the
+    // grammar names the boundary once and no rule may take it. Without that,
+    // an unfinished CASE reports its missing END by eating the `SELECT` of
+    // the next member, and the package loses that member entirely.
+    let input = "SELECT CASE WHEN 1 THEN 2 SELECT B FROM U";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert_eq!(
+        parse.syntax_node().descendants().filter(|n| n.kind() == SyntaxKind::SDBL_QUERY).count(),
+        2,
+    );
+
+    // A missing `ВЫБРАТЬ` is a gap, so it is reported at the gap rather than
+    // on the word that follows it.
+    let parse = parse_sdbl("FROM Products");
+    let gap = parse.errors().iter().find(|e| e.message().contains("SELECT")).expect("reported");
+    assert_eq!(gap.range(), TextRange::empty(TextSize::new(0)));
+}
+
+#[test]
+fn a_dot_with_nothing_before_it_shields_nothing() {
+    // The dot rule exists so that `T.ИЗ` is skipped as one name. A dot with
+    // no receiver is junk of its own and must not hide the query after it.
+    let input = ". SELECT A";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert_eq!(
+        parse
+            .syntax_node()
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+            .count(),
+        1,
+    );
+}

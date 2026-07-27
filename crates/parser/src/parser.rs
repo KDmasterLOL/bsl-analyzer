@@ -16,6 +16,7 @@ pub struct Parser<'a> {
     recent_positions: Vec<usize>,
     paren_depth: u32,
     brace_depth: u32,
+    at_grammar_boundary: Option<fn(&Parser) -> bool>,
 }
 
 impl<'a> Parser<'a> {
@@ -28,6 +29,7 @@ impl<'a> Parser<'a> {
             recent_positions: Vec::with_capacity(POSITION_HISTORY_SIZE),
             paren_depth: 0,
             brace_depth: 0,
+            at_grammar_boundary: None,
         }
     }
 
@@ -240,13 +242,23 @@ impl<'a> Parser<'a> {
         m.complete(self, NodeKind::Error);
     }
 
-    /// A statement separator is never the token an error is *about*. It is
-    /// the boundary that lets whatever comes after it still be parsed, so
-    /// reporting at one behaves like reporting at end of input: the
-    /// complaint is recorded where the missing element should have been,
-    /// and the separator stays for the caller.
+    /// Lets a grammar name boundaries of its own, beyond the separator.
+    ///
+    /// A rule deep inside a construct cannot know what encloses it, so it
+    /// cannot know which token it must not take. The grammar that owns the
+    /// input does know, and says so once here.
+    pub fn set_grammar_boundary(&mut self, at_boundary: fn(&Parser) -> bool) {
+        self.at_grammar_boundary = Some(at_boundary);
+    }
+
+    /// A boundary token is never the token an error is *about*. It is what
+    /// lets whatever comes after it still be parsed, so reporting at one
+    /// behaves like reporting at end of input: the complaint is recorded
+    /// where the missing element should have been, and the token stays for
+    /// the caller.
     fn at_statement_separator(&self) -> bool {
         self.at(TokenKind::Semicolon)
+            || self.at_grammar_boundary.is_some_and(|at_boundary| at_boundary(self))
     }
 
     fn emit_error(&mut self, err: ParseError) {
