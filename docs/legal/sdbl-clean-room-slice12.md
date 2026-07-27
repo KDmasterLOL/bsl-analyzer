@@ -386,15 +386,29 @@ extracted from 21 114 modules:
 
 | | |
 |---|---|
-| queries that produce the new leftover error | 851 (3.1%) |
-| of those, queries that produced **no** diagnostic before | **68 (0.25%)** |
-| of those, queries already carrying another parse error | 783 |
-| queries whose tree still does not cover the input | 29 (0.1%) |
+| queries carrying at least one parse error at all | 3543 (12.8%) |
+| queries that produce the new leftover error | 3190 (11.5%) |
+| of those, queries that produced **no** diagnostic before | **71 (0.26%)** |
+| queries whose tree does not cover the input | 29 (0.1%) |
+| of those, losses the lexer caused before the parser saw them | **29 — all of them** |
 
-The 0.25% is the number that matters for the decision the owner made: a
-query that was clean and now is not. The other 783 were already lit up.
+Two of these deserve reading together. 3190 queries now carry a leftover
+report, against 851 when the drain first landed — the same broken queries,
+cut into more pieces, because the leftover now stops at every separator
+and every query start instead of running to the end of the input. More
+reports about the same text, each pointing somewhere narrower.
 
-Grouping the 851 by what the leftover starts with: 209 begin at a `КАК`,
+What did not move is the number that the owner's decision turned on: **71**
+queries out of 27 677 carry a diagnostic where they carried none before,
+and the count of queries flagged at all is unchanged. The extra reports
+land on queries that were already lit up.
+
+The last row is the one worth keeping. Every remaining query whose tree
+falls short of its text falls short by exactly the bytes the lexer never
+handed over. The parser loses nothing.
+
+Grouping the leftovers by what they start with, measured when the drain
+first landed and there were 851 of them: 209 begin at a `КАК`,
 149 at a `%1`/`%2`/`%3`, 116 at a `(Титульный,…`, and a further 24 at a
 `#Имя` or `[Имя]`. Sampling the `КАК` class shows the same cause — the
 queries read `ИЗ #ТаблицаПланаОбмена КАК ПланОбмена`, and it is the `#Имя`
@@ -407,7 +421,7 @@ anything. Writing them is a practice the platform does not sanction and
 one that is discouraged in all but rare cases, however common it has
 become in practice.
 
-That matters for how the 851 should be read. They are not the price of
+That matters for how these should be read. They are not the price of
 this change and not noise it introduces: they are correct reports about
 text that is not a query. What the change did was make them visible. The
 text was never being parsed — it was being truncated in silence, and the

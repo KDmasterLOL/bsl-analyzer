@@ -1513,8 +1513,11 @@ false:
 
 ### Measured on a production configuration
 
-27 677 query literals. The drain reports 851 of them; only **68** are
-queries that produced no diagnostic before. A large share of the
+27 677 query literals. The leftover is reported on 3190 of them; only
+**71** are queries that produced no diagnostic before, and the number of
+queries flagged at all did not move. Every query whose tree still falls
+short of its text falls short by exactly the bytes the lexer never handed
+over — the parser loses nothing. A large share of the
 leftovers begin at a `#Имя`, `%1` or `[Имя]` marker. The query language
 has no substitution facility — these are possible only because a query
 lives in a string literal, and a literal may hold anything — so the
