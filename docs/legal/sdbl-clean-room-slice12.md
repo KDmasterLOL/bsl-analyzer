@@ -826,6 +826,44 @@ What the audit asked for was the range of the complaint. That is fixed.
 Parsing a body for a query that has no keyword was not asked for, and it
 belongs to whoever owns the field-list slice, not here.
 
+### The boundary held where errors are reported, not where tokens are taken
+
+Naming the boundary closed every path that reports an error. It left open
+every path that succeeds. A rule with an operand it must have does not
+report anything — it reads the next word as that operand — and since every
+SDBL keyword reaches the parser as an identifier, the word it read could
+be the `ВЫБРАТЬ` of the next package member. `ВЫБРАТЬ А ИЗ Т ГДЕ` followed
+by a second query on the next line lost that second query entirely, and an
+operand left unwritten is the ordinary state of a buffer being typed.
+
+A query keyword is never a column name. Where nothing is open to make it a
+subquery, the primary-expression rule now declines it, and the boundary
+check already in place reports the gap without taking the word. Inside a
+group the same keyword is still a subquery and is still read as one.
+
+The second finding is the dot rule again, one level deeper: it asked
+whether anything had been taken before the dot, which a preceding dot
+satisfies. It now asks whether what precedes could end a name — a word, a
+parameter, the closing paren of a cast — so `..` no longer shields the
+query behind it.
+
+The third is the BSL block terminators, found for the second round
+running. It is tracked, it predates this slice, and the mechanism it needs
+is the one this slice built.
+
+### The corpus says these two changed nothing
+
+Both fixes were measured the same way the behaviour change was: every
+string literal in the testbed configuration, 3 142 814 of them, parsed as
+a query before and after, and each classified by whether it draws any
+error, draws a leftover report, and is covered by its tree. The two runs
+are identical, line for line. The figures in § C2 outcome therefore stand
+as measured.
+
+A zero difference is worth nothing without evidence the measurement could
+have seen one, so a positive control was run alongside: the input from the
+first finding above is classified differently by the two builds.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -951,8 +989,11 @@ are covered by entries A6–A8 above.
   parser as whole files rather than as a diff. Three findings: two fixed,
   one pre-existing and outside this slice. Parser tests 657 → 659.
 - C18 `b4241dd7` — the corpus figures retaken.
-- C19 — the audit re-run. Four findings: three fixed here, one already
-  tracked as a defect of the BSL grammar. Parser tests 659 → 662.
+- C19 `508b2908` — the audit re-run. Four findings: three fixed here, one
+  already tracked as a defect of the BSL grammar. Parser tests 659 → 662.
+- C20 — the audit run again, because the previous round found defects.
+  Three findings: two fixed here, one already tracked as a defect of the
+  BSL grammar for the second round running. Parser tests 662 → 663.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

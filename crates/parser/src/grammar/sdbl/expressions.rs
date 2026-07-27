@@ -356,7 +356,15 @@ fn primary_expr(p: &mut Parser) {
             m.complete(p, NodeKind::SdblLiteral);
         }
 
-        Some(TokenKind::Ident) => column_or_function(p),
+        // A query keyword is never a column name. Where nothing is open to
+        // make it a subquery, it begins the package's next member, and an
+        // operand missing in front of it has to be reported at the gap: the
+        // boundary check in `error` then leaves the keyword where it is.
+        // Taking it instead would cost the package that whole member — and
+        // an operand left unwritten is exactly what an editor buffer holds.
+        Some(TokenKind::Ident) if p.open_group_count() > 0 || !super::at_query_boundary(p) => {
+            column_or_function(p)
+        }
 
         _ => {
             let m = p.start();

@@ -141,6 +141,12 @@ fn complain_about_a_missing_member(p: &mut Parser, a_query_is_due: bool, had_tok
     }
 }
 
+/// Whether the current token can be the last one of a name a dot may
+/// qualify: a word, a parameter, or the closing paren of a cast.
+fn ends_a_name(p: &Parser) -> bool {
+    matches!(p.current(), Some(TokenKind::Ident | TokenKind::Ampersand | TokenKind::RParen))
+}
+
 fn at_trivia(p: &Parser) -> bool {
     matches!(
         p.current(),
@@ -184,6 +190,7 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
     let leftover = p.start();
     let mut took_anything = false;
     let mut after_a_dot = false;
+    let mut after_a_receiver = false;
 
     while !p.at_end() && !p.at(TokenKind::Semicolon) {
         p.check_iteration_limit();
@@ -203,9 +210,11 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
         if p.at(TokenKind::Newline) {
             after_a_dot = false;
         } else if !at_trivia(p) {
-            // A dot qualifies only what precedes it. A dot with nothing in
-            // front is junk of its own and must not shield what follows.
-            after_a_dot = p.at(TokenKind::Dot) && took_anything;
+            // A dot qualifies the name in front of it. A dot with no name
+            // there — a second dot, an operator, the start of the leftover —
+            // is junk of its own and must not shield what follows.
+            after_a_dot = p.at(TokenKind::Dot) && after_a_receiver;
+            after_a_receiver = ends_a_name(p);
         }
 
         p.bump();

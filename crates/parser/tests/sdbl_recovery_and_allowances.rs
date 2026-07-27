@@ -889,17 +889,58 @@ fn no_rule_reports_by_taking_the_next_query_away() {
 
 #[test]
 fn a_dot_with_nothing_before_it_shields_nothing() {
-    // The dot rule exists so that `T.ИЗ` is skipped as one name. A dot with
-    // no receiver is junk of its own and must not hide the query after it.
-    let input = ". SELECT A";
-    let parse = parse_sdbl(input);
-    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
-    assert_eq!(
-        parse
-            .syntax_node()
-            .children()
-            .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
-            .count(),
-        1,
-    );
+    // The dot rule exists so that `T.ИЗ` is skipped as one name. A dot needs
+    // a name in front of it to qualify; without one — at the start of the
+    // leftover, or after another dot — it is junk of its own and must not
+    // hide what follows.
+    for input in [". SELECT A", ".. SELECT A", ". . SELECT A", "+ . SELECT A"] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+                .count(),
+            1,
+            "`{input}` still contains a query",
+        );
+    }
+}
+
+#[test]
+fn an_operand_left_unwritten_costs_only_its_own_query() {
+    // A query keyword is never a column name. An operand missing in front of
+    // one is the ordinary state of a buffer being typed, and the parser used
+    // to answer it by reading the next member's `ВЫБРАТЬ` as that operand —
+    // which cost the package the whole member behind it.
+    for input in [
+        "ВЫБРАТЬ А ИЗ Т ГДЕ\nВЫБРАТЬ Б ИЗ У",
+        "ВЫБРАТЬ А ИЗ Т ГДЕ А =\nВЫБРАТЬ Б ИЗ У",
+        "ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО\nВЫБРАТЬ Б ИЗ У",
+        "SELECT A + SELECT B FROM U",
+        "SELECT A FROM T WHERE SELECT B FROM U",
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY)
+                .count(),
+            2,
+            "`{input}` holds two queries: {:#?}",
+            parse.errors(),
+        );
+        assert!(
+            parse.errors().iter().any(|e| e.message().contains("разделитель")),
+            "`{input}` is missing its separator: {:#?}",
+            parse.errors(),
+        );
+    }
+
+    // Inside a group the same keyword is a subquery, and stays one.
+    accepted("ВЫБРАТЬ А ИЗ (ВЫБРАТЬ Б ИЗ У) КАК Вложенный");
+    accepted("ВЫБРАТЬ А ИЗ Т ГДЕ А В (ВЫБРАТЬ Б ИЗ У)");
 }
