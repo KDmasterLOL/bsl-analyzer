@@ -2,16 +2,20 @@
 //!
 //! ## Provenance
 //!
-//! The token vocabulary is being re-derived from official 1C sources one
+//! The token vocabulary has been re-derived from official 1C sources one
 //! vocabulary at a time. Each re-derived group carries a `CLEAN-ROOM`
-//! banner naming the attestation document that records its sources;
-//! everything still awaiting re-derivation carries a `LEGACY` banner
-//! naming the slice that owns it.
+//! banner naming the attestation document that records its sources.
 //!
 //! - Slice 3b — metadata-object table vocabulary and the `Error`
 //!   fallback: `docs/legal/sdbl-clean-room-slice3b.md`.
 //! - Slice 4 — query-function vocabulary:
 //!   `docs/legal/sdbl-clean-room-slice4.md`.
+//! - Slice 5 — virtual tables and external data sources:
+//!   `docs/legal/sdbl-clean-room-slice5.md`.
+//!
+//! No vocabulary awaits re-derivation any more. The one `LEGACY` banner
+//! left marks the brace pair, which belongs to no slice at all and is
+//! labelled unowned rather than pending.
 //!
 //! The lexer core, the structural keyword vocabulary, the clause-keyword
 //! leftovers and the primitive-type vocabulary are attested by
@@ -835,10 +839,25 @@ pub enum SdblTokenKind {
     MdoFilterCriterion,
 
     // ===================================================================
-    // LEGACY (Slice 5 pending — virtual tables and external data sources)
+    // CLEAN-ROOM Slice 5 — virtual tables and external data sources
     //
-    // Virtual-table suffixes and the external-data-source table root.
-    // Not yet re-derived from official 1C sources.
+    // A virtual table is computed when the query runs rather than
+    // stored, and is named by a suffix appended to a real table's
+    // dotted path — `РегистрСведений.<Имя>.СрезПоследних` and the like.
+    // Every spelling below is one half of the bilingual headline of an
+    // article in the 1C:Enterprise 8.3.27 syntax assistant, section
+    // «Работа с запросами → Таблицы запросов», the same canonical
+    // inventory the metadata-object roots come from. Table names exist
+    // in both languages by design — Developer's Reference Глава 8 §8.2 —
+    // and are case-insensitive per §8.4.5, which is what the `(?i)`
+    // flag expresses.
+    //
+    // The suffix alone does not make a virtual table: the lexer has no
+    // notion of how many dots preceded the current position, so
+    // `Остатки` standing on its own emits the same token as `Остатки`
+    // after two dots. Separating the two readings is the parser's work.
+    //
+    // Attestation: `docs/legal/sdbl-clean-room-slice5.md`.
     // ===================================================================
     #[regex(r"(?i)внешнийисточникданных|(?i)externaldatasource")]
     MdoExternalDataSource,
