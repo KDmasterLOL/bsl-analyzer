@@ -830,9 +830,9 @@ The regenerated snapshot confirms all three halves of the C0a audit:
   the thematic index, the thirteen added variants, the `FnDate`
   removal, the `datedifference` alternation, the converter arm edits,
   and the corpus snapshot flip. See § C2 outcome.
-- C3 — the `sdbl_slice4_functions.rs` acceptance suite (25 tests), this
-  attestation's flip to complete, and the master-document Slice 4
-  section.
+- `84c03ae8` (2026-07-27) — C3: the `sdbl_slice4_functions.rs`
+  acceptance suite (25 tests), this attestation's flip to complete, and
+  the master-document Slice 4 section.
 - Close-out: a single trailing commit strikes item 2 from the exit
   criteria in `sdbl-provenance-2026-07-audit.md` and pins the C3 SHA
   explicitly in the trail above. The exit-criteria edit is deliberately

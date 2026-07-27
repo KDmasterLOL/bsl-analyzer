@@ -153,12 +153,12 @@ expression, and the slices already completed are why so little else remains.
 
 Not everything has been through the clean-room process.
 
-- **Lexer vocabularies.** Slice 3b closed the metadata-object type names on
-  2026-07-27. Slices 4 and 5 have not been started: the query-function names
-  and the virtual-table names. These lists were transcribed from upstream in
-  the first commit and have not been re-derived from 1C documentation since.
-  Their present contents already diverge from upstream, but no attestation
-  covers them. Separately, `LBrace` and `RBrace` are covered by no attestation
+- **Lexer vocabularies.** Slice 3b closed the metadata-object type names and
+  Slice 4 the query-function names, both on 2026-07-27. Slice 5 has not been
+  started: the virtual-table names. That list was transcribed from upstream in
+  the first commit and has not been re-derived from 1C documentation since.
+  Its present contents already diverge from upstream, but no attestation
+  covers it. Separately, `LBrace` and `RBrace` are covered by no attestation
   and owned by no slice; see item 5 of the exit criteria.
 - **`sdbl-hir`.** Slice 13 has not been started. Roughly 13.8k lines. It is not
   unexamined: `parser-sdbl-hir-audit.md` assesses it as medium risk and records
@@ -223,7 +223,12 @@ For `lexer`:
    Done 2026-07-27, `sdbl-clean-room-slice3b.md`. It landed 18 variants
    rather than 14: the audit found four canonical table roots that the lexer
    never had.
-2. Slice 4 — query-function vocabulary re-derived and attested.
+2. ~~Slice 4 — query-function vocabulary re-derived and attested.~~
+   Done 2026-07-27, `sdbl-clean-room-slice4.md`. It landed 54 variants where
+   the lexer had 42: the audit found thirteen documented functions with no
+   variant at all — including seven of the eleven mathematical ones — and one
+   variant, `FnDate`, that was emitted for no input because `TypeDate`
+   declares the identical pattern earlier.
 3. Slice 5 — virtual-table vocabulary and external-data-source handling.
 4. ~~The `Error` fallback variant re-derived.~~ Done 2026-07-27 with Slice 3b,
    which classifies it Tier D: it carries no pattern, and no 1C source defines
@@ -238,10 +243,11 @@ For `lexer`:
    Slice 1-addendum rather than absorbing punctuation into a vocabulary slice.
 
    Note that “no `LEGACY` marker remains” is no longer a usable check:
-   `3aa29b99` removed every marker, so that test now passes vacuously. Slice 3b
-   restored markers for the vocabularies it owns and for those still pending,
-   but the closed slices' banners are still absent by choice — check the
-   vocabularies themselves, and treat this numbered list, not the source, as
+   `3aa29b99` removed every marker, so that test now passes vacuously. Slices 3b
+   and 4 restored markers for the vocabularies they own and for those still
+   pending — after Slice 4 only the `Vt*` block still carries a `LEGACY`
+   banner — but the closed slices' banners are still absent by choice. Check
+   the vocabularies themselves, and treat this numbered list, not the source, as
    the inventory.
 
 For `parser` (SDBL side):
