@@ -324,130 +324,362 @@ pub enum SdblTokenKind {
     // change with no provenance value.
     //
     // Attestation: `docs/legal/sdbl-clean-room-slice4.md`.
+    //
+    // Index (navigational only; the `#[regex]` attributes remain the
+    // single source of truth, since logos requires the pattern at the
+    // declaration site). The groups are the source's own:
+    //
+    //   aggregate      FnSum, FnAvg, FnMin, FnMax, FnCount
+    //   date           FnYear, FnQuarter, FnMonth, FnDayOfYear, FnDay,
+    //                  FnWeek, FnWeekDay, FnHour, FnMinute, FnSecond,
+    //                  FnBeginOfPeriod, FnEndOfPeriod, FnDateAdd,
+    //                  FnDateDiff, and the FnDateTime literal
+    //   string         FnSubstring, FnStringLength, FnStrFind,
+    //                  FnStrReplace, FnUpper, FnLower, FnTrimAll,
+    //                  FnTrimL, FnTrimR, FnLeft, FnRight
+    //   mathematical   FnRound, FnInt, FnExp, FnLog10, FnLog, FnPow,
+    //                  FnSqrt, FnACos, FnASin, FnATan, FnCos, FnSin,
+    //                  FnTan
+    //   other          FnValueType, FnPresentation, FnRefPresentation,
+    //                  FnIsNull, FnRecordAutoNumber, FnGroupedBy,
+    //                  FnStoredDataSize, FnUUID, and the FnEmptyTable
+    //                  and FnEmptyRef keywords
+    //
+    // The function `СТРОКА (String)` has no variant here: its spelling
+    // is the primitive type name, already claimed by
+    // [`SdblTokenKind::TypeString`].
     // ===================================================================
+    /// `СУММА (SUM)` — arithmetic sum of the field values in the
+    /// selection.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.17.3.
     #[regex(r"(?i)сумма|(?i)sum")]
     FnSum,
 
+    /// `СРЕДНЕЕ (AVG)` — mean of the field values in the selection.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.17.3.
     #[regex(r"(?i)среднее|(?i)avg")]
     FnAvg,
 
+    /// `МИНИМУМ (MIN)` — least of the field values in the selection.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.17.3.
     #[regex(r"(?i)минимум|(?i)min")]
     FnMin,
 
+    /// `МАКСИМУМ (MAX)` — greatest of the field values in the
+    /// selection.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.17.3.
     #[regex(r"(?i)максимум|(?i)max")]
     FnMax,
 
+    /// `КОЛИЧЕСТВО (COUNT)` — count of the values in the selection.
+    ///
+    /// The only aggregate that admits `РАЗЛИЧНЫЕ` and `*` as its
+    /// argument; that is grammar, not vocabulary, and belongs to the
+    /// parser.
+    ///
+    /// Second attestation: Developer's Reference Глава 8 §8.4.17.3.
     #[regex(r"(?i)количество|(?i)count")]
     FnCount,
 
+    /// `ГОД (YEAR)` — year number of a date.
+    ///
+    /// Doubles as a period specifier inside `НАЧАЛОПЕРИОДА`,
+    /// `КОНЕЦПЕРИОДА`, `ДОБАВИТЬКДАТЕ` and `РАЗНОСТЬДАТ`; the same
+    /// token serves both readings, which the parser separates by
+    /// position.
     #[regex(r"(?i)год|(?i)year", priority = 2)]
     FnYear,
 
+    /// `КВАРТАЛ (QUARTER)` — quarter number of a date, 1 to 4. Also a
+    /// period specifier; see [`FnYear`].
     #[regex(r"(?i)квартал|(?i)quarter", priority = 2)]
     FnQuarter,
 
+    /// `МЕСЯЦ (MONTH)` — month number of a date, 1 to 12. Also a
+    /// period specifier; see [`FnYear`].
     #[regex(r"(?i)месяц|(?i)month", priority = 2)]
     FnMonth,
 
+    /// `ДЕНЬГОДА (DAYOFYEAR)` — day of the year, 1 to 366.
+    ///
+    /// Longest-match wins over [`FnDay`], whose Russian and English
+    /// spellings are both proper prefixes of this one.
     #[regex(r"(?i)деньгода|(?i)dayofyear", priority = 2)]
     FnDayOfYear,
 
+    /// `ДЕНЬ (DAY)` — day of the month, 1 to 31. Also a period
+    /// specifier; see [`FnYear`].
     #[regex(r"(?i)день|(?i)day", priority = 2)]
     FnDay,
 
+    /// `НЕДЕЛЯ (WEEK)` — week number of the year. Also a period
+    /// specifier; see [`FnYear`].
+    ///
+    /// The result depends on the infobase's first-day-of-week regional
+    /// setting, which is runtime behaviour and not the lexer's concern.
     #[regex(r"(?i)неделя|(?i)week", priority = 2)]
     FnWeek,
 
+    /// `ДЕНЬНЕДЕЛИ (WEEKDAY)` — day of the week, 1 (Monday) to
+    /// 7 (Sunday).
     #[regex(r"(?i)деньнедели|(?i)weekday", priority = 2)]
     FnWeekDay,
 
+    /// `ЧАС (HOUR)` — hour of the day, 0 to 23. Also a period
+    /// specifier; see [`FnYear`].
     #[regex(r"(?i)час|(?i)hour", priority = 2)]
     FnHour,
 
+    /// `МИНУТА (MINUTE)` — minute of the hour, 0 to 59. Also a period
+    /// specifier; see [`FnYear`].
     #[regex(r"(?i)минута|(?i)minute", priority = 2)]
     FnMinute,
 
+    /// `СЕКУНДА (SECOND)` — second of the minute, 0 to 59. Also a
+    /// difference specifier inside `РАЗНОСТЬДАТ`.
     #[regex(r"(?i)секунда|(?i)second", priority = 2)]
     FnSecond,
 
+    /// `НАЧАЛОПЕРИОДА (BEGINOFPERIOD)` — start of the period that
+    /// contains a date.
     #[regex(r"(?i)началопериода|(?i)beginofperiod")]
     FnBeginOfPeriod,
 
+    /// `КОНЕЦПЕРИОДА (ENDOFPERIOD)` — end of the period that contains
+    /// a date.
     #[regex(r"(?i)конецпериода|(?i)endofperiod")]
     FnEndOfPeriod,
 
+    /// `ДОБАВИТЬКДАТЕ (DATEADD)` — a date shifted by a whole number of
+    /// periods.
     #[regex(r"(?i)добавитькдате|(?i)dateadd")]
     FnDateAdd,
 
-    #[regex(r"(?i)разностьдат|(?i)datediff")]
+    /// `РАЗНОСТЬДАТ (DATEDIFF)` — difference between two dates,
+    /// expressed in a chosen unit.
+    ///
+    /// The source gives two English spellings: the bilingual keyword
+    /// table and the function index say `DATEDIFF`, while the English
+    /// article is headlined `DATEDIFFERENCE function` and its examples
+    /// use that form. Both are documented, so both are accepted;
+    /// `datediff` is a proper prefix of `datedifference`, which
+    /// longest-match separates.
+    #[regex(r"(?i)разностьдат|(?i)datediff|(?i)datedifference")]
     FnDateDiff,
 
+    /// `ДАТАВРЕМЯ (DATETIME)` — the date literal, written
+    /// `ДАТАВРЕМЯ(<год>, <месяц>, <день>[, <час>, <минута>,
+    /// <секунда>])`.
+    ///
+    /// Not a function: the article «Литерал типа ДАТА» calls it the
+    /// way a value of type `Дата` is written, and the query-function
+    /// index does not list it. The type name `Дата` itself is a
+    /// separate token, [`SdblTokenKind::TypeDate`].
     #[regex(r"(?i)датавремя|(?i)datetime")]
     FnDateTime,
 
-    #[regex(r"(?i)дата|(?i)date", priority = 2)]
-    FnDate,
-
+    /// `ПОДСТРОКА (SUBSTRING)` — substring by start position and
+    /// length.
     #[regex(r"(?i)подстрока|(?i)substring")]
     FnSubstring,
 
+    /// `ДлинаСтроки (StringLength)` — length of a string, as a number.
     #[regex(r"(?i)длинастроки|(?i)stringlength")]
     FnStringLength,
 
+    /// `СтрНайти (StrFind)` — position of a substring, 1-based, or 0
+    /// when absent.
     #[regex(r"(?i)стрнайти|(?i)strfind")]
     FnStrFind,
 
+    /// `СтрЗаменить (StrReplace)` — every occurrence of one substring
+    /// replaced by another.
+    #[regex(r"(?i)стрзаменить|(?i)strreplace")]
+    FnStrReplace,
+
+    /// `ВРег (Upper)` — the string in upper case.
     #[regex(r"(?i)врег|(?i)upper")]
     FnUpper,
 
+    /// `НРег (Lower)` — the string in lower case.
     #[regex(r"(?i)нрег|(?i)lower")]
     FnLower,
 
+    /// `СокрЛП (TrimAll)` — the string without leading or trailing
+    /// blanks.
+    ///
+    /// Longest-match wins over [`FnTrimL`], whose Russian spelling is a
+    /// proper prefix of this one.
     #[regex(r"(?i)сокрлп|(?i)trimall")]
     FnTrimAll,
 
+    /// `СокрЛ (TrimL)` — the string without leading blanks.
     #[regex(r"(?i)сокрл|(?i)triml")]
     FnTrimL,
 
+    /// `СокрП (TrimR)` — the string without trailing blanks.
     #[regex(r"(?i)сокрп|(?i)trimr")]
     FnTrimR,
 
+    /// `Лев (Left)` — the leading characters of a string.
+    ///
+    /// Russian spelling only. The English `Left` is byte-identical to
+    /// the join keyword `ЛЕВОЕ (LEFT)`, which
+    /// [`SdblTokenKind::KwLeft`] already claims; a lexer cannot tell
+    /// the two apart, because the difference is grammatical position.
+    /// Leaving `Left` on the join keyword keeps `LEFT JOIN` correct
+    /// and hands the function reading to the parser, which sees the
+    /// following `(`.
+    ///
+    /// Against the join keyword's Russian spelling there is no
+    /// contest: `лев` is a proper prefix of `левое`, so longest match
+    /// separates them.
+    #[regex(r"(?i)лев")]
+    FnLeft,
+
+    /// `Прав (Right)` — the trailing characters of a string.
+    ///
+    /// Russian spelling only, for the reason given on [`FnLeft`]: the
+    /// English `Right` belongs to [`SdblTokenKind::KwRight`].
+    #[regex(r"(?i)прав")]
+    FnRight,
+
+    /// `Окр (Round)` — a number rounded to a given number of decimal
+    /// places.
     #[regex(r"(?i)окр|(?i)round")]
     FnRound,
 
+    /// `Цел (Int)` — the integer part of a number, fraction discarded.
     #[regex(r"(?i)цел|(?i)int")]
     FnInt,
 
+    /// `Exp` — the base of the natural logarithm raised to a power.
+    ///
+    /// The mathematical functions have no Russian spelling: the source
+    /// writes them in Latin letters in both language builds.
+    #[regex(r"(?i)exp")]
+    FnExp,
+
+    /// `Log10` — decimal logarithm.
+    ///
+    /// Longest-match wins over [`FnLog`], whose spelling is a proper
+    /// prefix of this one.
     #[regex(r"(?i)log10")]
     FnLog10,
 
+    /// `Log` — natural logarithm.
     #[regex(r"(?i)log")]
     FnLog,
 
+    /// `Pow` — a base raised to an exponent.
     #[regex(r"(?i)pow")]
     FnPow,
 
+    /// `Sqrt` — square root.
     #[regex(r"(?i)sqrt")]
     FnSqrt,
 
+    /// `ACos` — arc cosine, in radians.
+    #[regex(r"(?i)acos")]
+    FnACos,
+
+    /// `ASin` — arc sine, in radians.
+    #[regex(r"(?i)asin")]
+    FnASin,
+
+    /// `ATan` — arc tangent, in radians.
+    #[regex(r"(?i)atan")]
+    FnATan,
+
+    /// `Cos` — cosine of an angle in radians.
+    #[regex(r"(?i)cos")]
+    FnCos,
+
+    /// `Sin` — sine of an angle in radians.
+    #[regex(r"(?i)sin")]
+    FnSin,
+
+    /// `Tan` — tangent of an angle in radians.
+    #[regex(r"(?i)tan")]
+    FnTan,
+
+    /// `ТИПЗНАЧЕНИЯ (VALUETYPE)` — the type of a value, as a value of
+    /// type `Тип`.
     #[regex(r"(?i)типзначения|(?i)valuetype")]
     FnValueType,
 
+    /// `ПРЕДСТАВЛЕНИЕ (PRESENTATION)` — string presentation of a value
+    /// of any type.
     #[regex(r"(?i)представление|(?i)presentation")]
     FnPresentation,
 
+    /// `ПРЕДСТАВЛЕНИЕССЫЛКИ (REFPRESENTATION)` — presentation of a
+    /// reference value, the value itself otherwise.
+    ///
+    /// Longest-match wins over [`FnPresentation`], whose Russian
+    /// spelling is a proper prefix of this one.
+    ///
+    /// Attested only by the syntax assistant: the Developer's
+    /// Reference does not mention this function.
     #[regex(r"(?i)представлениессылки|(?i)refpresentation")]
     FnRefPresentation,
 
+    /// `ЕСТЬNULL (ISNULL)` — the first argument, or the second when
+    /// the first is `NULL`.
     #[regex(r"(?i)естьnull|(?i)isnull")]
     FnIsNull,
 
+    /// `АВТОНОМЕРЗАПИСИ (RECORDAUTONUMBER)` — a unique ascending
+    /// number, usable only in the selection list of a query that
+    /// builds a temporary table.
+    #[regex(r"(?i)автономерзаписи|(?i)recordautonumber")]
+    FnRecordAutoNumber,
+
+    /// `СГРУППИРОВАНОПО (GROUPEDBY)` — whether the current row was
+    /// grouped by the given field.
+    ///
+    /// Longest-match wins over [`SdblTokenKind::KwGroup`] for the
+    /// English spelling, whose `group` is a proper prefix of
+    /// `groupedby`. The Russian spellings diverge at their tenth
+    /// character.
+    #[regex(r"(?i)сгруппированопо|(?i)groupedby")]
+    FnGroupedBy,
+
+    /// `РАЗМЕРХРАНИМЫХДАННЫХ (StoredDataSize)` — size in bytes that
+    /// the given fields occupy in the database.
+    ///
+    /// The Russian spelling is attested by the Developer's Reference
+    /// §8.4.17.4.24; the syntax assistant carries only the English
+    /// article.
+    #[regex(r"(?i)размерхранимыхданных|(?i)storeddatasize")]
+    FnStoredDataSize,
+
+    /// `ПУСТАЯТАБЛИЦА (EMPTYTABLE)` — an empty nested table in the
+    /// selection list, written `ПУСТАЯТАБЛИЦА.(<псевдонимы>)`.
+    ///
+    /// Not a function: the article «Пустые вложенные таблицы в списке
+    /// выборки» calls it a keyword, and the query-function index does
+    /// not list it. It exists so that the arms of a `ОБЪЕДИНИТЬ` can
+    /// agree on their nested-table columns.
     #[regex(r"(?i)пустаятаблица|(?i)emptytable")]
     FnEmptyTable,
 
+    /// `ПустаяСсылка (EmptyRef)` — the empty-reference selector inside
+    /// `ЗНАЧЕНИЕ(<тип>.<объект>.ПустаяСсылка)`.
+    ///
+    /// Not a function: it is the value part of a predefined-data
+    /// literal, per the article «Использование предопределенных данных
+    /// конфигурации», which gives both spellings and the canonical
+    /// example `ГДЕ Город = ЗНАЧЕНИЕ(Справочник.Города.ПустаяСсылка)`.
     #[regex(r"(?i)пустаяссылка|(?i)emptyref")]
     FnEmptyRef,
 
+    /// `УНИКАЛЬНЫЙИДЕНТИФИКАТОР (UUID)` — the unique identifier behind
+    /// a reference.
     #[regex(r"(?i)уникальныйидентификатор|(?i)uuid")]
     FnUUID,
 

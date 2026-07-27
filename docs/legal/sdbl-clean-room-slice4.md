@@ -483,11 +483,70 @@ Longest-match interaction was checked for each new alternation:
   is the tie-break Slice 1 established for the whole keyword
   vocabulary.
 
+One further tokenisation property, measured before the edit, is what
+makes the short mathematical names safe to add: logos takes the longest
+match overall, so an identifier that merely starts with a keyword stays
+an identifier. `Документы`, `Годовой`, `Counter`, `Intel` and `Powered`
+all tokenise as a single `Ident` today, against variants spelling
+`документ`, `год`, `count`, `int` and `pow`. `Sinus`, `Cosinus` and
+`ЛЕВЫЙ` behave the same way after the slice, for the same reason.
+
 The golden corpus is the gate: C0b lands corpus entries for all thirteen
 new functions while they still tokenise as `Ident`, so the snapshot
 records the pre-change behaviour; C2 flips those snapshot lines to the
 new kinds. The flip is the audit trail of the behaviour change, in the
 same shape as the Slice 3b `Mdo*` corpus flip.
+
+### C2 outcome
+
+The measured blast radius matches the prediction exactly. Regenerating
+the snapshot over the whole 95-entry corpus changed **18 lines and no
+others**:
+
+```
+-  Ident @15 "ЛЕВ"                   +  FnLeft             @15 "ЛЕВ"
+-  Ident @34 "ПРАВ"                  +  FnRight            @34 "ПРАВ"
+-  Ident @15 "СтрЗаменить"           +  FnStrReplace       @15 "СтрЗаменить"
+-  Ident @66 "StrReplace"            +  FnStrReplace       @66 "StrReplace"
+-  Ident @15 "АВТОНОМЕРЗАПИСИ"       +  FnRecordAutoNumber @15 "АВТОНОМЕРЗАПИСИ"
+-  Ident @84 "RECORDAUTONUMBER"      +  FnRecordAutoNumber @84 "RECORDAUTONUMBER"
+-  Ident @15 "СГРУППИРОВАНОПО"       +  FnGroupedBy        @15 "СГРУППИРОВАНОПО"
+-  Ident @66 "GROUPEDBY"             +  FnGroupedBy        @66 "GROUPEDBY"
+-  Ident @15 "РАЗМЕРХРАНИМЫХДАННЫХ"  +  FnStoredDataSize   @15 "РАЗМЕРХРАНИМЫХДАННЫХ"
+-  Ident @78 "STOREDDATASIZE"        +  FnStoredDataSize   @78 "STOREDDATASIZE"
+-  Ident @15 "ACos"                  +  FnACos             @15 "ACos"
+-  Ident @24 "ASin"                  +  FnASin             @24 "ASin"
+-  Ident @33 "ATan"                  +  FnATan             @33 "ATan"
+-  Ident @42 "Cos"                   +  FnCos              @42 "Cos"
+-  Ident @50 "Sin"                   +  FnSin              @50 "Sin"
+-  Ident @58 "Tan"                   +  FnTan              @58 "Tan"
+-  Ident @66 "Exp"                   +  FnExp              @66 "Exp"
+-  Ident @7  "DATEDIFFERENCE"        +  FnDateDiff         @7  "DATEDIFFERENCE"
+```
+
+Every claim the audit makes is visible in what did **not** change:
+
+- No pre-existing token kind moved and no offset shifted.
+- Entry 089 still renders `KwLeft` and `KwRight` for all four join
+  spellings, so adding `FnLeft` / `FnRight` on Russian-only alternations
+  leaves `LEFT JOIN` and `ЛЕВОЕ СОЕДИНЕНИЕ` intact.
+- Entries 049 and 071 still render `TypeDate` for `Date` and `ДАТА`,
+  which is the pin that removing `FnDate` changed nothing.
+- Entries 044, 045 and 046 are untouched, so the 41 preserved regexes
+  accept exactly the text they accepted before.
+- `DATEDIFFERENCE` resolves to `FnDateDiff` rather than splitting at
+  `datediff`, confirming the longest-match reading of the new
+  alternation.
+
+`SdblTokenKind` goes from 158 variants to 170 (13 added, 1 removed), of
+which 54 are `Fn*`.
+
+Test counts after C2: `lexer` 252 passing (unchanged — the corpus
+snapshot is a single test whose content changed), `parser` 596 passing
+(unchanged), `clippy -p lexer -p parser --all-targets --all-features
+-- -D warnings` clean. The unchanged parser count is the empirical form
+of the parser-tree-invariance claim: the twenty affected spellings reach
+the grammar as `TokenKind::Ident` exactly as before.
 
 ## Marker restoration
 
@@ -754,9 +813,17 @@ The regenerated snapshot confirms all three halves of the C0a audit:
 
 - `eb49bba3` (2026-07-27) — C0a: this attestation document authored.
   Sole change: addition of `docs/legal/sdbl-clean-room-slice4.md`.
-- C0b — corpus entries 082–095 added to
+- `c874f43b` (2026-07-27) — C0b: corpus entries 082–095 added to
   `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`; snapshot
   regenerated via `UPDATE_EXPECT=1`. See § C0b outcome.
+- `93e63cbc` (2026-07-27) — C1: module docstring bullet and the
+  `CLEAN-ROOM Slice 4` banner replacing the `LEGACY (Slice 4 pending)`
+  one. Comments only: no declaration moved and no regex changed, so the
+  golden corpus snapshot needed no regeneration.
+- C2 — per-variant provenance docstrings and the thematic index, the
+  thirteen added variants, the `FnDate` removal, the `datedifference`
+  alternation, the converter arm edits, and the corpus snapshot flip.
+  See § C2 outcome.
 
 ## Licensing note
 
