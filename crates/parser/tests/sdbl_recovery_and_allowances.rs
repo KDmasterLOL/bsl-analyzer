@@ -733,3 +733,30 @@ fn a_member_is_not_minted_for_a_token_that_begins_nothing() {
         0,
     );
 }
+
+#[test]
+fn dropped_junk_does_not_cancel_the_member_it_precedes() {
+    // A token the package cannot use is dropped, not counted as the member
+    // that was owed. The incomplete query after it still gets the node the
+    // field-list slice promises it, and the complaint is made once per
+    // member rather than once per dropped token.
+    for (input, queries) in [
+        ("SELECT A FROM T; ) FROM Products", 2usize),
+        ("SELECT A FROM T; ) ГДЕ А = 1", 2),
+        (") FROM Products", 1),
+        // Junk with nothing after it owes nothing more.
+        ("ВЫБРАТЬ А ИЗ Т; ) 42", 1),
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .descendants()
+                .filter(|n| n.kind() == SyntaxKind::SDBL_QUERY)
+                .count(),
+            queries,
+            "`{input}`",
+        );
+    }
+}

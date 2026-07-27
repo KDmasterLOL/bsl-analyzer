@@ -675,6 +675,20 @@ member. A clause keyword still counts: `ИЗ Т` with no `ВЫБРАТЬ` yet is
 query being written, and Slice 7 guarantees it a node to hang on to, which
 is a contract this slice must not quietly break. A `)` is not.
 
+### Dropping a token is not the same as filling the slot
+
+The ninth round's fix stopped the loop from minting a member for a token
+that begins nothing. It also cleared the "a member is owed" flag when it
+dropped that token — as though the junk had been the member. So one
+stray `)` after a separator cancelled the incomplete query behind it, and
+`SELECT A FROM T; ) FROM Products` lost the node that Slice 7 promises
+`FROM Products`. The contract this slice had just gone out of its way to
+protect was broken by the protection.
+
+The flag now survives the drop, and the drain stops at a clause keyword
+while a member is still owed, so the query after the junk is reached. What
+is one-per-member is the complaint, not the debt.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -785,8 +799,11 @@ are covered by entries A6–A8 above.
   tests 645 → 647.
 - C11 `0bcbdf4a` — the eighth round. Two findings held and one was
   refuted. Parser tests 647 → 648.
-- C12 — the ninth round. Three findings, one class, and the class is the
-  fourth round's again at a deeper level. Parser tests 648 → 650.
+- C12 `09ceb39e` — the ninth round. Three findings, one class, and the
+  class is the fourth round's again at a deeper level. Parser tests
+  648 → 650.
+- C13 — the tenth round. One finding, in the ninth round's own fix. One
+  lens found nothing. Parser tests 650 → 651.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

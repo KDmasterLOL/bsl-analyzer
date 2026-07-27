@@ -56,6 +56,7 @@ pub fn query_package(p: &mut Parser) {
     // members are parsed only while the separators survive is a package that
     // loses good queries behind bad ones.
     let mut a_query_is_due = true;
+    let mut already_said_so = false;
 
     p.skip_trivia();
 
@@ -106,12 +107,17 @@ pub fn query_package(p: &mut Parser) {
             }
             queries(p);
             a_query_is_due = false;
+            already_said_so = false;
         } else {
-            if a_query_is_due {
+            // Dropping a token does not mean a member stopped being due, so
+            // the flag stays: `; ) ИЗ Т` still owes the package a member and
+            // the clause keyword after the junk still starts one. Only the
+            // complaint is one per member.
+            if a_query_is_due && !already_said_so {
                 p.error_custom_no_bump("ожидалось 'ВЫБРАТЬ' / 'SELECT'");
-                a_query_is_due = false;
+                already_said_so = true;
             }
-            if !drain_to_boundary(p) {
+            if !drain_to_boundary(p, a_query_is_due) {
                 break;
             }
         }
@@ -137,8 +143,10 @@ fn at_query_start(p: &Parser) -> bool {
 /// A separator cannot belong to a group in this language, so it ends the
 /// leftover at any depth. A query start can belong to one — inside parens it
 /// is a subquery, inside braces it is extension text — and is a boundary only
-/// where nothing this member opened is still open.
-fn drain_to_boundary(p: &mut Parser) -> bool {
+/// where nothing this member opened is still open. While a member is still
+/// owed, a clause keyword is a boundary too: it is where an incomplete query
+/// begins, and swallowing it would cost that query the node it is promised.
+fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
     p.skip_trivia();
 
     if p.at_end() || p.at(TokenKind::Semicolon) {
@@ -151,7 +159,10 @@ fn drain_to_boundary(p: &mut Parser) -> bool {
     while !p.at_end() && !p.at(TokenKind::Semicolon) {
         p.check_iteration_limit();
 
-        if took_anything && at_query_start(p) && p.open_group_count() == 0 {
+        let could_begin_a_member =
+            at_query_start(p) || (member_is_due && select::is_clause_keyword(p));
+
+        if took_anything && could_begin_a_member && p.open_group_count() == 0 {
             break;
         }
 
