@@ -10,17 +10,17 @@ independently.
 
 ## Status as of 2026-07-27
 
-Closed and attested: Slices 1, 2, 2-addendum, 3a, 3b, 4 and 5 on the
-lexer side; Slices 6, 7, 7-addendum, 8, 8-addendum, 9, 10a, 10b and 11
-on the parser side. Every lexer vocabulary is now attested; the only
-unattested lexer material is the brace pair below.
+Closed and attested: Slices 1, 2, 2-addendum, 3a, 3b, 4, 5 and
+1-addendum on the lexer side; Slices 6, 7, 7-addendum, 8, 8-addendum, 9,
+10a, 10b and 11 on the parser side. **The lexer is now fully attested**:
+every `SdblTokenKind` variant is covered, and no `LEGACY` marker remains
+in `crates/lexer/src/sdbl/mod.rs`.
 
 Open:
 
 | Slice | Area | State |
 |---|---|---|
 | 0 | SDBL test corpus | triaged into buckets A/B/C, but bucket C never rewritten and `3aa29b99` removed the bucket labels |
-| 1-addendum | Brace pair `LBrace` / `RBrace` | not started; recommended by Slice 3b (see below) |
 | 12 | Recovery / IDE allowances | fixes landed, no attestation |
 | 13 | `sdbl-hir` reattachment | not started |
 
@@ -32,10 +32,10 @@ attestation names them. Partitioning all 154 `SdblTokenKind` variants against
 the closed attestations and the pending families closes that class at exactly
 those two. They are punctuation rather than vocabulary, so folding them into a
 vocabulary slice would be the same category error that lost the map in the first
-place; the recommendation is a small **Slice 1-addendum** deriving them from the
+place; the recommendation was a small **Slice 1-addendum** deriving them from the
 official documentation of the query-language extension that gives `{…}` its
-meaning. Until it runs, the lexer cannot be declared clean, even though every
-vocabulary slice has now landed.
+meaning. That slice has run — see §Slice 1-addendum below — and the lexer's
+token inventory is now completely attested.
 
 Two things changed after the last slice landed and are recorded here so the
 programme is not resumed on stale assumptions:
@@ -48,9 +48,10 @@ programme is not resumed on stale assumptions:
 - `3aa29b99` removed the `CLEAN-ROOM` / `LEGACY` banners and the test-corpus
   bucket classification from the source. Attestation citations that point at
   those banners no longer resolve, and the remaining unrewritten surface is no
-  longer visible in the code. Slices 3b, 4 and 5 restored the markers on the
-  vocabularies they own; no `LEGACY (pending)` banner remains, and the only
-  `LEGACY` marker left is the `unowned` note on the brace pair.
+  longer visible in the code. Slices 3b, 4, 5 and 1-addendum restored the
+  markers, and no `LEGACY` marker of any kind remains in the file. The banners
+  of the closed Slices 1, 2, 2-addendum and 3a are still absent by choice, and
+  the module docstring says so.
 
 ## Legal framing
 
@@ -1360,6 +1361,74 @@ those still pending. Banners and per-variant docstrings for the closed
 Slices 1, 2, 2-addendum and 3a are deliberately **not** restored; the
 module docstring says so explicitly, so that a missing banner is not
 read as a missing attestation.
+
+## Slice 1-addendum: query-extension brace pair (lexer)
+
+**Status: complete (2026-07-27).** See
+[`sdbl-clean-room-slice1-addendum.md`](sdbl-clean-room-slice1-addendum.md)
+for the attestation. Commit trail: C0a `5475fe6d`, C0b `6715b5b3`, C1
+`ca597ec7`, C2 `6a485082`, C3 landed with the attestation.
+
+The slice Slice 3b recommended. It claims `LBrace` and `RBrace`, the two
+variants that were covered by no attestation and owned by no slice, and
+with it the lexer's token inventory is completely attested.
+
+### Source
+
+The 1C:Enterprise 8.3.27 syntax assistant, data-composition help book,
+article «Расширение языка запросов для системы компоновки данных». It
+defines the braces outright — «специальных синтаксических инструкций,
+заключаемых в фигурные скобки и помещаемых непосредственно в текст
+запроса» — and names the elements they may hold: `{ВЫБРАТЬ …}`,
+`{ГДЕ …}`, `{ХАРАКТЕРИСТИКИ …}` and the parameter form inside a virtual
+table's argument list.
+
+Глава 8 and the ITS textbook are cited for the negative: the base query
+language contains no braces at all. That is what makes the pair an
+extension rather than core syntax, and it is why the lexer rejected `{`
+until `537527eb`.
+
+### Scope
+
+2 lexer token variants. Neither changes — there is no spelling to
+re-derive in a one-character token, so what the slice attests is a
+contract: the characters carry a documented meaning, that meaning
+belongs to an extension of the language, and the lexer must emit them
+rather than `Error`.
+
+The nine `ХАРАКТЕРИСТИКИ` keywords the same article defines are
+**deliberately not added**, which reverses the Option A ADD outcome of
+Slices 3b, 4 and 5. Three measurements drive it: the parser consumes a
+brace region by bumping every token regardless of kind, so the tree
+never observes the distinction; the lexer has no state and cannot know a
+region is open; and the words occur overwhelmingly outside braces —
+`Характеристики` appears 2696 times as an ordinary identifier in a
+production configuration against 195 inside an extension.
+
+### Behaviour change
+
+**None.** No regex, variant or converter arm is touched; this is the
+only slice in the programme where that is true. The corpus grows and the
+snapshot with it, but the C0b diff is 208 insertions and 0 deletions —
+every added line records behaviour that already existed and had simply
+never been pinned.
+
+### Files
+
+- `crates/lexer/src/sdbl/mod.rs` — the `CLEAN-ROOM Slice 1-addendum`
+  banner replacing the `LEGACY (unowned)` note, per-variant provenance
+  docstrings, and the module docstring bullet.
+- `crates/parser/src/grammar/sdbl/select.rs` — the
+  `eat_query_extensions` doc comment, corrected to separate the elements
+  the documentation defines from the undocumented `{УПОРЯДОЧИТЬ ПО …}`
+  form that configurations nonetheless contain.
+- `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` — entries
+  111–119, the first corpus coverage either brace has had.
+- `crates/lexer/tests/sdbl_golden_corpus.rs` — snapshot regenerated at
+  C0b.
+- `crates/lexer/tests/sdbl_slice1_addendum_braces.rs` — 14 acceptance
+  tests added at C3.
+- `docs/legal/sdbl-clean-room-slice1-addendum.md` — the attestation.
 
 ## Slice 12: recovery and IDE allowances
 

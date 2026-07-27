@@ -1,6 +1,6 @@
 # SDBL Slice 1-addendum — Clean-Room Attestation (query-extension brace pair)
 
-**Status:** in progress (2026-07-27).
+**Status:** complete (2026-07-27).
 
 This document attests the clean-room authorship of the Slice 1-addendum
 material of the SDBL lexer, per the staged migration plan in
@@ -20,8 +20,8 @@ accounted for.
 
 ## Status
 
-The Slice 1-addendum attestation flips from "in progress" to "complete"
-at phase C3, with the absolute-date stamp at the top of this document.
+The Slice 1-addendum attestation flipped from "in progress" to
+"complete" at phase C3, with the absolute-date stamp at the top of this document.
 The C0a / C0b / C1 / C2 / C3 landings are atomic; the absolute-last
 trailing commit on the branch (the Anti-Hilbert disclosure) is
 necessarily not named in the enumeration, mirroring every closed slice
@@ -49,7 +49,10 @@ The paths claimed as clean-room Slice 1-addendum authorship are:
 - `crates/lexer/tests/sdbl_golden_corpus.rs` — the snapshot regenerated
   at C0b.
 - `crates/lexer/tests/sdbl_slice1_addendum_braces.rs` — the spec-driven
-  acceptance test file born at C3.
+  acceptance test file born at C3, 14 tests: 3 on the tokens existing at
+  all and carrying their own spans, 4 on the documented elements,
+  2 pinning the refusal of the extension keywords, 3 on the shapes the
+  documentation does not describe, and 2 structural.
 
 ### The 2 claimed variants
 
@@ -369,8 +372,9 @@ live. Pre-slice baseline test counts (post-Slice-5, `develop` as of
    (single snapshot test) throughout; the snapshot grows at C0b and does
    not change again.
 10. `cargo test -p lexer --test sdbl_slice1_addendum_braces` — file does
-    **not exist** pre-slice.
-11. `cargo test -p lexer --tests` — **300 passed** pre-slice.
+    **not exist** pre-slice; **14 passed** post-slice.
+11. `cargo test -p lexer --tests` — **300 passed** pre-slice,
+    **314 passed** post-slice (300 + 14, matching item 10).
 12. `cargo test -p parser` — **596 passed** before and after. The slice
     changes one doc comment in the parser crate and nothing else.
 13. `cargo build --workspace --all-targets`.
@@ -450,12 +454,23 @@ spellings owned elsewhere and are pinned as they are: `Ссылка` renders
 - `ca597ec7` (2026-07-27) — C1: module docstring and the `CLEAN-ROOM
   Slice 1-addendum` banner replacing the `LEGACY (unowned)` note.
   Comments only.
-- C2 — per-variant provenance docstrings on the two tokens, and the
-  correction of the `eat_query_extensions` doc comment. Comments only
-  in both crates: 20 inserted lines in the lexer, one rewritten doc
-  comment in the parser, no declaration or token touched, so the golden
-  corpus snapshot needed no regeneration and `cargo test -p parser`
-  stayed at 596.
+- `6a485082` (2026-07-27) — C2: per-variant provenance docstrings on the
+  two tokens, and the correction of the `eat_query_extensions` doc
+  comment. Comments only in both crates: 20 inserted lines in the lexer,
+  one rewritten doc comment in the parser, no declaration or token
+  touched, so the golden corpus snapshot needed no regeneration and
+  `cargo test -p parser` stayed at 596.
+- C3 — the `sdbl_slice1_addendum_braces.rs` acceptance suite (14 tests),
+  this attestation's flip to complete, and the master-document
+  Slice 1-addendum section.
+- Close-out: a single trailing commit strikes item 5 from the exit
+  criteria in `sdbl-provenance-2026-07-audit.md`, closing the lexer side
+  of that checklist, and pins the C3 SHA explicitly in the trail above.
+  The exit-criteria edit is deliberately last: that document's
+  § Finding 2 is under read-quarantine for clean-room authors, and
+  touching the file surfaces its contents. The Anti-Hilbert disclosure:
+  this trailing commit's own SHA is NOT named in this enumeration — it
+  cannot be, by construction.
 
 ## Licensing note
 
