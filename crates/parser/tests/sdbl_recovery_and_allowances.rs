@@ -809,11 +809,47 @@ fn a_clause_keyword_after_a_dot_is_a_property_name() {
 }
 
 #[test]
+fn a_line_break_ends_the_reach_of_a_dot() {
+    // `Т.\nИЗ` is a name and then a clause, which is how the expression
+    // layer reads it: a space after a dot keeps the qualified name together,
+    // a newline does not.
+    let broken = parse_sdbl("ВЫБРАТЬ Т.\nИЗ ИЗ Т");
+    assert!(broken.has_errors(), "the grammar itself breaks the name at a newline");
+
+    let input = "SELECT A; ) T.\nFROM Products";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert_eq!(
+        parse.syntax_node().descendants().filter(|n| n.kind() == SyntaxKind::SDBL_QUERY).count(),
+        2,
+        "the incomplete query after the line break still gets its node",
+    );
+}
+
+#[test]
+fn a_dropped_table_name_is_not_the_next_query() {
+    // Keywords reach the parser as identifiers, so `УНИЧТОЖИТЬ ВЫБРАТЬ …`
+    // would otherwise name a table `ВЫБРАТЬ` and swallow the query.
+    let input = "DROP SELECT A FROM T";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    let root = parse.syntax_node();
+    assert_eq!(root.children().filter(|n| n.kind() == SyntaxKind::SDBL_DROP_QUERY).count(), 1);
+    assert_eq!(root.children().filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY).count(), 1);
+    assert!(parse.errors().iter().any(|e| e.message().contains("разделител")));
+
+    // A real name still works.
+    accepted("УНИЧТОЖИТЬ ВТ");
+}
+
+#[test]
 fn a_dot_reaches_across_the_space_after_it() {
     // `Т . ИЗ` is one property access being skipped. Whitespace between the
     // dot and the name does not make the name a beginning, and the
     // expression layer reads it the same way.
-    for input in ["T . ИЗ", "T. FROM", "Т.\tИЗ", "T .\n TOTALS", "T . // c\n ИЗ"] {
+    // A line break is where the reach ends, so those inputs belong to the
+    // opposite test below.
+    for input in ["T . ИЗ", "T. FROM", "Т.\tИЗ"] {
         let parse = parse_sdbl(input);
         assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
         assert_eq!(

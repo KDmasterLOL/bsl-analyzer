@@ -1578,7 +1578,7 @@ well, since the reasoning is the same there.
 Commit trail: C0a `18b5bb70`, C0b `27eb6e92`, C1 `80350945`,
 C2 `da3eeaa0`, C2b `01d9cd6d`, C3 `7aaf669c`, C4 `3aebeb9b`,
 C5 `7a7fb54d`, C6 `f8c9d9e4`, C7 `efea2e7e`, C8 `76f4e5ad`, C9 `77dee744`,
-C10 `b23695ff`, C11 `0bcbdf4a`, C12 `09ceb39e`, C13 `9cf16871`, C14 `2e358746`, C15 `f0dbf5c3`, C16 the invariant properties. Two earlier commits landed
+C10 `b23695ff`, C11 `0bcbdf4a`, C12 `09ceb39e`, C13 `9cf16871`, C14 `2e358746`, C15 `f0dbf5c3`, C16 `ecb73b45`, C17 the closing audit's fixes. Two earlier commits landed
 under this slice's name in April 2026 without an attestation and are
 covered by it now: `9d418084` and `88439afa`, both on the recovery
 helpers' clause-keyword stop.

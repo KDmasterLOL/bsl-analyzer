@@ -747,6 +747,35 @@ keyword after any separator, not only at the beginning.
 
 With the arithmetic right, nothing else broke.
 
+### What auditing the files, rather than the diff, found
+
+The last twelve rounds read diffs. The seams between one round's fix and
+the next were never read as a whole, and the diff of the finished slice no
+longer fits what the tool can hand a lens — so the close was done as an
+audit of the two files' state instead.
+
+It found the dot rule over-corrected. A day earlier the reach of a dot had
+been extended across trivia, on the reasoning that `Т . ИЗ` is one property
+access; the grammar agrees about a space and disagrees about a line break —
+`ВЫБРАТЬ Т.\nИЗ ИЗ Т` is an error to the expression layer and
+`ВЫБРАТЬ Т. ИЗ ИЗ Т` is not. Matching trivia wholesale had matched half a
+rule. A newline now ends the reach; horizontal space does not.
+
+It also found `УНИЧТОЖИТЬ` taking the next query's keyword as the name of
+the table to drop. Every keyword arrives as an identifier, so a bare kind
+check accepts `ВЫБРАТЬ` as a name, and the package then loses that query
+altogether. The line is older than this slice, but the invariant it breaks
+is this slice's, so it is fixed here — and fixing it needed the separator
+rule applied once more: reporting must not take the keyword either, or the
+query behind it is lost exactly as before.
+
+The third finding is real and is not this slice's. In the BSL grammar an
+unclosed call swallows `КонецПроцедуры` and then a cascade reports it
+missing. The same shape as the separator class, one layer over: the
+boundary a recovery must not cross is not only `;`. Verified against the
+slice's base commit, where it behaves identically, so it predates this
+work — and the BSL grammar has no slice at all.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -866,8 +895,11 @@ are covered by entries A6–A8 above.
   round's own bookkeeping. Parser tests 651 → 653.
 - C15 `f0dbf5c3` — the twelfth round. One finding, and one this document
   had already named as a risk without testing it. Parser tests 653 → 654.
-- C16 — properties instead of a thirteenth round, on the owner's decision.
-  Parser tests 654 → 657.
+- C16 `ecb73b45` — properties instead of a thirteenth round, on the
+  owner's decision. Parser tests 654 → 657.
+- C17 — the closing audit of the package loop and the shared parser as
+  whole files rather than as a diff. Three findings: two fixed, one
+  pre-existing and outside this slice. Parser tests 657 → 659.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

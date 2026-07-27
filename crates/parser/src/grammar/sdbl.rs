@@ -191,10 +191,12 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
             break;
         }
 
-        // Trivia does not end the reach of the dot: `Т . ИЗ` is still one
-        // property access being skipped, and the expression layer reads it
-        // the same way.
-        if !at_trivia(p) {
+        // The dot reaches across a space but not across a line break, which
+        // is how the expression layer reads a qualified name: `Т . ИЗ` is one
+        // property access, `Т.\nИЗ` is a name and then a clause.
+        if p.at(TokenKind::Newline) {
+            after_a_dot = false;
+        } else if !at_trivia(p) {
             after_a_dot = p.at(TokenKind::Dot);
         }
 
@@ -229,8 +231,15 @@ fn drop_table_query(p: &mut Parser) {
     let m = p.start();
     select::eat_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ");
     p.skip_trivia();
-    if p.at(TokenKind::Ident) {
+    // Every keyword reaches the parser as an `Ident`, so a bare kind check
+    // would take the next query's `ВЫБРАТЬ` for the name of the table being
+    // dropped — and the package would then lose that query entirely.
+    if p.at(TokenKind::Ident) && !at_query_start(p) {
         p.bump();
+    } else if at_query_start(p) {
+        // The next query's keyword is a boundary, like a separator: report
+        // without taking it, or the package loses the query behind it.
+        p.error_custom_no_bump("ожидалось имя таблицы после 'УНИЧТОЖИТЬ' / 'DROP'");
     } else {
         p.error_custom("ожидалось имя таблицы после 'УНИЧТОЖИТЬ' / 'DROP'");
     }
