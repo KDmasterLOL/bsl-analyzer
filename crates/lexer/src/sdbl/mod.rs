@@ -10,6 +10,8 @@
 //!
 //! - Slice 3b — metadata-object table vocabulary and the `Error`
 //!   fallback: `docs/legal/sdbl-clean-room-slice3b.md`.
+//! - Slice 4 — query-function vocabulary:
+//!   `docs/legal/sdbl-clean-room-slice4.md`.
 //!
 //! The lexer core, the structural keyword vocabulary, the clause-keyword
 //! leftovers and the primitive-type vocabulary are attested by
@@ -299,10 +301,29 @@ pub enum SdblTokenKind {
     PeriodHalfYear,
 
     // ===================================================================
-    // LEGACY (Slice 4 pending — query-function vocabulary)
+    // CLEAN-ROOM Slice 4 — query-function vocabulary
     //
-    // Aggregate, date, string, numeric and type/presentation functions.
-    // Not yet re-derived from official 1C sources.
+    // The functions of the query language: aggregate, date, string,
+    // mathematical, and the type/presentation group. Every spelling
+    // below comes from the 1C:Enterprise 8.3.27 syntax assistant book
+    // «Синтаксис текста запросов» — from its article «Функции языка
+    // запросов», which is the complete grouped index of query
+    // functions, from its article «Двуязычное представление ключевых
+    // слов», which is the Russian/English correspondence table, or
+    // from the bilingual headline of the function's own article.
+    // Case-insensitivity is documented — «Регистр букв (строчные или
+    // заглавные) при написании не имеет значения» (Developer's
+    // Reference Глава 8 §8.4.5) — and is what the `(?i)` flag
+    // expresses.
+    //
+    // Three variants named `Fn*` are not functions in the source: the
+    // date literal keyword `ДАТАВРЕМЯ`, the selection-list keyword
+    // `ПУСТАЯТАБЛИЦА`, and the predefined-data selector
+    // `ПустаяСсылка`. Their spellings are canonical; only the family
+    // label is wrong, and renaming them would be a downstream-visible
+    // change with no provenance value.
+    //
+    // Attestation: `docs/legal/sdbl-clean-room-slice4.md`.
     // ===================================================================
     #[regex(r"(?i)сумма|(?i)sum")]
     FnSum,
