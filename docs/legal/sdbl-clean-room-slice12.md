@@ -715,6 +715,38 @@ followed a dot. `T.ИЗ` is one fragment being skipped, not a fragment and
 then a query, and treating the word after the dot as a beginning minted a
 query node where no query exists.
 
+### Where the rounds stopped, and what replaced them
+
+Twelve rounds ran. The first four cleared the surface the slice was for.
+The eight after them found, almost without exception, defects created by
+the round before — a spiral in which each repair was one level shallower
+than the cause, and the package loop was rewritten six times by accretion.
+Rounds that keep finding real defects are not evidence of a healthy
+process when the defects are one's own from an hour earlier.
+
+So the thirteenth round was replaced with something that suits a state
+machine grown that way better than another reader would: the invariants,
+checked by generating inputs instead of naming them. Fragments of real
+queries, of broken ones and of noise, combined at random from fixed seeds;
+every prefix of three full queries, which is what an editor shows a parser
+on each keystroke; and one malformed package of 370 kB.
+
+Four properties, on every input: the tree holds everything the lexer
+handed over; every reported range lies inside the input and between
+characters rather than through one; no more query nodes exist than the
+text could justify; and no member is complained about more than once.
+Parsing twice must also agree.
+
+The properties found three breaches on the first run, all of them the
+same: the lexer drops bytes on a run of quotes. That is its defect, not
+the parser's — the coverage property is therefore stated against what the
+lexer handed over rather than against the input, and the lexer defect is
+tracked on its own. Two further breaches were mistakes in the properties'
+own arithmetic, not in the parser: a member may be started by a clause
+keyword after any separator, not only at the beginning.
+
+With the arithmetic right, nothing else broke.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -832,8 +864,10 @@ are covered by entries A6–A8 above.
   fix. One lens found nothing. Parser tests 650 → 651.
 - C14 `2e358746` — the eleventh round. Four findings, all in the tenth
   round's own bookkeeping. Parser tests 651 → 653.
-- C15 — the twelfth round. One finding, and one this document had already
-  named as a risk without testing it. Parser tests 653 → 654.
+- C15 `f0dbf5c3` — the twelfth round. One finding, and one this document
+  had already named as a risk without testing it. Parser tests 653 → 654.
+- C16 — properties instead of a thirteenth round, on the owner's decision.
+  Parser tests 654 → 657.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert
