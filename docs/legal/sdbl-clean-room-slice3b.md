@@ -529,11 +529,50 @@ spelling. Its C0b corpus entry feeds the lexer a byte that no rule
 matches, which pins the current fallback behaviour before C2 documents
 it.
 
+### C0b outcome
+
+Eight thematic entries landed, numbered 074–081, closing all nineteen
+blind spots:
+
+- **074** register roots russian — `РегистрСведений`,
+  `РегистрНакопления`, `РегистрБухгалтерии`, `РегистрРасчета`.
+- **075** chart roots russian — `ПланСчетов`, `ПланВидовРасчета`,
+  `ПланВидовХарактеристик`.
+- **076** object roots russian — `БизнесПроцесс`, `Задача`,
+  `Константа`, `Последовательность`.
+- **077** document journal bilingual — `ЖурналДокументов`,
+  `DocumentJournal`.
+- **078** exchange plan bilingual — `ПланОбмена`, `ExchangePlan`.
+- **079** filter criterion bilingual — `КритерийОтбора`,
+  `FilterCriterion`.
+- **080** constants aggregate bilingual — `Константы`, `Constants`,
+  each in a source position, so the entry also contrasts the aggregate
+  root against `Константа` in entry 076.
+- **081** unmatched byte error fallback — a byte no rule matches, in
+  the middle of an otherwise well-formed query.
+
+The regenerated snapshot confirms both halves of the C0a audit:
+
+- All eleven previously-unpinned Russian spellings tokenise to their
+  `Mdo*` variants, so the preserved regexes accept the Russian side of
+  the vocabulary and the audit's spelling conclusion holds at the byte
+  level, not only on paper.
+- All eight spellings of the four new roots tokenise to `Ident`. This
+  is the pre-change behaviour the audit predicted, and it is now pinned;
+  the C2 diff on these eight lines is the record of the behaviour
+  change.
+- Entry 081 renders `Error @15 "@"`: the unmatched byte becomes its own
+  token at its own offset, and the tokens around it are unaffected. The
+  `Error` variant is therefore reachable and span-preserving, which is
+  the Tier D contract § The `Error` fallback variant describes.
+
 ## Commit trail
 
-- `<C0a>` (2026-07-27) — C0a: this attestation document authored. Sole
-  change: addition of `docs/legal/sdbl-clean-room-slice3b.md`.
-- `<C0b>` — C0b: corpus gap-fill and snapshot regeneration.
+- `3419ac6d` (2026-07-27) — C0a: this attestation document authored.
+  Sole change: addition of `docs/legal/sdbl-clean-room-slice3b.md`.
+- `<C0b>` (2026-07-27) — C0b: corpus entries 074–081 added to
+  `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`; snapshot
+  regenerated via `UPDATE_EXPECT=1`. See § C0b outcome.
 - `<C1>` — C1: banner restoration and relocation; pure refactor.
 - `<C2>` — C2: provenance docstrings, the four added variants, the
   converter arm extension, and the corpus snapshot flip.

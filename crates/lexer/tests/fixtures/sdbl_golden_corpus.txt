@@ -144,3 +144,19 @@ TOTALS SUM(X) BY OVERALL PERIODS(DAY, DATETIME(2024, 1, 1), &End)
 SELECT * FROM T WHERE X = UNDEFINED OR Y <> UNDEFINED
 ---- 073 slice3a period types english
 TOTALS SUM(X) BY PERIODS(TENDAYS, &S, &E), PERIODS(HALFYEAR, &T, &U)
+---- 074 slice3b register roots russian
+ВЫБРАТЬ 1 ИЗ РегистрСведений.Цены, РегистрНакопления.Товары, РегистрБухгалтерии.Хозрасчетный, РегистрРасчета.Начисления
+---- 075 slice3b chart roots russian
+ВЫБРАТЬ 1 ИЗ ПланСчетов.Основной, ПланВидовРасчета.Основные, ПланВидовХарактеристик.Свойства
+---- 076 slice3b object roots russian
+ВЫБРАТЬ 1 ИЗ БизнесПроцесс.Согласование, Задача.Поручение, Константа.Организация, Последовательность.Проведение
+---- 077 slice3b document journal bilingual
+ЖурналДокументов.Продажи DocumentJournal.Sales
+---- 078 slice3b exchange plan bilingual
+ПланОбмена.Филиалы ExchangePlan.Branches
+---- 079 slice3b filter criterion bilingual
+КритерийОтбора.Связанные FilterCriterion.Related
+---- 080 slice3b constants aggregate bilingual
+ВЫБРАТЬ 1 ИЗ Константы; SELECT 1 FROM Constants
+---- 081 slice3b unmatched byte error fallback
+ВЫБРАТЬ @ ИЗ Т
