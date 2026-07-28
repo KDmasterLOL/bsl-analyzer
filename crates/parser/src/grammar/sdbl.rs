@@ -263,6 +263,32 @@ pub(super) fn at_a_list_separator(p: &Parser) -> bool {
     p.at_keyword("BY")
 }
 
+/// Whether the word here can be the next part of a table's name.
+///
+/// A field chain is open to keywords: `Объект.Итоги` names a field, and after
+/// a dot the language does not reserve them, which is why the expression layer
+/// reads a chain by asking only for a property name. A table's name is not
+/// open to them, and the dot exempts no component of it.
+///
+/// Stated once because four rules walk such a chain — the source of an `ИЗ`,
+/// the table of a `ССЫЛКА`, the type of a `ВЫРАЗИТЬ`, the target of
+/// `ДЛЯ ИЗМЕНЕНИЯ` — and each of them checked only its first component, so
+/// each let a different set of words through the rest of the name.
+///
+/// What it does NOT refuse is a word carrying a kind of its own — `В`, `И`,
+/// `НЕ`, `ИСТИНА`. A configuration may name an object `В`, and
+/// `ВЫБРАТЬ * ИЗ Справочник.В` is a query slice 10a attested as clean. Only
+/// the words that open a clause or separate its parts are closed here, and
+/// only after a dot: the first component of a name is read as an identifier,
+/// where `В` could not be told from the operator.
+pub(super) fn at_table_name_component(p: &Parser) -> bool {
+    expressions::at_property_name(p)
+        && !at_query_boundary(p)
+        && !select::is_clause_keyword(p)
+        && !at_the_alias_separator(p)
+        && !at_a_list_separator(p)
+}
+
 pub(super) fn at_a_qualifying_dot(p: &Parser) -> bool {
     p.at(TokenKind::Dot) || (at_trivia(p) && p.nth_non_trivia(0) == Some(TokenKind::Dot))
 }
@@ -280,15 +306,6 @@ pub(super) fn eat_qualifying_dot(p: &mut Parser) -> bool {
     }
 
     false
-}
-
-/// Whether the word here is the next part of a qualified name.
-///
-/// After a dot most keywords are ordinary field names — the language does
-/// not reserve them — but the two that begin a query are never one: taking
-/// either costs the package the query it starts.
-pub(super) fn at_name_component(p: &Parser) -> bool {
-    expressions::at_property_name(p) && !at_query_boundary(p)
 }
 
 /// Takes whatever the query rules refused, up to the next boundary, so that

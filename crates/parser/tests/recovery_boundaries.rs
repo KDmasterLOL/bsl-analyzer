@@ -539,6 +539,11 @@ const NAME_POSITIONS: &[(&str, usize, usize)] = &[
     ("SELECT BY FROM T", 1, 1),
     ("SELECT A FROM Catalog.BY", 1, 1),
     ("SELECT A FROM T WHERE B = BY", 1, 1),
+    // A name after the dot is still part of the table's name. Four rules walk
+    // such a chain and each checked only its first component, so each let a
+    // different set of words through the rest of it.
+    ("SELECT A REFS Catalog.BY FROM T", 1, 1),
+    ("SELECT A FROM T FOR UPDATE Catalog.BY", 1, 1),
 ];
 
 #[test]
@@ -662,6 +667,21 @@ fn a_keyword_standing_where_a_name_belongs_is_a_name() {
         "SELECT A BY FROM T",
         "SELECT A FROM T BY",
         "SELECT A FROM T TOTALS SUM(A) BY N BY",
+        // A field chain is open to keywords where a table's name is not, and
+        // closing the one must not close the other.
+        "ВЫБРАТЬ Т.Итоги ИЗ Справочник.Товары КАК Т",
+        "ВЫБРАТЬ Т.Конец ИЗ Т",
+        "ВЫБРАТЬ Т.И ИЗ Т",
+        // Attested by slice 10a: a configuration may name an object `В`, so a
+        // word carrying a kind of its own is a name after a dot. Refusing it
+        // here broke three of that slice's tests.
+        "ВЫБРАТЬ * ИЗ Справочник.В",
+        "ВЫБРАТЬ * ИЗ Т КАК Т ДЛЯ ИЗМЕНЕНИЯ Т.В",
+        "ВЫБРАТЬ * ИЗ Т КАК Т ГДЕ Т.Поле ССЫЛКА Справочник.В",
+        "ВЫБРАТЬ А ССЫЛКА Справочник.Товары ИЗ Т",
+        "ВЫБРАТЬ А ИЗ РегистрСведений.Курсы.СрезПоследних",
+        "SELECT CAST(A AS Catalog.Goods) FROM T",
+        "SELECT A FROM T FOR UPDATE Catalog.Goods",
     ] {
         let parse = parser::parse_sdbl(input);
         assert!(!parse.has_errors(), "`{input}`: {:#?}", parse.errors());

@@ -523,28 +523,7 @@ fn table_ref(p: &mut Parser) {
         p.check_iteration_limit();
         p.skip_trivia();
 
-        if !super::expressions::at_property_name(p) {
-            let err = p.start();
-            let found = p.current();
-            p.emit_error_at_marker(
-                err,
-                ParseError::Expected {
-                    expected: smallvec![TokenKind::Ident],
-                    found,
-                    recovery: RecoveryKind::RecoverySpan,
-                },
-            );
-            break;
-        }
-
-        // A component after a dot is still part of a table's name, so it is
-        // closed to the same words the first component is. The dot does not
-        // exempt them: `Справочник.ПО` is no more a table than `ПО` is.
-        if is_clause_keyword(p)
-            || super::at_query_boundary(p)
-            || super::at_the_alias_separator(p)
-            || super::at_a_list_separator(p)
-        {
+        if !super::at_table_name_component(p) {
             let err = p.start();
             p.emit_error_at_marker(
                 err,
@@ -981,7 +960,7 @@ fn for_update_clause(p: &mut Parser) {
         while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
             p.skip_trivia();
-            if super::at_name_component(p) {
+            if super::at_table_name_component(p) {
                 p.bump();
             } else {
                 break;

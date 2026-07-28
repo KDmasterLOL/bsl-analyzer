@@ -660,12 +660,20 @@ fn predicate_expr(p: &mut Parser) {
             while super::eat_qualifying_dot(p) {
                 p.check_iteration_limit();
                 p.skip_trivia();
-                if super::at_name_component(p) {
-                    p.bump();
-                    p.skip_trivia();
-                } else {
+                if !super::at_table_name_component(p) {
+                    // A word stands here and cannot be part of the name: say
+                    // so, or it is taken in silence. Nothing standing here at
+                    // all is the unfinished path of a query built by
+                    // concatenation, which `QueryParseError` already reports —
+                    // and reporting it twice, from a layer that does not know
+                    // it is a fragment, is worse than not reporting it here.
+                    if at_property_name(p) {
+                        report_missing_name(p, "ожидалось имя объекта после '.'");
+                    }
                     break;
                 }
+                p.bump();
+                p.skip_trivia();
             }
         } else {
             // The source is explicit that what stands here is a table:
@@ -710,22 +718,28 @@ fn parse_cast_type(p: &mut Parser) {
             p.check_iteration_limit();
             p.skip_trivia();
 
-            if super::at_name_component(p) {
-                p.bump();
-                p.skip_trivia();
-            } else {
-                let err = p.start();
-                let found = p.current();
-                p.emit_error_at_marker(
-                    err,
-                    ParseError::Expected {
-                        expected: smallvec![TokenKind::Ident],
-                        found,
-                        recovery: RecoveryKind::RecoverySpan,
-                    },
-                );
+            if !super::at_table_name_component(p) {
+                // Saying «expected an identifier» of a word that IS one reads
+                // as nonsense; what is wrong with it is that it is a keyword.
+                if at_property_name(p) {
+                    report_missing_name(p, "ожидалось имя объекта после '.'");
+                } else {
+                    let err = p.start();
+                    let found = p.current();
+                    p.emit_error_at_marker(
+                        err,
+                        ParseError::Expected {
+                            expected: smallvec![TokenKind::Ident],
+                            found,
+                            recovery: RecoveryKind::RecoverySpan,
+                        },
+                    );
+                }
                 break;
             }
+
+            p.bump();
+            p.skip_trivia();
         }
 
         if p.at(TokenKind::LParen) {
