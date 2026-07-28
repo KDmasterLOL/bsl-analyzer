@@ -201,7 +201,22 @@ pub(super) fn parse_delimited_list<F>(
 ) where
     F: FnMut(&mut Parser),
 {
-    parse_item(p);
+    // A list starting on its delimiter is missing its first item, not
+    // holding one that happens to be a comma. Handing the delimiter to the
+    // item rule costs the list the item that follows it, which the rule
+    // reads as that one's alias.
+    if p.at(delimiter) {
+        let err = p.start();
+        p.emit_error_at_marker(
+            err,
+            ParseError::Custom {
+                message: "пропущен элемент списка",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+    } else {
+        parse_item(p);
+    }
 
     loop {
         p.skip_trivia();
@@ -595,12 +610,10 @@ fn predicate_expr(p: &mut Parser) {
             p.bump();
             p.skip_trivia();
 
-            while p.eat(TokenKind::Dot) {
+            while super::eat_qualifying_dot(p) {
                 p.check_iteration_limit();
                 p.skip_trivia();
-                // A word that begins a query is not the next part of a type
-                // name, however a dot before it reads.
-                if at_property_name(p) && !super::at_query_boundary(p) {
+                if super::at_name_component(p) {
                     p.bump();
                     p.skip_trivia();
                 } else {
@@ -641,12 +654,11 @@ fn parse_cast_type(p: &mut Parser) {
         p.bump();
         p.skip_trivia();
 
-        while p.at(TokenKind::Dot) {
+        while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
-            p.bump();
             p.skip_trivia();
 
-            if at_property_name(p) {
+            if super::at_name_component(p) {
                 p.bump();
                 p.skip_trivia();
             } else {
@@ -696,9 +708,8 @@ fn column_or_function(p: &mut Parser) {
     p.bump();
     p.skip_trivia();
 
-    if p.at(TokenKind::Dot) {
-        while p.at(TokenKind::Dot) {
-            p.bump();
+    if p.at(TokenKind::Dot) || super::at_a_qualifying_dot(p) {
+        while super::eat_qualifying_dot(p) {
             let crossed_newline = p.skip_trivia_crossing_newline();
 
             if p.at(TokenKind::LParen) {
@@ -836,9 +847,8 @@ fn column_or_function(p: &mut Parser) {
         }
 
         p.skip_trivia();
-        while p.at(TokenKind::Dot) {
+        while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
-            p.bump();
             let crossed_newline = p.skip_trivia_crossing_newline();
 
             if at_property_name(p) {

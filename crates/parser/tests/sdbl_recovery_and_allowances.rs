@@ -1018,6 +1018,87 @@ fn an_explicit_alias_may_spell_anything() {
     accepted("ВЫБРАТЬ А КАК УНИЧТОЖИТЬ ИЗ Т");
     accepted("ВЫБРАТЬ А ИЗ Т КАК УНИЧТОЖИТЬ");
     accepted("ВЫБРАТЬ А КАК Итоги ИЗ Т");
+    accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н КАК УНИЧТОЖИТЬ");
+}
+
+#[test]
+fn every_rule_reading_a_qualified_name_reads_it_the_same_way() {
+    // Seven rules walk a dotted chain, and each one that spelled the walk
+    // out for itself got some of it wrong — the space before the dot, the
+    // space after it, or the word beyond it. Naming the sites one at a time
+    // left one more every round, so they share the step now.
+    for input in [
+        "ВЫБРАТЬ А ИЗ Справочник . Товары",
+        "ВЫБРАТЬ Т . Поле ИЗ Справочник.Товары КАК Т",
+        "ВЫБРАТЬ ВЫРАЗИТЬ(А КАК Справочник . Товары) ИЗ Т",
+        "ВЫБРАТЬ А ИЗ Т ГДЕ А ССЫЛКА Справочник . Товары",
+        "ВЫБРАТЬ А ИЗ Т ДЛЯ ИЗМЕНЕНИЯ Справочник . Контрагенты",
+    ] {
+        accepted(input);
+    }
+
+    // And none of them may walk into the next query.
+    for input in
+        ["ВЫБРАТЬ А ИЗ Т.\nУНИЧТОЖИТЬ У", "ВЫБРАТЬ А ИЗ Т ДЛЯ ИЗМЕНЕНИЯ Справочник.УНИЧТОЖИТЬ У"]
+    {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert_eq!(
+            parse
+                .syntax_node()
+                .children()
+                .filter(|n| matches!(
+                    n.kind(),
+                    SyntaxKind::SDBL_SELECT_QUERY | SyntaxKind::SDBL_DROP_QUERY
+                ))
+                .count(),
+            2,
+            "`{input}` holds two queries: {:#?}",
+            parse.errors(),
+        );
+    }
+}
+
+#[test]
+fn a_date_literal_is_a_literal_everywhere_it_may_stand() {
+    // The lexer has taken `'ГГГГММДД[ЧЧММСС]'` as one token since the token
+    // set was re-derived. Teaching one rule about it and not the rule beside
+    // it leaves the same date valid in one position and wrong in the next.
+    accepted("ВЫБРАТЬ '20240101'");
+    accepted("ВЫБРАТЬ А ИЗ Т ГДЕ А > '20240101235959'");
+    accepted("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ, '20240101')");
+}
+
+#[test]
+fn an_extension_region_is_opaque_to_every_skip() {
+    // `{…}` is text for the platform, not for this query. The parser's own
+    // group count already treats it so; a skip that reads the words inside
+    // one ends where no boundary is, and takes the rest of the list with it.
+    for input in [
+        "ВЫБРАТЬ А # {ВЫБРАТЬ Я}, Б ИЗ Т",
+        "ВЫБРАТЬ Ф(А { ( }, Б), Ц ИЗ Т",
+        "ВЫБРАТЬ * ИЗ Т.В(А Х {ВЫБРАТЬ Я}, Б)",
+    ] {
+        let parse = parse_sdbl(input);
+        assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+        assert!(
+            parse.syntax_node().descendants().any(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE),
+            "`{input}` keeps its FROM: {:#?}",
+            parse.errors(),
+        );
+    }
+}
+
+#[test]
+fn a_list_starting_on_its_delimiter_keeps_what_follows() {
+    // A leading comma means the first item is missing, not that the comma is
+    // the first item. Handing it to the item rule costs the list the field
+    // after it, which that rule then reads as the comma's alias.
+    let input = "ВЫБРАТЬ , А ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert!(parse.syntax_node().descendants().any(|n| n.kind() == SyntaxKind::SDBL_COLUMN_REF));
+    assert!(parse.syntax_node().descendants().any(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE));
 }
 
 #[test]

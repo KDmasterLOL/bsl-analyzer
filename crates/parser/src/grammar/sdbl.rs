@@ -194,6 +194,41 @@ pub(super) fn at_name(p: &Parser) -> bool {
     p.at(TokenKind::Ident) && !at_query_start(p)
 }
 
+/// Steps over the dot joining two parts of a qualified name, wherever the
+/// whitespace around it falls.
+///
+/// Seven rules read such a chain, and each one that spelled the step out
+/// for itself got some of it wrong: the space before the dot, the space
+/// after it, or the word beyond it. They ask this instead, and the next
+/// rule to read a chain inherits the answer rather than re-deriving it.
+pub(super) fn at_a_qualifying_dot(p: &Parser) -> bool {
+    p.at(TokenKind::Dot) || (at_trivia(p) && p.nth_non_trivia(0) == Some(TokenKind::Dot))
+}
+
+pub(super) fn eat_qualifying_dot(p: &mut Parser) -> bool {
+    if p.at(TokenKind::Dot) {
+        p.bump();
+        return true;
+    }
+
+    if at_trivia(p) && p.nth_non_trivia(0) == Some(TokenKind::Dot) {
+        p.skip_trivia();
+        p.bump();
+        return true;
+    }
+
+    false
+}
+
+/// Whether the word here is the next part of a qualified name.
+///
+/// After a dot most keywords are ordinary field names — the language does
+/// not reserve them — but the two that begin a query are never one: taking
+/// either costs the package the query it starts.
+pub(super) fn at_name_component(p: &Parser) -> bool {
+    expressions::at_property_name(p) && !at_query_boundary(p)
+}
+
 /// Takes whatever the query rules refused, up to the next boundary, so that
 /// the tree's text is the source text. Returns whether anything was taken.
 ///

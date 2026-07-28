@@ -919,10 +919,10 @@ fn for_update_clause(p: &mut Parser) {
 
     if super::at_name(p) && !is_clause_keyword(p) {
         p.bump();
-        while p.at(TokenKind::Dot) {
+        while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
-            p.bump();
-            if super::expressions::at_property_name(p) {
+            p.skip_trivia();
+            if super::at_name_component(p) {
                 p.bump();
             } else {
                 break;
@@ -1051,6 +1051,7 @@ fn at_period_boundary(p: &Parser) -> bool {
     // A parameter arrives as one token, name included, so `Ampersand` here
     // means a whole `&Имя` rather than the sigil alone.
     p.at(TokenKind::Ampersand)
+        || p.at(TokenKind::Date)
         || (at_sdbl_keyword(p, "DATETIME", "ДАТАВРЕМЯ")
             && p.nth_non_trivia(0) == Some(TokenKind::LParen))
 }
@@ -1180,7 +1181,10 @@ fn totals_group_alias(p: &mut Parser) {
         eat_sdbl_keyword(p, "AS", "КАК");
         p.skip_trivia();
 
-        if super::at_name(p) && !is_body_clause_keyword(p) {
+        // After an explicit `КАК` nothing but a name can stand, so the
+        // boundary's guess from the word alone does not apply here — the
+        // same as for a field alias and a source alias.
+        if p.at(TokenKind::Ident) && !is_body_clause_keyword(p) {
             p.bump();
             p.skip_trivia();
         } else {
@@ -1255,10 +1259,36 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
     let recovery = p.start();
     let mut consumed_any = false;
     let mut paren_depth: u32 = 0;
+    let mut brace_depth: u32 = 0;
     let mut nested_query_starts: Vec<u32> = Vec::new();
 
     loop {
         p.check_iteration_limit();
+
+        // An extension region is opaque text: the words in it are not this
+        // query's, and neither are its parens.
+        if p.at(TokenKind::LBrace) {
+            brace_depth += 1;
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if p.at(TokenKind::RBrace) {
+            brace_depth = brace_depth.saturating_sub(1);
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if brace_depth > 0 {
+            if p.at_end() || p.at(TokenKind::Semicolon) {
+                break;
+            }
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
 
         if p.at(TokenKind::LParen) {
             paren_depth += 1;

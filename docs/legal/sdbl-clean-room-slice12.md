@@ -1046,6 +1046,37 @@ parse. It predates this slice, the existing guard counts iterations and
 cannot see depth, and a limit is owed to the BSL grammar in the same
 motion.
 
+### One more instance, three rounds running
+
+The round after that one found six things, and five were the same shape:
+a class fixed the round before, with one member left out. The date literal
+was taught to the expression layer but not to the rule validating a period
+boundary, so the same date parsed in one position and was rejected in the
+next. Two of the three alias rules were given `expect_name`; the third was
+not. Two of the three recovery skips were taught that `{…}` is opaque; the
+third was not. And of the dot chains, `ДЛЯ ИЗМЕНЕНИЯ` had been missed
+twice — it read neither the space around its dots nor the boundary beyond
+them.
+
+Three rounds in a row of *my own fix, minus one member* is the point at
+which listing the places is the wrong move, whatever care goes into the
+list. What made it the wrong move is visible in the shape of the code:
+seven rules walked a dotted chain and each spelled the walk out for
+itself, so each had its own chance to get the space before the dot, the
+space after it, or the word beyond it wrong — and collectively they did,
+in every combination.
+
+So the chains no longer spell it out. Two helpers say what a qualifying
+dot is and what may follow one, all seven ask, and a rule written later
+inherits the answer instead of re-deriving it. The remaining three
+one-offs are closed at their sites, because there is no shape to share:
+one date predicate, one alias rule, one skip.
+
+One finding of the round was not mine and not in that class: a list
+beginning on its delimiter handed the delimiter to the rule that parses an
+item, which read the field after it as that comma's alias. A leading comma
+means the first item is missing.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -1190,6 +1221,10 @@ are covered by entries A6–A8 above.
   confirmed: seven fixed, one tracked. One was a regression of the round
   before, and one of that round's own tests had pinned it. Parser tests
   668 → 669.
+- C25 — the audit over the same four files, unwidened. Six findings, all
+  confirmed: five were a class fixed the round before with one member left
+  out, the third such round in a row, so the dot chains stopped spelling
+  themselves out. Parser tests 669 → 673.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert
