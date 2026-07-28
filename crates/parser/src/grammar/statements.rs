@@ -112,6 +112,23 @@ fn at_end_do(p: &Parser) -> bool {
     p.at(TokenKind::KwEndDo)
 }
 
+// A header waits for the word that ends it as surely as the block waits for
+// the word that closes it, and a condition never written leaves the parser
+// standing on that word. `Если Тогда` used to consume the `Тогда` in front of
+// it and then report it missing.
+
+fn at_then(p: &Parser) -> bool {
+    p.at(TokenKind::KwThen)
+}
+
+fn at_do(p: &Parser) -> bool {
+    p.at(TokenKind::KwDo)
+}
+
+fn at_to_or_do(p: &Parser) -> bool {
+    matches!(p.current(), Some(TokenKind::KwTo | TokenKind::KwDo))
+}
+
 fn at_if_closer(p: &Parser) -> bool {
     matches!(p.current(), Some(TokenKind::KwElsIf | TokenKind::KwElse | TokenKind::KwEndIf))
 }
@@ -126,7 +143,7 @@ fn if_stmt(p: &mut Parser) {
 
     p.within_boundary(at_if_closer, |p| {
         p.skip_trivia();
-        expressions::expression(p);
+        p.within_boundary(at_then, expressions::expression);
 
         p.skip_trivia();
         p.expect(TokenKind::KwThen);
@@ -139,7 +156,7 @@ fn if_stmt(p: &mut Parser) {
             let em = p.start();
             p.bump();
             p.skip_trivia();
-            expressions::expression(p);
+            p.within_boundary(at_then, expressions::expression);
             p.skip_trivia();
             p.expect(TokenKind::KwThen);
             p.skip_trivia();
@@ -171,7 +188,7 @@ fn while_stmt(p: &mut Parser) {
 
     p.within_boundary(at_end_do, |p| {
         p.skip_trivia();
-        expressions::expression(p);
+        p.within_boundary(at_do, expressions::expression);
 
         p.skip_trivia();
         p.expect(TokenKind::KwDo);
@@ -208,7 +225,7 @@ fn for_stmt(p: &mut Parser) {
             p.expect(TokenKind::KwIn);
 
             p.skip_trivia();
-            expressions::expression(p);
+            p.within_boundary(at_do, expressions::expression);
 
             p.skip_trivia();
             p.expect(TokenKind::KwDo);
@@ -234,13 +251,13 @@ fn for_stmt(p: &mut Parser) {
             p.expect(TokenKind::Eq);
 
             p.skip_trivia();
-            expressions::expression(p);
+            p.within_boundary(at_to_or_do, expressions::expression);
 
             p.skip_trivia();
             p.expect(TokenKind::KwTo);
 
             p.skip_trivia();
-            expressions::expression(p);
+            p.within_boundary(at_do, expressions::expression);
 
             p.skip_trivia();
             p.expect(TokenKind::KwDo);

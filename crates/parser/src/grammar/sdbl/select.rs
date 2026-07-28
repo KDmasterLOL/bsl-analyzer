@@ -165,8 +165,13 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
 
 pub fn select_query(p: &mut Parser) {
     let m = p.start();
-    subquery(p);
-    select_tail_clauses(p);
+    // The clauses after the body — `АВТОУПОРЯДОЧИВАНИЕ`, `УПОРЯДОЧИТЬ`,
+    // `ИТОГИ` — may come in any order and are parsed here rather than in the
+    // body, so stating the boundary in the body alone leaves them outside it.
+    p.within_boundary(is_clause_keyword, |p| {
+        subquery(p);
+        select_tail_clauses(p);
+    });
     m.complete(p, NodeKind::SdblSelectQuery);
 }
 

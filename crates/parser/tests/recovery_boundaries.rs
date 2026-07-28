@@ -164,6 +164,29 @@ fn a_region_crossing_a_block_does_not_hang() {
     closer_survives(input, "КонецПроцедуры");
 }
 
+#[test]
+fn a_header_leaves_the_word_that_ends_it() {
+    // A header waits for the word ending it as surely as a block waits for
+    // the word closing it, and a condition never written leaves the parser
+    // standing on that word. Consuming it produced a second, false report
+    // that the word was missing.
+    for (input, separator) in [
+        ("Процедура П()\nЕсли Тогда\nКонецЕсли;\nКонецПроцедуры", "Тогда"),
+        ("Процедура П()\nЕсли А Тогда\nИначеЕсли Тогда\nКонецЕсли;\nКонецПроцедуры", "Тогда"),
+        ("Процедура П()\nПока Цикл\nКонецЦикла;\nКонецПроцедуры", "Цикл"),
+        ("Процедура П()\nДля Каждого Э Из Цикл\nКонецЦикла;\nКонецПроцедуры", "Цикл"),
+        ("Процедура П()\nДля А = По 10 Цикл\nКонецЦикла;\nКонецПроцедуры", "По"),
+    ] {
+        assert!(covers(input, true), "`{input}`");
+        assert!(
+            !swallowed(input, true, separator),
+            "`{separator}` was consumed: {:?}",
+            error_node_texts(input, true)
+        );
+        assert_eq!(messages(input, true).len(), 1, "`{input}`: {:?}", messages(input, true));
+    }
+}
+
 // --- SDBL: a clause keyword taken by a recovery inside the clause ---------
 
 fn clause_count(input: &str, kind: SyntaxKind) -> usize {
@@ -204,6 +227,25 @@ fn an_operand_never_written_still_costs_the_clause_after_it() {
     {
         assert!(covers(input, false), "`{input}`");
         assert_eq!(clause_count(input, SyntaxKind::SDBL_FROM_CLAUSE), 0, "`{input}`");
+    }
+}
+
+#[test]
+fn the_clauses_after_the_body_are_inside_the_boundary_too() {
+    // `АВТОУПОРЯДОЧИВАНИЕ`, `УПОРЯДОЧИТЬ` and `ИТОГИ` may come in any order
+    // and are parsed after the body rather than in it, so a boundary stated
+    // only for the body leaves them outside it.
+    let cases: &[(&str, SyntaxKind)] = &[
+        ("ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО () АВТОУПОРЯДОЧИВАНИЕ", SyntaxKind::SDBL_AUTOORDER),
+        (
+            "ВЫБРАТЬ А ИЗ Т АВТОУПОРЯДОЧИВАНИЕ УПОРЯДОЧИТЬ ПО () ИТОГИ ПО А",
+            SyntaxKind::SDBL_TOTALS_BY,
+        ),
+    ];
+
+    for (input, kind) in cases {
+        assert!(covers(input, false), "`{input}`");
+        assert_eq!(clause_count(input, *kind), 1, "`{input}` keeps its {kind:?}");
     }
 }
 
