@@ -529,6 +529,11 @@ const NAME_POSITIONS: &[(&str, usize, usize)] = &[
     ("ВЫБРАТЬ А ИЗ Т ГДЕ Б В (ИЗ)", 3, 1),
     ("ВЫБРАТЬ СУММА(ИЗ) ИЗ Т", 3, 1),
     ("ВЫБРАТЬ ВЫРАЗИТЬ(А КАК КАК) ИЗ Т", 3, 0),
+    ("ВЫБРАТЬ А ИЗ Т ДЛЯ ИЗМЕНЕНИЯ КАК", 1, 1),
+    // `ПО` covers the Russian half of both `ON` and `BY`, so without its
+    // English form the same word was a boundary in one language and a table
+    // name in the other.
+    ("SELECT A FROM BY", 2, 1),
 ];
 
 #[test]
@@ -637,6 +642,14 @@ fn a_keyword_standing_where_a_name_belongs_is_a_name() {
         // production queries in a corpus of 3 142 814 literals hold this shape.
         "ВЫБРАТЬ А ИЗ Т ИТОГИ КОЛИЧЕСТВО(А) КАК А ПО Б",
         "УНИЧТОЖИТЬ Врем",
+        // Every English clause that spells its second word `BY`, which is a
+        // boundary and still has to be consumed by the clause that owns it.
+        "SELECT A FROM T GROUP BY A",
+        "SELECT A FROM T ORDER BY A",
+        "SELECT SUM(A) FROM T TOTALS SUM(A) BY B",
+        "SELECT A FROM T INDEX BY A",
+        "SELECT A FROM T1 LEFT JOIN T2 ON T1.A = T2.B",
+        "ВЫБРАТЬ А ИЗ Т ДЛЯ ИЗМЕНЕНИЯ Т",
     ] {
         let parse = parser::parse_sdbl(input);
         assert!(!parse.has_errors(), "`{input}`: {:#?}", parse.errors());
