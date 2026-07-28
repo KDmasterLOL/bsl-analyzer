@@ -372,21 +372,87 @@ fn the_opening_paren_never_written_does_not_cost_the_separator() {
     assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
 }
 
-#[test]
-fn a_closer_is_not_a_boundary_before_the_group_is_open() {
-    // A ternary owns its commas from the `?`, but not its paren: nothing is
-    // open for that paren to close yet. Claiming it early stranded the tail —
-    // every remaining `expect` stalled on the stray paren and the real
-    // `, 1, 2)` was parsed as loose statements, nine messages for one stray
-    // token.
-    let input = "Процедура П()\n\tА = ?), 1, 2);\nКонецПроцедуры";
-    assert!(covers(input, true), "`{input}`");
-    assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
-    assert_eq!(clause_count_bsl(input, SyntaxKind::TERNARY_EXPR), 1);
-}
-
 fn clause_count_bsl(input: &str, kind: SyntaxKind) -> usize {
     parser::parse(input).syntax_node().descendants().filter(|n| n.kind() == kind).count()
+}
+
+/// Every malformed shape a ternary can take, and what each costs.
+///
+/// The ternary is the only bracketed rule whose opening paren is an `expect`
+/// rather than a `bump`, so it is the only one that can be parsing operands
+/// with no group open. Three attempts to state that with a single predicate
+/// each fixed one column of this table and broke another: claiming the closer
+/// throughout strands the tail after a stray `)`, and never claiming it feeds
+/// the closer of a well-formed tail to recovery. So the table is here whole —
+/// a later shape cannot be handed over one at a time.
+///
+/// A ternary is committed to a group once it has taken the opening paren, or
+/// taken one of the commas nothing else writes after a `?`; the closer is its
+/// own from that point and nobody else's before it.
+const TERNARY_SHAPES: &[(&str, usize)] = &[
+    ("?(Истина, 1, 2)", 0),
+    ("?(, 1, 2)", 1),
+    ("?(],1,2)", 1),
+    ("?(Истина, , 2)", 1),
+    ("?(Истина, 1, )", 1),
+    ("?(Истина 1, 2)", 2),
+    ("?, 1, 2)", 2),
+    ("?, 1, )", 3),
+    ("?, , )", 4),
+    ("?), 1, 2)", 2),
+    // A stray closer before the real opening paren: the `(` that follows reads
+    // as a group of its own, which telling apart needs a lookahead this rule
+    // does not do.
+    ("?)(1, 2, 3)", 2),
+    // Both of these are the ternary reporting one gap once per expectation it
+    // has — no closer is consumed, the rule simply cannot advance and says so
+    // six times. That is a stalled rule, not a boundary, and it is the same in
+    // every version of this rule so far.
+    ("?)", 7),
+    ("?", 7),
+];
+
+#[test]
+fn a_closer_is_the_ternary_own_only_once_it_has_a_group() {
+    for (shape, expected) in TERNARY_SHAPES {
+        let input = format!("Процедура П()\n\tА = {shape};\nКонецПроцедуры");
+        assert!(covers(&input, true), "`{shape}`");
+        assert_eq!(clause_count_bsl(&input, SyntaxKind::TERNARY_EXPR), 1, "`{shape}`");
+        assert_eq!(
+            messages(&input, true).len(),
+            *expected,
+            "`{shape}`: {:?}",
+            messages(&input, true)
+        );
+    }
+}
+
+#[test]
+fn a_ternary_inside_a_call_leaves_the_call_its_punctuation() {
+    // Whatever the ternary makes of itself, the argument after it is still an
+    // argument: the comma separating them is the call's, not the ternary's.
+    for (shape, _) in TERNARY_SHAPES {
+        let input = format!("Процедура П()\n\tФ({shape}, 5);\nКонецПроцедуры");
+        assert!(covers(&input, true), "`{shape}`");
+
+        // A shape whose own second character is the closer hands it to the
+        // call, which is right: the call ends there and what follows is loose
+        // text, so there is no last argument left to ask about.
+        if shape.starts_with("?)") {
+            continue;
+        }
+
+        let root = parser::parse(&input).syntax_node();
+        let last_arg = root
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.text() == "5")
+            .unwrap_or_else(|| panic!("`{shape}`: the last argument is not in the tree"));
+        assert!(
+            last_arg.parent_ancestors().any(|n| n.kind() == SyntaxKind::ARG_LIST),
+            "`{shape}`: the last argument left the argument list"
+        );
+    }
 }
 
 // --- SDBL: a clause keyword taken by a recovery inside the clause ---------
