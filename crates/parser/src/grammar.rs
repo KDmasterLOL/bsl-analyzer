@@ -241,6 +241,14 @@ pub(super) fn at_closing_bracket(p: &Parser) -> bool {
     p.at(TokenKind::RBracket)
 }
 
+/// The comma a list reaches its next part with, without the closer: what a
+/// construct owns before it has opened its group. Every other bracketed rule
+/// consumes its opener with a plain `bump`, so only the ternary — whose opener
+/// is an `expect` that can fail — is ever in that state.
+pub(super) fn at_comma(p: &Parser) -> bool {
+    p.at(TokenKind::Comma)
+}
+
 /// The words a declaration begins with. An annotation is followed by one, and
 /// an error inside the annotation must not take it: the declaration is what
 /// the annotation was attached to.

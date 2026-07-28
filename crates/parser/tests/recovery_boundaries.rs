@@ -372,6 +372,23 @@ fn the_opening_paren_never_written_does_not_cost_the_separator() {
     assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
 }
 
+#[test]
+fn a_closer_is_not_a_boundary_before_the_group_is_open() {
+    // A ternary owns its commas from the `?`, but not its paren: nothing is
+    // open for that paren to close yet. Claiming it early stranded the tail —
+    // every remaining `expect` stalled on the stray paren and the real
+    // `, 1, 2)` was parsed as loose statements, nine messages for one stray
+    // token.
+    let input = "Процедура П()\n\tА = ?), 1, 2);\nКонецПроцедуры";
+    assert!(covers(input, true), "`{input}`");
+    assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
+    assert_eq!(clause_count_bsl(input, SyntaxKind::TERNARY_EXPR), 1);
+}
+
+fn clause_count_bsl(input: &str, kind: SyntaxKind) -> usize {
+    parser::parse(input).syntax_node().descendants().filter(|n| n.kind() == kind).count()
+}
+
 // --- SDBL: a clause keyword taken by a recovery inside the clause ---------
 
 fn clause_count(input: &str, kind: SyntaxKind) -> usize {

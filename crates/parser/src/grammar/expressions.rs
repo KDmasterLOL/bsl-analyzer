@@ -367,10 +367,14 @@ fn ternary_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump();
     p.skip_trivia();
-    // The separators are the ternary's from the `?` on: the first way to land
-    // on one is the opening paren never written.
-    p.within_boundary(super::at_paren_list_punctuation, |p| {
-        p.expect(TokenKind::LParen);
+    // The commas are the ternary's from the `?` on: the first way to land on
+    // one is the opening paren never written. The closing paren is not — until
+    // the group is open there is nothing here for it to close, and claiming it
+    // early strands the tail that follows.
+    let opened = p.within_boundary(super::at_comma, |p| p.expect(TokenKind::LParen));
+    let separators: fn(&Parser) -> bool =
+        if opened { super::at_paren_list_punctuation } else { super::at_comma };
+    p.within_boundary(separators, |p| {
         p.skip_trivia();
         expression(p);
         p.skip_trivia();
