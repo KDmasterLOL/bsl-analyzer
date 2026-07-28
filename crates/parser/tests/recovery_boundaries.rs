@@ -259,6 +259,62 @@ fn a_region_that_crosses_a_block_keeps_its_own_closer_only_by_luck() {
     assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
 }
 
+#[test]
+fn a_call_keeps_its_closing_paren() {
+    // The same rule as a parameter list, in the constructs that had not been
+    // given it: an argument list and a parenthesised expression.
+    for input in
+        ["Процедура П()\nФ(А = )\nКонецПроцедуры", "Процедура П()\nА = (Б = )\nКонецПроцедуры"]
+    {
+        assert!(covers(input, true), "`{input}`");
+        assert!(!swallowed(input, true, ")"), "{:?}", error_node_texts(input, true));
+    }
+}
+
+#[test]
+fn an_annotation_keeps_the_next_link_of_its_chain() {
+    // A chain may hold more than one annotation, and a folding marker may sit
+    // between them, so the next link is awaited exactly as the declaration is.
+    let input = "&Перед(1\n&НаКлиенте\nПроцедура П()\nКонецПроцедуры";
+    let parse = parser::parse(input);
+
+    assert!(covers(input, true));
+    assert!(!swallowed(input, true, "&НаКлиенте"), "{:?}", error_node_texts(input, true));
+    assert!(
+        parse.syntax_node().descendants().any(|n| n.kind() == SyntaxKind::COMPILER_DIRECTIVE),
+        "the directive survives: {:#?}",
+        parse.errors()
+    );
+}
+
+#[test]
+fn a_separator_stops_being_awaited_once_it_is_taken() {
+    // `По` is awaited until it is consumed and not after. Keeping it a
+    // boundary past its own position leaves a repeated one standing, and the
+    // expect for `Цикл` then takes the real `Цикл` instead of it.
+    let input = "Процедура П()\nДля А = 1 По По Цикл\nКонецЦикла;\nКонецПроцедуры";
+
+    assert!(covers(input, true));
+    assert!(!swallowed(input, true, "Цикл"), "{:?}", error_node_texts(input, true));
+    assert_eq!(messages(input, true).len(), 1, "{:?}", messages(input, true));
+}
+
+#[test]
+fn a_word_inside_a_group_is_not_the_separator_the_header_awaits() {
+    // Pinned as it behaves, and as it behaved before any of this. A boundary
+    // holds at every depth inside its scope, so a `Тогда` inside parens counts
+    // as the one the header is waiting for, and the real one after the group
+    // is then taken as an error. Limiting a boundary to the depth it was
+    // declared at would fix these two and break the case the whole mechanism
+    // exists for — `КонецПроцедуры` reached with a paren still open.
+    for input in
+        ["#Если (Тогда) Тогда\n#КонецЕсли", "&Перед(Процедура)\nПроцедура П()\nКонецПроцедуры"]
+    {
+        assert!(covers(input, true), "`{input}`");
+        assert_eq!(messages(input, true).len(), 4, "`{input}`: {:?}", messages(input, true));
+    }
+}
+
 // --- SDBL: a clause keyword taken by a recovery inside the clause ---------
 
 fn clause_count(input: &str, kind: SyntaxKind) -> usize {

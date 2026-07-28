@@ -255,13 +255,19 @@ fn for_stmt(p: &mut Parser) {
             // The scope has to outlive the `По` it protects: an expect run
             // outside it would take the `Цикл` the header is still waiting
             // for, and then report that same `Цикл` missing.
+            // `По` stops being awaited the moment it is consumed, so the
+            // second bound is parsed under `Цикл` alone. Keeping `По` a
+            // boundary past its own position leaves a repeated one standing,
+            // and the expect for `Цикл` then takes the real `Цикл` instead.
             p.within_boundary(at_to_or_do, |p| {
                 p.skip_trivia();
                 expressions::expression(p);
 
                 p.skip_trivia();
                 p.expect(TokenKind::KwTo);
+            });
 
+            p.within_boundary(at_do, |p| {
                 p.skip_trivia();
                 expressions::expression(p);
             });

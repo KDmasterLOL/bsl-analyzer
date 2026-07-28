@@ -258,8 +258,10 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         Some(TokenKind::LParen) => {
             let m = p.start();
             p.bump();
-            p.skip_trivia();
-            expression(p);
+            p.within_boundary(at_bracket_punctuation, |p| {
+                p.skip_trivia();
+                expression(p);
+            });
             p.skip_trivia();
             p.expect(TokenKind::RParen);
             Some(m.complete(p, NodeKind::ParenExpr))
@@ -379,25 +381,34 @@ fn ternary_expr(p: &mut Parser) -> CompletedMarker {
     m.complete(p, NodeKind::TernaryExpr)
 }
 
+/// The punctuation a bracketed construct owns: the comma it reaches its next
+/// part with, and the bracket it ends with. A rule tripping over one of these
+/// inside a part must leave it, or the construct loses everything after it.
+fn at_bracket_punctuation(p: &Parser) -> bool {
+    matches!(p.current(), Some(TokenKind::RParen | TokenKind::RBracket | TokenKind::Comma))
+}
+
 fn arg_list(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.skip_trivia();
+    p.within_boundary(at_bracket_punctuation, |p| {
+        p.skip_trivia();
 
-    if !p.at(TokenKind::RParen) {
-        if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
-            expression(p);
-        }
-
-        while p.eat(TokenKind::Comma) {
-            p.check_iteration_limit();
-            p.skip_trivia();
+        if !p.at(TokenKind::RParen) {
             if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
                 expression(p);
             }
+
+            while p.eat(TokenKind::Comma) {
+                p.check_iteration_limit();
+                p.skip_trivia();
+                if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+                    expression(p);
+                }
+            }
         }
-    }
+    });
 
     p.skip_trivia();
     p.expect(TokenKind::RParen);

@@ -221,7 +221,25 @@ fn at_declaration_start(p: &Parser) -> bool {
     matches!(
         p.current(),
         Some(
-            TokenKind::KwProcedure | TokenKind::KwFunction | TokenKind::KwVar | TokenKind::KwAsync
+            TokenKind::KwProcedure
+                | TokenKind::KwFunction
+                | TokenKind::KwVar
+                | TokenKind::KwAsync
+                // The chain may hold more than one annotation, with a folding
+                // marker allowed between them, so the next link of the chain
+                // is awaited here exactly as the declaration is.
+                | TokenKind::AnnAtClient
+                | TokenKind::AnnAtServer
+                | TokenKind::AnnAtServerNoContext
+                | TokenKind::AnnAtClientAtServer
+                | TokenKind::AnnAtClientAtServerNoContext
+                | TokenKind::AnnBefore
+                | TokenKind::AnnAfter
+                | TokenKind::AnnAround
+                | TokenKind::AnnChangeAndValidate
+                | TokenKind::AnnCustom
+                | TokenKind::PreRegion
+                | TokenKind::PreEndRegion
         )
     )
 }

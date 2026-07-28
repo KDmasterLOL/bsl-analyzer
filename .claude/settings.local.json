@@ -8,8 +8,5 @@
       "Skill(codex:rescue:*)",
       "Bash(cargo check *)"
     ]
-  },
-  "skillOverrides": {
-    "omc-reference": "off"
   }
 }
