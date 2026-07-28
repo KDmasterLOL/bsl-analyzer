@@ -800,10 +800,6 @@ pub(super) fn is_clause_keyword(p: &Parser) -> bool {
         || at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ")
         || at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ")
         || at_sdbl_keyword(p, "ON", "ПО")
-        // `ПО` above covers the Russian half of both `ON` and `BY`. Without
-        // its English form the same word is a boundary in one language and a
-        // table name in the other.
-        || p.at_keyword("BY")
         || at_sdbl_keyword(p, "FOR", "ДЛЯ")
         || at_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ")
         || at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")

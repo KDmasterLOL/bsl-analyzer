@@ -533,7 +533,7 @@ const NAME_POSITIONS: &[(&str, usize, usize)] = &[
     // `ПО` covers the Russian half of both `ON` and `BY`, so without its
     // English form the same word was a boundary in one language and a table
     // name in the other.
-    ("SELECT A FROM BY", 2, 1),
+    ("SELECT A FROM BY", 1, 1),
 ];
 
 #[test]
@@ -650,6 +650,13 @@ fn a_keyword_standing_where_a_name_belongs_is_a_name() {
         "SELECT A FROM T INDEX BY A",
         "SELECT A FROM T1 LEFT JOIN T2 ON T1.A = T2.B",
         "ВЫБРАТЬ А ИЗ Т ДЛЯ ИЗМЕНЕНИЯ Т",
+        // `BY` ends a list, so no rule inside one may consume it — and it is
+        // still an ordinary name where a name may stand. Saying both with one
+        // predicate cost these four.
+        "SELECT BY.A FROM T AS BY",
+        "SELECT A BY FROM T",
+        "SELECT A FROM T BY",
+        "SELECT A FROM T TOTALS SUM(A) BY N BY",
     ] {
         let parse = parser::parse_sdbl(input);
         assert!(!parse.has_errors(), "`{input}`: {:#?}", parse.errors());

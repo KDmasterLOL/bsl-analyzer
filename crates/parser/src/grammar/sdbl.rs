@@ -236,7 +236,20 @@ pub(super) fn eat_name_here(p: &mut Parser, expected: &'static str) {
 /// stated as a boundary elsewhere, and making the alias separator a boundary
 /// would cost every alias its name. Here it is only a word that cannot be one.
 pub(super) fn at_field_name(p: &Parser) -> bool {
-    at_name(p) && !select::is_clause_keyword(p) && !select::at_sdbl_keyword(p, "AS", "КАК")
+    at_name(p) && !select::is_clause_keyword(p) && !at_a_clause_separator(p)
+}
+
+/// The words that separate the parts of a clause rather than open one: the
+/// alias `КАК`, and `BY` — whose Russian spelling `ПО` the clause keywords
+/// already carry, as the Russian for `ON`.
+///
+/// Stated apart from the clause keywords because that predicate answers a
+/// different question as well: which word ends a list, which no rule inside
+/// may consume. `BY` is one of those and is still a legal alias and a legal
+/// qualifier — `SELECT A FROM T BY`, `SELECT BY.A FROM T AS BY` — so only a
+/// position that must hold a field or a table is closed to it.
+fn at_a_clause_separator(p: &Parser) -> bool {
+    select::at_sdbl_keyword(p, "AS", "КАК") || p.at_keyword("BY")
 }
 
 pub(super) fn at_a_qualifying_dot(p: &Parser) -> bool {
