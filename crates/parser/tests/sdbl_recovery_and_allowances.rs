@@ -1090,6 +1090,68 @@ fn an_extension_region_is_opaque_to_every_skip() {
 }
 
 #[test]
+fn a_position_that_admits_only_a_name_takes_any_word() {
+    // Not every word of this language arrives as an identifier — a handful
+    // keep a kind of their own — so a rule that says "a name belongs here"
+    // and then asks for one kind rejects the aliases it meant to allow.
+    for word in ["НЕ", "И", "ИЛИ", "В", "ИСТИНА", "УНИЧТОЖИТЬ"] {
+        accepted(&format!("ВЫБРАТЬ А КАК {word} ИЗ Т"));
+    }
+}
+
+#[test]
+fn a_missing_alias_leaves_the_list_its_delimiter() {
+    // A name that is not there is a gap. Consuming the comma that revealed
+    // the gap costs the list every item after it, and the clauses too.
+    let input = "ВЫБРАТЬ * ИЗ Т КАК, У ГДЕ У.А = 1";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert_eq!(
+        parse
+            .syntax_node()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_DATA_SOURCE)
+            .count(),
+        2,
+        "{:#?}",
+        parse.errors(),
+    );
+    assert!(has_kind(&parse.syntax_node(), SyntaxKind::SDBL_WHERE_CLAUSE));
+}
+
+#[test]
+fn a_clause_keyword_after_a_dot_is_not_a_boundary_for_a_skip() {
+    // The leftover reads `Т.ИЗ` as one name; a recovery skip that reads the
+    // same two tokens as a name and then a clause hands the enclosing query
+    // a clause it never had, and loses everything after it.
+    let input = "ВЫБРАТЬ Ф(А Х Т.ИЗ, Б), Ц ИЗ У";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert_eq!(
+        parse
+            .syntax_node()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_SELECTED_FIELD)
+            .count(),
+        2,
+        "{:#?}",
+        parse.errors(),
+    );
+}
+
+#[test]
+fn an_extension_region_where_the_field_list_should_be() {
+    // `ВЫБРАТЬ {Х} ИЗ Т` has no ordinary selection, which is worth saying —
+    // but the region and the clause after it are both still there, and
+    // handing the brace to the rule that parses a field loses both.
+    let input = "ВЫБРАТЬ {Х} ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert_eq!(usize::from(parse.syntax_node().text_range().len()), input.len());
+    assert!(has_kind(&parse.syntax_node(), SyntaxKind::SDBL_QUERY_EXTENSION));
+    assert!(has_kind(&parse.syntax_node(), SyntaxKind::SDBL_FROM_CLAUSE));
+}
+
+#[test]
 fn a_list_starting_on_its_delimiter_keeps_what_follows() {
     // A leading comma means the first item is missing, not that the comma is
     // the first item. Handing it to the item rule costs the list the field

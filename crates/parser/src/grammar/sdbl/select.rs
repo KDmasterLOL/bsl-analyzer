@@ -107,7 +107,15 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
         if at_top_level && super::at_query_boundary(p) {
             break;
         }
-        if is_clause_keyword(p) {
+        // A clause keyword standing as the field name after a dot belongs
+        // to what is being skipped, and the drain reads it that way too.
+        //
+        // An open `ВЫБОР` does not earn the same treatment, though its
+        // depth is counted here: an unclosed one would then swallow the
+        // rest of the query, and half-written `ВЫБОР` is what an editor
+        // buffer holds. Stopping early costs a closed `ВЫБОР` its skip;
+        // stopping late costs every unclosed one its whole query.
+        if is_clause_keyword(p) && p.prev_significant() != Some(TokenKind::Dot) {
             let stop = if at_top_level {
                 true
             } else if inside_nested_query {
@@ -246,8 +254,11 @@ pub(super) fn selected_fields(p: &mut Parser) {
     // is absent. Anything else — a stray comma, a token no rule accepts — is
     // a list with something wrong inside it, and the list parser's own
     // recovery handles that better than giving up here would.
-    let list_is_absent =
-        is_clause_keyword(p) || p.at(TokenKind::Semicolon) || p.at(TokenKind::RParen) || p.at_end();
+    let list_is_absent = is_clause_keyword(p)
+        || p.at(TokenKind::Semicolon)
+        || p.at(TokenKind::RParen)
+        || p.at(TokenKind::LBrace)
+        || p.at_end();
 
     if !list_is_absent {
         super::expressions::parse_delimited_list(
@@ -363,7 +374,7 @@ fn selected_field_alias(p: &mut Parser) {
         return;
     }
 
-    let _ = p.expect_name();
+    super::eat_name_here(p, "ожидался псевдоним после 'КАК' / 'AS'");
 
     m.complete(p, NodeKind::SdblAlias);
 }
@@ -529,7 +540,7 @@ fn source_alias(p: &mut Parser) {
         return;
     }
 
-    p.expect_name();
+    super::eat_name_here(p, "ожидался псевдоним источника после 'КАК' / 'AS'");
 
     m.complete(p, NodeKind::SdblAlias);
 }
@@ -1184,11 +1195,11 @@ fn totals_group_alias(p: &mut Parser) {
         // After an explicit `КАК` nothing but a name can stand, so the
         // boundary's guess from the word alone does not apply here — the
         // same as for a field alias and a source alias.
-        if p.at(TokenKind::Ident) && !is_body_clause_keyword(p) {
-            p.bump();
-            p.skip_trivia();
-        } else {
+        if is_body_clause_keyword(p) {
             p.error_custom_no_bump("ожидался псевдоним после 'КАК' / 'AS'");
+        } else {
+            super::eat_name_here(p, "ожидался псевдоним после 'КАК' / 'AS'");
+            p.skip_trivia();
         }
         return;
     }
@@ -1317,7 +1328,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
 
         let inside_nested_query = !nested_query_starts.is_empty();
 
-        if is_clause_keyword(p) {
+        if is_clause_keyword(p) && p.prev_significant() != Some(TokenKind::Dot) {
             let stop = if paren_depth == 0 {
                 true
             } else if inside_nested_query {

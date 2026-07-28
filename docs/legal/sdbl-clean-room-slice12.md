@@ -1077,6 +1077,52 @@ beginning on its delimiter handed the delimiter to the rule that parses an
 item, which read the field after it as that comma's alias. A leading comma
 means the first item is missing.
 
+### What the helpers got wrong, and one thing they got right
+
+Making the dot chains share a step worked: the round after it found no
+defect in any of the seven. What it found instead were defects in the two
+helpers written the round before that, and the pattern is worth naming.
+`expect_name` was built on an invariant that is false — that every word of
+this language arrives as an identifier. A handful keep a kind of their
+own, so a rule saying "only a name belongs here" rejected `КАК НЕ`, an
+alias its own contract allowed. And when the word was not a name at all it
+fell back on a rule that consumes, so `КАК, У` ate the comma and the list
+lost every source after it.
+
+Both are gone. What replaced them is smaller and lives in the grammar
+rather than the shared parser, because what counts as a word is the
+grammar's business: take the word here whatever its kind, and when there
+is no word, report the gap and take nothing.
+
+Three more were the same skips again, this time missing that a clause
+keyword after a dot is a field name — which the leftover has known since
+the slice began. The three skips ask the parser now rather than each
+deciding, and asking is one accessor: what was the last token that was not
+trivia.
+
+### Two findings refused
+
+An audit finding is a claim to check, not an instruction. Two did not
+survive.
+
+The first asked recovery to skip past a clause keyword inside a `ВЫБОР`,
+on the ground that the code counts `ВЫБОР` depth and therefore means to
+treat it as opaque. Slice 7 decided otherwise on purpose and left a test
+saying so: `ВЫБРАТЬ 1 ( ВЫБОР ИЗ Т2 КАК Т` has a `ВЫБОР` that never
+closes, and treating everything after it as inside would cost the query
+its `ИЗ`. The trade is real in both directions — stopping early costs a
+closed `ВЫБОР` its skip, stopping late costs every unclosed one its whole
+query — and half-written is what an editor buffer holds.
+
+The second was mine to try and mine to withdraw. A group left open by a
+member does look like it should be forgotten when the member ends, and
+resetting the count there does fix the input the audit gave. It also
+broke two attested contracts immediately, because the leftover of that
+same member is parsed after the member returns and needs the depth the
+reset had just thrown away. The mismatch between a recovery's private
+depth and the parser's count is real and stays open; this was not the fix
+for it.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -1221,10 +1267,14 @@ are covered by entries A6–A8 above.
   confirmed: seven fixed, one tracked. One was a regression of the round
   before, and one of that round's own tests had pinned it. Parser tests
   668 → 669.
-- C25 — the audit over the same four files, unwidened. Six findings, all
-  confirmed: five were a class fixed the round before with one member left
-  out, the third such round in a row, so the dot chains stopped spelling
-  themselves out. Parser tests 669 → 673.
+- C25 `34030a9e` — the audit over the same four files, unwidened. Six
+  findings, all confirmed: five were a class fixed the round before with
+  one member left out, the third such round in a row, so the dot chains
+  stopped spelling themselves out. Parser tests 669 → 673.
+- C26 — the audit again, same four files. Eight findings: five fixed, one
+  a further instance of a tracked class, two refused — one against an
+  attested Slice 7 decision, one withdrawn after it broke two contracts.
+  No finding touched the seven dot chains. Parser tests 673 → 677.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert

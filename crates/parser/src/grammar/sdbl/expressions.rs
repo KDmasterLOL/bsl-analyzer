@@ -148,7 +148,13 @@ fn recover_to_delimiter(p: &mut Parser) {
             break;
         }
 
-        if brace_depth == 0 && super::select::is_clause_keyword(p) {
+        // After a qualifying dot the word is a field name, not this query's
+        // clause; the drain reads it that way and a skip that does not
+        // hands the enclosing query a clause it never had.
+        if brace_depth == 0
+            && super::select::is_clause_keyword(p)
+            && p.prev_significant() != Some(TokenKind::Dot)
+        {
             let stop = if paren_depth == 0 {
                 true
             } else if inside_nested_query {

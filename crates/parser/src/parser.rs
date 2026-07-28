@@ -192,19 +192,21 @@ impl<'a> Parser<'a> {
     }
 
     /// Takes a word where the rule knows a name is what belongs, whatever
-    /// the word spells.
+    /// The last token before this one that was not trivia.
     ///
-    /// The boundary `expect` enforces is a guess made from the word alone,
-    /// and a word is not enough: the one that begins a construct elsewhere
-    /// is an ordinary name in a position that admits nothing else. Only the
-    /// rule standing there knows which it is, so only the rule can say so —
-    /// and saying so is deliberately more work than staying silent.
-    pub fn expect_name(&mut self) -> bool {
-        if self.at(TokenKind::Ident) {
-            self.bump();
-            return true;
-        }
-        self.expect(TokenKind::Ident)
+    /// A rule that must know what it is standing behind — whether a dot
+    /// made the word here a field name, say — would otherwise walk the
+    /// token list itself, and every rule that walked it got a different
+    /// part of it wrong.
+    pub fn prev_significant(&self) -> Option<TokenKind> {
+        self.tokens[..self.pos].iter().rev().find(|t| !Self::is_trivia_kind(t.kind)).map(|t| t.kind)
+    }
+
+    fn is_trivia_kind(kind: TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline | TokenKind::Bom
+        )
     }
 
     pub fn eat_keyword(&mut self, text: &str) -> bool {

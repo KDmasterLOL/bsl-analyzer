@@ -158,7 +158,11 @@ fn ends_a_name(p: &Parser, is_property: bool) -> bool {
     match p.current() {
         Some(TokenKind::Ident) => is_property || !select::is_clause_keyword(p),
         Some(TokenKind::Ampersand) => p.current_text().chars().count() > 1,
-        Some(TokenKind::RParen) => p.open_group_count() > 0,
+        // A cast has something in it, and its closing paren is the end of
+        // the name only then: `()` closes a group and names nothing.
+        Some(TokenKind::RParen) => {
+            p.open_group_count() > 0 && p.prev_significant() != Some(TokenKind::LParen)
+        }
         // A few words carry a kind of their own and are still names after a
         // dot; the expression layer names that set, and the leftover reads a
         // chain the same way or it will cut one in half.
@@ -201,6 +205,24 @@ pub(super) fn at_name(p: &Parser) -> bool {
 /// for itself got some of it wrong: the space before the dot, the space
 /// after it, or the word beyond it. They ask this instead, and the next
 /// rule to read a chain inherits the answer rather than re-deriving it.
+/// Takes the word standing where only a name may stand, whatever it spells.
+///
+/// The boundary that keeps rules off the next query's first word is a guess
+/// made from the word alone, and after an explicit `КАК` there is nothing to
+/// guess: a name is the only thing the position admits. This says so.
+///
+/// What it must not do is take something that is not a word at all. A
+/// missing alias is a gap, and consuming the comma or paren that revealed
+/// the gap costs the enclosing list everything after it.
+pub(super) fn eat_name_here(p: &mut Parser, expected: &'static str) {
+    if p.at(TokenKind::Ident) || expressions::at_property_name(p) {
+        p.bump();
+        return;
+    }
+
+    p.error_custom_no_bump(expected);
+}
+
 pub(super) fn at_a_qualifying_dot(p: &Parser) -> bool {
     p.at(TokenKind::Dot) || (at_trivia(p) && p.nth_non_trivia(0) == Some(TokenKind::Dot))
 }

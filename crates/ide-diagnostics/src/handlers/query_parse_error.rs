@@ -101,7 +101,7 @@ mod tests {
                   message: Ожидался список полей выборки после 'ВЫБРАТЬ' / 'SELECT'
                   severity: Warning
                 QueryParseError @ 7:31..7:31
-                  message: Ожидалось 'идентификатор', встречено конец файла
+                  message: Ожидался псевдоним источника после 'КАК' / 'AS'
                   severity: Warning
                 QueryParseError @ 11:61..11:61
                   message: Неожиданный конец файла
