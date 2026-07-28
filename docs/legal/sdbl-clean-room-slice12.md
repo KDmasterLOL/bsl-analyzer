@@ -1428,11 +1428,76 @@ the same position reports once for each. No closer is consumed; the count
 simply does not match the number of missing parts. It is a property of every
 rule rather than of boundaries, so it belongs to its own step.
 
-Half of the defect stays open, pinned in the acceptance set rather than
-implied: a rule with an operand it must have reports nothing, reads the next
-word as that operand, and `ВЫБРАТЬ А + ИЗ Т` still loses its source clause.
-That half needs the position and not the word, which is the mechanism this
-follow-up did not build.
+## Follow-up: the other half, and what the source actually closes
+
+The half left open above is now closed too, and it turned on a passage of the
+source this document had never cited.
+
+**«Имена таблиц и полей не могут совпадать с ключевыми словами языка
+запросов»** (Гл.8 §8.3, `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`)
+closes exactly the position the defect sat in. The alias position it does not
+close: §8.4.8.2 and §8.4.9.3 delegate an alias's spelling to the rules for
+variable identifiers, and §8.4.10.3 documents a keyword landing in a bare
+alias position as being read as the alias, with the error arriving only at
+execution. So `КАК ИТОГИ` stays a name for a reason the source gives, where
+this document had only the consistency of two earlier slices to offer.
+
+`ВЫБРАТЬ А + ИЗ Т` had been worse than losing its clause: it parsed clean.
+`ИЗ` became the operand, `Т` became the field's alias, and nothing at all was
+reported — a query that quietly means something else, which is worse than a
+cascade. Six positions now refuse a clause keyword where a name must stand:
+the operand of a binary operation, the table of a `ССЫЛКА` — which §8.4.18.7
+calls a table, «ссылкой на таблицу, указанную справа» — the type of a
+`ВЫРАЗИТЬ`, the name after `ПОМЕСТИТЬ`, the reference to a source, and the
+target of `УНИЧТОЖИТЬ`.
+
+Four things about it belong here rather than in the tracker.
+
+**Which position it is decides this, and the grammar does not say which.** A
+bare name is a field only where the query says what to read — the field list, a
+filter, a join condition, `ИМЕЮЩИЕ`. Where it says how to arrange what was
+read, the same word may be an alias the selection declared, so
+`УПОРЯДОЧИТЬ ПО Итоги` must stay a reference. And a name carrying a dot is a
+qualifier, which may be the alias of a source: a join reading
+`Итоги.Регистратор` off a source aliased `КАК Итоги` is legal. Both were found
+by tests, not by reading — the second by an attested test of another slice.
+
+**The source's rule does not survive contact with real field names.** Applying
+it to the language's whole keyword table was measured: 708 of 29 495
+production queries in the corpus stop parsing clean, because configurations do
+name fields `Сумма`, `Дата`, `Количество`, `Представление`. Only the words that
+open a clause are refused. The same measurement settled the other direction:
+slice 10a attested that a configuration may name an object `В`, so a word
+carrying a kind of its own is a name after a dot, and refusing every keyword
+there broke three of that slice's tests.
+
+**One predicate cannot answer three questions.** `is_clause_keyword` says which
+word ends a list — a word no rule inside the list may consume — and it is also
+what the name positions and the alias guards ask. For `ПО` and its English
+`BY` the answers differ: the list ends there, the name may not be that word,
+and an alias may. Moving `BY` between the two lists fixed one side and opened
+the other, twice, until the duties were split. `ПО` still carries all three in
+one bit, which is filed as gitlab#141 with the measurement behind it.
+
+**Sharing a predicate between rules is safe; sharing their wording is not.**
+The same fix in four rules made one message claim a keyword at the end of
+input, and made a cast's chain claim «expected an identifier» of a word that
+is one. A mandatory source name and an optional `ДЛЯ ИЗМЕНЕНИЯ` target list
+also differ in whether silence is right, and that difference belongs to the
+caller: a guard put inside the shared report made the parser quieter than it
+had been before this work, which the corpus caught and no review did.
+
+Across seven rounds the corpus moved six of 29 495 query-ish literals, none of
+them previously clean, and no module of 21 114. The loop closed on an empty
+round.
+
+The half this document had left open — a rule with an operand it must have
+reporting nothing and reading the next word as that operand — is the half
+closed above. What stays open now is named rather than implied: `КАК` in an
+operand position, which needs the callers to consume an aggregate's alias
+first (gitlab#142); the bracketed lists of SDBL, which state no closer of
+their own (gitlab#143); and three defects that predate this work, found by
+comparing against the base (gitlab#141).
 
 ## Licensing note
 
