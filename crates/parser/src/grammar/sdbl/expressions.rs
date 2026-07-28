@@ -411,8 +411,22 @@ fn primary_expr(p: &mut Parser) {
         // boundary check in `error` then leaves the keyword where it is.
         // Taking it instead would cost the package that whole member — and
         // an operand left unwritten is exactly what an editor buffer holds.
-        Some(TokenKind::Ident) if p.open_group_count() > 0 || !super::at_query_boundary(p) => {
+        Some(TokenKind::Ident)
+            if (p.open_group_count() > 0 || !super::at_query_boundary(p))
+                && !at_a_keyword_that_cannot_be_a_field(p) =>
+        {
             column_or_function(p)
+        }
+
+        // A clause keyword reaching here is an operand the text never wrote:
+        // this position admits only a field or a table name, and the source is
+        // explicit that neither may spell a keyword. Saying so beats
+        // "unexpected token", and the recovery choice stays the generic one so
+        // that a word no rule awaits is still consumed.
+        Some(TokenKind::Ident) => {
+            let m = p.start();
+            p.error_custom("ожидалось имя поля, встречено ключевое слово");
+            m.complete(p, NodeKind::SdblError);
         }
 
         _ => {
@@ -421,6 +435,23 @@ fn primary_expr(p: &mut Parser) {
             m.complete(p, NodeKind::SdblError);
         }
     }
+}
+
+/// A clause keyword standing where only a field name can stand.
+///
+/// A bare name here is a field, and the source closes that position to
+/// keywords: «Имена таблиц и полей не могут совпадать с ключевыми словами
+/// языка запросов». A name carrying a dot is a different thing — the
+/// qualifier of a chain, which may be the alias of a source, and an alias is
+/// allowed to spell a keyword. `ПО Зак.Ссылка = Итоги.Регистратор` reads a
+/// source aliased `КАК Итоги`, and refusing the word would cost that join its
+/// condition.
+fn at_a_keyword_that_cannot_be_a_field(p: &Parser) -> bool {
+    p.names_are_fields() && super::select::is_clause_keyword(p) && !next_is_a_qualifying_dot(p)
+}
+
+fn next_is_a_qualifying_dot(p: &Parser) -> bool {
+    matches!(p.nth_non_trivia(0), Some(TokenKind::Dot))
 }
 
 fn literal_expr(p: &mut Parser) {
@@ -612,7 +643,7 @@ fn predicate_expr(p: &mut Parser) {
         p.bump();
         p.skip_trivia();
 
-        if super::at_name(p) {
+        if super::at_field_name(p) {
             p.bump();
             p.skip_trivia();
 
@@ -626,6 +657,11 @@ fn predicate_expr(p: &mut Parser) {
                     break;
                 }
             }
+        } else {
+            // The source is explicit that what stands here is a table:
+            // «проверяется, является ли значение выражения, указанного слева
+            // от него, ссылкой на таблицу, указанную справа».
+            report_missing_name(p, "ожидалось имя таблицы после 'ССЫЛКА' / 'REFS'");
         }
 
         m.complete(p, NodeKind::SdblRefsExpr);
@@ -654,7 +690,7 @@ fn is_cast_function(p: &Parser) -> bool {
 fn parse_cast_type(p: &mut Parser) {
     let m = p.start();
 
-    if super::at_name(p) {
+    if super::at_field_name(p) {
         let is_number_type = p.at_keyword("NUMBER") || p.at_keyword("ЧИСЛО");
 
         p.bump();
@@ -701,9 +737,26 @@ fn parse_cast_type(p: &mut Parser) {
 
             p.expect(TokenKind::RParen);
         }
+    } else {
+        report_missing_name(p, "ожидался тип после 'КАК' / 'AS'");
     }
 
     m.complete(p, NodeKind::SdblType);
+}
+
+/// Reports a name the text does not hold, at the gap where it belongs.
+///
+/// A position that requires a name and finds none used to leave the node
+/// empty and say nothing, so a query meaning something else parsed clean.
+///
+/// The message names what the position wants rather than what stands there:
+/// a clause keyword is one thing that cannot be a name here, a parameter is
+/// another, and a message that names only the first is wrong for the second.
+/// The report goes in the gap, because whatever stands here is not this
+/// rule's to take.
+fn report_missing_name(p: &mut Parser, message: &'static str) {
+    let m = p.start();
+    p.emit_error_at_marker(m, ParseError::Custom { message, recovery: RecoveryKind::RecoverySpan });
 }
 
 fn column_or_function(p: &mut Parser) {

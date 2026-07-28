@@ -276,13 +276,17 @@ pub(super) fn selected_fields(p: &mut Parser) {
         || p.at_end();
 
     if !list_is_absent {
-        super::expressions::parse_delimited_list(
-            p,
-            TokenKind::Comma,
-            &super::LIST_RECOVERY,
-            is_field_start,
-            selected_field,
-        );
+        // A bare name in the selection is a field of a source, so a clause
+        // keyword here is not a name at all.
+        p.within_field_names(|p| {
+            super::expressions::parse_delimited_list(
+                p,
+                TokenKind::Comma,
+                &super::LIST_RECOVERY,
+                is_field_start,
+                selected_field,
+            )
+        });
     } else if !p.at_end() {
         // The list is mandatory, so its absence is worth saying — but say
         // it without moving, or the clause keyword that revealed the
@@ -400,7 +404,7 @@ fn into_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
     p.skip_trivia();
 
-    if super::at_name(p) {
+    if super::at_field_name(p) {
         let table_m = p.start();
         p.bump();
         table_m.complete(p, NodeKind::SdblTempTableName);
@@ -610,7 +614,7 @@ fn join_clause(p: &mut Parser) {
     }
     p.skip_trivia();
 
-    expressions::logical_expression(p);
+    p.within_field_names(expressions::logical_expression);
 
     m.complete(p, NodeKind::SdblJoinClause);
 }
@@ -755,7 +759,7 @@ fn where_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "WHERE", "ГДЕ");
     p.skip_trivia();
 
-    expressions::logical_expression(p);
+    p.within_field_names(expressions::logical_expression);
 
     m.complete(p, NodeKind::SdblWhereClause);
 }
@@ -929,7 +933,7 @@ fn having_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ");
     p.skip_trivia();
 
-    super::expressions::expression(p);
+    p.within_field_names(super::expressions::expression);
 
     m.complete(p, NodeKind::SdblHavingClause);
 }

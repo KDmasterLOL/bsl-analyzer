@@ -490,21 +490,76 @@ fn a_recovery_inside_a_query_leaves_the_clause_that_follows_it() {
     }
 }
 
+/// Every position where a bare name must be a field or a table, and what a
+/// clause keyword standing there costs.
+///
+/// The source closes these positions to keywords: «Имена таблиц и полей не
+/// могут совпадать с ключевыми словами языка запросов». Before this, each of
+/// these parsed clean and meant something else — the keyword became the
+/// operand, the source clause behind it became an alias, and nothing was
+/// reported at all.
+///
+/// What the position is matters twice over. A bare name is a field only where
+/// the query says what to read; where it says how to arrange what was read,
+/// the same word may be an alias the select list declared. And a name
+/// carrying a dot is a qualifier, which may be the alias of a source. Both
+/// exceptions are held by `a_keyword_standing_where_a_name_belongs_is_a_name`.
+const NAME_POSITIONS: &[(&str, usize)] = &[
+    ("ВЫБРАТЬ А + ИЗ Т", 1),
+    ("ВЫБРАТЬ А ПОДОБНО ИЗ Т", 1),
+    ("ВЫБРАТЬ А ССЫЛКА ИЗ Т", 1),
+    ("ВЫБРАТЬ А ПОМЕСТИТЬ ИЗ Т", 1),
+    ("ВЫБРАТЬ А ИЗ Т ГДЕ Б = ИЗ", 2),
+    ("ВЫБРАТЬ А ИЗ Т1 ЛЕВОЕ СОЕДИНЕНИЕ Т2 ПО Т1.А = ИЗ", 2),
+    ("ВЫБРАТЬ СУММА(А) ИЗ Т СГРУППИРОВАТЬ ПО Б ИМЕЮЩИЕ СУММА(А) > ИЗ", 2),
+    // A paren does not make a keyword a name. These cost more than one
+    // message because an SDBL bracketed list does not yet state the paren it
+    // ends with — the BSL half of that work is done, this half is not.
+    ("ВЫБРАТЬ (А + ИЗ) ИЗ Т", 4),
+    ("ВЫБРАТЬ ВЫРАЗИТЬ(А КАК ИЗ) ИЗ Т", 4),
+    ("ВЫБРАТЬ А ИЗ Т ГДЕ Б В (ИЗ)", 3),
+    ("ВЫБРАТЬ СУММА(ИЗ) ИЗ Т", 3),
+];
+
 #[test]
-fn an_operand_never_written_still_costs_the_clause_after_it() {
-    // The other half of the same defect, and not fixed here. A rule with an
-    // operand it must have reports nothing at all — it reads the next word as
-    // that operand — and since every keyword of this language arrives as an
-    // identifier, the word it reads can be the clause keyword that follows.
-    //
-    // Refusing it needs the position, not the word: `ИЗ` opens a clause where
-    // a clause may start and names a source where a name may stand. Pinned as
-    // it behaves so that the remaining half is visible rather than implied.
-    for input in ["ВЫБРАТЬ А + ИЗ Т", "ВЫБРАТЬ А ССЫЛКА ИЗ Т", "ВЫБРАТЬ А ПОДОБНО ИЗ Т"]
-    {
+fn a_keyword_is_never_a_field_or_a_table_name() {
+    for (input, expected) in NAME_POSITIONS {
         assert!(covers(input, false), "`{input}`");
-        assert_eq!(clause_count(input, SyntaxKind::SDBL_FROM_CLAUSE), 0, "`{input}`");
+        assert_eq!(
+            clause_count(input, SyntaxKind::SDBL_FROM_CLAUSE),
+            1,
+            "`{input}` keeps its source clause"
+        );
+        assert_eq!(
+            messages(input, false).len(),
+            *expected,
+            "`{input}`: {:?}",
+            messages(input, false)
+        );
     }
+}
+
+#[test]
+fn a_name_the_text_does_not_hold_is_never_accepted_in_silence() {
+    // The half of this defect that is not about losing a clause: the position
+    // reported nothing, so a consumer could not tell these from a query that
+    // says what its author meant.
+    for (input, _) in NAME_POSITIONS {
+        assert!(!messages(input, false).is_empty(), "`{input}` says nothing");
+    }
+}
+
+#[test]
+fn what_closing_the_name_positions_costs() {
+    // The measured price, and the source is what makes it a price rather than
+    // a defect: a field may not be named `Итоги`, so this query is not legal
+    // either way — but recovery no longer reaches the source clause, where
+    // before the keyword was quietly taken as the operand and the clause was
+    // parsed.
+    let input = "ВЫБРАТЬ А + Итоги ИЗ Т";
+    assert!(covers(input, false));
+    assert_eq!(clause_count(input, SyntaxKind::SDBL_FROM_CLAUSE), 0);
+    assert_eq!(messages(input, false).len(), 2, "{:?}", messages(input, false));
 }
 
 #[test]
@@ -538,6 +593,24 @@ fn a_keyword_standing_where_a_name_belongs_is_a_name() {
         "ВЫБРАТЬ А КАК УНИЧТОЖИТЬ ИЗ Т",
         "ВЫБРАТЬ А ИЗ Т КАК Итоги",
         "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н КАК УНИЧТОЖИТЬ",
+        // An alias may spell a keyword, so a reference to one may too. Where
+        // the query arranges what it read, a bare name may be an alias the
+        // select list declared; and a name carrying a dot is the qualifier of
+        // a chain, which may be the alias of a source. A join condition
+        // reading `Итоги.Регистратор` is a whole join's worth of tree.
+        "ВЫБРАТЬ А КАК Итоги ИЗ Т УПОРЯДОЧИТЬ ПО Итоги",
+        "ВЫБРАТЬ А ИЗ Т СГРУППИРОВАТЬ ПО ИЗ",
+        "ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО ИЗ",
+        "ВЫБРАТЬ Зак.Ссылка ИЗ Т КАК Зак ЛЕВОЕ СОЕДИНЕНИЕ Т2 КАК Итоги \
+         ПО Зак.Ссылка = Итоги.Регистратор",
+        // Legal queries whose shape the field-name rule must not disturb.
+        "ВЫБРАТЬ А ИЗ Т ГДЕ Б В (ВЫБРАТЬ Ц ИЗ Т2)",
+        "ВЫБРАТЬ А ИЗ Т ОБЪЕДИНИТЬ ВСЕ ВЫБРАТЬ Б ИЗ Т2",
+        "ВЫБРАТЬ ВЫБОР КОГДА А ТОГДА 1 ИНАЧЕ 2 КОНЕЦ ИЗ Т",
+        "ВЫБРАТЬ ВЫРАЗИТЬ(А КАК ЧИСЛО(10, 2)) ИЗ Т",
+        "ВЫБРАТЬ А ССЫЛКА Справочник.Т ИЗ Т",
+        "ВЫБРАТЬ А ПОМЕСТИТЬ Врем ИЗ Т",
+        "ВЫБРАТЬ А ИЗ Т ГДЕ А МЕЖДУ 1 И 2",
     ] {
         let parse = parser::parse_sdbl(input);
         assert!(!parse.has_errors(), "`{input}`: {:#?}", parse.errors());

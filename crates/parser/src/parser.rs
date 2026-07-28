@@ -18,6 +18,7 @@ pub struct Parser<'a> {
     brace_depth: u32,
     at_grammar_boundary: Option<fn(&Parser) -> bool>,
     enclosing_boundaries: Vec<fn(&Parser) -> bool>,
+    names_are_fields: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -31,6 +32,7 @@ impl<'a> Parser<'a> {
             paren_depth: 0,
             brace_depth: 0,
             at_grammar_boundary: None,
+            names_are_fields: false,
             enclosing_boundaries: Vec::new(),
         }
     }
@@ -191,6 +193,29 @@ impl<'a> Parser<'a> {
         }
 
         false
+    }
+
+    /// Runs `f` with a bare name read as a field of a source.
+    ///
+    /// Where the query says what to read — the field list, a filter, a join
+    /// condition — a bare name is a field, and the source closes that position
+    /// to keywords. Where it says how to arrange what was read, the same word
+    /// may be an alias the select list declared, and an alias is allowed to
+    /// spell a keyword; those rules leave this off, so `УПОРЯДОЧИТЬ ПО Итоги`
+    /// stays a reference rather than becoming an error.
+    ///
+    /// Scoped like a boundary, and for the same reason: the fact belongs to
+    /// the rule that knows it, and has to end when that rule returns.
+    pub fn within_field_names<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let outer = self.names_are_fields;
+        self.names_are_fields = true;
+        let result = f(self);
+        self.names_are_fields = outer;
+        result
+    }
+
+    pub fn names_are_fields(&self) -> bool {
+        self.names_are_fields
     }
 
     /// Requires `kind`, and consumes nothing when it is absent.

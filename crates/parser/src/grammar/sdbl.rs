@@ -223,6 +223,18 @@ pub(super) fn eat_name_here(p: &mut Parser, expected: &'static str) {
     p.error_custom_no_bump(expected);
 }
 
+/// A word standing where a field or a table name belongs.
+///
+/// The source is explicit that this position is closed to keywords, and only
+/// this one: «Имена таблиц и полей не могут совпадать с ключевыми словами
+/// языка запросов». An alias is a different position — its spelling is
+/// delegated to the rules for variable identifiers, and a keyword landing
+/// there is documented as being read as the alias — so this must not reach
+/// one, and `КАК ИТОГИ` stays a name.
+pub(super) fn at_field_name(p: &Parser) -> bool {
+    at_name(p) && !select::is_clause_keyword(p)
+}
+
 pub(super) fn at_a_qualifying_dot(p: &Parser) -> bool {
     p.at(TokenKind::Dot) || (at_trivia(p) && p.nth_non_trivia(0) == Some(TokenKind::Dot))
 }
