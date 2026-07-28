@@ -42,6 +42,7 @@ pub fn parse_sdbl(input: &str) -> syntax::Parse<syntax::SyntaxNode> {
     let tokens = sdbl_token_converter::convert_sdbl_tokens(&sdbl_tokens);
 
     let mut p = parser::Parser::new(&tokens);
+    p.set_grammar_boundary(grammar::sdbl::at_query_boundary);
     grammar::sdbl::query_package(&mut p);
     let events = p.finish();
 
@@ -57,6 +58,7 @@ pub fn parse_sdbl_with_shared_cache(input: &str) -> syntax::Parse<syntax::Syntax
     let tokens = sdbl_token_converter::convert_sdbl_tokens(&sdbl_tokens);
 
     let mut p = parser::Parser::new(&tokens);
+    p.set_grammar_boundary(grammar::sdbl::at_query_boundary);
     grammar::sdbl::query_package(&mut p);
     let events = p.finish();
 

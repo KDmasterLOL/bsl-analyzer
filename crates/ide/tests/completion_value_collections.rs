@@ -595,6 +595,32 @@ fn completion_after_dot_on_same_body_structure_lists_constructor_and_insert_keys
     }
 }
 
+/// У динамической формы второй аргумент — массив параметров конструктора, а не
+/// строка ключей: разбирать его как `Новый Структура("К1,К2")` нельзя. Тест
+/// падает, если имя типа из строкового литерала начнут подставлять в
+/// `Expr::New::type_name` — тогда сама строка `"Структура"` уедет в позицию
+/// ключей и породит ключ-призрак.
+#[test]
+fn completion_on_dynamically_named_structure_offers_no_phantom_keys() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Стр = Новый("Структура", "Таймаут, Адрес");
+    Стр.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for key in ["Структура", "Таймаут", "Адрес"] {
+        assert!(
+            !has_label(&items, key),
+            "dynamic `Новый(<Тип>, <Параметры>)` carries no key string, so `{key}` must not be \
+             offered as a structure key; got: {ls:?}"
+        );
+    }
+}
+
 #[test]
 fn completion_after_dot_on_nested_structure_value_lists_inner_keys() {
     let items = complete(

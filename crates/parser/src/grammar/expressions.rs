@@ -207,8 +207,10 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
             Some(TokenKind::LBracket) => {
                 let m = lhs.precede(p);
                 p.bump();
-                p.skip_trivia();
-                expression(p);
+                p.within_boundary(super::at_closing_bracket, |p| {
+                    p.skip_trivia();
+                    expression(p);
+                });
                 p.skip_trivia();
                 p.expect(TokenKind::RBracket);
                 lhs = m.complete(p, NodeKind::IndexExpr);
@@ -258,8 +260,10 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         Some(TokenKind::LParen) => {
             let m = p.start();
             p.bump();
-            p.skip_trivia();
-            expression(p);
+            p.within_boundary(super::at_closing_paren, |p| {
+                p.skip_trivia();
+                expression(p);
+            });
             p.skip_trivia();
             p.expect(TokenKind::RParen);
             Some(m.complete(p, NodeKind::ParenExpr))
@@ -359,21 +363,72 @@ fn new_expr(p: &mut Parser) -> CompletedMarker {
     m.complete(p, NodeKind::NewExpr)
 }
 
+/// Whether the token here carries on the expression this one sits inside —
+/// an operator of any precedence level, or the dot and bracket of a postfix
+/// chain. No rule declares these as a boundary, because a rule that reaches
+/// one consumes it and loops; a rule giving up in front of one has to leave
+/// it for that loop.
+fn continues_the_surrounding_expression(p: &Parser) -> bool {
+    matches!(
+        p.current(),
+        Some(
+            TokenKind::KwOr
+                | TokenKind::KwAnd
+                | TokenKind::Eq
+                | TokenKind::Neq
+                | TokenKind::Lt
+                | TokenKind::Le
+                | TokenKind::Gt
+                | TokenKind::Ge
+                | TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::Percent
+                | TokenKind::Dot
+                | TokenKind::LBracket
+        )
+    )
+}
+
 fn ternary_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump();
     p.skip_trivia();
-    p.expect(TokenKind::LParen);
-    p.skip_trivia();
-    expression(p);
-    p.skip_trivia();
-    p.expect(TokenKind::Comma);
-    p.skip_trivia();
-    expression(p);
-    p.skip_trivia();
-    p.expect(TokenKind::Comma);
-    p.skip_trivia();
-    expression(p);
+
+    // Every other bracketed rule is entered with its opener already in hand.
+    // The ternary's opener is an `expect`, so it can be absent — and with no
+    // group open, nothing standing here is the ternary's to take. Not the
+    // commas: an enclosing list writes those after a `?` too, and a successful
+    // `expect` does not ask whose separator it is. Not the closer either.
+    // Reading on would spend another rule's punctuation on operands that were
+    // never written.
+    if !p.eat(TokenKind::LParen) {
+        // Giving up must not spend a token either — but only where something
+        // else will use it. `expect` already leaves an enclosing boundary
+        // alone; what nobody declares is the operator that carries on the
+        // expression around the `?`. Anything past those two is stray, and
+        // leaving that behind means no rule ever takes it.
+        if continues_the_surrounding_expression(p) {
+            p.expect_no_bump(TokenKind::LParen);
+        } else {
+            p.expect(TokenKind::LParen);
+        }
+        return m.complete(p, NodeKind::TernaryExpr);
+    }
+
+    p.within_boundary(super::at_paren_list_punctuation, |p| {
+        p.skip_trivia();
+        expression(p);
+        p.skip_trivia();
+        p.expect(TokenKind::Comma);
+        p.skip_trivia();
+        expression(p);
+        p.skip_trivia();
+        p.expect(TokenKind::Comma);
+        p.skip_trivia();
+        expression(p);
+    });
     p.skip_trivia();
     p.expect(TokenKind::RParen);
     m.complete(p, NodeKind::TernaryExpr)
@@ -383,21 +438,23 @@ fn arg_list(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.skip_trivia();
+    p.within_boundary(super::at_paren_list_punctuation, |p| {
+        p.skip_trivia();
 
-    if !p.at(TokenKind::RParen) {
-        if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
-            expression(p);
-        }
-
-        while p.eat(TokenKind::Comma) {
-            p.check_iteration_limit();
-            p.skip_trivia();
+        if !p.at(TokenKind::RParen) {
             if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
                 expression(p);
             }
+
+            while p.eat(TokenKind::Comma) {
+                p.check_iteration_limit();
+                p.skip_trivia();
+                if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+                    expression(p);
+                }
+            }
         }
-    }
+    });
 
     p.skip_trivia();
     p.expect(TokenKind::RParen);

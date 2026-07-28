@@ -103,19 +103,7 @@ fn type_of_arg(expr: ExprIdx, body: &Body) -> Option<Name> {
 }
 
 fn type_literal_arg(expr: ExprIdx, body: &Body) -> Option<String> {
-    let (callee_name, args) = call_parts(expr, body)?;
-    if !callee_name.eq_ignore_case(&Name::new("Тип"))
-        && !callee_name.eq_ignore_case(&Name::new("Type"))
-    {
-        return None;
-    }
-    if args.len() != 1 {
-        return None;
-    }
-    match body.expr_idx(args[0]) {
-        Expr::Literal(Literal::String(s)) => Some(s.clone()),
-        _ => None,
-    }
+    crate::type_literal::type_ctor_literal(body, expr).map(|(_, text)| text.to_owned())
 }
 
 fn call_parts(expr: ExprIdx, body: &Body) -> Option<(Name, &[ExprIdx])> {

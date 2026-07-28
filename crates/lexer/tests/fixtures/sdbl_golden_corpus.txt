@@ -144,3 +144,95 @@ TOTALS SUM(X) BY OVERALL PERIODS(DAY, DATETIME(2024, 1, 1), &End)
 SELECT * FROM T WHERE X = UNDEFINED OR Y <> UNDEFINED
 ---- 073 slice3a period types english
 TOTALS SUM(X) BY PERIODS(TENDAYS, &S, &E), PERIODS(HALFYEAR, &T, &U)
+---- 074 slice3b register roots russian
+ВЫБРАТЬ 1 ИЗ РегистрСведений.Цены, РегистрНакопления.Товары, РегистрБухгалтерии.Хозрасчетный, РегистрРасчета.Начисления
+---- 075 slice3b chart roots russian
+ВЫБРАТЬ 1 ИЗ ПланСчетов.Основной, ПланВидовРасчета.Основные, ПланВидовХарактеристик.Свойства
+---- 076 slice3b object roots russian
+ВЫБРАТЬ 1 ИЗ БизнесПроцесс.Согласование, Задача.Поручение, Константа.Организация, Последовательность.Проведение
+---- 077 slice3b document journal bilingual
+ЖурналДокументов.Продажи DocumentJournal.Sales
+---- 078 slice3b exchange plan bilingual
+ПланОбмена.Филиалы ExchangePlan.Branches
+---- 079 slice3b filter criterion bilingual
+КритерийОтбора.Связанные FilterCriterion.Related
+---- 080 slice3b constants aggregate bilingual
+ВЫБРАТЬ 1 ИЗ Константы; SELECT 1 FROM Constants
+---- 081 slice3b unmatched byte error fallback
+ВЫБРАТЬ @ ИЗ Т
+---- 082 slice4 aggregate functions russian
+ВЫБРАТЬ СУММА(Цена), СРЕДНЕЕ(Цена), МИНИМУМ(Цена), МАКСИМУМ(Цена), КОЛИЧЕСТВО(*) ИЗ Продажи
+---- 083 slice4 date part functions russian
+ВЫБРАТЬ ГОД(Момент), КВАРТАЛ(Момент), МЕСЯЦ(Момент), ДЕНЬГОДА(Момент), ДЕНЬ(Момент), НЕДЕЛЯ(Момент), ДЕНЬНЕДЕЛИ(Момент), ЧАС(Момент), МИНУТА(Момент), СЕКУНДА(Момент)
+---- 084 slice4 date arithmetic functions russian
+ВЫБРАТЬ НАЧАЛОПЕРИОДА(Момент, МЕСЯЦ), КОНЕЦПЕРИОДА(Момент, ГОД), ДОБАВИТЬКДАТЕ(Момент, ДЕНЬ, 5), РАЗНОСТЬДАТ(Момент, ДАТАВРЕМЯ(2024, 1, 1), ЧАС)
+---- 085 slice4 string functions russian
+ВЫБРАТЬ ПОДСТРОКА(Имя, 1, 5), ДЛИНАСТРОКИ(Имя), СТРНАЙТИ(Имя, "к"), ВРЕГ(Имя), НРЕГ(Имя), СОКРЛП(Имя), СОКРЛ(Имя), СОКРП(Имя)
+---- 086 slice4 numeric type and null functions russian
+ВЫБРАТЬ ОКР(Цена, 2), ЦЕЛ(Цена), ТИПЗНАЧЕНИЯ(Товар), ПРЕДСТАВЛЕНИЕ(Товар), ПРЕДСТАВЛЕНИЕССЫЛКИ(Товар), ЕСТЬNULL(Цена, 0), УНИКАЛЬНЫЙИДЕНТИФИКАТОР(Товар)
+---- 087 slice4 empty table keyword and empty ref selector russian
+ВЫБРАТЬ ПУСТАЯТАБЛИЦА.(Ном, Тов) КАК Состав ИЗ Документ.Расход ГДЕ Товар = ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)
+---- 088 slice4 left and right substring russian
+ВЫБРАТЬ ЛЕВ(Имя, 3), ПРАВ(Имя, 3) ИЗ Справочник.Товары
+---- 089 slice4 join keywords keep the english left and right
+ЛЕВОЕ СОЕДИНЕНИЕ ПРАВОЕ СОЕДИНЕНИЕ LEFT JOIN RIGHT JOIN
+---- 090 slice4 string replacement bilingual
+ВЫБРАТЬ СтрЗаменить(Имя, "к", "г"); SELECT StrReplace(Name, "k", "g")
+---- 091 slice4 record autonumber bilingual
+ВЫБРАТЬ АВТОНОМЕРЗАПИСИ() ПОМЕСТИТЬ Врем; SELECT RECORDAUTONUMBER() INTO Tmp
+---- 092 slice4 grouped by probe bilingual
+ВЫБРАТЬ СГРУППИРОВАНОПО(Склад); SELECT GROUPEDBY(Store)
+---- 093 slice4 stored data size bilingual
+ВЫБРАТЬ РАЗМЕРХРАНИМЫХДАННЫХ(Данные); SELECT STOREDDATASIZE(Data)
+---- 094 slice4 trigonometric and exponential functions
+ВЫБРАТЬ ACos(X), ASin(X), ATan(X), Cos(X), Sin(X), Tan(X), Exp(X), Log(X), Log10(X), Pow(X, 2), Sqrt(X)
+---- 095 slice4 date difference alternate english spelling
+SELECT DATEDIFFERENCE(Start, Finish, DAY)
+---- 096 slice5 information register slices russian
+ВЫБРАТЬ 1 ИЗ РегистрСведений.Цены.СрезПервых, РегистрСведений.Цены.СрезПоследних
+---- 097 slice5 accumulation register virtual tables russian
+ВЫБРАТЬ 1 ИЗ РегистрНакопления.Товары.Остатки, РегистрНакопления.Товары.Обороты, РегистрНакопления.Товары.ОстаткиИОбороты
+---- 098 slice5 accounting register virtual tables russian
+ВЫБРАТЬ 1 ИЗ РегистрБухгалтерии.Хозрасчетный.ОборотыДтКт, РегистрБухгалтерии.Хозрасчетный.Субконто, РегистрБухгалтерии.Хозрасчетный.ДвиженияССубконто
+---- 099 slice5 accounting register virtual tables english
+SELECT 1 FROM AccountingRegister.Main.ExtDimensions, AccountingRegister.Main.RecordsWithExtDimensions
+---- 100 slice5 calculation register virtual tables russian
+ВЫБРАТЬ 1 ИЗ РегистрРасчета.Начисления.ДанныеГрафика, РегистрРасчета.Начисления.ФактическийПериодДействия
+---- 101 slice5 calculation register virtual tables english
+SELECT 1 FROM CalculationRegister.Accruals.ScheduleData, CalculationRegister.Accruals.AdjustedEffectivePeriod
+---- 102 slice5 base register prefix stays one identifier
+РегистрРасчета.Начисления.БазаОсновныеНачисления CalculationRegister.Accruals.BaseMainAccruals
+---- 103 slice5 sequence boundaries and route points bilingual
+Последовательность.Проведение.Границы Sequence.Posting.Boundaries БизнесПроцесс.Согласование.Точки BusinessProcess.Approval.Points
+---- 104 slice5 tasks by performer bilingual
+Задача.Поручение.ЗадачиПоИсполнителю Task.Assignment.TasksByPerformer
+---- 105 slice5 external data source table russian
+ВЫБРАТЬ 1 ИЗ ВнешнийИсточникДанных.Склад.Таблица.Позиции
+---- 106 slice5 external data source table english
+SELECT 1 FROM ExternalDataSource.Depot.Table.Items
+---- 107 slice5 external data source cube dimension table bilingual
+ВнешнийИсточникДанных.Склад.Куб.Продажи.ТаблицаИзмерения.Интервалы ExternalDataSource.Depot.Cube.Sales.DimensionTable.Intervals
+---- 108 slice5 change registration table english
+SELECT 1 FROM Catalog.Goods.Changes, AccumulationRegister.Stock.Changes
+---- 109 slice5 change registration russian keeps the update keyword
+ВЫБРАТЬ 1 ИЗ Справочник.Товары.Изменения; ВЫБРАТЬ 1 ИЗ Т ДЛЯ ИЗМЕНЕНИЯ
+---- 110 slice5 identifiers starting with a virtual table suffix
+КубическийМетр ТаблицаТоваров ГраницыДиапазона ТочкаМаршрута Changeset Tableau
+---- 111 slice1addendum extension selection element russian
+ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Товары КАК Т {ВЫБРАТЬ Номенклатура, Склад}
+---- 112 slice1addendum extension filter element with child field marker
+{ГДЕ Номенклатура.*, Склад} {ГДЕ Документ.Дата >= &ДатаНачала, Документ.Дата <= &ДатаКонца}
+---- 113 slice1addendum extension characteristics element
+{ХАРАКТЕРИСТИКИ ТИП(Справочник.Номенклатура) ПОЛЕКЛЮЧА Ссылка ПОЛЕИМЕНИ Наименование}
+---- 114 slice1addendum extension in virtual table arguments
+РегистрНакопления.УчетНоменклатуры.Обороты({&ДатаНачала}, {&ДатаКонца}, , {Номенклатура.*, Склад.*})
+---- 115 slice1addendum empty and nested braces
+{} {{}} {ГДЕ {Вложенный} Т.Поле}
+---- 116 slice1addendum unbalanced opening brace at eof
+ВЫБРАТЬ 1 {ВЫБРАТЬ Т
+---- 117 slice1addendum unbalanced closing brace
+ВЫБРАТЬ 1 } ИЗ Т
+---- 118 slice1addendum braces inside a string literal
+ВЫБРАТЬ "{ВЫБРАТЬ Поле}" КАК Ф ИЗ Т
+---- 119 slice1addendum extension elements english
+SELECT 1 FROM Catalog.Goods AS T {SELECT Products, Warehouse} {WHERE Products.*}

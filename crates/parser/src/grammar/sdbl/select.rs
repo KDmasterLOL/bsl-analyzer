@@ -14,15 +14,54 @@ pub(super) fn eat_sdbl_keyword(p: &mut Parser, en: &str, ru: &str) -> bool {
     p.eat_keyword(en) || p.eat_keyword(ru)
 }
 
+// =====================================================================
+// CLEAN-ROOM Slice 12 — field-list recovery
+//
+// Skips a malformed selected field to the next boundary a reader would
+// recognise — an alias, a comma, a clause keyword — while refusing to
+// stop inside a `CASE`, a paren group or a nested query, where such a
+// boundary would be a false one. Not the language; kept so that one bad
+// field does not destroy the list around it.
+//
+// Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entry A6.
+// =====================================================================
+
 fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
     let err = p.start();
     let mut case_depth = 0i32;
     let mut paren_depth = 0i32;
+    let mut brace_depth = 0i32;
     let mut consumed_any = false;
     let mut nested_query_starts: Vec<i32> = Vec::new();
 
     loop {
         p.check_iteration_limit();
+
+        // An extension region is opaque: the words inside it are not this
+        // query's, and a boundary read from one is a boundary that is not
+        // there.
+        if p.at(TokenKind::LBrace) {
+            brace_depth += 1;
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if p.at(TokenKind::RBrace) {
+            brace_depth = brace_depth.saturating_sub(1);
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if brace_depth > 0 {
+            if p.at_end() || p.at(TokenKind::Semicolon) {
+                break;
+            }
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
 
         if p.at_keyword("CASE") || p.at_keyword("ВЫБОР") {
             case_depth += 1;
@@ -63,7 +102,20 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
 
         let at_top_level = case_depth == 0 && paren_depth == 0;
         let inside_nested_query = !nested_query_starts.is_empty();
-        if is_clause_keyword(p) {
+        // Refusing to take the boundary elsewhere buys nothing if the skip
+        // that follows takes it instead.
+        if at_top_level && super::at_query_boundary(p) {
+            break;
+        }
+        // A clause keyword standing as the field name after a dot belongs
+        // to what is being skipped, and the drain reads it that way too.
+        //
+        // An open `ВЫБОР` does not earn the same treatment, though its
+        // depth is counted here: an unclosed one would then swallow the
+        // rest of the query, and half-written `ВЫБОР` is what an editor
+        // buffer holds. Stopping early costs a closed `ВЫБОР` its skip;
+        // stopping late costs every unclosed one its whole query.
+        if is_clause_keyword(p) && p.prev_significant() != Some(TokenKind::Dot) {
             let stop = if at_top_level {
                 true
             } else if inside_nested_query {
@@ -113,8 +165,13 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
 
 pub fn select_query(p: &mut Parser) {
     let m = p.start();
-    subquery(p);
-    select_tail_clauses(p);
+    // The clauses after the body — `АВТОУПОРЯДОЧИВАНИЕ`, `УПОРЯДОЧИТЬ`,
+    // `ИТОГИ` — may come in any order and are parsed here rather than in the
+    // body, so stating the boundary in the body alone leaves them outside it.
+    p.within_boundary(is_clause_keyword, |p| {
+        subquery(p);
+        select_tail_clauses(p);
+    });
     m.complete(p, NodeKind::SdblSelectQuery);
 }
 
@@ -158,25 +215,44 @@ fn query(p: &mut Parser) {
     let m = p.start();
 
     if !eat_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ") {
-        p.error_custom("ожидалось 'ВЫБРАТЬ' / 'SELECT'");
+        // The word is missing, not wrong: what stands here belongs to the
+        // rest of the query. Taking it would cost the query the clause it
+        // starts with, and would put the complaint on that clause instead
+        // of on the gap in front of it.
+        //
+        // The rule still stops here. Carrying on would parse a body for a
+        // query that has no keyword, and this rule is also reached
+        // speculatively — from a parenthesised source, where Slice 8
+        // requires `ИЗ (&Tmp)` to yield no field of its own.
+        p.error_custom_no_bump("ожидалось 'ВЫБРАТЬ' / 'SELECT'");
         m.complete(p, NodeKind::SdblQuery);
         return;
     }
 
-    p.skip_trivia();
-    if is_limitation_keyword(p) {
-        limitations(p);
+    // The words that open the clauses of this query are what the query is
+    // waiting for, so no rule inside it may report an error by taking one:
+    // an unfinished `ВЫБОР` used to report its missing `КОНЕЦ` by consuming
+    // the `ИЗ` that followed, and the source clause then existed nowhere.
+    //
+    // A clause keyword is still an ordinary name where a name is what
+    // belongs — `КАК Итоги` names a source — and that is why this is stated
+    // here rather than as a word the whole parse treats as a boundary.
+    p.within_boundary(is_clause_keyword, |p| {
         p.skip_trivia();
-    }
+        if is_limitation_keyword(p) {
+            limitations(p);
+            p.skip_trivia();
+        }
 
-    selected_fields(p);
+        selected_fields(p);
 
-    eat_query_extensions(p);
-    if at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ") {
-        into_clause(p);
-    }
+        eat_query_extensions(p);
+        if at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ") {
+            into_clause(p);
+        }
 
-    query_body_clauses(p);
+        query_body_clauses(p);
+    });
 
     m.complete(p, NodeKind::SdblQuery);
 }
@@ -184,13 +260,37 @@ fn query(p: &mut Parser) {
 pub(super) fn selected_fields(p: &mut Parser) {
     let m = p.start();
 
-    super::expressions::parse_delimited_list(
-        p,
-        TokenKind::Comma,
-        &super::LIST_RECOVERY,
-        is_field_start,
-        selected_field,
-    );
+    // The list parser takes its first item unconditionally, and an
+    // expression asked to start on a clause keyword takes it anyway. That
+    // turns a selection list the user has not typed yet — or one whose
+    // qualifier failed to parse — into a field made of the next clause's
+    // keyword, and the clause it belonged to is then never recognised.
+    // Only a clause keyword, a separator or the end of input means the list
+    // is absent. Anything else — a stray comma, a token no rule accepts — is
+    // a list with something wrong inside it, and the list parser's own
+    // recovery handles that better than giving up here would.
+    let list_is_absent = is_clause_keyword(p)
+        || p.at(TokenKind::Semicolon)
+        || p.at(TokenKind::RParen)
+        || p.at(TokenKind::LBrace)
+        || p.at_end();
+
+    if !list_is_absent {
+        super::expressions::parse_delimited_list(
+            p,
+            TokenKind::Comma,
+            &super::LIST_RECOVERY,
+            is_field_start,
+            selected_field,
+        );
+    } else if !p.at_end() {
+        // The list is mandatory, so its absence is worth saying — but say
+        // it without moving, or the clause keyword that revealed the
+        // absence is the thing that gets consumed. At end of input this
+        // stays quiet: that is a query being typed, not one missing a
+        // selection.
+        p.error_custom_no_bump("ожидался список полей выборки после 'ВЫБРАТЬ' / 'SELECT'");
+    }
 
     m.complete(p, NodeKind::SdblFieldList);
 }
@@ -239,8 +339,8 @@ fn is_asterisk_start(p: &Parser) -> bool {
     }
 
     if p.at(TokenKind::Ident) {
-        if let Some(TokenKind::Dot) = p.nth(1) {
-            if let Some(TokenKind::Star) = p.nth(2) {
+        if let Some(TokenKind::Dot) = p.nth_non_trivia(0) {
+            if let Some(TokenKind::Star) = p.nth_non_trivia(1) {
                 return true;
             }
         }
@@ -253,9 +353,11 @@ fn asterisk_field(p: &mut Parser) {
     let m = p.start();
 
     while p.at(TokenKind::Ident) {
-        if let Some(TokenKind::Dot) = p.nth(1) {
+        if let Some(TokenKind::Dot) = p.nth_non_trivia(0) {
             p.bump();
+            p.skip_trivia();
             p.bump();
+            p.skip_trivia();
         } else {
             break;
         }
@@ -287,7 +389,7 @@ fn selected_field_alias(p: &mut Parser) {
         return;
     }
 
-    let _ = p.expect(TokenKind::Ident);
+    super::eat_name_here(p, "ожидался псевдоним после 'КАК' / 'AS'");
 
     m.complete(p, NodeKind::SdblAlias);
 }
@@ -298,7 +400,7 @@ fn into_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
     p.skip_trivia();
 
-    if p.at(TokenKind::Ident) {
+    if super::at_name(p) {
         let table_m = p.start();
         p.bump();
         table_m.complete(p, NodeKind::SdblTempTableName);
@@ -380,7 +482,14 @@ fn table_ref(p: &mut Parser) {
         return;
     }
 
-    while p.eat(TokenKind::Dot) {
+    // The dot reaches across the space before it as well as the space after
+    // it: `Справочник . Товары` is one name, and the expression layer already
+    // reads it as one.
+    while p.nth_non_trivia(0) == Some(TokenKind::Dot) || p.at(TokenKind::Dot) {
+        p.skip_trivia();
+        if !p.eat(TokenKind::Dot) {
+            break;
+        }
         p.check_iteration_limit();
         p.skip_trivia();
 
@@ -398,7 +507,11 @@ fn table_ref(p: &mut Parser) {
             break;
         }
 
-        if is_clause_keyword(p) || p.at_keyword("AS") || p.at_keyword("КАК") {
+        if is_clause_keyword(p)
+            || super::at_query_boundary(p)
+            || p.at_keyword("AS")
+            || p.at_keyword("КАК")
+        {
             let err = p.start();
             p.emit_error_at_marker(
                 err,
@@ -442,7 +555,7 @@ fn source_alias(p: &mut Parser) {
         return;
     }
 
-    p.expect(TokenKind::Ident);
+    super::eat_name_here(p, "ожидался псевдоним источника после 'КАК' / 'AS'");
 
     m.complete(p, NodeKind::SdblAlias);
 }
@@ -578,9 +691,12 @@ fn query_body_clauses(p: &mut Parser) {
 }
 
 /// Consumes any run of `{…}` query-language extension blocks at the current
-/// position. These braces mark sections a user may customize at runtime
-/// (`{ГДЕ …}`, `{ВЫБРАТЬ …}`, `{УПОРЯДОЧИТЬ ПО …}`); their inner text is taken
-/// verbatim so the surrounding query still parses and keeps its diagnostics.
+/// position. These braces mark sections a user may customize at runtime: the
+/// data-composition documentation defines `{ВЫБРАТЬ …}`, `{ГДЕ …}` and
+/// `{ХАРАКТЕРИСТИКИ …}`, and configurations also contain undocumented forms
+/// such as `{УПОРЯДОЧИТЬ ПО …}`. Their inner text is taken verbatim, so the
+/// surrounding query parses and keeps its diagnostics whichever element
+/// appears.
 pub(super) fn eat_query_extensions(p: &mut Parser) {
     p.skip_trivia();
     while p.at(TokenKind::LBrace) {
@@ -598,6 +714,13 @@ fn query_extension(p: &mut Parser) {
         p.check_iteration_limit();
 
         if p.at_end() {
+            break;
+        }
+
+        // An unclosed `{` is tolerated, but tolerating it must not cost the
+        // rest of the package: a separator ends the region whether or not
+        // its brace was ever closed.
+        if p.at(TokenKind::Semicolon) {
             break;
         }
 
@@ -743,19 +866,60 @@ fn order_by_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblOrderClause);
 }
 
+// =====================================================================
+// CLEAN-ROOM Slice 12 — ordering-field modifiers
+//
+// The Developer's Reference gives an ordering field exactly four
+// alternatives for its order: `ВОЗР`, `УБЫВ`, `ИЕРАРХИЯ` and
+// `ИЕРАРХИЯ УБЫВ`. The reverse word order `УБЫВ ИЕРАРХИЯ` is not among
+// them and is accepted anyway, as a plausible slip that costs nothing to
+// tolerate.
+//
+// Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entries A13 and
+// D4.
+// =====================================================================
+
 fn order_by_item(p: &mut Parser) {
     super::expressions::expression(p);
     p.skip_trivia();
 
-    if p.at_keyword("ASC") || p.at_keyword("ВОЗР") || p.at_keyword("DESC") || p.at_keyword("УБЫВ")
-    {
-        p.bump();
-        p.skip_trivia();
-    }
+    // Of the four documented orderings, `ИЕРАРХИЯ` may be preceded by
+    // nothing and followed by `УБЫВ`. The reverse, `УБЫВ ИЕРАРХИЯ`, is not
+    // among them and is tolerated; `ВОЗР ИЕРАРХИЯ` is not among them either
+    // and is not — one stated tolerance, not a general permission.
+    let descending_came_first = at_sdbl_keyword(p, "DESC", "УБЫВ");
+    let direction_came_first = eat_order_direction(p);
 
-    if p.at_keyword("HIERARCHY") || p.at_keyword("ИЕРАРХИЯ") {
+    if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
+        if direction_came_first && !descending_came_first {
+            p.error_custom_no_bump("'ИЕРАРХИЯ' / 'HIERARCHY' сочетается только с 'УБЫВ' / 'DESC'");
+        }
+
         p.bump();
         p.skip_trivia();
+
+        if !direction_came_first {
+            if at_sdbl_keyword(p, "DESC", "УБЫВ") {
+                p.bump();
+                p.skip_trivia();
+            } else if at_sdbl_keyword(p, "ASC", "ВОЗР") {
+                p.error_custom_no_bump(
+                    "'ИЕРАРХИЯ' / 'HIERARCHY' сочетается только с 'УБЫВ' / 'DESC'",
+                );
+                p.bump();
+                p.skip_trivia();
+            }
+        }
+    }
+}
+
+fn eat_order_direction(p: &mut Parser) -> bool {
+    if at_sdbl_keyword(p, "ASC", "ВОЗР") || at_sdbl_keyword(p, "DESC", "УБЫВ") {
+        p.bump();
+        p.skip_trivia();
+        true
+    } else {
+        false
     }
 }
 
@@ -779,12 +943,12 @@ fn for_update_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "UPDATE", "ИЗМЕНЕНИЯ");
     p.skip_trivia();
 
-    if p.at(TokenKind::Ident) && !is_clause_keyword(p) {
+    if super::at_name(p) && !is_clause_keyword(p) {
         p.bump();
-        while p.at(TokenKind::Dot) {
+        while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
-            p.bump();
-            if super::expressions::at_property_name(p) {
+            p.skip_trivia();
+            if super::at_name_component(p) {
                 p.bump();
             } else {
                 break;
@@ -834,6 +998,7 @@ fn totals_by_clause(p: &mut Parser) {
     p.skip_trivia();
 
     while !p.at_end() {
+        p.check_iteration_limit();
         p.skip_trivia();
 
         if at_sdbl_keyword(p, "BY", "ПО") {
@@ -875,23 +1040,193 @@ fn totals_by_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblTotalsBy);
 }
 
+// =====================================================================
+// CLEAN-ROOM Slice 12 — totals control-point modifiers
+//
+// A control point is an expression, then an optional `[ТОЛЬКО]
+// ИЕРАРХИЯ` or `ПЕРИОДАМИ(<вид периода> [, <дата>] [, <дата>])`, then an
+// optional alias. Modifiers are consumed as tokens of the enclosing
+// `SdblTotalsBy` rather than promoted into nodes of their own, so the
+// shape `crates/sdbl-hir` reads is unchanged; interpreting them is
+// Slice 13's.
+//
+// Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entries D2–D3.
+// =====================================================================
+
+/// The ten period names, in both spellings, as the rule enumerates them.
+const PERIOD_NAMES: &[(&str, &str)] = &[
+    ("SECOND", "СЕКУНДА"),
+    ("MINUTE", "МИНУТА"),
+    ("HOUR", "ЧАС"),
+    ("DAY", "ДЕНЬ"),
+    ("WEEK", "НЕДЕЛЯ"),
+    ("MONTH", "МЕСЯЦ"),
+    ("QUARTER", "КВАРТАЛ"),
+    ("YEAR", "ГОД"),
+    ("TENDAYS", "ДЕКАДА"),
+    ("HALFYEAR", "ПОЛУГОДИЕ"),
+];
+
+fn at_period_name(p: &Parser) -> bool {
+    PERIOD_NAMES.iter().any(|(en, ru)| at_sdbl_keyword(p, en, ru))
+}
+
+/// `<Литерал типа DATE> | <Идентификатор параметра>` — what the rule allows
+/// a period boundary to be.
+fn at_period_boundary(p: &Parser) -> bool {
+    // A parameter arrives as one token, name included, so `Ampersand` here
+    // means a whole `&Имя` rather than the sigil alone.
+    p.at(TokenKind::Ampersand)
+        || p.at(TokenKind::Date)
+        || (at_sdbl_keyword(p, "DATETIME", "ДАТАВРЕМЯ")
+            && p.nth_non_trivia(0) == Some(TokenKind::LParen))
+}
+
+fn at_periods_keyword(p: &Parser) -> bool {
+    at_sdbl_keyword(p, "PERIODS", "ПЕРИОДАМИ")
+}
+
 fn totals_group_item(p: &mut Parser) {
     super::expressions::expression(p);
     p.skip_trivia();
 
-    if p.at_keyword("ONLY") || p.at_keyword("ТОЛЬКО") {
+    totals_group_modifier(p);
+    totals_group_alias(p);
+}
+
+/// `[[ТОЛЬКО] ИЕРАРХИЯ] | [ПЕРИОДАМИ(…)]`.
+///
+/// The rule offers these as alternatives, not as a sequence, so taking
+/// one rules out the other. A control point carrying both is reported and
+/// then consumed anyway: the reading is wrong, but dropping the text
+/// would be worse.
+fn totals_group_modifier(p: &mut Parser) {
+    let took_hierarchy = if at_sdbl_keyword(p, "ONLY", "ТОЛЬКО") {
         p.bump();
         p.skip_trivia();
+
+        if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
+            p.bump();
+            p.skip_trivia();
+            true
+        } else {
+            p.error_custom_no_bump("ожидалось 'ИЕРАРХИЯ' / 'HIERARCHY' после 'ТОЛЬКО' / 'ONLY'");
+            // The alternative was never taken, so what follows cannot
+            // conflict with it. Saying otherwise would be a second message
+            // about a word that is not there.
+            false
+        }
+    } else if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
+        p.bump();
+        p.skip_trivia();
+        true
+    } else {
+        false
+    };
+
+    if at_periods_keyword(p) {
+        if took_hierarchy {
+            p.error_custom_no_bump(
+                "'ИЕРАРХИЯ' / 'HIERARCHY' и 'ПЕРИОДАМИ' / 'PERIODS' исключают друг друга",
+            );
+        }
+        totals_periods_modifier(p);
+    }
+}
+
+/// `ПЕРИОДАМИ(<вид периода> [, <граница>] [, <граница>])`.
+///
+/// Every part the rule marks mandatory is reported when it is missing —
+/// but reported without moving, so the clause that follows still gets
+/// parsed. The period name comes from a closed list of ten words; the
+/// boundaries are a date literal or a parameter, taken as expressions so
+/// that their structure survives for the semantic layer.
+fn totals_periods_modifier(p: &mut Parser) {
+    p.bump();
+    p.skip_trivia();
+
+    if !p.at(TokenKind::LParen) {
+        if !p.at_end() {
+            p.error_custom_no_bump("ожидалась '(' после 'ПЕРИОДАМИ' / 'PERIODS'");
+        }
+        return;
+    }
+    p.bump();
+    p.skip_trivia();
+
+    if at_period_name(p) {
+        p.bump();
+        p.skip_trivia();
+    } else if super::at_name(p) && !is_clause_keyword(p) {
+        // A word in the right place that is not one of the ten. Take it,
+        // so the modifier still has a shape, and say what is wrong with it.
+        p.error_custom_no_bump("неизвестный вид периода");
+        p.bump();
+        p.skip_trivia();
+    } else {
+        p.error_custom_no_bump("ожидался вид периода");
     }
 
-    if p.at_keyword("HIERARCHY") || p.at_keyword("ИЕРАРХИЯ") {
+    // The rule allows two boundaries. A third is a mistake the user can
+    // see; counting them here would only cost the rest of the clause.
+    while p.at(TokenKind::Comma) {
+        p.check_iteration_limit();
+        p.bump();
+        p.skip_trivia();
+
+        if super::expressions::is_expression_start(p) {
+            if !at_period_boundary(p) {
+                p.error_custom_no_bump("границей периода может быть литерал даты или параметр");
+            }
+            super::expressions::expression(p);
+            p.skip_trivia();
+        } else {
+            p.error_custom_no_bump("ожидалась граница периода после запятой");
+        }
+    }
+
+    if p.at(TokenKind::RParen) {
+        p.bump();
+        p.skip_trivia();
+    } else if !p.at_end() {
+        // At end of input this is a query being typed and says nothing;
+        // with a clause still to come the paren is simply unclosed.
+        p.error_custom_no_bump("не закрыта скобка после 'ПЕРИОДАМИ' / 'PERIODS'");
+    }
+}
+
+/// The trailing `[[КАК] <Псевдоним поля>]` of a control point.
+///
+/// Written out, `КАК` commits to a name and its absence is reported. A
+/// bare alias cannot be told from a following clause by anything but the
+/// spelling, so that form keeps the wide guard; an explicit one uses the
+/// same narrow guard as the other explicit aliases in this grammar,
+/// because a name that spells a keyword is still a name.
+fn totals_group_alias(p: &mut Parser) {
+    if at_sdbl_keyword(p, "AS", "КАК") {
+        eat_sdbl_keyword(p, "AS", "КАК");
+        p.skip_trivia();
+
+        // After an explicit `КАК` nothing but a name can stand, so the
+        // boundary's guess from the word alone does not apply here — the
+        // same as for a field alias and a source alias.
+        if is_body_clause_keyword(p) {
+            p.error_custom_no_bump("ожидался псевдоним после 'КАК' / 'AS'");
+        } else {
+            super::eat_name_here(p, "ожидался псевдоним после 'КАК' / 'AS'");
+            p.skip_trivia();
+        }
+        return;
+    }
+
+    if super::at_name(p) && !is_clause_keyword(p) {
         p.bump();
         p.skip_trivia();
     }
 }
 
 fn is_identifier_token(p: &Parser) -> bool {
-    p.at(TokenKind::Ident)
+    super::at_name(p)
 }
 
 fn is_limitation_keyword(p: &Parser) -> bool {
@@ -923,19 +1258,63 @@ fn top_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "TOP", "ПЕРВЫЕ");
     p.skip_trivia();
 
-    p.expect(TokenKind::Decimal);
+    // `expect` reports by bumping the offending token, which would eat the
+    // next clause's keyword and cost that clause its parse. Say the same
+    // thing without moving when the count is simply not there.
+    if is_clause_keyword(p) || p.at(TokenKind::Semicolon) || p.at(TokenKind::RParen) || p.at_end() {
+        p.error_custom_no_bump("ожидалось количество после 'ПЕРВЫЕ' / 'TOP'");
+    } else {
+        p.expect(TokenKind::Decimal);
+    }
 
     m.complete(p, NodeKind::SdblTopClause);
 }
+
+// =====================================================================
+// CLEAN-ROOM Slice 12 — virtual-table argument recovery
+//
+// A safety net for malformed argument lists only: clean nested calls and
+// subqueries are consumed by the expression layer and never reach here.
+// Tracks paren depth so that a comma inside a nested call is not
+// mistaken for an argument separator.
+//
+// Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entry A7.
+// =====================================================================
 
 fn recover_to_delimiter_vt(p: &mut Parser) {
     let recovery = p.start();
     let mut consumed_any = false;
     let mut paren_depth: u32 = 0;
+    let mut brace_depth: u32 = 0;
     let mut nested_query_starts: Vec<u32> = Vec::new();
 
     loop {
         p.check_iteration_limit();
+
+        // An extension region is opaque text: the words in it are not this
+        // query's, and neither are its parens.
+        if p.at(TokenKind::LBrace) {
+            brace_depth += 1;
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if p.at(TokenKind::RBrace) {
+            brace_depth = brace_depth.saturating_sub(1);
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if brace_depth > 0 {
+            if p.at_end() || p.at(TokenKind::Semicolon) {
+                break;
+            }
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
 
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
@@ -964,7 +1343,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
 
         let inside_nested_query = !nested_query_starts.is_empty();
 
-        if is_clause_keyword(p) {
+        if is_clause_keyword(p) && p.prev_significant() != Some(TokenKind::Dot) {
             let stop = if paren_depth == 0 {
                 true
             } else if inside_nested_query {
@@ -977,7 +1356,11 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             }
         }
 
-        if paren_depth == 0 && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon)) {
+        if p.at(TokenKind::Semicolon) {
+            break;
+        }
+
+        if paren_depth == 0 && p.at(TokenKind::Comma) {
             break;
         }
 

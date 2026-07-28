@@ -89,11 +89,13 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
 
         S::FnSubstring => T::Ident,
 
-        S::FnPresentation | S::FnValueType | S::FnDate => T::Ident,
+        S::FnPresentation | S::FnValueType => T::Ident,
 
         S::FnIsNull | S::FnRefPresentation | S::FnEmptyRef | S::FnEmptyTable | S::FnUUID => {
             T::Ident
         }
+
+        S::FnRecordAutoNumber | S::FnGroupedBy | S::FnStoredDataSize => T::Ident,
 
         S::TypeBoolean | S::TypeNumber | S::TypeString | S::TypeDate => T::Ident,
 
@@ -111,28 +113,53 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         | S::MdoTask
         | S::MdoExternalDataSource
         | S::MdoConstant
-        | S::MdoSequence => T::Ident,
+        | S::MdoConstants
+        | S::MdoSequence
+        | S::MdoDocumentJournal
+        | S::MdoExchangePlan
+        | S::MdoFilterCriterion => T::Ident,
 
         S::FnStringLength
         | S::FnStrFind
+        | S::FnStrReplace
         | S::FnUpper
         | S::FnLower
         | S::FnTrimAll
         | S::FnTrimL
         | S::FnTrimR
+        | S::FnLeft
+        | S::FnRight
         | S::FnRound
         | S::FnInt
+        | S::FnExp
         | S::FnLog10
         | S::FnLog
         | S::FnPow
-        | S::FnSqrt => T::Ident,
+        | S::FnSqrt
+        | S::FnACos
+        | S::FnASin
+        | S::FnATan
+        | S::FnCos
+        | S::FnSin
+        | S::FnTan => T::Ident,
 
         S::VtSliceFirst
         | S::VtSliceLast
         | S::VtBalance
         | S::VtTurnovers
         | S::VtBalanceAndTurnovers
-        | S::VtDrCrTurnovers => T::Ident,
+        | S::VtDrCrTurnovers
+        | S::VtExtDimensions
+        | S::VtRecordsWithExtDimensions
+        | S::VtScheduleData
+        | S::VtAdjustedEffectivePeriod
+        | S::VtBoundaries
+        | S::VtPoints
+        | S::VtTasksByPerformer
+        | S::VtTable
+        | S::VtCube
+        | S::VtDimensionTable
+        | S::VtChanges => T::Ident,
 
         S::PeriodTenDays | S::PeriodHalfYear => T::Ident,
 

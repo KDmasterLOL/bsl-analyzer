@@ -206,7 +206,7 @@ pub(crate) fn is_platform_name(name: &Name, ru: &str, en: &str) -> bool {
     is_platform_name_str(name.as_str(), ru, en)
 }
 
-fn is_platform_name_str(name: &str, ru: &str, en: &str) -> bool {
+pub(crate) fn is_platform_name_str(name: &str, ru: &str, en: &str) -> bool {
     stdx::case::eq_ignore_case(name, ru) || stdx::case::eq_ignore_case(name, en)
 }
 

@@ -830,6 +830,60 @@ impl<'db> InferenceContext<'db> {
         });
     }
 
+    /// The type name a `Новый(...)` names by value, trimmed once here so every
+    /// consumer below sees the same spelling. A `Тип(...)` wrapper counts only
+    /// when it really is the platform function: a nearer declaration takes the
+    /// name over, in the Local → Module → Global-CM → Platform order the call
+    /// path itself applies.
+    fn constructed_type_name<'b>(&mut self, body: &'b Body, arg: ExprIdx) -> Option<&'b str> {
+        if let Some(text) = crate::type_literal::bare_string_literal(body, arg) {
+            return Some(text.trim());
+        }
+        let (callee, text) = crate::type_literal::type_ctor_literal(body, arg)?;
+        if self.is_call_name_shadowed(callee) {
+            return None;
+        }
+        Some(text.trim())
+    }
+
+    fn is_call_name_shadowed(&mut self, name: &Name) -> bool {
+        let key = NormName::intern(name.as_str());
+        if self.body_declares_binding(name) || self.assigned_var_names.contains(&key) {
+            return true;
+        }
+        // A module-level `Перем` takes the name over just as a module method
+        // does, so both are asked. Not through `resolve_name`: it answers
+        // `Builtin` first, and every name worth asking about here — `Тип` above
+        // all — is precisely a builtin, so the module would never be consulted.
+        let resolver = self.get_resolver();
+        if resolver.resolve_module_method(self.db, name).is_some()
+            || resolver.resolve_module_variable(self.db, name).is_some()
+        {
+            return true;
+        }
+        self.global_export_map().contains_key(&key)
+    }
+
+    /// The same type-availability check as the syntactic `Новый X`, for a name
+    /// that arrived as a string value (`Новый("X")`, `Новый(Тип("X"))`). A
+    /// qualified name denotes a configuration object rather than a platform
+    /// type, and configuration objects carry no per-environment availability.
+    fn check_constructed_type_env(&mut self, expr: ExprId, name: &str) {
+        if name.contains('.') {
+            return;
+        }
+        let platform = bsl_platform::PlatformDataInner::instance();
+        let Some(platform_type) = platform.get_type(name) else {
+            return;
+        };
+        if platform.is_ambiguous_type_name(name) {
+            return;
+        }
+        let environment =
+            hir_def::execution_env::EnvFlags::from_platform_context(platform_type.context.as_ref());
+        self.check_member_env(expr, &Name::new(name), environment, EnvMemberKind::Type);
+    }
+
     /// Accessibility of a cross-module call to `callee_module` (a common
     /// module): every environment this body runs in must either be one the
     /// callee is compiled for, or — for `ВызовСервера` modules — a client
@@ -1553,6 +1607,17 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(ExprId::from_idx(arg));
                 }
 
+                // `Новый("X")` / `Новый(Тип("X"))`: имя типа приходит значением.
+                // Список аргументов у этой формы — `(<Тип>, <МассивПараметров>)`,
+                // то есть НЕ позиционные аргументы конструктора, поэтому ниже она
+                // не участвует ни в привязке к перегрузкам, ни в синтезе проекций
+                // запроса — иначе имя типа было бы разобрано как первый параметр.
+                let body = Arc::clone(&self.body);
+                let dynamic_name = match (type_name, args.first()) {
+                    (None, Some(&first)) => self.constructed_type_name(&body, first),
+                    _ => None,
+                };
+
                 if let Some(name) = type_name {
                     let platform = bsl_platform::PlatformDataInner::instance();
                     let platform_type = platform.get_type(name.as_str());
@@ -1602,16 +1667,33 @@ impl<'db> InferenceContext<'db> {
                     }
                 }
 
-                let is_query_ctor = type_name.as_ref().is_some_and(|name| {
-                    crate::method_lookup::is_platform_name(name, "Запрос", "Query")
+                if let Some(raw) = dynamic_name {
+                    self.check_constructed_type_env(expr_id, raw);
+                }
+
+                // Обе формы обязаны сходиться на одном типе, иначе `Новый Запрос`
+                // и `Новый("Запрос")` начали бы конфликтовать между собой.
+                let ctor_name = type_name.as_ref().map(Name::as_str).or(dynamic_name);
+                let is_query_ctor = ctor_name.is_some_and(|name| {
+                    crate::method_lookup::is_platform_name_str(name, "Запрос", "Query")
                 });
                 if is_query_ctor {
-                    let projections = self.try_synthesise_query_projections(args);
+                    let projections = match type_name {
+                        Some(_) => self.try_synthesise_query_projections(args),
+                        None => Arc::from([]),
+                    };
                     self.db.query(projections.iter().cloned().collect())
                 } else {
-                    match type_name {
-                        Some(name) => TyLoweringContext::new().lower_bare_name_id(self.db, name),
-                        None => self.db.unknown(),
+                    match (type_name, dynamic_name) {
+                        (Some(name), _) => {
+                            TyLoweringContext::new().lower_bare_name_id(self.db, name)
+                        }
+                        (None, Some(raw)) => {
+                            crate::lower::type_string::lower_constructed_type_name_typeid(
+                                self.db, raw,
+                            )
+                        }
+                        (None, None) => self.db.unknown(),
                     }
                 }
             }
@@ -1637,7 +1719,9 @@ impl<'db> InferenceContext<'db> {
         let resolver = self.get_resolver();
 
         let name_lower = name.as_str().fold_lower();
-        if name_lower == "этотобъект" || name_lower == "thisobject" {
+        let self_name_wins =
+            is_self_name(&name_lower) && !self.self_name_is_shadowed(name, &resolver);
+        if self_name_wins && (name_lower == "этотобъект" || name_lower == "thisobject") {
             if let Some(owner) = crate::this_object::resolve_this_object_owner(self.db, &resolver) {
                 trace!("resolved {} as ThisObject {{ owner: {:?} }}", name, owner);
                 return self.db.mk_this_object(
@@ -1666,10 +1750,15 @@ impl<'db> InferenceContext<'db> {
                     return self.db.metadata_ref(kind, name.as_str().to_string(), &RootConfigCtx);
                 }
             }
-            if crate::this_object::is_managed_form_module(self.db, &resolver) {
-                trace!("resolved {} as managed form Self", name);
-                return self.db.platform_object(crate::form_self::FORM_TYPE_NAME.to_string());
-            }
+        }
+        // `ЭтаФорма` denotes the form itself just as `ЭтотОбъект` does — the
+        // deprecated spelling only earns the `UsingThisForm` hint, not a worse
+        // type. The platform's own `ЭтаФорма` entry belongs to the ORDINARY form
+        // (`Форма`), so a managed form module finds nothing there and would end
+        // up treating the receiver as an unresolved module.
+        if self_name_wins && crate::this_object::is_managed_form_module(self.db, &resolver) {
+            trace!("resolved {} as managed form Self", name);
+            return self.db.platform_object(crate::form_self::FORM_TYPE_NAME.to_string());
         }
 
         let resolved = resolver.resolve_name(self.db, name);
@@ -2164,6 +2253,28 @@ impl<'db> InferenceContext<'db> {
                     self.record_candidate_call_arg_binding(callee, args, candidates)
                 }
                 None => {
+                    // `ЭтотОбъект.Метод()` in a managed form module. The form type
+                    // carries no such platform member, so the module's own methods
+                    // are the receiver's remaining surface — resolve and judge them
+                    // exactly as the equivalent bare call, and report the miss:
+                    // unlike a bare name, a self receiver has nowhere else to look.
+                    if let Some(self_name) = self.form_self_receiver_name(base_id) {
+                        let result = self
+                            .infer_local_method_call(&method_name, args, callee)
+                            .unwrap_or_else(|| {
+                                self.push_inference_diagnostic(
+                                    InferenceDiagnostic::UnresolvedMethodCall {
+                                        expr: callee,
+                                        receiver_name: self_name,
+                                        method_name: method_name.clone(),
+                                        kind: UnresolvedMethodKind::MethodNotFound,
+                                    },
+                                );
+                                self.db.unknown()
+                            });
+                        self.expr_types.insert(callee, self.db.unknown());
+                        return result;
+                    }
                     if self.method_resolves_on_alternate_assignment(
                         base_id,
                         receiver_ty,
@@ -2321,49 +2432,8 @@ impl<'db> InferenceContext<'db> {
                     if !self.body_declares_binding(name)
                         && !self.assigned_var_names.contains(&NormName::intern(name.as_str()))
                     {
-                        let symbol_tree = match &self.local_symbols {
-                            Some(symbols) => Arc::clone(symbols),
-                            None => {
-                                let module_id = hir_def::ModuleId::new(self.context_file_id);
-                                self.db.symbol_tree(module_id)
-                            }
-                        };
-                        // Weaving: a `&Вместо`/`&Перед`/`&После` interceptor calling a base
-                        // sibling that the extension does not define falls back to the paired
-                        // base module's symbols (the extension shadows the base). The base tree
-                        // is bound here so the borrowed method outlives the lookup.
-                        let base_tree = self.weaving_base.map(|base| self.db.symbol_tree_ref(base));
-                        let resolved_method = symbol_tree.find_method(name).or_else(|| {
-                            base_tree.as_ref().and_then(|base_tree| base_tree.find_method(name))
-                        });
-                        if let Some(method) = resolved_method {
-                            // Weaving-base fallbacks resolve into another file whose
-                            // item tree does not match `context_file_id` — the local
-                            // directive check only makes sense for true siblings.
-                            if method.id.module.file_id == self.context_file_id {
-                                let method_name = method.name.clone();
-                                let local_id = method.id.local_id;
-                                self.check_local_callee_env(callee, &method_name, local_id);
-                            }
-                            // In effective (`&ИзменениеИКонтроль`) inference, prefer the
-                            // CHANGED body's return over the base-keyed query, so inserted
-                            // code that consumes a changed sibling's result types correctly.
-                            let effective_ret = self
-                                .local_effective_returns
-                                .as_ref()
-                                .and_then(|m| m.get(&method.id.local_id).copied())
-                                .filter(|ret| !self.is_unknown(*ret));
-                            let sig = crate::method_resolution::materialise_signature_enriched(
-                                self.db, method.id, method,
-                            );
-                            let return_ty = effective_ret.unwrap_or(sig.ret);
-                            let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
-                                self.db, name, method.id, return_ty,
-                            ) else {
-                                return self.db.unknown();
-                            };
-                            return self
-                                .record_candidate_call_arg_binding(callee, args, candidates);
+                        if let Some(return_ty) = self.infer_local_method_call(name, args, callee) {
+                            return return_ty;
                         }
                     }
                 }
@@ -2371,6 +2441,98 @@ impl<'db> InferenceContext<'db> {
             }
             _ => self.db.unknown(),
         }
+    }
+
+    /// Resolves a call against the methods of the module being inferred, judges it
+    /// against the caller's compilation directive and binds its arguments.
+    ///
+    /// `None` means the module declares no such method — what that means is the
+    /// caller's decision: a bare name may still be a global function or a common
+    /// module export, while a self-qualified receiver has no surface left.
+    fn infer_local_method_call(
+        &mut self,
+        name: &hir_def::Name,
+        args: &[ExprId],
+        callee: ExprId,
+    ) -> Option<TypeId> {
+        let symbol_tree = match &self.local_symbols {
+            Some(symbols) => Arc::clone(symbols),
+            None => {
+                let module_id = hir_def::ModuleId::new(self.context_file_id);
+                self.db.symbol_tree(module_id)
+            }
+        };
+        // Weaving: a `&Вместо`/`&Перед`/`&После` interceptor calling a base
+        // sibling that the extension does not define falls back to the paired
+        // base module's symbols (the extension shadows the base). The base tree
+        // is bound here so the borrowed method outlives the lookup.
+        let base_tree = self.weaving_base.map(|base| self.db.symbol_tree_ref(base));
+        let method = symbol_tree
+            .find_method(name)
+            .or_else(|| base_tree.as_ref().and_then(|base_tree| base_tree.find_method(name)))?;
+
+        // Weaving-base fallbacks resolve into another file whose item tree does
+        // not match `context_file_id` — the local directive check only makes
+        // sense for true siblings.
+        if method.id.module.file_id == self.context_file_id {
+            let method_name = method.name.clone();
+            let local_id = method.id.local_id;
+            self.check_local_callee_env(callee, &method_name, local_id);
+        }
+        // In effective (`&ИзменениеИКонтроль`) inference, prefer the CHANGED
+        // body's return over the base-keyed query, so inserted code that consumes
+        // a changed sibling's result types correctly.
+        let effective_ret = self
+            .local_effective_returns
+            .as_ref()
+            .and_then(|m| m.get(&method.id.local_id).copied())
+            .filter(|ret| !self.is_unknown(*ret));
+        let sig =
+            crate::method_resolution::materialise_signature_enriched(self.db, method.id, method);
+        let return_ty = effective_ret.unwrap_or(sig.ret);
+        let Ok(candidates) =
+            crate::user_call_candidates::for_resolved_method(self.db, name, method.id, return_ty)
+        else {
+            return Some(self.db.unknown());
+        };
+        Some(self.record_candidate_call_arg_binding(callee, args, candidates))
+    }
+
+    /// An ordinary symbol with a self name's spelling shadows the predefined
+    /// meaning: a parameter, a `Перем` in the body or at module level, an
+    /// assignment target, a user method. Typing such a receiver as the module's
+    /// own object or form would invent members it does not have and lose every
+    /// check that depends on its real type. Mirrors the `user_shadows` /
+    /// `body_binding_shadows` rule the rest of the name cascade uses.
+    fn self_name_is_shadowed(&self, name: &hir_def::Name, resolver: &Resolver) -> bool {
+        self.body_declares_binding(name)
+            || self.assigned_var_names.contains(&NormName::intern(name.as_str()))
+            || matches!(
+                resolver.resolve_name(self.db, name),
+                Some(
+                    hir_def::resolver::Resolution::Method(_)
+                        | hir_def::resolver::Resolution::Variable(_)
+                )
+            )
+    }
+
+    /// The receiver is the form module's own self reference, written literally.
+    ///
+    /// The test is on the spelling, not on the inferred type: a parameter or
+    /// variable that merely holds a `ФормаКлиентскогоПриложения` came from
+    /// somewhere else, and resolving it against THIS module's methods would
+    /// invent members it does not have.
+    fn form_self_receiver_name(&self, base_id: ExprId) -> Option<hir_def::Name> {
+        let Expr::Path(name) = self.body.expr(base_id) else { return None };
+        let name = name.clone();
+        if !is_self_name(&name.as_str().fold_lower()) {
+            return None;
+        }
+        let resolver = self.get_resolver();
+        if self.self_name_is_shadowed(&name, &resolver) {
+            return None;
+        }
+        crate::this_object::is_managed_form_module(self.db, &resolver).then_some(name)
     }
 
     /// `static_receiver` — the call names the module directly
@@ -2815,6 +2977,11 @@ fn const_eval_literal_index(expr: &Expr) -> Option<usize> {
         return None;
     }
     Some(f as usize)
+}
+
+/// Spellings that denote the module's own object or form, both languages.
+fn is_self_name(name_lower: &str) -> bool {
+    matches!(name_lower, "этотобъект" | "thisobject" | "этаформа" | "thisform")
 }
 
 fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<hir_def::Name> {

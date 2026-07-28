@@ -237,6 +237,196 @@ fn execute_batch_chain_propagates_through_select() {
     );
 }
 
+/// Строит `Новый <статическая форма>` и `Новый(<динамическая форма>)` в двух
+/// отдельных базах и возвращает выведенные типы для сравнения.
+fn static_and_dynamic_ctor_ty(static_form: &str, dynamic_form: &str) -> (TypeId, TypeId) {
+    let build = |ctor: &str| {
+        let fixture = format!(
+            "//- /test.bsl\nФункция Тест()\n    Х = Новый {ctor};\n    Возврат Х;\nКонецФункции\n"
+        );
+        let (db, file_id) = setup(&fixture);
+        let ty = var_ty(&db, file_id, "х")
+            .unwrap_or_else(|| panic!("`Новый {ctor}` must infer a type for х"));
+        (db, ty)
+    };
+    let (static_db, static_ty) = build(static_form);
+    let (dynamic_db, dynamic_ty) = build(&format!("({dynamic_form})"));
+    assert_eq!(
+        static_db.lookup_type(static_ty),
+        dynamic_db.lookup_type(dynamic_ty),
+        "`Новый {static_form}` and `Новый({dynamic_form})` must agree on the constructed type"
+    );
+    (static_ty, dynamic_ty)
+}
+
+#[test]
+fn new_with_string_literal_name_agrees_with_the_syntactic_form() {
+    static_and_dynamic_ctor_ty("ТаблицаЗначений", r#""ТаблицаЗначений""#);
+}
+
+#[test]
+fn new_with_type_call_name_agrees_with_the_syntactic_form() {
+    static_and_dynamic_ctor_ty("ТаблицаЗначений", r#"Тип("ТаблицаЗначений")"#);
+}
+
+#[test]
+fn new_with_english_type_call_name_agrees_with_the_syntactic_form() {
+    static_and_dynamic_ctor_ty("Массив", r#"Type("Массив")"#);
+}
+
+/// Пробелы вокруг имени не должны разводить формы: `Запрос` распознаётся до
+/// понижения, поэтому обрезка обязана случиться раньше обеих проверок.
+#[test]
+fn new_with_padded_dynamic_name_agrees_with_the_syntactic_form() {
+    static_and_dynamic_ctor_ty("Запрос", r#"" Запрос ""#);
+    static_and_dynamic_ctor_ty("Массив", r#"Тип("  Массив  ")"#);
+}
+
+#[test]
+fn new_with_dynamic_query_name_types_as_query() {
+    for ctor in [r#"("Запрос")"#, r#"(Тип("Запрос"))"#] {
+        let fixture = format!(
+            "//- /test.bsl\nФункция Тест()\n    Х = Новый {ctor};\n    Возврат Х;\nКонецФункции\n"
+        );
+        let (db, file_id) = setup(&fixture);
+        let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
+        assert!(
+            query_no_projection(&db, ty),
+            "`Новый {ctor}` must produce Ty::Query so it cannot contradict `Новый Запрос`, got {ty:?}",
+        );
+    }
+}
+
+#[test]
+fn new_with_qualified_string_name_types_as_metadata_ref() {
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Х = Новый(Тип("СправочникСсылка.Товары"));
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
+    match db.lookup_type(ty) {
+        TypeKind::MetadataRef(facet) => {
+            assert_eq!(facet.name.as_str(), "Товары");
+        }
+        other => panic!(
+            "a qualified name is only expressible through the string form, so it must still \
+             produce a metadata reference; got {other:?}"
+        ),
+    }
+}
+
+/// Имя, пришедшее значением, — гипотеза, а не утверждение автора: нераспознанное
+/// остаётся `Unknown`, потому что номинальный фантом в позиции аргумента даёт
+/// только ложный `TypeMismatch`.
+#[test]
+fn new_with_unrecognised_dynamic_name_stays_unknown() {
+    let infer_ctor = |ctor: &str| {
+        let fixture = format!(
+            "//- /test.bsl\nФункция Тест(ИмяТипа, ИмяКомпоненты)\n    Х = Новый {ctor};\n    Возврат Х;\nКонецФункции\n"
+        );
+        let (db, file_id) = setup(&fixture);
+        // Инференс не заносит Unknown в `var_types`, поэтому отсутствие записи и
+        // есть «о переменной ничего не известно».
+        let ty = var_ty(&db, file_id, "х").unwrap_or_else(|| db.unknown());
+        (db.unknown(), ty)
+    };
+
+    for ctor in [
+        r#"("AddIn.CLON.DbControl")"#,
+        r#"("Addin.ЭДОNative.CryptS")"#,
+        r#"("ЗаведомоНесуществующийТип")"#,
+        r#"(Тип("ЗаведомоНесуществующийТип"))"#,
+        // Семейства из `is_known_non_corpus_type_name` угадываются по префиксу и
+        // суффиксу — для имени-из-значения этого мало.
+        r#"("ЗаведомоНесуществующийDOM")"#,
+        r#"("ОбъектМетаданныхЗаведомоНесуществующий")"#,
+        r#"("")"#,
+        "(ИмяТипа)",
+        r#"(Тип(ИмяТипа))"#,
+        r#"("AddIn." + ИмяКомпоненты)"#,
+    ] {
+        let (unknown, ty) = infer_ctor(ctor);
+        assert_eq!(ty, unknown, "`Новый {ctor}` names no recognisable type and must stay Unknown");
+    }
+
+    // Контроль: та же фикстура с распознаваемым именем типа обязана дать не-Unknown,
+    // иначе проверки выше проходили бы и на сломанной фикстуре.
+    let (unknown, ty) = infer_ctor(r#"("ТаблицаЗначений")"#);
+    assert_ne!(ty, unknown, "the control case must be typed, otherwise the fixture proves nothing");
+}
+
+/// Курируемый список реальных типов вне корпуса — тот же источник истины, что и
+/// у деградации фантома в аннотации: обе формы обязаны его видеть одинаково.
+#[test]
+fn new_with_known_non_corpus_name_agrees_with_the_syntactic_form() {
+    static_and_dynamic_ctor_ty("УправляемаяФорма", r#""УправляемаяФорма""#);
+    static_and_dynamic_ctor_ty("СтрокаТабличнойЧасти", r#"Тип("СтрокаТабличнойЧасти")"#);
+}
+
+/// Имя из значения принимается только по точно поименованным типам. Всё, что
+/// корпус и точные списки лишь угадывают, остаётся `Unknown`: семейства
+/// XDTO/XML/DOM опознаются по форме «кириллический корень + латинский тег», где
+/// `ТипXDTO` неотличим от `ЗаведомоНесуществующийDOM`, а произведение видов
+/// регистров на суффиксы записи содержит несуществующие сочетания (у регистра
+/// накопления нет менеджера записи, у последовательности — ключа записи).
+///
+/// Размен сознательный и закреплён тестом, чтобы его не «починили» обратно:
+/// несовпадение со статической формой стоит невыведенного типа, который никто не
+/// видит, а обратный выбор — ложного `TypeMismatch` на фантоме, который видят все.
+#[test]
+fn new_with_family_guessed_name_stays_unknown_in_the_string_form() {
+    for ctor in [
+        r#"("ТипXDTO")"#,
+        r#"("РегистрНакопленияМенеджерЗаписи")"#,
+        r#"("ПоследовательностьКлючЗаписи")"#,
+    ] {
+        let fixture = format!(
+            "//- /test.bsl\nФункция Тест()\n    Х = Новый {ctor};\n    Возврат Х;\nКонецФункции\n"
+        );
+        let (db, file_id) = setup(&fixture);
+        assert_eq!(
+            var_ty(&db, file_id, "х"),
+            None,
+            "`Новый {ctor}` names a guessed family, not an exactly known type"
+        );
+    }
+}
+
+/// Модульная переменная перехватывает имя так же, как метод модуля: платформенной
+/// `Тип` здесь нет, и строка ничего не говорит о типе результата.
+#[test]
+fn module_variable_named_type_is_not_a_type_name_wrapper() {
+    let fixture = r#"//- /test.bsl
+Перем Тип;
+Функция Тест()
+    Х = Новый(Тип("Массив"));
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        None,
+        "a module variable takes the name over, so the literal is not a type name"
+    );
+
+    let control = r#"//- /test.bsl
+Функция Тест()
+    Х = Новый(Тип("Массив"));
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(control);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        Some(db.array(None)),
+        "control: with no shadowing declaration the platform wrapper is still unwrapped"
+    );
+}
+
 #[test]
 fn new_structure_gives_structure_ty() {
     let fixture = r#"//- /test.bsl

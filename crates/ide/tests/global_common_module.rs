@@ -227,3 +227,35 @@ fn non_global_module_export_not_callable_unqualified() {
         "a non-global module's export must not be callable unqualified"
     );
 }
+
+/// `Новый(Тип("X"))` разворачивает строку в имя типа только тогда, когда `Тип` —
+/// действительно платформенная функция. Экспорт глобального общего модуля её
+/// перекрывает, и тогда строка ничего не говорит о типе результата.
+#[test]
+fn shadowed_type_function_is_not_a_type_name_wrapper() {
+    use hir::HirDatabase;
+
+    let caller = "Процедура Тест()\n    Х = Новый(Тип(\"Массив\"));\nКонецПроцедуры\n";
+
+    let db = build_db(caller);
+    let array = {
+        use hir::Builders;
+        db.array(None)
+    };
+    assert_eq!(
+        db.infer(FileId::from_raw(CALLER_ID)).var_types.get("х").copied(),
+        Some(array),
+        "control: with no user-defined Тип the platform wrapper must still be unwrapped"
+    );
+
+    let mut db = build_db(caller);
+    db.set_file_text(
+        FileId::from_raw(GLOBAL_ID),
+        "Функция Тип(Имя) Экспорт\n    Возврат \"ТаблицаЗначений\";\nКонецФункции\n",
+    );
+    assert_eq!(
+        db.infer(FileId::from_raw(CALLER_ID)).var_types.get("х").copied(),
+        None,
+        "a global export named Тип shadows the platform function, so the literal says nothing"
+    );
+}

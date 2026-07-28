@@ -9,6 +9,36 @@ use crate::intern::TypeKernelDb;
 use crate::kind::{MetadataKind, MetadataReferenceKind, Projection, TypeId, TypeKind};
 use bsl_metadata::MdoType;
 
+/// Имя платформенного типа хранится в каноническом русском написании
+/// (см. `intern::canonical_platform_name`), поэтому английская локаль обязана
+/// брать парное имя из корпуса — иначе она показывала бы русское. Имя вне
+/// корпуса парного не имеет и печатается как есть.
+fn platform_object_label(name: &str, locale: Locale) -> &str {
+    let platform = bsl_platform::PlatformData::instance();
+    // Хранимое имя каноническое, но не обязательно русское: у типов-тёзок
+    // интернирование вынуждено сохранять английский алиас, иначе они склеились
+    // бы в один тип. Поэтому обе локали спрашивают корпус, а не полагаются на то,
+    // что в фасете лежит русское написание.
+    match locale {
+        Locale::Ru => match platform.get_type(name) {
+            // Русское имя у тёзок общее, так что выбор записи здесь безопасен.
+            Some(ty) if !ty.name.is_empty() => ty.name.as_str(),
+            _ => name,
+        },
+        Locale::En => {
+            // А вот английские имена у тёзок разные, и по общему русскому имени
+            // нельзя выбрать одно, не приписав типу чужой перевод.
+            if platform.is_ambiguous_type_name(name) {
+                return name;
+            }
+            match platform.get_type(name) {
+                Some(ty) if !ty.english_name.is_empty() => ty.english_name.as_str(),
+                _ => name,
+            }
+        }
+    }
+}
+
 fn manager_collection_label(mdo: MdoType, locale: Locale) -> &'static str {
     match locale {
         Locale::Ru => mdo.manager_type_prefix_ru().unwrap_or("МенеджерКоллекция"),
@@ -130,7 +160,9 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
             Locale::Ru => "Тип",
             Locale::En => "Type",
         }),
-        TypeKind::PlatformObject(PlatformObjectFacet { name }) => buf.push_str(name),
+        TypeKind::PlatformObject(PlatformObjectFacet { name }) => {
+            buf.push_str(platform_object_label(name, ctx.locale()));
+        }
         TypeKind::MetadataRef(facet) => render_meta_ref(facet, ctx, buf),
         TypeKind::MetadataObject(facet) => render_meta_obj(facet, ctx, buf),
         TypeKind::AnyMetadataRef { mdo_type } => match MetadataKind::ref_kind_for(*mdo_type) {
@@ -535,6 +567,64 @@ mod tests {
 
     fn show(db: &InMemoryDb, id: TypeId, ctx: &dyn DisplayCtx) -> String {
         display_name(db.lookup_type(id), ctx, db)
+    }
+
+    #[test]
+    fn platform_object_follows_locale() {
+        let data = bsl_platform::PlatformData::instance();
+        let Some(reader) = data.get_type("ЧтениеТекста") else {
+            return;
+        };
+        if reader.english_name.is_empty() {
+            return;
+        }
+        let db = InMemoryDb::new();
+        let id = db.platform_object("ЧтениеТекста".to_string());
+        assert_eq!(show(&db, id, &ru()), "ЧтениеТекста");
+        assert_eq!(
+            show(&db, id, &en()),
+            reader.english_name.as_str(),
+            "имя хранится каноническим русским, поэтому английская локаль обязана \
+             брать парное имя из корпуса, а не показывать русское"
+        );
+    }
+
+    /// У тёзок английские имена разные, и выбрать одно значит приписать типу
+    /// чужой перевод. Раз канонизация от такого выбора отказалась, отображение
+    /// тем более не вправе его делать.
+    #[test]
+    fn ambiguous_name_is_not_translated_through_a_twin() {
+        let data = bsl_platform::PlatformData::instance();
+        if !data.is_ambiguous_type_name("ЭлементыФормы") {
+            return;
+        }
+        let db = InMemoryDb::new();
+        let id = db.platform_object("ЭлементыФормы".to_string());
+        assert_eq!(show(&db, id, &en()), "ЭлементыФормы");
+        assert_eq!(show(&db, id, &ru()), "ЭлементыФормы");
+    }
+
+    /// Хранимое имя тёзки — английский алиас, но русская локаль обязана показать
+    /// русское имя: оно у тёзок общее, и выбор записи тут ничего не искажает.
+    #[test]
+    fn twin_alias_follows_ru_locale() {
+        let data = bsl_platform::PlatformData::instance();
+        if !data.is_ambiguous_type_name("ЭлементыФормы") {
+            return;
+        }
+        let db = InMemoryDb::new();
+        let id = db.platform_object("FormItems".to_string());
+        assert_eq!(show(&db, id, &ru()), "ЭлементыФормы");
+        assert_eq!(show(&db, id, &en()), "FormItems", "в английской алиас сохраняется");
+    }
+
+    /// Имени вне корпуса парного нет — печатается как записано, в обеих локалях.
+    #[test]
+    fn uncorpused_platform_object_is_shown_as_written() {
+        let db = InMemoryDb::new();
+        let id = db.platform_object("ДокументМенеджер".to_string());
+        assert_eq!(show(&db, id, &ru()), "ДокументМенеджер");
+        assert_eq!(show(&db, id, &en()), "ДокументМенеджер");
     }
 
     #[test]

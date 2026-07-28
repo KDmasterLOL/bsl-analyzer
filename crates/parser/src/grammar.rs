@@ -11,47 +11,52 @@ use crate::parser::Parser;
 fn annotated_item(p: &mut Parser) {
     let outer = p.start();
 
-    while matches!(
-        p.current(),
-        Some(TokenKind::AnnAtClient)
-            | Some(TokenKind::AnnAtServer)
-            | Some(TokenKind::AnnAtServerNoContext)
-            | Some(TokenKind::AnnAtClientAtServer)
-            | Some(TokenKind::AnnAtClientAtServerNoContext)
-            | Some(TokenKind::AnnBefore)
-            | Some(TokenKind::AnnAfter)
-            | Some(TokenKind::AnnAround)
-            | Some(TokenKind::AnnChangeAndValidate)
-            | Some(TokenKind::AnnCustom)
-    ) {
-        p.check_iteration_limit();
-        match p.current() {
+    // An error inside an annotation must not take the word the
+    // declaration begins with: that word is what the annotation was
+    // attached to, and consuming it costs the whole declaration.
+    p.within_boundary(at_declaration_start, |p| {
+        while matches!(
+            p.current(),
             Some(TokenKind::AnnAtClient)
-            | Some(TokenKind::AnnAtServer)
-            | Some(TokenKind::AnnAtServerNoContext)
-            | Some(TokenKind::AnnAtClientAtServer)
-            | Some(TokenKind::AnnAtClientAtServerNoContext) => {
-                items::compiler_directive(p);
+                | Some(TokenKind::AnnAtServer)
+                | Some(TokenKind::AnnAtServerNoContext)
+                | Some(TokenKind::AnnAtClientAtServer)
+                | Some(TokenKind::AnnAtClientAtServerNoContext)
+                | Some(TokenKind::AnnBefore)
+                | Some(TokenKind::AnnAfter)
+                | Some(TokenKind::AnnAround)
+                | Some(TokenKind::AnnChangeAndValidate)
+                | Some(TokenKind::AnnCustom)
+        ) {
+            p.check_iteration_limit();
+            match p.current() {
+                Some(TokenKind::AnnAtClient)
+                | Some(TokenKind::AnnAtServer)
+                | Some(TokenKind::AnnAtServerNoContext)
+                | Some(TokenKind::AnnAtClientAtServer)
+                | Some(TokenKind::AnnAtClientAtServerNoContext) => {
+                    items::compiler_directive(p);
+                }
+                _ => {
+                    items::annotation(p);
+                }
             }
-            _ => {
-                items::annotation(p);
-            }
+            p.skip_trivia();
         }
-        p.skip_trivia();
-    }
 
-    // Region directives are flat folding markers and may sit between an
-    // annotation and the declaration it applies to (e.g. `&НаКлиенте #Область X
-    // <newline> Перем Y;`). Consume them here so the annotation still binds to
-    // the following Procedure/Function/Var instead of derailing the parse.
-    while matches!(p.current(), Some(TokenKind::PreRegion) | Some(TokenKind::PreEndRegion)) {
-        p.check_iteration_limit();
-        match p.current() {
-            Some(TokenKind::PreRegion) => preprocessor_region(p),
-            _ => preprocessor_end_region(p),
+        // Region directives are flat folding markers and may sit between an
+        // annotation and the declaration it applies to (e.g. `&НаКлиенте #Область X
+        // <newline> Перем Y;`). Consume them here so the annotation still binds to
+        // the following Procedure/Function/Var instead of derailing the parse.
+        while matches!(p.current(), Some(TokenKind::PreRegion) | Some(TokenKind::PreEndRegion)) {
+            p.check_iteration_limit();
+            match p.current() {
+                Some(TokenKind::PreRegion) => preprocessor_region(p),
+                _ => preprocessor_end_region(p),
+            }
+            p.skip_trivia();
         }
-        p.skip_trivia();
-    }
+    });
 
     match p.current() {
         Some(TokenKind::KwAsync) => match p.nth_non_trivia(0) {
@@ -167,55 +172,120 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
     p.bump();
     p.skip_trivia();
 
-    preproc_expression(p);
-    p.skip_trivia();
-
-    p.expect(TokenKind::KwThen);
-
-    preproc_content(p);
-
-    while p.at(TokenKind::PreElsIf) {
-        p.check_iteration_limit();
-        let elsif_m = p.start();
-        p.bump();
-        p.skip_trivia();
-
-        preproc_expression(p);
+    p.within_boundary(at_preproc_closer, |p| {
+        p.within_boundary(at_then, preproc_expression);
         p.skip_trivia();
 
         p.expect(TokenKind::KwThen);
 
         preproc_content(p);
 
-        elsif_m.complete(p, NodeKind::PreElsIfClause);
-    }
+        while p.at(TokenKind::PreElsIf) {
+            p.check_iteration_limit();
+            let elsif_m = p.start();
+            p.bump();
+            p.skip_trivia();
 
-    if p.at(TokenKind::PreElse) {
-        let else_m = p.start();
-        p.bump();
+            p.within_boundary(at_then, preproc_expression);
+            p.skip_trivia();
 
-        preproc_content(p);
+            p.expect(TokenKind::KwThen);
 
-        else_m.complete(p, NodeKind::PreElseClause);
-    }
+            preproc_content(p);
+
+            elsif_m.complete(p, NodeKind::PreElsIfClause);
+        }
+
+        if p.at(TokenKind::PreElse) {
+            let else_m = p.start();
+            p.bump();
+
+            preproc_content(p);
+
+            else_m.complete(p, NodeKind::PreElseClause);
+        }
+    });
 
     p.expect(TokenKind::PreEndIf);
     m.complete(p, NodeKind::PreIfDir);
 }
 
+fn at_then(p: &Parser) -> bool {
+    p.at(TokenKind::KwThen)
+}
+
+/// The punctuation a parenthesised list owns: the comma it reaches its next
+/// part with, and the paren it ends with.
+///
+/// Declared by each construct rather than derived from the parser's count of
+/// open groups. The count outlives its owner — once the rule that opened the
+/// paren has returned, nothing will ever consume it — and a boundary nobody
+/// is waiting behind is a parse that cannot move.
+///
+/// Each construct declares only the punctuation it will itself consume. A
+/// construct that also claims a neighbour's separator makes recovery leave
+/// behind a token nobody will take, and its own `expect` then spends the
+/// closer on it.
+pub(super) fn at_paren_list_punctuation(p: &Parser) -> bool {
+    matches!(p.current(), Some(TokenKind::RParen | TokenKind::Comma))
+}
+
+/// The paren a group ends with. A group holds a single expression, so a comma
+/// inside it belongs to no rule waiting here.
+pub(super) fn at_closing_paren(p: &Parser) -> bool {
+    p.at(TokenKind::RParen)
+}
+
+/// The bracket an index ends with.
+pub(super) fn at_closing_bracket(p: &Parser) -> bool {
+    p.at(TokenKind::RBracket)
+}
+
+/// The words a declaration begins with. An annotation is followed by one, and
+/// an error inside the annotation must not take it: the declaration is what
+/// the annotation was attached to.
+fn at_declaration_start(p: &Parser) -> bool {
+    matches!(
+        p.current(),
+        Some(
+            TokenKind::KwProcedure
+                | TokenKind::KwFunction
+                | TokenKind::KwVar
+                | TokenKind::KwAsync
+                // The chain may hold more than one annotation, with a folding
+                // marker allowed between them, so the next link of the chain
+                // is awaited here exactly as the declaration is.
+                | TokenKind::AnnAtClient
+                | TokenKind::AnnAtServer
+                | TokenKind::AnnAtServerNoContext
+                | TokenKind::AnnAtClientAtServer
+                | TokenKind::AnnAtClientAtServerNoContext
+                | TokenKind::AnnBefore
+                | TokenKind::AnnAfter
+                | TokenKind::AnnAround
+                | TokenKind::AnnChangeAndValidate
+                | TokenKind::AnnCustom
+                | TokenKind::PreRegion
+                | TokenKind::PreEndRegion
+        )
+    )
+}
+
+fn at_preproc_closer(p: &Parser) -> bool {
+    matches!(p.current(), Some(TokenKind::PreElsIf | TokenKind::PreElse | TokenKind::PreEndIf))
+}
+
+/// A conditional region and a statement block can cross each other: a
+/// `#Если` may open inside `Если` and the `ИначеЕсли` closing that `Если` may
+/// stand inside the region. The region's content therefore ends at the
+/// closers of whatever encloses it as well as at its own — rules inside it
+/// will not consume an enclosing closer, so a region waiting only for
+/// `#КонецЕсли` would wait for a token nothing reaches.
 fn preproc_content(p: &mut Parser) {
-    while !p.at_end()
-        && !p.at(TokenKind::PreElsIf)
-        && !p.at(TokenKind::PreElse)
-        && !p.at(TokenKind::PreEndIf)
-    {
+    while !p.at_end() && !at_preproc_closer(p) && !p.at_enclosing_boundary() {
         p.check_iteration_limit();
         p.skip_trivia();
-        if p.at_end()
-            || p.at(TokenKind::PreElsIf)
-            || p.at(TokenKind::PreElse)
-            || p.at(TokenKind::PreEndIf)
-        {
+        if p.at_end() || at_preproc_closer(p) || p.at_enclosing_boundary() {
             break;
         }
 
@@ -286,13 +356,15 @@ fn preproc_logical_operand(p: &mut Parser) {
         p.bump();
         p.skip_trivia();
 
-        if p.at(TokenKind::KwNot) {
-            p.bump();
-            p.skip_trivia();
-            preproc_logical_operand(p);
-        } else {
-            preproc_logical_expression(p);
-        }
+        p.within_boundary(at_closing_paren, |p| {
+            if p.at(TokenKind::KwNot) {
+                p.bump();
+                p.skip_trivia();
+                preproc_logical_operand(p);
+            } else {
+                preproc_logical_expression(p);
+            }
+        });
 
         p.skip_trivia();
         p.expect(TokenKind::RParen);

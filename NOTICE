@@ -34,20 +34,40 @@ code-style standards published at v8std.ru (CC0) and in the official
 1C documentation. They do not implement a third party's proprietary
 rule set.
 
-Historical reference for the SDBL parser and lexer
---------------------------------------------------
-Early grammar work in the following files was developed with the
-bsl-parser project (https://github.com/1c-syntax/bsl-parser,
-LGPL-3.0-or-later) as a reference source:
+Derivation notice for the SDBL and BSL grammar layers
+-----------------------------------------------------
+The initial grammar work in the following files was written with the
+grammar files of the bsl-parser project
+(https://github.com/1c-syntax/bsl-parser, LGPL-3.0-or-later) open as
+the working reference:
 
-  * crates/parser/src/grammar/sdbl/
-  * crates/parser/src/grammar/ (BSL grammar layer)
-  * crates/lexer/src/sdbl.rs
+  * crates/lexer/src/sdbl/        (SDBL token inventory)
+  * crates/parser/src/grammar/sdbl/  (SDBL grammar)
+  * crates/parser/src/grammar/    (BSL grammar layer)
+  * crates/lexer/src/lib.rs       (BSL token inventory)
 
-These components are Tier B and are being replaced slice-by-slice
-from official 1C documentation under a clean-room process described
-in docs/legal/sdbl-clean-room-slices.md. Until that work completes,
-the Tier B crates and the final binary remain under LGPL-3.0-or-later.
+This is recorded in this repository's own history of December 2025,
+though not uniformly per file. The commit that introduced the SDBL lexer
+names both upstream grammar files in its commit message and in the file
+header. The commit that introduced the SDBL grammar names SDBLParser.g4
+in the file header and quotes upstream grammar rules in ANTLR notation in
+many of its function doc-comments. For the BSL layer the record is the
+planning document shipped in the initial commit, which names the upstream
+grammars as the source for both languages; a file header naming
+BSLLexer.g4 was added a few commits later. Details and commit identifiers
+are in docs/legal/sdbl-provenance-2026-07-audit.md.
+
+The SDBL layer has since been rewritten in bounded slices from official
+1C documentation under the clean-room process described in
+docs/legal/sdbl-clean-room-slices.md, and now diverges from the upstream
+grammar in token inventory, token granularity, rule decomposition and
+operator precedence. That rewrite is not finished, and the BSL layer has
+not been rewritten at all.
+
+The current assessment — what is proven, what has diverged, and what is
+still outstanding — is in docs/legal/sdbl-provenance-2026-07-audit.md.
+Until that work completes, the Tier B crates and the final binary remain
+under LGPL-3.0-or-later.
 
 Bundled 1C platform data
 ------------------------
@@ -66,8 +86,8 @@ the full statement.
 Upstream acknowledgements
 -------------------------
   * rust-analyzer — architectural reference — MIT OR Apache-2.0
-  * bsl-parser — historical grammar reference for the SDBL layer —
-    LGPL-3.0-or-later
+  * bsl-parser — grammar reference used when the SDBL and BSL layers
+    were first written — LGPL-3.0-or-later
   * bsl-language-server — compatibility target for configuration
     format and diagnostic catalogue — LGPL-3.0-or-later
   * v8std.ru — public catalogue of 1C coding standards — CC0
