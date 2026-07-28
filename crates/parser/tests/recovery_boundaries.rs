@@ -341,6 +341,37 @@ fn every_bracketed_construct_keeps_its_punctuation() {
     }
 }
 
+#[test]
+fn a_construct_claims_only_the_punctuation_it_consumes() {
+    // The mirror of the test above, and the price of stating the class with
+    // one shared predicate: a construct that also claimed its neighbour's
+    // separator left behind a token no rule would take, and then spent its
+    // own closer on it — three messages for one stray bracket.
+    for input in [
+        "Процедура П()\n\tА = Б[,];\nКонецПроцедуры",
+        "Процедура П()\n\tА = Б[)];\nКонецПроцедуры",
+        "Процедура П()\n\tА = (]);\nКонецПроцедуры",
+        "Процедура П()\n\tФ(]);\nКонецПроцедуры",
+        "Процедура П()\n\tА = ?(],1,2);\nКонецПроцедуры",
+        "Процедура П()\n\tВызватьИсключение(]);\nКонецПроцедуры",
+    ] {
+        assert!(covers(input, true), "`{input}`");
+        assert_eq!(messages(input, true).len(), 1, "`{input}`: {:?}", messages(input, true));
+    }
+}
+
+#[test]
+fn the_opening_paren_never_written_does_not_cost_the_separator() {
+    // A ternary owns its commas from the `?` on, not from the paren onwards:
+    // the first way to land on one is the paren missing.
+    let input = "Процедура П()\n\tА = ?, 1, 2);\nКонецПроцедуры";
+    assert!(covers(input, true), "`{input}`");
+    let eaten: Vec<String> =
+        error_node_texts(input, true).into_iter().filter(|t| !t.is_empty()).collect();
+    assert!(eaten.is_empty(), "consumed {eaten:?}");
+    assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
+}
+
 // --- SDBL: a clause keyword taken by a recovery inside the clause ---------
 
 fn clause_count(input: &str, kind: SyntaxKind) -> usize {

@@ -214,15 +214,31 @@ fn at_then(p: &Parser) -> bool {
     p.at(TokenKind::KwThen)
 }
 
-/// The punctuation a bracketed construct owns: the comma it reaches its next
-/// part with, and the bracket it ends with.
+/// The punctuation a parenthesised list owns: the comma it reaches its next
+/// part with, and the paren it ends with.
 ///
 /// Declared by each construct rather than derived from the parser's count of
 /// open groups. The count outlives its owner — once the rule that opened the
 /// paren has returned, nothing will ever consume it — and a boundary nobody
 /// is waiting behind is a parse that cannot move.
-pub(super) fn at_bracket_punctuation(p: &Parser) -> bool {
-    matches!(p.current(), Some(TokenKind::RParen | TokenKind::RBracket | TokenKind::Comma))
+///
+/// Each construct declares only the punctuation it will itself consume. A
+/// construct that also claims a neighbour's separator makes recovery leave
+/// behind a token nobody will take, and its own `expect` then spends the
+/// closer on it.
+pub(super) fn at_paren_list_punctuation(p: &Parser) -> bool {
+    matches!(p.current(), Some(TokenKind::RParen | TokenKind::Comma))
+}
+
+/// The paren a group ends with. A group holds a single expression, so a comma
+/// inside it belongs to no rule waiting here.
+pub(super) fn at_closing_paren(p: &Parser) -> bool {
+    p.at(TokenKind::RParen)
+}
+
+/// The bracket an index ends with.
+pub(super) fn at_closing_bracket(p: &Parser) -> bool {
+    p.at(TokenKind::RBracket)
 }
 
 /// The words a declaration begins with. An annotation is followed by one, and
@@ -340,7 +356,7 @@ fn preproc_logical_operand(p: &mut Parser) {
         p.bump();
         p.skip_trivia();
 
-        p.within_boundary(at_bracket_punctuation, |p| {
+        p.within_boundary(at_closing_paren, |p| {
             if p.at(TokenKind::KwNot) {
                 p.bump();
                 p.skip_trivia();

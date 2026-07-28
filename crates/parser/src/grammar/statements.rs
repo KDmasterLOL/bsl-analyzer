@@ -351,7 +351,7 @@ fn parse_raise_call_args(p: &mut Parser) {
 
     p.skip_trivia();
 
-    p.within_boundary(super::at_bracket_punctuation, |p| {
+    p.within_boundary(super::at_paren_list_punctuation, |p| {
         while !p.at(TokenKind::RParen) && !p.at_end() {
             p.check_iteration_limit();
             p.skip_trivia();

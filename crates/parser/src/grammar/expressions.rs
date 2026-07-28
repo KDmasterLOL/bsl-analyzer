@@ -207,9 +207,7 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
             Some(TokenKind::LBracket) => {
                 let m = lhs.precede(p);
                 p.bump();
-                // Square brackets are not counted among open groups, so this
-                // one says for itself what the parser says for the others.
-                p.within_boundary(super::at_bracket_punctuation, |p| {
+                p.within_boundary(super::at_closing_bracket, |p| {
                     p.skip_trivia();
                     expression(p);
                 });
@@ -262,7 +260,7 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         Some(TokenKind::LParen) => {
             let m = p.start();
             p.bump();
-            p.within_boundary(super::at_bracket_punctuation, |p| {
+            p.within_boundary(super::at_closing_paren, |p| {
                 p.skip_trivia();
                 expression(p);
             });
@@ -369,8 +367,10 @@ fn ternary_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump();
     p.skip_trivia();
-    p.expect(TokenKind::LParen);
-    p.within_boundary(super::at_bracket_punctuation, |p| {
+    // The separators are the ternary's from the `?` on: the first way to land
+    // on one is the opening paren never written.
+    p.within_boundary(super::at_paren_list_punctuation, |p| {
+        p.expect(TokenKind::LParen);
         p.skip_trivia();
         expression(p);
         p.skip_trivia();
@@ -391,7 +391,7 @@ fn arg_list(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.within_boundary(super::at_bracket_punctuation, |p| {
+    p.within_boundary(super::at_paren_list_punctuation, |p| {
         p.skip_trivia();
 
         if !p.at(TokenKind::RParen) {
