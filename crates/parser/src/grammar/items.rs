@@ -28,7 +28,7 @@ fn annotation_params(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.within_boundary(at_list_punctuation, |p| {
+    p.within_boundary(super::at_bracket_punctuation, |p| {
         p.skip_trivia();
 
         if !p.at(TokenKind::RParen) {
@@ -114,13 +114,6 @@ pub fn procedure_def(p: &mut Parser) {
 // A definition states the word that closes it while it parses its header and
 // its body, so that a rule tripping over that word leaves it for the
 // definition instead of consuming it and reporting it missing at end of file.
-
-/// The punctuation a bracketed list owns. A rule tripping over one of these
-/// inside an item of the list must leave it: the comma is the list's way of
-/// reaching the next item, and the paren is how it ends.
-fn at_list_punctuation(p: &Parser) -> bool {
-    matches!(p.current(), Some(TokenKind::RParen | TokenKind::Comma))
-}
 
 fn at_end_procedure(p: &Parser) -> bool {
     p.at(TokenKind::KwEndProcedure)
@@ -208,7 +201,7 @@ fn param_list(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.within_boundary(at_list_punctuation, |p| {
+    p.within_boundary(super::at_bracket_punctuation, |p| {
         p.skip_trivia();
 
         if !p.at(TokenKind::RParen) {

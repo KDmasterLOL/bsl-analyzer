@@ -193,7 +193,6 @@ impl<'a> Parser<'a> {
         false
     }
 
-    /// Takes a word where the rule knows a name is what belongs, whatever
     /// The last token before this one that was not trivia.
     ///
     /// A rule that must know what it is standing behind — whether a dot

@@ -121,6 +121,12 @@ fn at_then(p: &Parser) -> bool {
     p.at(TokenKind::KwThen)
 }
 
+/// The comma between the two operands of a handler statement. It stands at
+/// the statement's own level, where no group is open to speak for it.
+fn at_handler_comma(p: &Parser) -> bool {
+    p.at(TokenKind::Comma)
+}
+
 fn at_do(p: &Parser) -> bool {
     p.at(TokenKind::KwDo)
 }
@@ -345,22 +351,25 @@ fn parse_raise_call_args(p: &mut Parser) {
 
     p.skip_trivia();
 
-    while !p.at(TokenKind::RParen) && !p.at_end() {
-        p.skip_trivia();
+    p.within_boundary(super::at_bracket_punctuation, |p| {
+        while !p.at(TokenKind::RParen) && !p.at_end() {
+            p.check_iteration_limit();
+            p.skip_trivia();
 
-        if p.at(TokenKind::Comma) {
-        } else if !p.at(TokenKind::RParen) {
-            expressions::expression(p);
+            if p.at(TokenKind::Comma) {
+            } else if !p.at(TokenKind::RParen) {
+                expressions::expression(p);
+            }
+
+            p.skip_trivia();
+
+            if p.at(TokenKind::Comma) {
+                p.bump();
+            } else if !p.at(TokenKind::RParen) {
+                break;
+            }
         }
-
-        p.skip_trivia();
-
-        if p.at(TokenKind::Comma) {
-            p.bump();
-        } else if !p.at(TokenKind::RParen) {
-            break;
-        }
-    }
+    });
 
     p.expect(TokenKind::RParen);
 }
@@ -411,12 +420,14 @@ fn add_handler_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.skip_trivia();
+    p.within_boundary(at_handler_comma, |p| {
+        p.skip_trivia();
 
-    expressions::expression(p);
+        expressions::expression(p);
 
-    p.skip_trivia();
-    p.expect(TokenKind::Comma);
+        p.skip_trivia();
+        p.expect(TokenKind::Comma);
+    });
 
     p.skip_trivia();
 
@@ -432,12 +443,14 @@ fn remove_handler_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.skip_trivia();
+    p.within_boundary(at_handler_comma, |p| {
+        p.skip_trivia();
 
-    expressions::expression(p);
+        expressions::expression(p);
 
-    p.skip_trivia();
-    p.expect(TokenKind::Comma);
+        p.skip_trivia();
+        p.expect(TokenKind::Comma);
+    });
 
     p.skip_trivia();
 

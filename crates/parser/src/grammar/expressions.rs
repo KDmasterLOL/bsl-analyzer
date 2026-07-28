@@ -207,8 +207,12 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
             Some(TokenKind::LBracket) => {
                 let m = lhs.precede(p);
                 p.bump();
-                p.skip_trivia();
-                expression(p);
+                // Square brackets are not counted among open groups, so this
+                // one says for itself what the parser says for the others.
+                p.within_boundary(super::at_bracket_punctuation, |p| {
+                    p.skip_trivia();
+                    expression(p);
+                });
                 p.skip_trivia();
                 p.expect(TokenKind::RBracket);
                 lhs = m.complete(p, NodeKind::IndexExpr);
@@ -258,7 +262,7 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         Some(TokenKind::LParen) => {
             let m = p.start();
             p.bump();
-            p.within_boundary(at_bracket_punctuation, |p| {
+            p.within_boundary(super::at_bracket_punctuation, |p| {
                 p.skip_trivia();
                 expression(p);
             });
@@ -366,33 +370,28 @@ fn ternary_expr(p: &mut Parser) -> CompletedMarker {
     p.bump();
     p.skip_trivia();
     p.expect(TokenKind::LParen);
-    p.skip_trivia();
-    expression(p);
-    p.skip_trivia();
-    p.expect(TokenKind::Comma);
-    p.skip_trivia();
-    expression(p);
-    p.skip_trivia();
-    p.expect(TokenKind::Comma);
-    p.skip_trivia();
-    expression(p);
+    p.within_boundary(super::at_bracket_punctuation, |p| {
+        p.skip_trivia();
+        expression(p);
+        p.skip_trivia();
+        p.expect(TokenKind::Comma);
+        p.skip_trivia();
+        expression(p);
+        p.skip_trivia();
+        p.expect(TokenKind::Comma);
+        p.skip_trivia();
+        expression(p);
+    });
     p.skip_trivia();
     p.expect(TokenKind::RParen);
     m.complete(p, NodeKind::TernaryExpr)
-}
-
-/// The punctuation a bracketed construct owns: the comma it reaches its next
-/// part with, and the bracket it ends with. A rule tripping over one of these
-/// inside a part must leave it, or the construct loses everything after it.
-fn at_bracket_punctuation(p: &Parser) -> bool {
-    matches!(p.current(), Some(TokenKind::RParen | TokenKind::RBracket | TokenKind::Comma))
 }
 
 fn arg_list(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.within_boundary(at_bracket_punctuation, |p| {
+    p.within_boundary(super::at_bracket_punctuation, |p| {
         p.skip_trivia();
 
         if !p.at(TokenKind::RParen) {

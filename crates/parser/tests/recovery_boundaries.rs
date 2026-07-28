@@ -315,6 +315,32 @@ fn a_word_inside_a_group_is_not_the_separator_the_header_awaits() {
     }
 }
 
+#[test]
+fn every_bracketed_construct_keeps_its_punctuation() {
+    // Enumerated from the grammar rather than from what a review happened to
+    // find: every construct that owns a bracket or a comma says so. The
+    // ternary was the worst of them — a missing first operand consumed the
+    // comma, both remaining operands and the closing paren, six messages for
+    // one gap.
+    for input in [
+        "Процедура П(А = )\nКонецПроцедуры",
+        "Процедура П()\n\tФ(А = );\nКонецПроцедуры",
+        "Процедура П()\n\tА = Б[ ];\nКонецПроцедуры",
+        "Процедура П()\n\tА = ?(, 1, 2);\nКонецПроцедуры",
+        "Процедура П()\n\tВызватьИсключение(, 1);\nКонецПроцедуры",
+        "Процедура П()\n\tДобавитьОбработчик , П;\nКонецПроцедуры",
+        "Процедура П()\n\tУдалитьОбработчик , П;\nКонецПроцедуры",
+        "&Перед(1\nПроцедура П()\nКонецПроцедуры",
+    ] {
+        assert!(covers(input, true), "`{input}`");
+
+        let eaten: Vec<String> =
+            error_node_texts(input, true).into_iter().filter(|t| !t.is_empty()).collect();
+        assert!(eaten.is_empty(), "`{input}` consumed {eaten:?}");
+        assert!(messages(input, true).len() <= 1, "`{input}`: {:?}", messages(input, true));
+    }
+}
+
 // --- SDBL: a clause keyword taken by a recovery inside the clause ---------
 
 fn clause_count(input: &str, kind: SyntaxKind) -> usize {
