@@ -363,39 +363,35 @@ fn new_expr(p: &mut Parser) -> CompletedMarker {
     m.complete(p, NodeKind::NewExpr)
 }
 
-/// What a ternary awaits, given whether it has committed to a group yet.
-fn separators(committed: bool) -> fn(&Parser) -> bool {
-    if committed {
-        super::at_paren_list_punctuation
-    } else {
-        super::at_comma
-    }
-}
-
 fn ternary_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump();
     p.skip_trivia();
-    // The commas are the ternary's from the `?` on: the first way to land on
-    // one is the opening paren never written. The closing paren is the
-    // ternary's only once it has committed to a group — by taking the opening
-    // paren, or by taking one of the commas nothing but a ternary writes after
-    // `?`. Until then a `)` standing here closes somebody else, and taking it
-    // strands everything after it.
-    let mut committed = p.within_boundary(super::at_comma, |p| p.expect(TokenKind::LParen));
 
-    for part in 0..3 {
-        if part > 0 {
-            committed |= p.within_boundary(separators(committed), |p| p.expect(TokenKind::Comma));
-            p.skip_trivia();
-        }
-        p.within_boundary(separators(committed), |p| {
-            p.skip_trivia();
-            expression(p);
-        });
-        p.skip_trivia();
+    // Every other bracketed rule is entered with its opener already in hand.
+    // The ternary's opener is an `expect`, so it can be absent — and with no
+    // group open, nothing standing here is the ternary's to take. Not the
+    // commas: an enclosing list writes those after a `?` too, and a successful
+    // `expect` does not ask whose separator it is. Not the closer either.
+    // Reading on would spend another rule's punctuation on operands that were
+    // never written.
+    if !p.expect(TokenKind::LParen) {
+        return m.complete(p, NodeKind::TernaryExpr);
     }
 
+    p.within_boundary(super::at_paren_list_punctuation, |p| {
+        p.skip_trivia();
+        expression(p);
+        p.skip_trivia();
+        p.expect(TokenKind::Comma);
+        p.skip_trivia();
+        expression(p);
+        p.skip_trivia();
+        p.expect(TokenKind::Comma);
+        p.skip_trivia();
+        expression(p);
+    });
+    p.skip_trivia();
     p.expect(TokenKind::RParen);
     m.complete(p, NodeKind::TernaryExpr)
 }
