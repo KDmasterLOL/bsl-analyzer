@@ -32,7 +32,7 @@ jobs:
             platform: darwin-arm64
             ext: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -60,7 +60,7 @@ jobs:
           cp target/${{ matrix.target }}/release/bsl-analyzer.exe artifacts/bsl-analyzer-${{ matrix.platform }}.exe
           cp target/${{ matrix.target }}/release/bsl-analyzer-app.exe artifacts/bsl-analyzer-app-${{ matrix.platform }}.exe
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.platform }}
           path: artifacts/
@@ -74,7 +74,7 @@ jobs:
       id-token: write      # OIDC token for Sigstore signing
       attestations: write  # write the build-provenance attestation
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -88,7 +88,7 @@ jobs:
         run: ls -la artifacts/
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             artifacts/bsl-analyzer-*
