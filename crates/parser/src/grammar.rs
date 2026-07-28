@@ -167,19 +167,7 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
     p.bump();
     p.skip_trivia();
 
-    preproc_expression(p);
-    p.skip_trivia();
-
-    p.expect(TokenKind::KwThen);
-
-    preproc_content(p);
-
-    while p.at(TokenKind::PreElsIf) {
-        p.check_iteration_limit();
-        let elsif_m = p.start();
-        p.bump();
-        p.skip_trivia();
-
+    p.within_boundary(at_preproc_closer, |p| {
         preproc_expression(p);
         p.skip_trivia();
 
@@ -187,35 +175,51 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
 
         preproc_content(p);
 
-        elsif_m.complete(p, NodeKind::PreElsIfClause);
-    }
+        while p.at(TokenKind::PreElsIf) {
+            p.check_iteration_limit();
+            let elsif_m = p.start();
+            p.bump();
+            p.skip_trivia();
 
-    if p.at(TokenKind::PreElse) {
-        let else_m = p.start();
-        p.bump();
+            preproc_expression(p);
+            p.skip_trivia();
 
-        preproc_content(p);
+            p.expect(TokenKind::KwThen);
 
-        else_m.complete(p, NodeKind::PreElseClause);
-    }
+            preproc_content(p);
+
+            elsif_m.complete(p, NodeKind::PreElsIfClause);
+        }
+
+        if p.at(TokenKind::PreElse) {
+            let else_m = p.start();
+            p.bump();
+
+            preproc_content(p);
+
+            else_m.complete(p, NodeKind::PreElseClause);
+        }
+    });
 
     p.expect(TokenKind::PreEndIf);
     m.complete(p, NodeKind::PreIfDir);
 }
 
+fn at_preproc_closer(p: &Parser) -> bool {
+    matches!(p.current(), Some(TokenKind::PreElsIf | TokenKind::PreElse | TokenKind::PreEndIf))
+}
+
+/// A conditional region and a statement block can cross each other: a
+/// `#Если` may open inside `Если` and the `ИначеЕсли` closing that `Если` may
+/// stand inside the region. The region's content therefore ends at the
+/// closers of whatever encloses it as well as at its own — rules inside it
+/// will not consume an enclosing closer, so a region waiting only for
+/// `#КонецЕсли` would wait for a token nothing reaches.
 fn preproc_content(p: &mut Parser) {
-    while !p.at_end()
-        && !p.at(TokenKind::PreElsIf)
-        && !p.at(TokenKind::PreElse)
-        && !p.at(TokenKind::PreEndIf)
-    {
+    while !p.at_end() && !at_preproc_closer(p) && !p.at_enclosing_boundary() {
         p.check_iteration_limit();
         p.skip_trivia();
-        if p.at_end()
-            || p.at(TokenKind::PreElsIf)
-            || p.at(TokenKind::PreElse)
-            || p.at(TokenKind::PreEndIf)
-        {
+        if p.at_end() || at_preproc_closer(p) || p.at_enclosing_boundary() {
             break;
         }
 

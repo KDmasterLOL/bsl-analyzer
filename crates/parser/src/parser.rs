@@ -17,6 +17,7 @@ pub struct Parser<'a> {
     paren_depth: u32,
     brace_depth: u32,
     at_grammar_boundary: Option<fn(&Parser) -> bool>,
+    enclosing_boundaries: Vec<fn(&Parser) -> bool>,
 }
 
 impl<'a> Parser<'a> {
@@ -30,6 +31,7 @@ impl<'a> Parser<'a> {
             paren_depth: 0,
             brace_depth: 0,
             at_grammar_boundary: None,
+            enclosing_boundaries: Vec::new(),
         }
     }
 
@@ -270,13 +272,50 @@ impl<'a> Parser<'a> {
         m.complete(self, NodeKind::Error);
     }
 
-    /// Lets a grammar name boundaries of its own, beyond the separator.
+    /// Names the words that are never anything but a boundary, for the whole
+    /// parse.
     ///
     /// A rule deep inside a construct cannot know what encloses it, so it
-    /// cannot know which token it must not take. The grammar that owns the
-    /// input does know, and says so once here.
+    /// cannot know which token it must not take. What holds everywhere the
+    /// grammar can say once, here — and only what holds everywhere belongs
+    /// here, because this reaches even the positions where a rule is asking
+    /// for a name.
     pub fn set_grammar_boundary(&mut self, at_boundary: fn(&Parser) -> bool) {
         self.at_grammar_boundary = Some(at_boundary);
+    }
+
+    /// Runs `f` with one more token pattern that no rule inside it may report
+    /// an error by consuming.
+    ///
+    /// This is what the whole-parse boundary cannot express: the closer of
+    /// *this* block, the clause keywords of *this* query. The rule that owns
+    /// the construct knows them, states them where it descends into the body,
+    /// and they stop applying when it returns — which is why they are pushed
+    /// here rather than by hand, since a rule with an early return would
+    /// otherwise leave one behind.
+    ///
+    /// Unlike the whole-parse boundary, an enclosing one does not reach a
+    /// rule that is asking for a name: a clause keyword is a boundary where a
+    /// clause may start and an ordinary alias where a name may stand.
+    pub fn within_boundary<R>(
+        &mut self,
+        at_boundary: fn(&Parser) -> bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.enclosing_boundaries.push(at_boundary);
+        let result = f(self);
+        self.enclosing_boundaries.pop();
+        result
+    }
+
+    /// Whether the current token belongs to a construct further out.
+    ///
+    /// A loop that parses items until its own terminator has to ask this too.
+    /// Rules inside it refuse to consume such a token, so a loop that waits
+    /// only for its own terminator waits for a token nothing will reach — the
+    /// boundary turns a cascade of false errors into a parse that never ends.
+    pub fn at_enclosing_boundary(&self) -> bool {
+        self.enclosing_boundaries.iter().any(|at_boundary| at_boundary(self))
     }
 
     /// A boundary token is never the token an error is *about*. It is what
@@ -285,11 +324,15 @@ impl<'a> Parser<'a> {
     /// where the missing element should have been, and the token stays for
     /// the caller.
     fn at_statement_separator(&self) -> bool {
-        self.at(TokenKind::Semicolon) || self.at_declared_boundary()
+        self.at(TokenKind::Semicolon) || self.at_declared_boundary() || self.at_enclosing_boundary()
     }
 
-    /// The part of the boundary a grammar declared for itself, without the
+    /// The part of the boundary that holds for the whole parse, without the
     /// separator every grammar has.
+    ///
+    /// Kept apart from the enclosing ones because this is the only part a
+    /// successful `expect` may refuse: a word that is never a name is safe to
+    /// decline anywhere, and a word that is a name somewhere is not.
     fn at_declared_boundary(&self) -> bool {
         self.at_grammar_boundary.is_some_and(|at_boundary| at_boundary(self))
     }

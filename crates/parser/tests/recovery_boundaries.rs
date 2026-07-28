@@ -5,10 +5,11 @@
 //! enclosing rule never sees it, runs to the end of the file, and reports the
 //! closer as missing — while the closer is right there in the text.
 //!
-//! Every case below is pinned as the parser behaves today. Where today's
-//! behaviour is wrong, the assertion says which part of it is wrong; a
-//! reader should not take a passing test here as a statement that the
-//! behaviour is right.
+//! A block therefore states the words that close it while it parses what it
+//! encloses, and a rule that trips over one of them reports the trip and
+//! leaves the word alone. What these tests hold to is that the closer stays
+//! in the tree where the text put it, and that the count of messages does not
+//! grow with the depth of the nesting.
 
 use syntax::SyntaxKind;
 
@@ -41,69 +42,126 @@ fn claims_missing(input: &str, bsl: bool, closer: &str) -> bool {
     messages(input, bsl).iter().any(|m| m.contains(closer) && m.contains("конец файла"))
 }
 
-// --- BSL: a block closer taken by a recovery inside the block -------------
+// --- BSL: a block closer is not a recovery's to take ---------------------
+
+/// Nothing consumed the closer, and nothing claimed it was missing.
+fn closer_survives(input: &str, closer: &str) {
+    assert!(covers(input, true), "`{input}`");
+    assert!(
+        !swallowed(input, true, closer),
+        "`{closer}` was consumed: {:?}",
+        error_node_texts(input, true)
+    );
+    assert!(
+        !claims_missing(input, true, closer),
+        "`{closer}` was reported missing while present: {:?}",
+        messages(input, true)
+    );
+}
 
 #[test]
-fn an_unclosed_call_costs_a_procedure_its_closer() {
+fn an_unclosed_call_leaves_a_procedure_its_closer() {
     let input = "Процедура П()\nФ(\nКонецПроцедуры";
 
-    assert!(covers(input, true));
+    closer_survives(input, "КонецПроцедуры");
 
-    // Wrong on both counts: `КонецПроцедуры` is not an unexpected token, it
-    // is the boundary the argument list had to end before; and it is present
-    // in the text, so reporting it missing is a second error about the first.
-    assert!(swallowed(input, true, "КонецПроцедуры"), "{:?}", error_node_texts(input, true));
-    assert!(claims_missing(input, true, "КонецПроцедуры"), "{:?}", messages(input, true));
-
-    // One typo, three messages, two of them false.
-    assert_eq!(messages(input, true).len(), 3, "{:?}", messages(input, true));
+    // Two messages about the one gap, both standing at it. One is the
+    // argument that was never written, the other the paren that never closed.
+    assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
 }
 
 #[test]
-fn an_unfinished_assignment_costs_two_closers() {
+fn an_unfinished_assignment_leaves_both_closers() {
     let input = "Процедура П()\nЕсли Истина Тогда\nА =\nКонецЕсли;\nКонецПроцедуры";
 
-    assert!(covers(input, true));
-
-    // The missing right-hand side is one defect. Both closers are in the
-    // text, and both are consumed by recovery, so both are then reported
-    // missing at end of file.
     for closer in ["КонецЕсли", "КонецПроцедуры"] {
-        assert!(swallowed(input, true, closer), "{closer}: {:?}", error_node_texts(input, true));
-        assert!(claims_missing(input, true, closer), "{closer}: {:?}", messages(input, true));
+        closer_survives(input, closer);
     }
 
-    assert_eq!(messages(input, true).len(), 4, "{:?}", messages(input, true));
+    // The missing right-hand side, and nothing else.
+    assert_eq!(messages(input, true).len(), 1, "{:?}", messages(input, true));
 }
 
 #[test]
-fn the_cascade_grows_with_the_depth_of_the_nesting() {
-    // Every block between the typo and the end of the file loses its closer,
-    // so the count of false reports is the nesting depth. Three here.
+fn the_count_of_messages_does_not_grow_with_the_nesting() {
+    // Three blocks stand between the typo and the end of the file. Each used
+    // to lose its closer and be reported unclosed, so the false reports came
+    // one per level; the depth now costs nothing.
     let input =
         "Процедура П()\n\tПопытка\n\t\tА = Ф(\n\tИсключение\n\tКонецПопытки;\nКонецПроцедуры";
 
-    assert!(covers(input, true));
-
     for closer in ["Исключение", "КонецПопытки", "КонецПроцедуры"]
     {
-        assert!(swallowed(input, true, closer), "{closer}: {:?}", error_node_texts(input, true));
-        assert!(claims_missing(input, true, closer), "{closer}: {:?}", messages(input, true));
+        closer_survives(input, closer);
     }
 
-    assert_eq!(messages(input, true).len(), 6, "{:?}", messages(input, true));
+    assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
 }
 
 #[test]
-fn a_loop_closer_goes_the_same_way() {
+fn a_loop_closer_stays_the_loop_closer() {
     let input = "Процедура П()\n\tПока Истина Цикл\n\t\tА = Ф(\n\tКонецЦикла;\nКонецПроцедуры";
 
-    assert!(covers(input, true));
-
     for closer in ["КонецЦикла", "КонецПроцедуры"] {
-        assert!(swallowed(input, true, closer), "{closer}: {:?}", error_node_texts(input, true));
-        assert!(claims_missing(input, true, closer), "{closer}: {:?}", messages(input, true));
+        closer_survives(input, closer);
     }
+
+    assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
+}
+
+#[test]
+fn a_statement_list_ends_at_a_closer_further_out() {
+    // A boundary is a promise that some rule will not advance, and a list
+    // waiting only for its own terminator waits for a token nothing will
+    // reach. These inputs each end a block without its own closer, and the
+    // parse has to finish rather than spin.
+    for input in [
+        "Процедура П()\n\tПока Истина Цикл\n\t\tА = 1;\nКонецПроцедуры",
+        "Процедура П()\n\tЕсли Истина Тогда\n\t\tА = 1;\nКонецПроцедуры",
+        "Процедура П()\n\tПопытка\n\t\tА = 1;\nКонецПроцедуры",
+        "Процедура П()\n\tДля Каждого Э Из К Цикл\n\t\tА = 1;\nКонецПроцедуры",
+    ] {
+        assert!(covers(input, true), "`{input}`");
+        closer_survives(input, "КонецПроцедуры");
+    }
+}
+
+#[test]
+fn what_the_boundary_costs_when_the_closer_is_not_stranded() {
+    // The same rule cuts the other way. Here `Иначе` is a stray word, not a
+    // closer anyone is waiting for in the text — the loop's `КонецЦикла` is
+    // right there — but an enclosing `Если` is open, so the list ends and the
+    // loop reports a closer that is present. Two messages where one would do,
+    // and the first of them false.
+    //
+    // Telling the two cases apart needs to know whether the block's own
+    // closer appears later, which is the whole rest of the input. The trade
+    // was made the other way on measurement: this shape costs one message on
+    // one module in a production configuration of 21 114, and the shape it
+    // replaces costs one false message per level of nesting on every
+    // half-written block.
+    let input =
+        "Процедура П()\n\tЕсли А Тогда\n\t\tДля Каждого Э Из К Цикл\n\t\t\tИначе\n\t\tКонецЦикла;\n\tКонецЕсли;\nКонецПроцедуры";
+
+    assert!(covers(input, true));
+    assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
+    assert!(
+        messages(input, true).iter().any(|m| m.contains("КонецЦикла")),
+        "{:?}",
+        messages(input, true)
+    );
+}
+
+#[test]
+fn a_region_crossing_a_block_does_not_hang() {
+    // A `#Если` may open inside `Если` and the `ИначеЕсли` closing that `Если`
+    // may stand inside the region. The region's content must end there: rules
+    // inside it will not consume an enclosing closer, so a region waiting only
+    // for `#КонецЕсли` waits for a token nothing reaches.
+    let input = "Процедура П()\n\tЕсли А Тогда\n#Если Клиент Тогда\n\tИначеЕсли Б Тогда\n#КонецЕсли\n\tКонецЕсли;\nКонецПроцедуры";
+
+    assert!(covers(input, true));
+    closer_survives(input, "КонецПроцедуры");
 }
 
 // --- SDBL: a clause keyword taken by a recovery inside the clause ---------

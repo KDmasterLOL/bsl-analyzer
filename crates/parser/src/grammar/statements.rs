@@ -9,11 +9,14 @@ use super::expressions;
 pub fn stmt_list(p: &mut Parser, terminator: TokenKind) {
     let m = p.start();
 
-    while !p.at_end() && !p.at(terminator) {
+    // The list ends at its own terminator and at every closer further out.
+    // Rules inside refuse to consume an enclosing closer, so a list waiting
+    // only for its own would wait for a token nothing will reach.
+    while !p.at_end() && !p.at(terminator) && !p.at_enclosing_boundary() {
         p.check_iteration_limit();
         p.skip_trivia();
 
-        if p.at_end() || p.at(terminator) {
+        if p.at_end() || p.at(terminator) || p.at_enclosing_boundary() {
             break;
         }
 
@@ -103,39 +106,59 @@ fn return_stmt(p: &mut Parser) {
     m.complete(p, NodeKind::ReturnStmt);
 }
 
+// A block states the words that close it while it parses what it encloses, so
+// that a rule tripping over one of them reports the trip and leaves the word
+// for the block. Without that, the count of false "closer is missing" reports
+// is the nesting depth: one unclosed call inside `Попытка` inside `Процедура`
+// costs `Исключение`, `КонецПопытки` and `КонецПроцедуры` all three.
+
+fn at_end_do(p: &Parser) -> bool {
+    p.at(TokenKind::KwEndDo)
+}
+
+fn at_if_closer(p: &Parser) -> bool {
+    matches!(p.current(), Some(TokenKind::KwElsIf | TokenKind::KwElse | TokenKind::KwEndIf))
+}
+
+fn at_try_closer(p: &Parser) -> bool {
+    matches!(p.current(), Some(TokenKind::KwExcept | TokenKind::KwEndTry))
+}
+
 fn if_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.skip_trivia();
-    expressions::expression(p);
-
-    p.skip_trivia();
-    p.expect(TokenKind::KwThen);
-
-    p.skip_trivia();
-    stmt_list_inner(p, &[TokenKind::KwElsIf, TokenKind::KwElse, TokenKind::KwEndIf]);
-
-    while p.at(TokenKind::KwElsIf) {
-        p.check_iteration_limit();
-        let em = p.start();
-        p.bump();
+    p.within_boundary(at_if_closer, |p| {
         p.skip_trivia();
         expressions::expression(p);
+
         p.skip_trivia();
         p.expect(TokenKind::KwThen);
+
         p.skip_trivia();
         stmt_list_inner(p, &[TokenKind::KwElsIf, TokenKind::KwElse, TokenKind::KwEndIf]);
-        em.complete(p, NodeKind::ElseIfClause);
-    }
 
-    if p.at(TokenKind::KwElse) {
-        let em = p.start();
-        p.bump();
-        p.skip_trivia();
-        stmt_list_inner(p, &[TokenKind::KwEndIf]);
-        em.complete(p, NodeKind::ElseClause);
-    }
+        while p.at(TokenKind::KwElsIf) {
+            p.check_iteration_limit();
+            let em = p.start();
+            p.bump();
+            p.skip_trivia();
+            expressions::expression(p);
+            p.skip_trivia();
+            p.expect(TokenKind::KwThen);
+            p.skip_trivia();
+            stmt_list_inner(p, &[TokenKind::KwElsIf, TokenKind::KwElse, TokenKind::KwEndIf]);
+            em.complete(p, NodeKind::ElseIfClause);
+        }
+
+        if p.at(TokenKind::KwElse) {
+            let em = p.start();
+            p.bump();
+            p.skip_trivia();
+            stmt_list_inner(p, &[TokenKind::KwEndIf]);
+            em.complete(p, NodeKind::ElseClause);
+        }
+    });
 
     p.skip_trivia();
     p.expect(TokenKind::KwEndIf);
@@ -150,14 +173,16 @@ fn while_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.skip_trivia();
-    expressions::expression(p);
+    p.within_boundary(at_end_do, |p| {
+        p.skip_trivia();
+        expressions::expression(p);
 
-    p.skip_trivia();
-    p.expect(TokenKind::KwDo);
+        p.skip_trivia();
+        p.expect(TokenKind::KwDo);
 
-    p.skip_trivia();
-    stmt_list(p, TokenKind::KwEndDo);
+        p.skip_trivia();
+        stmt_list(p, TokenKind::KwEndDo);
+    });
 
     p.skip_trivia();
     p.expect(TokenKind::KwEndDo);
@@ -175,24 +200,26 @@ fn for_stmt(p: &mut Parser) {
     p.skip_trivia();
 
     if p.at(TokenKind::KwEach) {
-        p.bump();
-        p.skip_trivia();
-
-        if p.at(TokenKind::Ident) {
+        p.within_boundary(at_end_do, |p| {
             p.bump();
-        }
+            p.skip_trivia();
 
-        p.skip_trivia();
-        p.expect(TokenKind::KwIn);
+            if p.at(TokenKind::Ident) {
+                p.bump();
+            }
 
-        p.skip_trivia();
-        expressions::expression(p);
+            p.skip_trivia();
+            p.expect(TokenKind::KwIn);
 
-        p.skip_trivia();
-        p.expect(TokenKind::KwDo);
+            p.skip_trivia();
+            expressions::expression(p);
 
-        p.skip_trivia();
-        stmt_list(p, TokenKind::KwEndDo);
+            p.skip_trivia();
+            p.expect(TokenKind::KwDo);
+
+            p.skip_trivia();
+            stmt_list(p, TokenKind::KwEndDo);
+        });
 
         p.skip_trivia();
         p.expect(TokenKind::KwEndDo);
@@ -202,27 +229,29 @@ fn for_stmt(p: &mut Parser) {
 
         m.complete(p, NodeKind::ForEachStmt);
     } else {
-        if p.at(TokenKind::Ident) {
-            p.bump();
-        }
+        p.within_boundary(at_end_do, |p| {
+            if p.at(TokenKind::Ident) {
+                p.bump();
+            }
 
-        p.skip_trivia();
-        p.expect(TokenKind::Eq);
+            p.skip_trivia();
+            p.expect(TokenKind::Eq);
 
-        p.skip_trivia();
-        expressions::expression(p);
+            p.skip_trivia();
+            expressions::expression(p);
 
-        p.skip_trivia();
-        p.expect(TokenKind::KwTo);
+            p.skip_trivia();
+            p.expect(TokenKind::KwTo);
 
-        p.skip_trivia();
-        expressions::expression(p);
+            p.skip_trivia();
+            expressions::expression(p);
 
-        p.skip_trivia();
-        p.expect(TokenKind::KwDo);
+            p.skip_trivia();
+            p.expect(TokenKind::KwDo);
 
-        p.skip_trivia();
-        stmt_list(p, TokenKind::KwEndDo);
+            p.skip_trivia();
+            stmt_list(p, TokenKind::KwEndDo);
+        });
 
         p.skip_trivia();
         p.expect(TokenKind::KwEndDo);
@@ -238,16 +267,18 @@ fn try_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.skip_trivia();
-    stmt_list(p, TokenKind::KwExcept);
+    p.within_boundary(at_try_closer, |p| {
+        p.skip_trivia();
+        stmt_list(p, TokenKind::KwExcept);
 
-    p.skip_trivia();
-    p.expect(TokenKind::KwExcept);
+        p.skip_trivia();
+        p.expect(TokenKind::KwExcept);
 
-    let em = p.start();
-    p.skip_trivia();
-    stmt_list(p, TokenKind::KwEndTry);
-    em.complete(p, NodeKind::ExceptClause);
+        let em = p.start();
+        p.skip_trivia();
+        stmt_list(p, TokenKind::KwEndTry);
+        em.complete(p, NodeKind::ExceptClause);
+    });
 
     p.skip_trivia();
     p.expect(TokenKind::KwEndTry);
@@ -437,11 +468,11 @@ fn assignment_or_call(p: &mut Parser) {
 fn stmt_list_inner(p: &mut Parser, terminators: &[TokenKind]) {
     let m = p.start();
 
-    while !p.at_end() && !terminators.iter().any(|t| p.at(*t)) {
+    while !p.at_end() && !terminators.iter().any(|t| p.at(*t)) && !p.at_enclosing_boundary() {
         p.check_iteration_limit();
         p.skip_trivia();
 
-        if p.at_end() || terminators.iter().any(|t| p.at(*t)) {
+        if p.at_end() || terminators.iter().any(|t| p.at(*t)) || p.at_enclosing_boundary() {
             break;
         }
 

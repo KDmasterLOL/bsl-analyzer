@@ -109,6 +109,18 @@ pub fn procedure_def(p: &mut Parser) {
     m.complete(p, NodeKind::ProcedureDef);
 }
 
+// A definition states the word that closes it while it parses its header and
+// its body, so that a rule tripping over that word leaves it for the
+// definition instead of consuming it and reporting it missing at end of file.
+
+fn at_end_procedure(p: &Parser) -> bool {
+    p.at(TokenKind::KwEndProcedure)
+}
+
+fn at_end_function(p: &Parser) -> bool {
+    p.at(TokenKind::KwEndFunction)
+}
+
 pub fn procedure_def_content(p: &mut Parser) {
     p.skip_trivia();
 
@@ -117,25 +129,27 @@ pub fn procedure_def_content(p: &mut Parser) {
     p.skip_trivia();
     p.expect(TokenKind::KwProcedure);
 
-    p.skip_trivia();
+    p.within_boundary(at_end_procedure, |p| {
+        p.skip_trivia();
 
-    if p.at(TokenKind::Ident) || p.current().is_some_and(|k| k.is_keyword()) {
-        p.bump();
-    }
+        if p.at(TokenKind::Ident) || p.current().is_some_and(|k| k.is_keyword()) {
+            p.bump();
+        }
 
-    p.skip_trivia();
+        p.skip_trivia();
 
-    if p.at(TokenKind::LParen) {
-        param_list(p);
-    }
+        if p.at(TokenKind::LParen) {
+            param_list(p);
+        }
 
-    p.skip_trivia();
+        p.skip_trivia();
 
-    p.eat(TokenKind::KwExport);
+        p.eat(TokenKind::KwExport);
 
-    p.skip_trivia();
+        p.skip_trivia();
 
-    statements::stmt_list(p, TokenKind::KwEndProcedure);
+        statements::stmt_list(p, TokenKind::KwEndProcedure);
+    });
 
     p.skip_trivia();
     p.expect(TokenKind::KwEndProcedure);
@@ -155,25 +169,27 @@ pub fn function_def_content(p: &mut Parser) {
     p.skip_trivia();
     p.expect(TokenKind::KwFunction);
 
-    p.skip_trivia();
+    p.within_boundary(at_end_function, |p| {
+        p.skip_trivia();
 
-    if p.at(TokenKind::Ident) || p.current().is_some_and(|k| k.is_keyword()) {
-        p.bump();
-    }
+        if p.at(TokenKind::Ident) || p.current().is_some_and(|k| k.is_keyword()) {
+            p.bump();
+        }
 
-    p.skip_trivia();
+        p.skip_trivia();
 
-    if p.at(TokenKind::LParen) {
-        param_list(p);
-    }
+        if p.at(TokenKind::LParen) {
+            param_list(p);
+        }
 
-    p.skip_trivia();
+        p.skip_trivia();
 
-    p.eat(TokenKind::KwExport);
+        p.eat(TokenKind::KwExport);
 
-    p.skip_trivia();
+        p.skip_trivia();
 
-    statements::stmt_list(p, TokenKind::KwEndFunction);
+        statements::stmt_list(p, TokenKind::KwEndFunction);
+    });
 
     p.skip_trivia();
     p.expect(TokenKind::KwEndFunction);
