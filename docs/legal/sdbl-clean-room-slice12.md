@@ -1371,6 +1371,63 @@ those — it moves which nodes exist. Counted that way the control differs by
 two nodes, and the corpus by nothing at all across 3 142 814 literals. A
 zero from the first run would have been a statement about the harness.
 
+**Naming the class beat waiting for the class to be handed over.** Three
+rounds running brought one more construct that owned a bracket and declared
+nothing, so the remaining ones were enumerated from the grammar instead:
+every `expect` of `)`, `]` or `,` in the BSL rules. Deriving the boundary
+from the parser's count of open groups was tried first and reverted, because
+the count outlives its owner — once the rule that opened the paren has
+returned nothing will ever consume it, and a boundary with nobody waiting
+behind it is a parse that cannot move. It hung three times before the reason
+was visible.
+
+**A construct may declare only the punctuation it will consume itself.**
+Stating the class with one shared predicate made an index claim the comma
+and the paren as well; recovery then left a token no rule would take, and
+the index spent its own bracket on it. One stray token cost three messages
+where the text holds one defect, and a malformed ternary cost nine.
+
+**The ternary needed the rule redesigned, not the predicate refined.** It is
+the only bracketed rule whose opening paren is an `expect` rather than a
+`bump`, so it is the only one that could be reading operands with no group
+open, and four attempts to say what it awaits in that state each fixed one
+malformed shape and broke a neighbour. The premise under all four is false:
+a comma after `?` is not the ternary's evidence of anything, because an
+enclosing argument list writes the same comma and a successful `expect`
+deliberately never asks whose separator it matched — only a hard boundary
+may refuse it. No local formula can distinguish them. So the rule now enters
+its group the way the other seven do, with the opener in hand; without one it
+is the `?` and nothing else. Every malformed shape is pinned as one table
+rather than a representative, and the table fails on each design it replaced.
+
+**Giving up must not spend a token either, where something else will use
+it.** A rule that stops in front of a missing opener still reported through
+`expect`, and `expect` reports by consuming — so it took the operator
+carrying on the expression around it, and `Б[? + 1]` lost its bracket two
+tokens later. An enclosing boundary `expect` already leaves alone; an
+operator is declared by nobody, because a rule that reaches its own operator
+consumes it and loops. A stray token that no rule wants must still be taken,
+or nothing takes it.
+
+**Two of the gates written here could not fail, and that is worth recording
+next to the fixes.** A check that the argument after a ternary still had an
+argument-list ancestor passed while the tree was wrong, because a ternary
+that had eaten the call's comma sits inside that same argument list; a
+`continue` then excused exactly the shapes the check existed for. Both were
+found by review of the fix, not by the fix's own tests.
+
+**The loop closed on an empty round, not on a falling count.** Nine rounds:
+five of them found a defect inside the previous round's fix, which is the
+difference between "fixed against review" and fixed. Across the six commits
+the corpus moved nothing — 0 of 21 114 modules and 0 of 3 142 814 string
+literals each time — every zero read against a control shown to move both
+the message count and the node count.
+
+One class is named and left: a rule several of whose expectations stall on
+the same position reports once for each. No closer is consumed; the count
+simply does not match the number of missing parts. It is a property of every
+rule rather than of boundaries, so it belongs to its own step.
+
 Half of the defect stays open, pinned in the acceptance set rather than
 implied: a rule with an operand it must have reports nothing, reads the next
 word as that operand, and `ВЫБРАТЬ А + ИЗ Т` still loses its source clause.
