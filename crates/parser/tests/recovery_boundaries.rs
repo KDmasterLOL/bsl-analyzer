@@ -187,6 +187,78 @@ fn a_header_leaves_the_word_that_ends_it() {
     }
 }
 
+#[test]
+fn a_bracketed_list_keeps_its_punctuation() {
+    // A comma is how a list reaches its next item and a paren is how it ends,
+    // so a rule tripping over one inside an item must leave it. A parameter
+    // with no default value used to consume the `)` and the list then reported
+    // it missing at the closer of the procedure.
+    let input = "Процедура П(А = )\nКонецПроцедуры";
+    assert!(covers(input, true));
+    assert!(!swallowed(input, true, ")"), "{:?}", error_node_texts(input, true));
+    assert_eq!(messages(input, true).len(), 1, "{:?}", messages(input, true));
+}
+
+#[test]
+fn an_annotation_keeps_the_declaration_it_precedes() {
+    // The declaration is what the annotation was attached to, and an
+    // unclosed parameter list inside the annotation used to consume the whole
+    // of it: four messages and no definition in the tree at all.
+    let input = "&Перед(1\nПроцедура П()\nКонецПроцедуры";
+    let parse = parser::parse(input);
+
+    assert!(covers(input, true));
+    assert!(!swallowed(input, true, "Процедура"), "{:?}", error_node_texts(input, true));
+    assert!(
+        parse.syntax_node().descendants().any(|n| n.kind() == SyntaxKind::PROCEDURE_DEF),
+        "the definition survives: {:#?}",
+        parse.errors()
+    );
+    assert_eq!(messages(input, true).len(), 1, "{:?}", messages(input, true));
+}
+
+#[test]
+fn a_region_header_keeps_its_then() {
+    // The same header rule as `Если`, in the conditional region.
+    let input = "#Если Тогда\n#КонецЕсли";
+    assert!(covers(input, true));
+    assert!(!swallowed(input, true, "Тогда"), "{:?}", error_node_texts(input, true));
+    assert_eq!(messages(input, true).len(), 1, "{:?}", messages(input, true));
+}
+
+#[test]
+fn a_header_keeps_its_last_word_through_the_separator_before_it() {
+    // A scope has to outlive the word it protects. `Для А = 1 Цикл` has no
+    // `По`, and the expect that says so ran outside the scope keeping `Цикл`,
+    // so it took the `Цикл` and the header then reported that same word
+    // missing.
+    for input in [
+        "Процедура П()\nДля А = 1 Цикл\nКонецЦикла;\nКонецПроцедуры",
+        "Процедура П()\nДля Каждого Э Цикл\nКонецЦикла;\nКонецПроцедуры",
+    ] {
+        assert!(covers(input, true), "`{input}`");
+        assert!(!swallowed(input, true, "Цикл"), "{:?}", error_node_texts(input, true));
+        closer_survives(input, "КонецЦикла");
+    }
+}
+
+#[test]
+fn a_region_that_crosses_a_block_keeps_its_own_closer_only_by_luck() {
+    // The scope stack holds constructs that nest. A conditional region and a
+    // statement block may cross instead, and then the region returns on a word
+    // that is not its own, its scope is dropped, and the `#КонецЕсли` that
+    // does belong to it is no longer protected from anything.
+    //
+    // Pinned as it behaves, which is as it behaved before any of this: the
+    // mechanism does not make it worse and cannot make it better. Expressing
+    // a scope that outlives the rule that opened it is what would fix it.
+    let input = "Процедура П()\nЕсли А Тогда\n#Если Клиент Тогда\n\tИначеЕсли Б Тогда\n#КонецЕсли\n\tКонецЕсли;\nКонецПроцедуры";
+
+    assert!(covers(input, true));
+    assert!(swallowed(input, true, "#КонецЕсли"), "{:?}", error_node_texts(input, true));
+    assert_eq!(messages(input, true).len(), 2, "{:?}", messages(input, true));
+}
+
 // --- SDBL: a clause keyword taken by a recovery inside the clause ---------
 
 fn clause_count(input: &str, kind: SyntaxKind) -> usize {

@@ -221,11 +221,13 @@ fn for_stmt(p: &mut Parser) {
                 p.bump();
             }
 
-            p.skip_trivia();
-            p.expect(TokenKind::KwIn);
+            p.within_boundary(at_do, |p| {
+                p.skip_trivia();
+                p.expect(TokenKind::KwIn);
 
-            p.skip_trivia();
-            p.within_boundary(at_do, expressions::expression);
+                p.skip_trivia();
+                expressions::expression(p);
+            });
 
             p.skip_trivia();
             p.expect(TokenKind::KwDo);
@@ -250,14 +252,19 @@ fn for_stmt(p: &mut Parser) {
             p.skip_trivia();
             p.expect(TokenKind::Eq);
 
-            p.skip_trivia();
-            p.within_boundary(at_to_or_do, expressions::expression);
+            // The scope has to outlive the `По` it protects: an expect run
+            // outside it would take the `Цикл` the header is still waiting
+            // for, and then report that same `Цикл` missing.
+            p.within_boundary(at_to_or_do, |p| {
+                p.skip_trivia();
+                expressions::expression(p);
 
-            p.skip_trivia();
-            p.expect(TokenKind::KwTo);
+                p.skip_trivia();
+                p.expect(TokenKind::KwTo);
 
-            p.skip_trivia();
-            p.within_boundary(at_do, expressions::expression);
+                p.skip_trivia();
+                expressions::expression(p);
+            });
 
             p.skip_trivia();
             p.expect(TokenKind::KwDo);

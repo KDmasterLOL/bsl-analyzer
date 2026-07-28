@@ -11,47 +11,52 @@ use crate::parser::Parser;
 fn annotated_item(p: &mut Parser) {
     let outer = p.start();
 
-    while matches!(
-        p.current(),
-        Some(TokenKind::AnnAtClient)
-            | Some(TokenKind::AnnAtServer)
-            | Some(TokenKind::AnnAtServerNoContext)
-            | Some(TokenKind::AnnAtClientAtServer)
-            | Some(TokenKind::AnnAtClientAtServerNoContext)
-            | Some(TokenKind::AnnBefore)
-            | Some(TokenKind::AnnAfter)
-            | Some(TokenKind::AnnAround)
-            | Some(TokenKind::AnnChangeAndValidate)
-            | Some(TokenKind::AnnCustom)
-    ) {
-        p.check_iteration_limit();
-        match p.current() {
+    // An error inside an annotation must not take the word the
+    // declaration begins with: that word is what the annotation was
+    // attached to, and consuming it costs the whole declaration.
+    p.within_boundary(at_declaration_start, |p| {
+        while matches!(
+            p.current(),
             Some(TokenKind::AnnAtClient)
-            | Some(TokenKind::AnnAtServer)
-            | Some(TokenKind::AnnAtServerNoContext)
-            | Some(TokenKind::AnnAtClientAtServer)
-            | Some(TokenKind::AnnAtClientAtServerNoContext) => {
-                items::compiler_directive(p);
+                | Some(TokenKind::AnnAtServer)
+                | Some(TokenKind::AnnAtServerNoContext)
+                | Some(TokenKind::AnnAtClientAtServer)
+                | Some(TokenKind::AnnAtClientAtServerNoContext)
+                | Some(TokenKind::AnnBefore)
+                | Some(TokenKind::AnnAfter)
+                | Some(TokenKind::AnnAround)
+                | Some(TokenKind::AnnChangeAndValidate)
+                | Some(TokenKind::AnnCustom)
+        ) {
+            p.check_iteration_limit();
+            match p.current() {
+                Some(TokenKind::AnnAtClient)
+                | Some(TokenKind::AnnAtServer)
+                | Some(TokenKind::AnnAtServerNoContext)
+                | Some(TokenKind::AnnAtClientAtServer)
+                | Some(TokenKind::AnnAtClientAtServerNoContext) => {
+                    items::compiler_directive(p);
+                }
+                _ => {
+                    items::annotation(p);
+                }
             }
-            _ => {
-                items::annotation(p);
-            }
+            p.skip_trivia();
         }
-        p.skip_trivia();
-    }
 
-    // Region directives are flat folding markers and may sit between an
-    // annotation and the declaration it applies to (e.g. `&НаКлиенте #Область X
-    // <newline> Перем Y;`). Consume them here so the annotation still binds to
-    // the following Procedure/Function/Var instead of derailing the parse.
-    while matches!(p.current(), Some(TokenKind::PreRegion) | Some(TokenKind::PreEndRegion)) {
-        p.check_iteration_limit();
-        match p.current() {
-            Some(TokenKind::PreRegion) => preprocessor_region(p),
-            _ => preprocessor_end_region(p),
+        // Region directives are flat folding markers and may sit between an
+        // annotation and the declaration it applies to (e.g. `&НаКлиенте #Область X
+        // <newline> Перем Y;`). Consume them here so the annotation still binds to
+        // the following Procedure/Function/Var instead of derailing the parse.
+        while matches!(p.current(), Some(TokenKind::PreRegion) | Some(TokenKind::PreEndRegion)) {
+            p.check_iteration_limit();
+            match p.current() {
+                Some(TokenKind::PreRegion) => preprocessor_region(p),
+                _ => preprocessor_end_region(p),
+            }
+            p.skip_trivia();
         }
-        p.skip_trivia();
-    }
+    });
 
     match p.current() {
         Some(TokenKind::KwAsync) => match p.nth_non_trivia(0) {
@@ -168,7 +173,7 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
     p.skip_trivia();
 
     p.within_boundary(at_preproc_closer, |p| {
-        preproc_expression(p);
+        p.within_boundary(at_then, preproc_expression);
         p.skip_trivia();
 
         p.expect(TokenKind::KwThen);
@@ -181,7 +186,7 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
             p.bump();
             p.skip_trivia();
 
-            preproc_expression(p);
+            p.within_boundary(at_then, preproc_expression);
             p.skip_trivia();
 
             p.expect(TokenKind::KwThen);
@@ -203,6 +208,22 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
 
     p.expect(TokenKind::PreEndIf);
     m.complete(p, NodeKind::PreIfDir);
+}
+
+fn at_then(p: &Parser) -> bool {
+    p.at(TokenKind::KwThen)
+}
+
+/// The words a declaration begins with. An annotation is followed by one, and
+/// an error inside the annotation must not take it: the declaration is what
+/// the annotation was attached to.
+fn at_declaration_start(p: &Parser) -> bool {
+    matches!(
+        p.current(),
+        Some(
+            TokenKind::KwProcedure | TokenKind::KwFunction | TokenKind::KwVar | TokenKind::KwAsync
+        )
+    )
 }
 
 fn at_preproc_closer(p: &Parser) -> bool {
