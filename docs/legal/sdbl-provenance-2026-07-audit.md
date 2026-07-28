@@ -175,8 +175,9 @@ Not everything has been through the clean-room process.
   classification no longer exists in the tree. Test material of upstream-derived
   shape is a provenance class in its own right and is easy to overlook because it
   is not implementation code.
-- **Slice 12.** Recovery and IDE allowances: individual fixes landed, no
-  attestation exists.
+- **Slice 12.** Closed. Recovery and IDE allowances re-derived and attested on
+  2026-07-28, `sdbl-clean-room-slice12.md`; see item 6 of the exit criteria.
+  Nothing on the SDBL parser side remains except rule naming, which is item 7.
 - **The BSL grammar layer.** Same origin, same first-commit evidence, and no
   slice plan exists at all. See `parser-bsl-grammar-audit.md`.
 
@@ -274,7 +275,26 @@ For `lexer`:
 
 For `parser` (SDBL side):
 
-6. Slice 12 — recovery and IDE allowances attested.
+6. ~~Slice 12 — recovery and IDE allowances attested.~~ Done 2026-07-28,
+   `sdbl-clean-room-slice12.md`. It is the only slice of the programme whose
+   subject was behaviour rather than vocabulary, and the only one that found a
+   defect the plan had not anticipated: the SDBL tree silently dropped input, so
+   a consumer could not tell a whole query from half of one. Twenty-six
+   commits, of which nine closed review rounds.
+
+   Two things about it are worth carrying forward. Its acceptance figures were
+   measured against a production configuration and not estimated, and every
+   round after the measurement was re-measured the same way — with a positive
+   control, because a zero difference is unreadable without one. And its review
+   did not converge: the last three rounds over an unchanged scope returned
+   8, 6 and 8 confirmed findings. What they were finding by then was the quality
+   of SDBL recovery under adversarial malformed input, which is a surface of its
+   own and no longer this slice's subject. The stopping decision, the method and
+   the known remainder are recorded in #140; the individual defects are #136,
+   #137, #138 and #139.
+
+   **With this item struck, the recovery and allowance layer is attested.** What
+   the checklist still wants from `parser` on the SDBL side is item 7 alone.
 7. Rule naming reviewed. See the non-action below before acting on this.
 
 For `sdbl-hir`:
@@ -302,8 +322,10 @@ Cross-cutting:
 
 ## Options, including one not previously considered
 
-**A. Finish the slices.** Items 1–9 above. Bounded and well understood; item 7
-is the expensive one.
+**A. Finish the slices.** Items 1–6 are struck, so what is left of this option is
+items 7, 8 and 9: rule naming, `sdbl-hir`, and the test corpus. Still bounded and
+still well understood; item 7 is the expensive one, and item 8 is the largest
+unknown rather than the largest amount of work.
 
 **B. Split SDBL into its own crates.** Only helps if the goal is to publish the
 SDBL parser separately. The lexer separates almost mechanically; the parser does

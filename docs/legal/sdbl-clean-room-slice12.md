@@ -1280,6 +1280,41 @@ The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert
 disclosure shared with every closed slice in this programme.
 
+## Where the review stopped, and why it was not empty
+
+Every other closed slice in this programme stopped on a round that found
+nothing. This one did not, and saying otherwise would be the easiest lie
+in the document.
+
+Nine rounds ran. The last three went over an unchanged scope — the shared
+parser and the three SDBL grammar files — and returned 8, 6 and 8 confirmed
+findings. That is a flat rate, not a falling one. The rule the author works
+under says to stop on an empty round; a rule of that shape assumes rounds
+converge, and here they did not.
+
+What the rounds were finding by the end is not this slice's subject. The
+package loop, the leftover, the allowances and the figures are settled and
+were re-measured after every round. What kept producing findings is the
+quality of SDBL recovery under adversarial malformed input across the whole
+grammar — a surface with no natural end, most of it older than this slice.
+The stopping decision was the owner's, taken on those numbers.
+
+Two things about the measurement belong in the same breath. Every round
+after the figures were retaken was measured against the same production
+configuration — 3 142 814 string literals, each parsed as a query and
+classified — and **no round changed a single line of that classification.**
+Every fix in the second half of this slice is a fix to behaviour on input
+that does not occur in committed code. It occurs in editor buffers, which
+is a legitimate target and a weaker one, and the reader of this document
+should weigh the slice's later commits accordingly.
+
+And each of those zero results was run beside a positive control: an input
+the two builds classify differently. A zero difference with no control is
+not evidence that behaviour is unchanged, it is evidence of nothing.
+
+The remainder, the method and the four known defects are recorded outside
+this document rather than left implicit here.
+
 ## Licensing note
 
 Nothing in this slice is derived from a third-party grammar or parser.
