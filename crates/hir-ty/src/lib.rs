@@ -69,7 +69,10 @@ pub use module_implicit::module_implicit_fields;
 pub use object_resolver::{
     ConfigsObjectResolver, DbObjectResolver, MetadataResolution, ObjectResolver,
 };
-pub use platform_global_lookup::resolve_platform_global_property_type;
+pub use platform_global_lookup::{
+    bare_global_name_claim, manager_collection_env, resolve_platform_global_property_type,
+    BareGlobalClaim, BodyShadowScope,
+};
 pub use platform_manager_lookup::{
     resolve_platform_manager_method, resolve_platform_metadata_ref_method, PlatformMethodResolution,
 };

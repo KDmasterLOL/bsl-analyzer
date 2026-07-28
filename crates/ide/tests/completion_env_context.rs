@@ -284,3 +284,67 @@ fn weaving_interceptor_not_judged() {
         "a weaving interceptor's directive is unknown — availability must not be judged"
     );
 }
+
+#[test]
+fn metadata_root_members_hidden_in_client_method() {
+    if !platform_data_available() {
+        return;
+    }
+    // `Метаданные` is unavailable on the thin and web clients.
+    let items = complete(
+        r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Сохранить()
+    Метаданные.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        items.is_empty(),
+        "a client method must not offer members behind the unavailable `Метаданные` root; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn metadata_root_members_offered_in_server_method() {
+    if !platform_data_available() {
+        return;
+    }
+    let items = complete(
+        r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Процедура Записать()
+    Метаданные.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        has_label(&items, "Справочники"),
+        "the server method must keep the metadata collection suggestions; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn metadata_collection_objects_hidden_in_client_method() {
+    if !platform_data_available() {
+        return;
+    }
+    let items = complete(
+        r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Сохранить()
+    Метаданные.Справочники.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        items.is_empty(),
+        "a client method must not offer objects of a metadata collection behind the unavailable root; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}

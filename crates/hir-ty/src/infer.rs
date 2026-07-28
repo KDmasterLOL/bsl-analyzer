@@ -861,7 +861,6 @@ impl<'db> InferenceContext<'db> {
     /// Shadowing is judged body-wide and preprocessor-blind, like every other
     /// shadowing decision in inference.
     fn manager_collection_shadowed(&mut self, name: &Name) -> bool {
-        use hir_def::resolver::Resolution;
         let key = NormName::intern(name.as_str());
         if self.body_declares_binding(name)
             || self.var_types.contains_key(&key)
@@ -870,22 +869,8 @@ impl<'db> InferenceContext<'db> {
             return true;
         }
         let resolver = self.get_resolver();
-        if matches!(
-            resolver.resolve_name(self.db, name),
-            Some(Resolution::Method(_)) | Some(Resolution::Variable(_))
-        ) {
-            return true;
-        }
-        if crate::form_self::resolve_form_self_property(self.db, &resolver, name).is_some()
-            || crate::form_attr::resolve_form_attribute(self.db, &resolver, name).is_some()
-            || crate::this_object_attr::resolve_this_object_member(self.db, &resolver, name)
-                .is_some()
-            || crate::this_object_attr::resolve_this_record_set_member(self.db, &resolver, name)
-                .is_some()
-        {
-            return true;
-        }
-        resolver.user_common_module_exists(self.db, name)
+        crate::platform_global_lookup::bare_global_name_claim(self.db, &resolver, None, name)
+            .is_some()
     }
 
     /// Environment check for a bare manager-collection root (`Справочники`,
