@@ -60,6 +60,17 @@ pub(crate) fn resolve_platform_global_property(
     ))
 }
 
+/// Environment availability of the global manager-collection property
+/// (`Справочники`, `Перечисления`, …) backing `mdo_type`. Manager collections
+/// resolve through the metadata layer, but their availability is owned by the
+/// platform's Global-context property record; a type without such a record
+/// carries no restriction.
+pub(crate) fn manager_collection_env(mdo_type: bsl_metadata::MdoType) -> EnvFlags {
+    EnvFlags::from_platform_context(
+        mdo_type.hbk_global_property().and_then(|prop| prop.context.as_ref()),
+    )
+}
+
 /// Resolve a bare identifier that names a platform **system enumeration**
 /// (`ВидДвиженияБухгалтерии`, `ВидСравненияКомпоновкиДанных`, …) to its platform
 /// object type, so member access such as `ВидДвиженияБухгалтерии.Дебет` resolves

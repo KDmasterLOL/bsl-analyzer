@@ -360,6 +360,13 @@ pub struct InferenceContext<'db> {
 
     assigned_var_names: rustc_hash::FxHashSet<NormName>,
 
+    /// Names assigned anywhere in this body, computed on first demand.
+    /// Unlike `assigned_var_names`, which grows as the statement walk
+    /// progresses, this set is body-wide: a BSL implicit local shadows a
+    /// global in the whole procedure, including reads that precede its
+    /// first assignment.
+    body_assigned_names: Option<rustc_hash::FxHashSet<NormName>>,
+
     binding_types: FxHashMap<BindingId, TypeId>,
 
     expr_types: FxHashMap<ExprId, TypeId>,
@@ -599,6 +606,7 @@ impl<'db> InferenceContext<'db> {
             var_types: FxHashMap::default(),
             implicit_locals: FxHashMap::default(),
             assigned_var_names: rustc_hash::FxHashSet::default(),
+            body_assigned_names: None,
             binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
@@ -828,6 +836,79 @@ impl<'db> InferenceContext<'db> {
             member_kind,
             missing,
         });
+    }
+
+    fn body_assigned_names(&mut self) -> &rustc_hash::FxHashSet<NormName> {
+        if self.body_assigned_names.is_none() {
+            let mut names = rustc_hash::FxHashSet::default();
+            for (_, stmt) in self.body.stmts_iter() {
+                if let Stmt::Assign { target, .. } = stmt {
+                    if let Expr::Path(name) = self.body.expr(ExprId::from_idx(*target)) {
+                        names.insert(NormName::intern(name.as_str()));
+                    }
+                }
+            }
+            self.body_assigned_names = Some(names);
+        }
+        self.body_assigned_names.as_ref().expect("filled above")
+    }
+
+    /// True when a bare manager-collection name is shadowed by a user symbol
+    /// and thus does not denote the platform global: a body binding or typed
+    /// local/parameter, an assignment anywhere in the body, a module-level
+    /// variable or method, a form attribute or form-self property, an
+    /// implicit `ЭтотОбъект`/record-set member, or a workspace common module.
+    /// Shadowing is judged body-wide and preprocessor-blind, like every other
+    /// shadowing decision in inference.
+    fn manager_collection_shadowed(&mut self, name: &Name) -> bool {
+        use hir_def::resolver::Resolution;
+        let key = NormName::intern(name.as_str());
+        if self.body_declares_binding(name)
+            || self.var_types.contains_key(&key)
+            || self.body_assigned_names().contains(&key)
+        {
+            return true;
+        }
+        let resolver = self.get_resolver();
+        if matches!(
+            resolver.resolve_name(self.db, name),
+            Some(Resolution::Method(_)) | Some(Resolution::Variable(_))
+        ) {
+            return true;
+        }
+        if crate::form_self::resolve_form_self_property(self.db, &resolver, name).is_some()
+            || crate::form_attr::resolve_form_attribute(self.db, &resolver, name).is_some()
+            || crate::this_object_attr::resolve_this_object_member(self.db, &resolver, name)
+                .is_some()
+            || crate::this_object_attr::resolve_this_record_set_member(self.db, &resolver, name)
+                .is_some()
+        {
+            return true;
+        }
+        resolver.user_common_module_exists(self.db, name)
+    }
+
+    /// Environment check for a bare manager-collection root (`Справочники`,
+    /// `Перечисления`, …). The mask compare runs first, so on the available
+    /// path — every server-side body — no shadowing lookups happen at all;
+    /// the resolver is consulted only when a verdict is about to be issued.
+    fn check_manager_collection_env(
+        &mut self,
+        expr: ExprId,
+        name: &Name,
+        mdo_type: bsl_metadata::MdoType,
+    ) {
+        let member_env = crate::platform_global_lookup::manager_collection_env(mdo_type);
+        if self.body_env.is_empty() || member_env.is_empty() {
+            return;
+        }
+        if (self.body_env.without(member_env) & self.checked_env).is_empty() {
+            return;
+        }
+        if self.manager_collection_shadowed(name) {
+            return;
+        }
+        self.check_member_env(expr, name, member_env, EnvMemberKind::GlobalProperty);
     }
 
     /// The type name a `Новый(...)` names by value, trimmed once here so every
@@ -1212,10 +1293,20 @@ impl<'db> InferenceContext<'db> {
         let stmts: Vec<StmtIdx> = self.body.body_stmts_typed().to_vec();
         self.infer_stmts(&stmts);
 
+        // Exprs the statement walk never reached are lowering leftovers — e.g.
+        // the original callee chain a qualified-call rewrite replaced. They
+        // are still typed here for the IDE layer (hover/goto resolve through
+        // the source map), but they carry no execution context: statement-level
+        // `#Если` narrowing never saw them, so an environment verdict from
+        // this sweep would double or contradict the one issued during the
+        // walk. An empty body mask disables every environment check.
+        let walk_env =
+            std::mem::replace(&mut self.body_env, hir_def::execution_env::EnvFlags::EMPTY);
         let expr_ids: Vec<ExprId> = self.body.exprs_iter().map(|(id, _)| id).collect();
         for expr_id in expr_ids {
             self.infer_expr(expr_id);
         }
+        self.body_env = walk_env;
 
         debug!(
             "inferred {} expression types, {} var types, {} diagnostics",
@@ -1811,6 +1902,7 @@ impl<'db> InferenceContext<'db> {
         if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(name.as_str()) {
             if mdo_type.manager_type_prefix().is_some() {
                 trace!("resolved {} as manager collection {:?}", name, mdo_type);
+                self.check_manager_collection_env(expr_id, name, mdo_type);
                 return self.db.manager_collection(mdo_type);
             }
         }
@@ -2831,6 +2923,17 @@ impl<'db> InferenceContext<'db> {
             self.infer_expr(*arg);
         }
 
+        let mdo_type_opt = bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str());
+
+        // The call is lowered as one QualifiedPath, so the collection root
+        // (`Справочники`, `Перечисления`, …) never passes through
+        // `infer_path_name`; its availability is checked here instead. The
+        // verdict does not depend on whether the method resolves — the root
+        // itself is what the restricted environments lack.
+        if let Some(mdo_type) = mdo_type_opt {
+            self.check_manager_collection_env(call_expr, mdo_type_plural, mdo_type);
+        }
+
         let resolver = self.get_resolver();
         let receiver_name =
             Name::new(&format!("{}.{}", mdo_type_plural.as_str(), mdo_name.as_str()));
@@ -2863,7 +2966,6 @@ impl<'db> InferenceContext<'db> {
                 self.record_candidate_call_arg_binding(call_expr, args, candidates)
             }
             Err(UnresolvedMethodKind::MethodNotFound) => {
-                let mdo_type_opt = bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str());
                 let plat_res: Option<PlatformMethodResolution> = mdo_type_opt
                     .filter(|mdo_type| self.mdo_declared(*mdo_type, mdo_name))
                     .and_then(|mdo_type| {

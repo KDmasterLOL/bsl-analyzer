@@ -870,6 +870,22 @@ pub fn check_form_with_common_modules(
     form_source: &str,
     modules: &[(&str, &str, &str)],
 ) -> Vec<Diagnostic> {
+    check_form_module_impl(form_source, modules, minimal_managed_form_xml())
+}
+
+/// Diagnostics of a managed-form module whose `Ext/Form.xml` content matters
+/// (form attributes, items): the in-memory fixture VFS cannot provide it, so
+/// the configuration is materialized on disk exactly like in
+/// [`check_form_with_common_modules`].
+pub fn check_form_with_form_xml(form_source: &str, form_xml: &str) -> Vec<Diagnostic> {
+    check_form_module_impl(form_source, &[], form_xml)
+}
+
+fn check_form_module_impl(
+    form_source: &str,
+    modules: &[(&str, &str, &str)],
+    form_xml: &str,
+) -> Vec<Diagnostic> {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::metadata::intern_configuration_path;
     use ide_db::RootDatabaseImpl;
@@ -898,8 +914,7 @@ pub fn check_form_with_common_modules(
 
     let form_ext_dir = root.join("Catalogs/Товары/Forms/ФормаЭлемента/Ext");
     std::fs::create_dir_all(form_ext_dir.join("Form")).expect("create form Ext/Form directory");
-    std::fs::write(form_ext_dir.join("Form.xml"), minimal_managed_form_xml())
-        .expect("write Ext/Form.xml");
+    std::fs::write(form_ext_dir.join("Form.xml"), form_xml).expect("write Ext/Form.xml");
 
     let mut db = RootDatabaseImpl::new();
     db.set_all_config_paths(vec![(None, root.clone())]);
