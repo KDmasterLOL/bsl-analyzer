@@ -396,6 +396,12 @@ const TERNARY_SHAPES: &[(&str, usize, bool)] = &[
     ("?)(1, 2, 3)", 1, false),
     ("?)", 1, false),
     ("?", 1, true),
+    // Giving up must not spend the token either, where something else will
+    // use it: an operator carries on the expression around the `?`, and no
+    // rule declares an operator as a boundary because a rule that reaches one
+    // consumes it and loops.
+    ("? + 9", 1, true),
+    ("? . А", 1, true),
 ];
 
 #[test]
@@ -439,6 +445,22 @@ fn a_ternary_never_takes_the_argument_after_it() {
             *call_keeps_last_arg,
             "`{shape}`: the call kept its last argument"
         );
+    }
+}
+
+#[test]
+fn a_ternary_that_gives_up_leaves_the_bracket_holding_it() {
+    // The index owns `]` and declares it, but an operator standing where the
+    // ternary's paren should be is declared by nobody: consuming it as the
+    // report cost the index its bracket two tokens later.
+    for (shape, _, _) in TERNARY_SHAPES {
+        if !shape.contains('+') && !shape.contains('.') {
+            continue;
+        }
+        let input = format!("Процедура П()\n\tА = Б[{shape}];\nКонецПроцедуры");
+        assert!(covers(&input, true), "`{shape}`");
+        assert!(!swallowed(&input, true, "]"), "`{shape}`: {:?}", error_node_texts(&input, true));
+        assert_eq!(messages(&input, true).len(), 1, "`{shape}`: {:?}", messages(&input, true));
     }
 }
 

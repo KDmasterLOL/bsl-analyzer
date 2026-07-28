@@ -193,6 +193,28 @@ impl<'a> Parser<'a> {
         false
     }
 
+    /// Requires `kind`, and consumes nothing when it is absent.
+    ///
+    /// A rule that gives up once it sees its opener is missing must not spend
+    /// a token on the way out. Whatever stands there is the continuation of
+    /// something else — an operator of the expression around it, the bracket
+    /// of the construct holding it — and plain `expect` would take it as its
+    /// recovery, which costs the caller exactly what the caller was about to
+    /// parse.
+    pub fn expect_no_bump(&mut self, kind: TokenKind) -> bool {
+        if !self.at_declared_boundary() && self.eat(kind) {
+            return true;
+        }
+
+        let err = ParseError::Expected {
+            expected: smallvec![kind],
+            found: self.current(),
+            recovery: RecoveryKind::MissingToken,
+        };
+        self.emit_missing(err);
+        false
+    }
+
     /// The last token before this one that was not trivia.
     ///
     /// A rule that must know what it is standing behind — whether a dot
