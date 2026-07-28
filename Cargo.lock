@@ -342,6 +342,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-tree",
+ "uuid",
  "vcs",
  "vfs",
  "vfs-notify",
