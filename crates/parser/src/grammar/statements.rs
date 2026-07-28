@@ -87,16 +87,12 @@ fn return_stmt(p: &mut Parser) {
 
     p.skip_trivia();
 
-    if !p.at(TokenKind::Semicolon)
-        && !p.at(TokenKind::KwEndFunction)
-        && !p.at(TokenKind::KwEndProcedure)
-        && !p.at(TokenKind::KwEndIf)
-        && !p.at(TokenKind::KwElsIf)
-        && !p.at(TokenKind::KwElse)
-        && !p.at(TokenKind::KwEndDo)
-        && !p.at(TokenKind::KwExcept)
-        && !p.at(TokenKind::KwEndTry)
-    {
+    // `Возврат` may carry a value or not, and what says it does not is the
+    // end of the statement or the end of something enclosing it. The blocks
+    // that are open have already stated their closers, so asking them beats
+    // keeping a list here — a list has no way to know that `КонецЦикла` with
+    // no loop open closes nothing.
+    if !at_end_of_statement(p) {
         expressions::expression(p);
     }
 
@@ -297,7 +293,7 @@ fn raise_stmt(p: &mut Parser) {
 
     if p.at(TokenKind::LParen) {
         parse_raise_call_args(p);
-    } else if !at_bare_raise_boundary(p) {
+    } else if !at_end_of_statement(p) {
         expressions::expression(p);
     }
 
@@ -307,24 +303,10 @@ fn raise_stmt(p: &mut Parser) {
     m.complete(p, NodeKind::RaiseStmt);
 }
 
-fn at_bare_raise_boundary(p: &Parser) -> bool {
-    matches!(
-        p.current(),
-        Some(
-            TokenKind::Semicolon
-                | TokenKind::KwEndTry
-                | TokenKind::KwExcept
-                | TokenKind::KwEndIf
-                | TokenKind::KwElsIf
-                | TokenKind::KwElse
-                | TokenKind::KwEndDo
-                | TokenKind::KwEndProcedure
-                | TokenKind::KwEndFunction
-                | TokenKind::PreElsIf
-                | TokenKind::PreElse
-                | TokenKind::PreEndIf
-        ) | None
-    )
+/// Whether nothing more of this statement can follow: its own separator, the
+/// end of the input, or a word an enclosing construct is waiting for.
+fn at_end_of_statement(p: &Parser) -> bool {
+    p.at(TokenKind::Semicolon) || p.at_end() || p.at_enclosing_boundary()
 }
 
 fn parse_raise_call_args(p: &mut Parser) {
