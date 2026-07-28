@@ -2,6 +2,7 @@ mod baseline;
 pub mod broker;
 mod cache;
 mod change_hub;
+pub mod contract;
 mod diagnostics_state;
 mod drift_classify;
 mod graph;
@@ -10,6 +11,7 @@ mod graph_query;
 mod http;
 mod state;
 mod tools;
+mod workspace_lease;
 
 pub use baseline::{
     resolve_project_baseline_diagnostics, BaselineConfigDiagnostics, BaselineResolutionSummary,
@@ -44,8 +46,13 @@ where
 use crate::graph::GraphStatus;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::model::{
+    AnnotateAble, CallToolResult, ListResourcesResult, PaginatedRequestParams, RawResource,
+    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -68,7 +75,7 @@ impl McpProfile {
 
 #[derive(Deserialize, JsonSchema)]
 struct MetadataParams {
-    /// info | tree | object | form.
+    /// info | tree | object | form | status.
     action: String,
     /// `tree`: case-insensitive substring to narrow the returned tree (optional).
     filter: Option<String>,
@@ -104,8 +111,9 @@ struct SearchParams {
     query: Option<String>,
     /// Cap on returned hits (default 10, max 50).
     limit: Option<usize>,
-    /// Output budget in tokens (~4 chars each); over-budget results are truncated at a hit
-    /// boundary with a note telling you to raise `limit` or narrow the query (default 6000).
+    /// Output budget in tokens (~4 chars each) for the text listing and the structured hits
+    /// together; over-budget results are truncated at a hit boundary with a note telling you to
+    /// raise `limit` or narrow the query, and `budget_exhausted: true` (default 6000).
     max_output_tokens: Option<usize>,
 }
 
@@ -115,6 +123,9 @@ struct SyntaxHelpParams {
     name: String,
     /// Owning platform type when `name` is a member of a specific type (optional).
     type_name: Option<String>,
+    /// Output budget in tokens (~4 chars each); a large type's card is truncated at a line
+    /// boundary with a note pointing at the single-member lookup (default 6000).
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -129,6 +140,11 @@ struct QueryParams {
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
     /// Named live 1C connection (optional when only one/default connection exists).
     connection: Option<String>,
+    /// `execute`: output budget in tokens (~4 chars each) on top of the `limit` row cap —
+    /// `limit` bounds how many rows come back, nothing bounds how wide they are. An
+    /// over-budget table is truncated at a row boundary with a note (default 6000); when the
+    /// row cap fired too, the note says raising the budget alone will not help.
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -139,6 +155,9 @@ struct ExecuteParams {
     code: String,
     /// Named live 1C connection (optional when only one/default connection exists).
     connection: Option<String>,
+    /// Output budget in tokens (~4 chars each); over-budget output (a `run` context block, an
+    /// evaluated value, a long syntax-error listing) is truncated with a note (default 6000).
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -163,6 +182,14 @@ struct EventLogParams {
     limit: Option<u32>,
     /// Named live 1C connection (optional when only one/default connection exists).
     connection: Option<String>,
+    /// Output budget in tokens (~4 chars each) on top of the `limit` record cap — `limit`
+    /// counts records, it does not bound their size. An over-budget read drops the oldest
+    /// records, flags `budget_exhausted: true` and carries a `budget_hint` (default 6000);
+    /// when the record cap fired too, the hint says raising the budget alone will not help.
+    /// In the response, `returned` counts the records actually delivered and `total` the ones
+    /// the platform read for this `limit` window — neither is the whole matching population,
+    /// which the platform never reports.
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -260,6 +287,9 @@ struct DiagnosticsParams {
 struct ItsHelpParams {
     /// Natural-language question for the ITS expert help.
     question: String,
+    /// Output budget in tokens (~4 chars each); a long answer is truncated at a line boundary
+    /// with a continuation note (default 6000).
+    max_output_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -295,6 +325,10 @@ struct DebugParams {
     stack_level: Option<u32>,
     /// `eval`: BSL expression to evaluate in the current stop (required).
     expression: Option<String>,
+    /// Output budget in tokens (~4 chars each) for the state-reading actions `stack_trace`,
+    /// `locals`, `wait_stop` and `eval`: a deep stack or a wide frame is truncated at a line
+    /// boundary with a continuation note (default 6000).
+    max_output_tokens: Option<usize>,
 }
 
 fn default_debug_port() -> u16 {
@@ -328,13 +362,12 @@ impl McpServer {
         self.state.shutdown();
     }
 
-    /// Whether long-running background work is still in flight — a search/embedding
-    /// pass OR a diagnostics resident build/reload. The broker backend polls this to
-    /// avoid idle-exiting (and killing the work) while it runs, so an expensive
-    /// embedding run or a cold diagnostics build finishes instead of restarting on the
-    /// next request. See [`SharedState::background_indexing_active`].
-    pub fn background_work_active(&self) -> bool {
-        self.state.background_indexing_active() || self.state.diagnostics().is_busy()
+    /// Whether a newer daemon generation owns this workspace's derived caches. The broker
+    /// backend consults it when it falls idle: staying warm buys a reconnecting client a
+    /// resident state that can no longer maintain itself, while the memory it holds is the
+    /// same multi-gigabyte footprint as a working backend's.
+    pub fn superseded(&self) -> bool {
+        self.state.superseded()
     }
 
     /// Browse the configuration's metadata: objects, their structure, and managed forms.
@@ -343,8 +376,10 @@ impl McpServer {
     /// for call relationships (use `graph`) and not for finding code by meaning (use `search`).
     /// Actions: `info` — configuration summary; `tree` — the metadata object tree (filterable);
     /// `object` — one object's structure (needs `object_type` + `object_name`); `form` — a
-    /// managed form's layout (needs `object_type`). Reads the resident analysis host; while it
-    /// builds it returns a retry envelope, not an error.
+    /// managed form's layout (needs `object_type`); `status` — resident readiness. Reads the
+    /// resident analysis host; while it builds it returns a retry envelope, not an error —
+    /// `structuredContent.status == "loading"`, same field `diagnostics`/`graph` set, so retry
+    /// shortly instead of reading the answer as "no such object".
     #[tool(name = "metadata", annotations(read_only_hint = true))]
     async fn metadata(
         &self,
@@ -360,6 +395,18 @@ impl McpServer {
                 None,
             ));
         }
+        // `status` reports the resident lifecycle (and kicks the lazy build), so an agent can
+        // poll readiness here instead of firing `info` just to read its `loading` envelope.
+        // Answered ahead of every mode branch: readiness is a property of this server, not of
+        // the requested mode, and a client that passes `connection` on every metadata call
+        // would otherwise be told the action does not exist. Rendered by the shared renderer,
+        // so it is byte-identical to `diagnostics status`: one resident, one status shape.
+        if p.action == "status" {
+            let diag = self.state.diagnostics();
+            diag.ensure_loading();
+            return Ok(tools::resident::status(&diag.status_report()));
+        }
+
         let live = mode == "infobase" || (mode == "auto" && p.connection.is_some());
         if live {
             return match p.action.as_str() {
@@ -465,10 +512,9 @@ impl McpServer {
                                 require(object_name.clone(), "object_name", "object")?;
                             tools::metadata::object_from_db(db, &object_type, &object_name)
                         }
-                        other => Err(McpError::invalid_params(
-                            format!("Unknown action '{other}'. Expected: info, tree, object, form"),
-                            None,
-                        )),
+                        other => {
+                            Err(contract::unknown_action(McpProfile::Workspace, "metadata", other))
+                        }
                     }
                 })
             };
@@ -511,7 +557,14 @@ impl McpServer {
     /// `graph` (callers/callees by durable id) — and not for analyzer findings — that is
     /// `diagnostics`. Actions: `search_code` — the search (`query` required; `limit` default
     /// 10, max 50); `status` — index readiness. While the index warms up it returns a retry
-    /// envelope; retry shortly.
+    /// envelope; retry shortly. Hits arrive twice: a listing for people in the text block, and
+    /// the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, path,
+    /// line_start, line_end, symbol, kind, graph_id, snippet, snippet_truncated_lines}], shown,
+    /// total, budget_exhausted?, degraded?}`. Read the structured form: it is the versioned
+    /// contract, whereas the text layout may be reformatted in any release. Absent fields mean
+    /// absent facts — no `symbol` is a file/header chunk, no `graph_id` means the hit has no
+    /// durable id to pass to `graph`. `total` is the ranked list before the output budget cut
+    /// it (already bounded by `limit`), not the configuration-wide match count.
     #[tool(name = "search", annotations(read_only_hint = true))]
     async fn workspace_search(
         &self,
@@ -594,10 +647,7 @@ impl McpServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: search_code, status"),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Workspace, "search", other)),
         }
     }
 
@@ -606,15 +656,24 @@ impl McpServer {
     /// the query-language schema. Not for browsing metadata structure (use `metadata`) and not
     /// for BSL code (use `execute`). Actions: `validate` — parse and type-check a query (`query`
     /// required); `execute` — run it (`query` required; optional `limit`, `parameters`);
-    /// `schema` — the SDBL schema reference.
+    /// `schema` — the SDBL schema reference. `execute` output is bounded by `max_output_tokens`
+    /// on top of `limit` and appends a truncation note.
     #[tool(name = "query", annotations(read_only_hint = true))]
     async fn query(&self, params: Parameters<QueryParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
+        let max_output_tokens =
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
         match p.action.as_str() {
             "schema" => Ok(tools::query::schema()),
             "validate" => {
                 let query = require(p.query, "query", "validate")?;
-                tools::query::validate_query(&self.state, &query, p.connection.as_deref()).await
+                tools::query::validate_query(
+                    &self.state,
+                    &query,
+                    p.connection.as_deref(),
+                    max_output_tokens,
+                )
+                .await
             }
             "execute" => {
                 let query = require(p.query, "query", "execute")?;
@@ -624,13 +683,11 @@ impl McpServer {
                     p.limit,
                     p.parameters,
                     p.connection.as_deref(),
+                    max_output_tokens,
                 )
                 .await
             }
-            other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: validate, execute, schema"),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Workspace, "query", other)),
         }
     }
 
@@ -639,24 +696,40 @@ impl McpServer {
     /// database (use `query` for SDBL) and not for analyzer findings (use `diagnostics`).
     /// Actions: `check` — syntax-check `code`; `run` — execute `code`; `eval` — evaluate the
     /// single expression in `code`. `run`/`eval` execute code, so this tool is not read-only.
+    /// Output is bounded by `max_output_tokens` and appends a truncation note.
     #[tool(name = "execute")]
     async fn execute(&self, params: Parameters<ExecuteParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
+        let budget = p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
         match p.action.as_str() {
             "check" => {
-                tools::execution::check_syntax(&self.state, &p.code, p.connection.as_deref()).await
+                tools::execution::check_syntax(
+                    &self.state,
+                    &p.code,
+                    p.connection.as_deref(),
+                    budget,
+                )
+                .await
             }
             "run" => {
-                tools::execution::execute_code(&self.state, &p.code, p.connection.as_deref()).await
+                tools::execution::execute_code(
+                    &self.state,
+                    &p.code,
+                    p.connection.as_deref(),
+                    budget,
+                )
+                .await
             }
             "eval" => {
-                tools::execution::eval_expression(&self.state, &p.code, p.connection.as_deref())
-                    .await
+                tools::execution::eval_expression(
+                    &self.state,
+                    &p.code,
+                    p.connection.as_deref(),
+                    budget,
+                )
+                .await
             }
-            other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: check, run, eval"),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Workspace, "execute", other)),
         }
     }
 
@@ -666,7 +739,9 @@ impl McpServer {
     /// source (use `diagnostics`): this reads live runtime records from a running infobase.
     /// Filters: `date_from`/`date_to`, `level`, `user`, `event`, `metadata`, and `contains`
     /// (post-read substring over the newest `limit` window). `limit` is newest-first (default
-    /// 100, max 1000). Requires the extension deployed with event-log read rights.
+    /// 100, max 1000) and bounds the record COUNT; `max_output_tokens` bounds the response
+    /// SIZE and flags `budget_exhausted`. Requires the extension deployed with event-log read
+    /// rights.
     #[tool(name = "event_log", annotations(read_only_hint = true))]
     async fn event_log(
         &self,
@@ -686,6 +761,7 @@ impl McpServer {
                 limit: p.limit,
                 connection: p.connection,
             },
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
         )
         .await
     }
@@ -694,12 +770,14 @@ impl McpServer {
     /// to debug a running infobase — attach, break, then step and read locals/eval. Not for
     /// static analysis (use `diagnostics`) and not for running standalone code (use `execute`).
     /// Actions: `attach`/`disconnect`; `set_breakpoint`/`remove_breakpoint`; `continue`/`step`;
-    /// `wait_stop`; `stack_trace`; `locals`; `eval`. Requires a reachable debug endpoint
+    /// `wait_stop`; `stack_trace`; `locals`; `eval`. State-reading actions are bounded by
+    /// `max_output_tokens` and append a truncation note. Requires a reachable debug endpoint
     /// (`host` + `infobase`, default port 1550).
     #[tool(name = "debug")]
     async fn debug(&self, params: Parameters<DebugParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let session = self.state.debug_session().clone();
+        let budget = p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
 
         match p.action.as_str() {
             "attach" => {
@@ -722,6 +800,7 @@ impl McpServer {
                             extensions: &extensions,
                             auto_attach: &auto_attach,
                         },
+                        budget,
                     )
                 })
                 .await
@@ -770,20 +849,20 @@ impl McpServer {
             "wait_stop" => {
                 let timeout_secs = p.timeout_secs;
                 tokio::task::spawn_blocking(move || {
-                    tools::debug::debug_wait_stop(&session, timeout_secs)
+                    tools::debug::debug_wait_stop(&session, timeout_secs, budget)
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            "stack_trace" => {
-                tokio::task::spawn_blocking(move || tools::debug::debug_stack_trace(&session))
-                    .await
-                    .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-            }
+            "stack_trace" => tokio::task::spawn_blocking(move || {
+                tools::debug::debug_stack_trace(&session, budget)
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?,
             "locals" => {
                 let stack_level = p.stack_level;
                 tokio::task::spawn_blocking(move || {
-                    tools::debug::debug_locals(&session, stack_level)
+                    tools::debug::debug_locals(&session, stack_level, budget)
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
@@ -792,18 +871,12 @@ impl McpServer {
                 let expression = require(p.expression, "expression", "eval")?;
                 let stack_level = p.stack_level;
                 tokio::task::spawn_blocking(move || {
-                    tools::debug::debug_eval(&session, &expression, stack_level)
+                    tools::debug::debug_eval(&session, &expression, stack_level, budget)
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            other => Err(McpError::invalid_params(
-                format!(
-                    "Unknown action '{other}'. Expected: attach, disconnect, set_breakpoint, \
-                     remove_breakpoint, continue, step, wait_stop, stack_trace, locals, eval"
-                ),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Workspace, "debug", other)),
         }
     }
 
@@ -913,13 +986,7 @@ impl McpServer {
                     tools::graph::neighbors(gdb, &neighbors, budget)
                 }
                 other => {
-                    return Err(McpError::invalid_params(
-                        format!(
-                            "Unknown action '{other}'. Expected: overview, schema, status, node, \
-                             source, neighbors, callers, callees, resolve"
-                        ),
-                        None,
-                    ))
+                    return Err(contract::unknown_action(McpProfile::Workspace, "graph", other))
                 }
             };
             // Stamp freshness relative to the snapshot that served this answer: the
@@ -1100,16 +1167,11 @@ impl McpServer {
             "status" => {
                 let diag = self.state.diagnostics();
                 diag.ensure_loading();
-                Ok(tools::diagnostics::status(&diag.status_report()))
+                Ok(tools::resident::status(&diag.status_report()))
             }
             "file" => self.diagnostics_file(p).await,
             "workspace" => self.diagnostics_workspace(p, ct).await,
-            other => Err(McpError::invalid_params(
-                format!(
-                    "Unknown action '{other}'. Expected: catalog, schema, status, file, workspace"
-                ),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Workspace, "diagnostics", other)),
         }
     }
 
@@ -1326,7 +1388,12 @@ impl McpServer {
     /// workspace profile's `search`; for one platform member's signature use `syntax_help`.
     /// Actions: `find_docs` / `search_docs` — doc search (`query` required; `limit` default 10,
     /// max 50); `status` — index readiness. While the index warms up it returns a retry
-    /// envelope.
+    /// envelope. Hits arrive twice: a listing for people in the text block, and the same hits
+    /// in `structuredContent` — `{schema_version, hits: [{rank, score, path, line_start,
+    /// line_end, symbol, kind, snippet, snippet_truncated_lines}], shown, total,
+    /// budget_exhausted?}`. Read the structured form: it is the versioned contract, whereas the
+    /// text layout may be reformatted in any release. `score` is the ranker's own number —
+    /// comparable within one response, meaningless across searches or backends.
     #[tool(name = "search", annotations(read_only_hint = true))]
     async fn reference_search(
         &self,
@@ -1389,10 +1456,7 @@ impl McpServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            other => Err(McpError::invalid_params(
-                format!("Unknown action '{other}'. Expected: find_docs, search_docs, status"),
-                None,
-            )),
+            other => Err(contract::unknown_action(McpProfile::Reference, "search", other)),
         }
     }
 
@@ -1400,25 +1464,36 @@ impl McpServer {
     /// from the built-in platform data. Use when you know the member name (e.g. `СтрНайти`) and
     /// want its exact signature. For free-text doc discovery use `search`; for broader
     /// conceptual guidance use `its_help`. Params: `name` (required), optional `type_name` when
-    /// the member belongs to a specific platform type.
+    /// the member belongs to a specific platform type, optional `max_output_tokens` bounding a
+    /// large type's card.
     #[tool(name = "syntax_help", annotations(read_only_hint = true))]
     async fn syntax_help(
         &self,
         params: Parameters<SyntaxHelpParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::platform::bsl_syntax_help(&params.0.name, params.0.type_name.as_deref())
+        let p = params.0;
+        tools::platform::bsl_syntax_help(
+            &p.name,
+            p.type_name.as_deref(),
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+        )
     }
 
     /// Ask the ITS expert-help knowledge base a natural-language question about the 1C platform
     /// and development standards. Use for conceptual "how / why" questions. For one member's
-    /// signature use `syntax_help`; for doc keyword search use `search`. Param: `question`
-    /// (required).
+    /// signature use `syntax_help`; for doc keyword search use `search`. Params: `question`
+    /// (required), optional `max_output_tokens` bounding a long answer.
     #[tool(name = "its_help", annotations(read_only_hint = true))]
     async fn its_help(
         &self,
         params: Parameters<ItsHelpParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::its_help::its_help(&params.0.question).await
+        let p = params.0;
+        tools::its_help::its_help(
+            &p.question,
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+        )
+        .await
     }
 }
 
@@ -1439,9 +1514,12 @@ impl ServerHandler for McpServer {
                  - SDBL query validate/run → `query`; run/check BSL code → `execute`;\n\
                  - live infobase runtime events → `event_log`; live debugger session → `debug`.\n\
                  Tools whose data is built lazily (metadata, graph, diagnostics, search) return a \
-                 retry envelope while indexing rather than an error; large responses are bounded \
-                 by `max_output_tokens`/limits — JSON tools (graph, diagnostics) flag \
-                 `budget_exhausted`, text tools (search, metadata) append a truncation note."
+                 retry envelope while indexing rather than an error; every response is bounded \
+                 by `max_output_tokens` (and, where one exists, the action's own count cap) — \
+                 JSON tools (graph, diagnostics, event_log) flag `budget_exhausted` with a \
+                 `budget_hint`, text tools (search, metadata, query, execute, debug) append a \
+                 truncation note. When a count cap fired too, the hint says so: raising \
+                 `max_output_tokens` alone will not return more."
                     .into()
             }
             McpProfile::Reference => {
@@ -1450,27 +1528,71 @@ impl ServerHandler for McpServer {
                  - one platform member's signature by name → `syntax_help`;\n\
                  - platform docs by keyword or meaning → `search`;\n\
                  - conceptual how/why question on the platform or standards → `its_help`.\n\
-                 Tools: search, syntax_help, its_help."
+                 Tools: search, syntax_help, its_help. Every response is bounded by \
+                 `max_output_tokens`; a truncated one appends a continuation note."
                     .into()
             }
         });
-        info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        info.server_info = rmcp::model::Implementation::from_build_env();
+        info.capabilities = ServerCapabilities::builder().enable_tools().enable_resources().build();
+        // NOT `Implementation::from_build_env()`: that macro expands inside rmcp, so it
+        // reports rmcp's own name and version — a consumer reading `serverInfo` to learn
+        // which analyzer build it is talking to gets the transport library instead.
+        info.server_info =
+            rmcp::model::Implementation::new("bsl-analyzer", env!("CARGO_PKG_VERSION"));
         info
+    }
+
+    /// The contract declaration is served as a resource rather than a tool on purpose: it
+    /// is for feature detection by consumers, not work an agent does, and a tool would
+    /// spend description tokens in every session to say so.
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let resource = RawResource::new(contract::CONTRACT_URI, "contract")
+            .with_title("Tool and CLI contract")
+            .with_description(
+                "Machine-readable declaration of this build's surfaces: MCP tools with their \
+                 actions and parameters, the CLI commands and flags, and a contract version \
+                 separate from the build version.",
+            )
+            .with_mime_type("application/json")
+            .no_annotation();
+        Ok(ListResourcesResult::with_all_items(vec![resource]))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        if request.uri != contract::CONTRACT_URI {
+            return Err(McpError::resource_not_found(
+                format!("Unknown resource '{}'", request.uri),
+                None,
+            ));
+        }
+        let body = serde_json::to_string_pretty(&contract::document())
+            .map_err(|e| McpError::internal_error(format!("contract serialization: {e}"), None))?;
+        Ok(ReadResourceResult::new(vec![
+            ResourceContents::text(body, contract::CONTRACT_URI).with_mime_type("application/json")
+        ]))
     }
 }
 
 #[cfg(test)]
-mod contract {
+mod tool_descriptions {
     use super::*;
     use expect_test::expect;
     use std::fmt::Write;
 
     /// Render a profile's `tools/list` into a stable text contract: every tool (sorted by
-    /// name) with its description and each parameter field's description. This is the #25
-    /// guardrail — a refactor that drops a tool description or a field doc changes this
-    /// snapshot loudly, instead of silently shipping an empty contract to agents. Rebase with
-    /// `UPDATE_EXPECT=1 cargo test -p mcp-server contract`.
+    /// name) with its description and each parameter field's description. A refactor that
+    /// drops a tool description or a field doc changes this snapshot loudly, instead of
+    /// silently shipping an empty contract to agents. The machine-readable declaration
+    /// consumers read lives in [`crate::contract`]; this guards the prose agents read.
+    /// Rebase with `UPDATE_EXPECT=1 cargo test -p mcp-server tool_descriptions`.
     fn render(tools: &[rmcp::model::Tool]) -> String {
         let mut tools: Vec<&rmcp::model::Tool> = tools.iter().collect();
         tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1504,7 +1626,8 @@ mod contract {
             to debug a running infobase — attach, break, then step and read locals/eval. Not for
             static analysis (use `diagnostics`) and not for running standalone code (use `execute`).
             Actions: `attach`/`disconnect`; `set_breakpoint`/`remove_breakpoint`; `continue`/`step`;
-            `wait_stop`; `stack_trace`; `locals`; `eval`. Requires a reachable debug endpoint
+            `wait_stop`; `stack_trace`; `locals`; `eval`. State-reading actions are bounded by
+            `max_output_tokens` and append a truncation note. Requires a reachable debug endpoint
             (`host` + `infobase`, default port 1550).
               - action: attach | disconnect | set_breakpoint | remove_breakpoint | continue | step |
             wait_stop | stack_trace | locals | eval.
@@ -1517,6 +1640,9 @@ mod contract {
               - host: `attach`: debugger host (required).
               - infobase: `attach`: infobase name (required).
               - line: `set_breakpoint`/`remove_breakpoint`: 1-based line (required).
+              - max_output_tokens: Output budget in tokens (~4 chars each) for the state-reading actions `stack_trace`,
+            `locals`, `wait_stop` and `eval`: a deep stack or a wide frame is truncated at a line
+            boundary with a continuation note (default 6000).
               - module: `set_breakpoint`/`remove_breakpoint`: target module id (required).
               - port: `attach`: debugger port (default 1550).
               - stack_level: `locals`/`eval`: stack frame level to evaluate in (optional, default top frame).
@@ -1553,7 +1679,9 @@ mod contract {
             source (use `diagnostics`): this reads live runtime records from a running infobase.
             Filters: `date_from`/`date_to`, `level`, `user`, `event`, `metadata`, and `contains`
             (post-read substring over the newest `limit` window). `limit` is newest-first (default
-            100, max 1000). Requires the extension deployed with event-log read rights.
+            100, max 1000) and bounds the record COUNT; `max_output_tokens` bounds the response
+            SIZE and flags `budget_exhausted`. Requires the extension deployed with event-log read
+            rights.
               - connection: Named live 1C connection (optional when only one/default connection exists).
               - contains: Case-insensitive substring filter over the comment/data columns, applied AFTER the
             platform read — so it narrows the already-`limit`-capped newest window, it does not
@@ -1563,6 +1691,13 @@ mod contract {
               - event: Event name, e.g. `_$Session$_.Authentication` or a metadata event like `_$Data$_.Post`.
               - level: Severity: Информация/Предупреждение/Ошибка/Примечание or Information/Warning/Error/Note.
               - limit: Max records (newest first), default 100, capped at 1000.
+              - max_output_tokens: Output budget in tokens (~4 chars each) on top of the `limit` record cap — `limit`
+            counts records, it does not bound their size. An over-budget read drops the oldest
+            records, flags `budget_exhausted: true` and carries a `budget_hint` (default 6000);
+            when the record cap fired too, the hint says raising the budget alone will not help.
+            In the response, `returned` counts the records actually delivered and `total` the ones
+            the platform read for this `limit` window — neither is the whole matching population,
+            which the platform never reports.
               - metadata: Full metadata name to filter by, e.g. `Документ.ЗаказКлиента`.
               - user: Infobase user name (deleted users can only be matched by name).
 
@@ -1572,9 +1707,12 @@ mod contract {
             database (use `query` for SDBL) and not for analyzer findings (use `diagnostics`).
             Actions: `check` — syntax-check `code`; `run` — execute `code`; `eval` — evaluate the
             single expression in `code`. `run`/`eval` execute code, so this tool is not read-only.
+            Output is bounded by `max_output_tokens` and appends a truncation note.
               - action: check | run | eval.
               - code: BSL source to `check`/`run`, or the single expression to `eval`.
               - connection: Named live 1C connection (optional when only one/default connection exists).
+              - max_output_tokens: Output budget in tokens (~4 chars each); over-budget output (a `run` context block, an
+            evaluated value, a long syntax-error listing) is truncated with a note (default 6000).
 
             ## graph
             Whole-config semantic call graph: traverse who-calls-whom and object/metadata usage by
@@ -1609,9 +1747,11 @@ mod contract {
             for call relationships (use `graph`) and not for finding code by meaning (use `search`).
             Actions: `info` — configuration summary; `tree` — the metadata object tree (filterable);
             `object` — one object's structure (needs `object_type` + `object_name`); `form` — a
-            managed form's layout (needs `object_type`). Reads the resident analysis host; while it
-            builds it returns a retry envelope, not an error.
-              - action: info | tree | object | form.
+            managed form's layout (needs `object_type`); `status` — resident readiness. Reads the
+            resident analysis host; while it builds it returns a retry envelope, not an error —
+            `structuredContent.status == "loading"`, same field `diagnostics`/`graph` set, so retry
+            shortly instead of reading the answer as "no such object".
+              - action: info | tree | object | form | status.
               - connection: Named live 1C connection for `mode=infobase` (optional).
               - filter: `tree`: case-insensitive substring to narrow the returned tree (optional).
               - form_name: `form`: managed-form name (optional; omit for the object's default form).
@@ -1632,10 +1772,15 @@ mod contract {
             the query-language schema. Not for browsing metadata structure (use `metadata`) and not
             for BSL code (use `execute`). Actions: `validate` — parse and type-check a query (`query`
             required); `execute` — run it (`query` required; optional `limit`, `parameters`);
-            `schema` — the SDBL schema reference.
+            `schema` — the SDBL schema reference. `execute` output is bounded by `max_output_tokens`
+            on top of `limit` and appends a truncation note.
               - action: validate | execute | schema.
               - connection: Named live 1C connection (optional when only one/default connection exists).
               - limit: `execute`: cap on returned rows (optional).
+              - max_output_tokens: `execute`: output budget in tokens (~4 chars each) on top of the `limit` row cap —
+            `limit` bounds how many rows come back, nothing bounds how wide they are. An
+            over-budget table is truncated at a row boundary with a note (default 6000); when the
+            row cap fired too, the note says raising the budget alone will not help.
               - parameters: `execute`: named SDBL query parameters (`&Param` → value) (optional).
               - query: SDBL text — required for `validate`/`execute`, omitted for `schema`.
 
@@ -1646,12 +1791,20 @@ mod contract {
             `graph` (callers/callees by durable id) — and not for analyzer findings — that is
             `diagnostics`. Actions: `search_code` — the search (`query` required; `limit` default
             10, max 50); `status` — index readiness. While the index warms up it returns a retry
-            envelope; retry shortly.
+            envelope; retry shortly. Hits arrive twice: a listing for people in the text block, and
+            the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, path,
+            line_start, line_end, symbol, kind, graph_id, snippet, snippet_truncated_lines}], shown,
+            total, budget_exhausted?, degraded?}`. Read the structured form: it is the versioned
+            contract, whereas the text layout may be reformatted in any release. Absent fields mean
+            absent facts — no `symbol` is a file/header chunk, no `graph_id` means the hit has no
+            durable id to pass to `graph`. `total` is the ranked list before the output budget cut
+            it (already bounded by `limit`), not the configuration-wide match count.
               - action: Workspace profile: `search_code` | `status`. Reference profile: `find_docs` |
             `search_docs` | `status`.
               - limit: Cap on returned hits (default 10, max 50).
-              - max_output_tokens: Output budget in tokens (~4 chars each); over-budget results are truncated at a hit
-            boundary with a note telling you to raise `limit` or narrow the query (default 6000).
+              - max_output_tokens: Output budget in tokens (~4 chars each) for the text listing and the structured hits
+            together; over-budget results are truncated at a hit boundary with a note telling you to
+            raise `limit` or narrow the query, and `budget_exhausted: true` (default 6000).
               - query: Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
 
             ## symbol_info
@@ -1693,8 +1846,10 @@ mod contract {
             ## its_help
             Ask the ITS expert-help knowledge base a natural-language question about the 1C platform
             and development standards. Use for conceptual "how / why" questions. For one member's
-            signature use `syntax_help`; for doc keyword search use `search`. Param: `question`
-            (required).
+            signature use `syntax_help`; for doc keyword search use `search`. Params: `question`
+            (required), optional `max_output_tokens` bounding a long answer.
+              - max_output_tokens: Output budget in tokens (~4 chars each); a long answer is truncated at a line boundary
+            with a continuation note (default 6000).
               - question: Natural-language question for the ITS expert help.
 
             ## search
@@ -1703,12 +1858,18 @@ mod contract {
             workspace profile's `search`; for one platform member's signature use `syntax_help`.
             Actions: `find_docs` / `search_docs` — doc search (`query` required; `limit` default 10,
             max 50); `status` — index readiness. While the index warms up it returns a retry
-            envelope.
+            envelope. Hits arrive twice: a listing for people in the text block, and the same hits
+            in `structuredContent` — `{schema_version, hits: [{rank, score, path, line_start,
+            line_end, symbol, kind, snippet, snippet_truncated_lines}], shown, total,
+            budget_exhausted?}`. Read the structured form: it is the versioned contract, whereas the
+            text layout may be reformatted in any release. `score` is the ranker's own number —
+            comparable within one response, meaningless across searches or backends.
               - action: Workspace profile: `search_code` | `status`. Reference profile: `find_docs` |
             `search_docs` | `status`.
               - limit: Cap on returned hits (default 10, max 50).
-              - max_output_tokens: Output budget in tokens (~4 chars each); over-budget results are truncated at a hit
-            boundary with a note telling you to raise `limit` or narrow the query (default 6000).
+              - max_output_tokens: Output budget in tokens (~4 chars each) for the text listing and the structured hits
+            together; over-budget results are truncated at a hit boundary with a note telling you to
+            raise `limit` or narrow the query, and `budget_exhausted: true` (default 6000).
               - query: Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
 
             ## syntax_help
@@ -1716,7 +1877,10 @@ mod contract {
             from the built-in platform data. Use when you know the member name (e.g. `СтрНайти`) and
             want its exact signature. For free-text doc discovery use `search`; for broader
             conceptual guidance use `its_help`. Params: `name` (required), optional `type_name` when
-            the member belongs to a specific platform type.
+            the member belongs to a specific platform type, optional `max_output_tokens` bounding a
+            large type's card.
+              - max_output_tokens: Output budget in tokens (~4 chars each); a large type's card is truncated at a line
+            boundary with a note pointing at the single-member lookup (default 6000).
               - name: Platform member name to look up, e.g. `СтрНайти` or a type method.
               - type_name: Owning platform type when `name` is a member of a specific type (optional).
 

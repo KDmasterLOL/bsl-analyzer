@@ -6,6 +6,8 @@ use std::time::UNIX_EPOCH;
 
 use walkdir::WalkDir;
 
+use crate::graph_query::GraphDb;
+
 /// One graph-relevant file's stat-only identity: canonical `/`-normalised path,
 /// mtime in nanos, and length. Produced once per scan and shared by the
 /// whole-workspace fingerprint (which folds them) and the per-file `files` table
@@ -195,6 +197,22 @@ pub(crate) fn workspace_fingerprint_over(
 /// real digest.
 pub(crate) fn topology_u64(configs: &ide::WorkspaceConfigsSnapshot) -> u64 {
     topology_hex_u64(configs.fingerprint.as_deref().unwrap_or(""))
+}
+
+/// Whether the graph database at `path` was built under the extension topology the
+/// workspace declares right now.
+///
+/// The path is shared by every daemon over this workspace, so the file there is not
+/// necessarily one WE wrote (see [`crate::workspace_lease`]): a generation keyed to another
+/// topology publishes into the same name. A graph built under a different topology resolves
+/// names differently, so adopting it — to serve, or to render search contexts from — would
+/// persist another project shape's answers as this one's. Costs a config parse, no tree
+/// walk, so it belongs on boot/publish paths rather than per query.
+pub(crate) fn graph_file_matches_live_topology(workspace_root: &Path, graph: &GraphDb) -> bool {
+    let Ok((_, fingerprint, _)) = graph.freshness_token() else {
+        return false;
+    };
+    fingerprint.topology == topology_u64(&super::ProjectSnapshot::load(workspace_root).configs)
 }
 
 /// The BLAKE3-based 64-bit fold shared by every consumer that reduces the

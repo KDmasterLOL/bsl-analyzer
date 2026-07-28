@@ -24,6 +24,7 @@ pub use root_db::RootDatabase;
 
 pub use provider::AnalysisProvider;
 pub use salsa_provider::SalsaProvider;
+pub use vfs_helpers::get_file_path;
 
 pub use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 pub use queries::{

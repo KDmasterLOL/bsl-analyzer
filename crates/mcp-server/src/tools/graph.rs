@@ -222,6 +222,9 @@ pub fn status(report: &crate::graph::GraphStatusReport) -> CallToolResult {
     if let Some(error) = &report.error {
         body["error"] = json!(error);
     }
+    if let Some(superseded) = report.superseded {
+        body["superseded"] = json!(superseded);
+    }
     structured(body)
 }
 
@@ -241,9 +244,9 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "27",
+        "schema_version": "28",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
-        "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`).",
+        "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`). `superseded: true` (emitted only when it holds) means another daemon generation now owns this workspace's derived caches: answers keep coming from the snapshot this server already has, but it no longer rebuilds, so a `stale` snapshot stays stale — reconnect to pick up the daemon that does.",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "node_shape": "`qualified` (russified display path) is emitted only for metadata nodes — for code nodes it would restate `module` + `name`; `addressable` is emitted only when false (absent = the id round-trips); `truncated: true` is emitted on a node whose `detail=bodies` source was cut short — or, when `source` is absent, dropped — to fit the output budget (so a short body is not mistaken for a complete one, nor a budget-dropped body for a method with no body)",
         "notes": "`node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
@@ -382,6 +385,7 @@ mod tests {
             stale: Some(false),
             reload: Some("none"),
             error: None,
+            superseded: None,
         };
         let body = status(&ready).structured_content.unwrap();
         assert_eq!(body["state"], "ready");
@@ -397,6 +401,7 @@ mod tests {
             stale: None,
             reload: None,
             error: Some("boom".to_string()),
+            superseded: None,
         };
         let body = status(&failed).structured_content.unwrap();
         assert_eq!(body["state"], "failed");
@@ -419,7 +424,7 @@ mod tests {
         // The contract version must be bumped in lockstep with any response-shape change
         // (a new action, node/edge kind, or result field). The history of what each bump
         // added lives in git, not here.
-        assert_eq!(schema["schema_version"], "27");
+        assert_eq!(schema["schema_version"], "28");
         // The validating `edge_kinds` allowlist and the schema-advertised list must not drift:
         // every advertised kind except the implicit `call` umbrella must be an accepted filter,
         // and the allowlist must advertise no kind the schema omits.
@@ -491,7 +496,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "27");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "28");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

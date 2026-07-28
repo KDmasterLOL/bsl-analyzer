@@ -102,6 +102,7 @@ pub(crate) mod heap_estimate {
             + config.enabled.iter().map(String::capacity).sum::<usize>()
             + stdx::heap::vec_bytes::<(String, String)>(config.parameters.len())
             + config.parameters.iter().map(|(k, v)| k.capacity() + v.capacity()).sum::<usize>()
+            + config.scope.as_deref().map_or(0, crate::scope::scope_heap_size)
     }
 
     #[cfg(test)]
@@ -190,6 +191,11 @@ pub struct DiagnosticsConfigInput {
     pub locale: crate::Locale,
 
     pub bslls_suppression_compat: bool,
+
+    /// Restricts diagnostics to files/lines changed relative to a reference
+    /// state (vendor-diff filter). `None` = no restriction. Part of the
+    /// interned config so replacing the scope re-keys `file_diagnostics_query`.
+    pub scope: Option<std::sync::Arc<crate::AnalysisScope>>,
 }
 
 impl DiagnosticsConfigInput {
@@ -222,7 +228,13 @@ impl DiagnosticsConfigInput {
             dataflow_max_iterations,
             locale,
             bslls_suppression_compat,
+            scope: None,
         }
+    }
+
+    pub fn with_scope(mut self, scope: Option<std::sync::Arc<crate::AnalysisScope>>) -> Self {
+        self.scope = scope;
+        self
     }
 
     pub fn is_disabled(&self, code: &str) -> bool {

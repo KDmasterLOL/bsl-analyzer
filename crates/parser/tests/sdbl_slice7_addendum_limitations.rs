@@ -231,10 +231,9 @@ fn test_slice7adn_q3_top_missing_decimal_recovery() {
     let from_clauses_count =
         root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
     assert_eq!(
-        from_clauses_count, 0,
-        "Pre-rewrite recovery shape: NO SdblFromClause emitted; \
-         `ИЗ` falls through to selected_fields as bare SdblColumnRef \
-         (Slice 12 owns the recovery-quality fix)",
+        from_clauses_count, 1,
+        "The clause after a failed count survives: the selection list left \
+         empty by the failure no longer takes `ИЗ` as its only field",
     );
 }
 

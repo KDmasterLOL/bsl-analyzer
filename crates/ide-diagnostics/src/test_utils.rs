@@ -140,7 +140,7 @@ pub fn assert_diagnostic_range_multiline(
     );
 }
 
-fn create_test_db(code: &str) -> (ide_db::RootDatabaseImpl, vfs::FileId) {
+pub(crate) fn create_test_db(code: &str) -> (ide_db::RootDatabaseImpl, vfs::FileId) {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use test_fixture::Fixture;
@@ -849,6 +849,18 @@ pub fn check_with_config_xml(
     crate::diagnostics(&ctx)
 }
 
+/// Minimal `Ext/Form.xml` for a managed form. An absent `<FormType>` already
+/// means `Managed`, so the empty form is enough to make `ЭтотОбъект` resolve as
+/// the form itself — without it a form-module fixture is not a form at all.
+fn minimal_managed_form_xml() -> &'static str {
+    r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <Properties>
+        <Name>ФормаЭлемента</Name>
+    </Properties>
+</Form>"#
+}
+
 /// Diagnostics of a form module calling common modules whose metadata flags
 /// matter: each `(name, body, xml)` triple materializes with its OWN
 /// CommonModule XML (client/server/`ВызовСервера` flags), which the in-memory
@@ -883,6 +895,11 @@ pub fn check_form_with_common_modules(
         std::fs::write(root.join(format!("CommonModules/{name}.xml")), xml)
             .expect("write CommonModule XML");
     }
+
+    let form_ext_dir = root.join("Catalogs/Товары/Forms/ФормаЭлемента/Ext");
+    std::fs::create_dir_all(form_ext_dir.join("Form")).expect("create form Ext/Form directory");
+    std::fs::write(form_ext_dir.join("Form.xml"), minimal_managed_form_xml())
+        .expect("write Ext/Form.xml");
 
     let mut db = RootDatabaseImpl::new();
     db.set_all_config_paths(vec![(None, root.clone())]);

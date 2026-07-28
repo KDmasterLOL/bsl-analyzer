@@ -242,12 +242,15 @@ mod tests {
 
     #[test]
     fn multi_byte_cyrillic_error_range_is_byte_correct() {
-        let source = "Процедура Тест() Если Иначе Тогда КонецЕсли КонецПроцедуры";
+        // The token has to be one no enclosing rule is waiting for: a block
+        // closer is reported at the gap without being consumed, so it never
+        // carries a range of its own.
+        let source = "Процедура Тест() А = Возврат; КонецПроцедуры";
         let tokens = lexer::tokenize(source);
         let unexpected = tokens
             .iter()
-            .find(|token| token.kind == lexer::TokenKind::KwElse)
-            .expect("test input should contain Иначе token");
+            .find(|token| token.kind == lexer::TokenKind::KwReturn)
+            .expect("test input should contain Возврат token");
         let parse = crate::parse(source);
         let expected_range = range(
             unexpected.offset as u32,

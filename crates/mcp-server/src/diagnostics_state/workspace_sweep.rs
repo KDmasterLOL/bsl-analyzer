@@ -26,6 +26,15 @@ pub(crate) struct WorkspaceSweep {
     /// smaller when the sweep was cancelled mid-flight.
     pub files_swept: usize,
     pub files_total: usize,
+    /// Files excluded by the vendor-diff analysis scope (no changed lines vs the
+    /// configured base); 0 when no scope is configured.
+    pub files_out_of_scope: usize,
+    /// Findings dropped because every covered line is attributed to an
+    /// `[analysis].ignored_authors` entry; 0 when the filter is off.
+    pub findings_ignored_by_author: usize,
+    /// HEAD commit the author filter attributed against, folded into the
+    /// result id so a filter rebuild after a ref move changes the identity.
+    pub author_head: Option<String>,
     pub truncated: bool,
     /// The sweep was cancelled mid-flight (MCP `notifications/cancelled` or transport
     /// shutdown); `aggregates` cover only the `files_swept` files processed before it.

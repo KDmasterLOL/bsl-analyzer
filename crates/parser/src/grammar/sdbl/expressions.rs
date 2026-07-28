@@ -9,11 +9,18 @@ pub(super) fn is_expression_start(p: &Parser) -> bool {
         Some(TokenKind::Decimal)
         | Some(TokenKind::Float)
         | Some(TokenKind::String)
+        | Some(TokenKind::Date)
         | Some(TokenKind::KwTrue)
         | Some(TokenKind::KwFalse)
         | Some(TokenKind::KwUndefined) => true,
 
-        Some(TokenKind::Ident) => !super::select::is_clause_keyword(p),
+        // The word that begins the next query begins no expression. Saying
+        // otherwise sends a rule that will refuse it a token it must not
+        // take, and a loop that expects an expression to be consumed then
+        // has nothing to consume and no reason to stop.
+        Some(TokenKind::Ident) => {
+            !super::select::is_clause_keyword(p) && !super::at_query_boundary(p)
+        }
 
         Some(TokenKind::Plus)
         | Some(TokenKind::Minus)
@@ -43,6 +50,17 @@ pub(super) fn at_property_name(p: &Parser) -> bool {
         )
     )
 }
+
+// =====================================================================
+// CLEAN-ROOM Slice 12 — expression-level recovery
+//
+// None of this is the query language: the official grammar has no
+// opinion on malformed input. These helpers exist so that one bad
+// expression does not cost the editor the rest of the query, and each is
+// justified on that ground alone.
+//
+// Provenance: `docs/legal/sdbl-clean-room-slice12.md`, entries A8–A9.
+// =====================================================================
 
 fn is_recovery_point(p: &Parser, recovery_set: &crate::token_set::TokenSet) -> bool {
     if let Some(kind) = p.current() {
@@ -84,6 +102,19 @@ fn recover_to_delimiter(p: &mut Parser) {
             continue;
         }
 
+        // An extension region is opaque text, so the parser's own group
+        // count ignores parens inside one. This scan has to agree, or its
+        // idea of which `)` closes the caller's `(` drifts from the
+        // parser's and it walks out through a boundary that is still open.
+        if brace_depth > 0 {
+            if p.at_end() || p.at(TokenKind::Semicolon) {
+                break;
+            }
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
             p.bump();
@@ -113,7 +144,17 @@ fn recover_to_delimiter(p: &mut Parser) {
 
         let inside_nested_query = !nested_query_starts.is_empty();
 
-        if brace_depth == 0 && super::select::is_clause_keyword(p) {
+        if paren_depth == 0 && brace_depth == 0 && super::at_query_boundary(p) {
+            break;
+        }
+
+        // After a qualifying dot the word is a field name, not this query's
+        // clause; the drain reads it that way and a skip that does not
+        // hands the enclosing query a clause it never had.
+        if brace_depth == 0
+            && super::select::is_clause_keyword(p)
+            && p.prev_significant() != Some(TokenKind::Dot)
+        {
             let stop = if paren_depth == 0 {
                 true
             } else if inside_nested_query {
@@ -126,10 +167,13 @@ fn recover_to_delimiter(p: &mut Parser) {
             }
         }
 
-        if paren_depth == 0
-            && brace_depth == 0
-            && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon))
-        {
+        // A separator ends the skipped fragment at any depth: it is the
+        // boundary between package members, and no depth of ours outranks it.
+        if p.at(TokenKind::Semicolon) {
+            break;
+        }
+
+        if paren_depth == 0 && brace_depth == 0 && p.at(TokenKind::Comma) {
             break;
         }
 
@@ -163,7 +207,22 @@ pub(super) fn parse_delimited_list<F>(
 ) where
     F: FnMut(&mut Parser),
 {
-    parse_item(p);
+    // A list starting on its delimiter is missing its first item, not
+    // holding one that happens to be a comma. Handing the delimiter to the
+    // item rule costs the list the item that follows it, which the rule
+    // reads as that one's alias.
+    if p.at(delimiter) {
+        let err = p.start();
+        p.emit_error_at_marker(
+            err,
+            ParseError::Custom {
+                message: "пропущен элемент списка",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+    } else {
+        parse_item(p);
+    }
 
     loop {
         p.skip_trivia();
@@ -332,6 +391,10 @@ fn primary_expr(p: &mut Parser) {
         Some(TokenKind::LParen) => paren_or_subquery_expr(p),
         Some(TokenKind::Decimal) | Some(TokenKind::Float) => literal_expr(p),
         Some(TokenKind::String) => literal_expr(p),
+        // The lexer has taken `'ГГГГММДД[ЧЧММСС]'` as one token since the
+        // token set was re-derived; nothing here ever accepted it, so a
+        // whole class of literal was an error wherever it stood.
+        Some(TokenKind::Date) => literal_expr(p),
         Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => literal_expr(p),
         Some(TokenKind::KwUndefined) => literal_expr(p),
         Some(TokenKind::Ampersand) => parameter_expr(p),
@@ -342,7 +405,15 @@ fn primary_expr(p: &mut Parser) {
             m.complete(p, NodeKind::SdblLiteral);
         }
 
-        Some(TokenKind::Ident) => column_or_function(p),
+        // A query keyword is never a column name. Where nothing is open to
+        // make it a subquery, it begins the package's next member, and an
+        // operand missing in front of it has to be reported at the gap: the
+        // boundary check in `error` then leaves the keyword where it is.
+        // Taking it instead would cost the package that whole member — and
+        // an operand left unwritten is exactly what an editor buffer holds.
+        Some(TokenKind::Ident) if p.open_group_count() > 0 || !super::at_query_boundary(p) => {
+            column_or_function(p)
+        }
 
         _ => {
             let m = p.start();
@@ -541,14 +612,14 @@ fn predicate_expr(p: &mut Parser) {
         p.bump();
         p.skip_trivia();
 
-        if p.at(TokenKind::Ident) {
+        if super::at_name(p) {
             p.bump();
             p.skip_trivia();
 
-            while p.eat(TokenKind::Dot) {
+            while super::eat_qualifying_dot(p) {
                 p.check_iteration_limit();
                 p.skip_trivia();
-                if at_property_name(p) {
+                if super::at_name_component(p) {
                     p.bump();
                     p.skip_trivia();
                 } else {
@@ -583,18 +654,17 @@ fn is_cast_function(p: &Parser) -> bool {
 fn parse_cast_type(p: &mut Parser) {
     let m = p.start();
 
-    if p.at(TokenKind::Ident) {
+    if super::at_name(p) {
         let is_number_type = p.at_keyword("NUMBER") || p.at_keyword("ЧИСЛО");
 
         p.bump();
         p.skip_trivia();
 
-        while p.at(TokenKind::Dot) {
+        while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
-            p.bump();
             p.skip_trivia();
 
-            if at_property_name(p) {
+            if super::at_name_component(p) {
                 p.bump();
                 p.skip_trivia();
             } else {
@@ -644,9 +714,8 @@ fn column_or_function(p: &mut Parser) {
     p.bump();
     p.skip_trivia();
 
-    if p.at(TokenKind::Dot) {
-        while p.at(TokenKind::Dot) {
-            p.bump();
+    if p.at(TokenKind::Dot) || super::at_a_qualifying_dot(p) {
+        while super::eat_qualifying_dot(p) {
             let crossed_newline = p.skip_trivia_crossing_newline();
 
             if p.at(TokenKind::LParen) {
@@ -674,7 +743,7 @@ fn column_or_function(p: &mut Parser) {
             // is recovered, and on the same line only the alias separator AS/КАК — which
             // is never a field name — breaks out instead of being swallowed.
             let dangling_dot_recovery = if crossed_newline {
-                super::select::is_likely_clause_start_after_dot(p)
+                super::select::is_likely_clause_start_after_dot(p) || super::at_query_boundary(p)
             } else {
                 super::select::at_sdbl_keyword(p, "AS", "КАК")
             };
@@ -784,16 +853,17 @@ fn column_or_function(p: &mut Parser) {
         }
 
         p.skip_trivia();
-        while p.at(TokenKind::Dot) {
+        while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
-            p.bump();
             let crossed_newline = p.skip_trivia_crossing_newline();
 
             if at_property_name(p) {
                 // Same-line keyword after a dot is a member name; across a newline a
                 // clause keyword is a dangling-dot recovery point. See the column-ref
                 // dot loop above.
-                if crossed_newline && super::select::is_clause_keyword(p) {
+                if crossed_newline
+                    && (super::select::is_clause_keyword(p) || super::at_query_boundary(p))
+                {
                     let err = p.start();
                     p.emit_error_at_marker(
                         err,

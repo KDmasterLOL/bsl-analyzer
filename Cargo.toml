@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.63"
+version = "0.2.64"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
@@ -37,6 +37,7 @@ hir = { path = "crates/hir" }
 hir-def = { path = "crates/hir-def" }
 hir-ty = { path = "crates/hir-ty" }
 sdbl-hir = { path = "crates/sdbl-hir" }
+vcs = { path = "crates/vcs" }
 vfs = { path = "crates/vfs" }
 project-model = { path = "crates/project-model" }
 intern = { path = "crates/intern" }
@@ -79,6 +80,10 @@ clap = { version = "4.4", features = ["derive"] }
 
 anyhow = "1.0"
 thiserror = "1.0"
+
+# Vendored libgit2 + OpenSSL so git attribute/filter behavior (CRLF, .gitattributes)
+# is identical across platforms and independent of any system libgit2.
+git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
 
 tracing = { version = "0.1.42", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.20", default-features = false, features = [

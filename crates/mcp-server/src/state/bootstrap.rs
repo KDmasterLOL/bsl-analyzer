@@ -1,4 +1,4 @@
-use super::embed::{BackgroundWorkGuard, EmbedFlight};
+use super::embed::EmbedFlight;
 use super::types::{
     OverlayInit, OverlayWarmupState, PendingEmbed, SemanticRuntimeStatus, SharedSearchEngine,
     WorkspaceSearchInit, WorkspaceSearchMode,
@@ -12,7 +12,7 @@ use crate::diagnostics_state::DiagnosticsState;
 use crate::graph::GraphState;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
     env,
@@ -56,11 +56,15 @@ impl SharedState {
         let config_path = project.source_path();
         let source_root = config_path.to_path_buf();
 
+        // Claimed before any background pass starts, so the graph's very first build already
+        // knows whether this daemon owns the workspace's derived caches or is the superseded
+        // generation of a pair that overlaps over them.
+        let workspace_lease = crate::workspace_lease::WorkspaceLease::claim(&source_dir);
+
         let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let overlay_warmup = Arc::new(Mutex::new(OverlayWarmupState::Pending));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let watcher_ready = Arc::new(AtomicBool::new(false));
         // Only the cheap, local part of baseline resolution runs here (config, env,
         // credential helper); the PG connect itself is deferred to a background thread
@@ -106,13 +110,14 @@ impl SharedState {
             Arc::clone(&search_engine),
             source_dir.clone(),
             Arc::clone(&semantic_runtime),
-            Arc::clone(&background_indexers),
             Arc::clone(&index_progress),
             Arc::clone(&embed_flight),
+            workspace_lease.clone(),
         );
         let graph = GraphState::for_workspace(source_dir.clone())
             .with_change_hub(change_hub.clone())
-            .with_publish_hook(publish_hook);
+            .with_publish_hook(publish_hook)
+            .with_lease(workspace_lease.clone());
 
         // The `metadata` tool reads the resident diagnostics host (per-MDO substrate for
         // `object`, Channel-2 `load_configuration` for `tree`/`info`); it is seeded and
@@ -130,7 +135,6 @@ impl SharedState {
             Arc::clone(&index_progress),
             Arc::clone(&semantic_runtime),
             Arc::clone(&overlay_warmup),
-            Arc::clone(&background_indexers),
             source_dir.clone(),
             Arc::clone(&watcher_ready),
             baseline.clone(),
@@ -138,6 +142,7 @@ impl SharedState {
             graph.clone(),
             Arc::clone(&embed_flight),
             Arc::clone(&snapshot_source),
+            workspace_lease.clone(),
         );
 
         Self::spawn_search_sink(
@@ -163,8 +168,8 @@ impl SharedState {
             graph,
             diagnostics,
             change_hub: Some(change_hub),
-            background_indexers,
             embed_flight,
+            workspace_lease,
         })
     }
 
@@ -178,7 +183,6 @@ impl SharedState {
         index_progress: Arc<IndexProgress>,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         overlay_warmup: Arc<Mutex<OverlayWarmupState>>,
-        background_indexers: Arc<AtomicUsize>,
         workspace_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
         baseline: DeferredBaselineRuntime,
@@ -186,14 +190,30 @@ impl SharedState {
         graph: GraphState,
         embed_flight: Arc<EmbedFlight>,
         snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource>,
+        lease: crate::workspace_lease::WorkspaceLease,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
             .spawn(move || {
-                // Held for the whole init (incl. a multi-minute fused cold build) so the
-                // broker stays alive even if the launching client disconnects mid-build.
-                let _init_guard = BackgroundWorkGuard::new(&background_indexers);
                 tracing::info!("search engine initialization started in background");
+
+                // The graph is a boot subsystem like the resident, not a lazy one. In
+                // SqliteLocal the fused cold build below claims and builds it; the Postgres
+                // branch never reaches that claim at all, which is why a PG workspace paid for
+                // a whole-config graph build mid-session, on the first `graph`/`symbol_info`
+                // call. Start it here instead — ahead of the baseline connect wait, which the
+                // graph does not depend on. (Other early exits are covered by the catch-all
+                // start after the init returns.)
+                //
+                // Mode-gated on purpose: in SqliteLocal an eager kick would win the
+                // `Idle → Loading` transition that `try_begin_external_build` needs, the fused
+                // claim would fail, and one parse pass producing both graph and search chunks
+                // would degrade into two. A warm graph cache makes either start cheap —
+                // `run_load` publishes the cached build instead of rebuilding.
+                if matches!(mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+                    graph.ensure_loading();
+                }
+
                 // Postgres mode needs the baseline connect's outcome before it can load
                 // the manifest; waiting HERE keeps the wait on this background thread
                 // (never a request path) and off the slot's lock. On timeout the init
@@ -218,6 +238,12 @@ impl SharedState {
                     external_baseline,
                     &graph,
                 );
+
+                // Whatever the init decided, the graph must not be left idle: it may have
+                // bailed (invalid project, unopenable store) before reaching the fused claim
+                // at all. A no-op once the build is claimed or published, so the fused and
+                // cached paths above are untouched.
+                graph.ensure_loading();
 
                 let Some(mut init) = init else {
                     Self::set_semantic_runtime_status(
@@ -304,6 +330,13 @@ impl SharedState {
                     graph.consume_leftover_marks(leftover_bound);
                 }
 
+                // A boot that found the cached graph built under a different extension topology
+                // asked for a whole-collection re-render before this engine existed to run it.
+                // The publish that followed could not hand the request anywhere, so it is
+                // honoured here — otherwise files the build skipped as byte-identical keep the
+                // contexts they were given under the old topology.
+                graph.flush_pending_topology_refresh();
+
                 if let Some(status) = status_after_publish {
                     Self::set_semantic_runtime_status(&semantic_runtime, status);
                 }
@@ -317,9 +350,9 @@ impl SharedState {
                     Self::spawn_embed_pass(
                         Arc::clone(&search_engine),
                         Arc::clone(&semantic_runtime),
-                        Arc::clone(&background_indexers),
                         Arc::clone(&index_progress),
                         Arc::clone(&embed_flight),
+                        lease.clone(),
                         pending.db_path,
                         pending.config,
                     );
@@ -333,11 +366,9 @@ impl SharedState {
                     let search_engine = Arc::clone(&search_engine);
                     let semantic_runtime = Arc::clone(&semantic_runtime);
                     let overlay_warmup = Arc::clone(&overlay_warmup);
-                    let warmup_guard = BackgroundWorkGuard::new(&background_indexers);
                     std::thread::Builder::new()
                         .name("bsl-search-overlay-warmup".to_owned())
                         .spawn(move || {
-                            let _warmup_guard = warmup_guard;
                             tracing::info!("workspace overlay semantic warmup started");
                             Self::run_overlay_warmup(&search_engine, &overlay_warmup);
                             // Semantic stays available via the baseline even when the overlay
@@ -357,7 +388,6 @@ impl SharedState {
         let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
-        let background_indexers = Arc::new(AtomicUsize::new(0));
         let project_config = project_root.as_deref().and_then(|root| {
             match project_model::ProjectConfig::load(root) {
                 Ok(config) => config,
@@ -382,11 +412,9 @@ impl SharedState {
             let progress_arc = Arc::clone(&index_progress);
             let semantic_runtime_arc = Arc::clone(&semantic_runtime);
             let baseline = baseline.clone();
-            let init_guard = BackgroundWorkGuard::new(&background_indexers);
             std::thread::Builder::new()
                 .name("bsl-search-reference-init".to_owned())
                 .spawn(move || {
-                    let _init_guard = init_guard;
                     tracing::info!("reference search engine initialization started in background");
                     // Wait for the deferred connect before deciding shared-vs-local:
                     // a still-pending baseline read as `None` would rebuild the local
@@ -436,8 +464,8 @@ impl SharedState {
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
-            background_indexers,
             embed_flight: EmbedFlight::new(),
+            workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
         }
     }
 
@@ -457,8 +485,8 @@ impl SharedState {
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
-            background_indexers: Arc::new(AtomicUsize::new(0)),
             embed_flight: EmbedFlight::new(),
+            workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
         }
     }
 
@@ -811,6 +839,17 @@ impl SharedState {
         if engine.has_semantic() {
             let graph_path = crate::cache::graph_db_path(workspace_root);
             match crate::graph_query::GraphDb::open(&graph_path) {
+                Ok(graph_db)
+                    if !crate::graph::scan::graph_file_matches_live_topology(
+                        workspace_root,
+                        &graph_db,
+                    ) =>
+                {
+                    tracing::warn!(
+                        "graph database was built for another extension topology; \
+                         embeddings without graph context"
+                    );
+                }
                 Ok(graph_db) => {
                     engine.set_graph_context_provider(Arc::new(
                         crate::graph_query::GraphDbContextProvider::new(graph_db),
@@ -1145,7 +1184,6 @@ impl SharedState {
                 Arc::clone(&self.index_progress),
                 Arc::clone(&self.semantic_runtime),
                 Arc::clone(&self.overlay_warmup),
-                Arc::clone(&self.background_indexers),
                 root,
                 watcher_ready,
                 self.baseline.clone(),
@@ -1155,6 +1193,7 @@ impl SharedState {
                 Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
                     self.diagnostics.clone(),
                 )),
+                self.workspace_lease.clone(),
             );
         }
     }
@@ -1179,13 +1218,17 @@ impl SharedState {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{write_common_module_tree, EnvVarGuard, ENV_LOCK};
-    use super::{OverlayInit, SharedState, WorkspaceSearchMode};
+    use super::{
+        DiagnosticsState, EmbedFlight, GraphState, OverlayInit, OverlayWarmupState,
+        SemanticRuntimeStatus, SharedState, WorkspaceSearchMode,
+    };
     use crate::baseline::{
-        BaselineBootstrap, BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineService,
-        RefreshableExternalBaselineSource,
+        BaselineBootstrap, BaselineRuntime, ConfiguredBaselineStatus, DeferredBaselineRuntime,
+        ExternalBaselineService, RefreshableExternalBaselineSource,
     };
     use bsl_search::{
-        BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexedDocument, SearchEngine,
+        BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexProgress, IndexedDocument,
+        SearchEngine,
     };
     use std::fs;
     use std::sync::atomic::AtomicBool;
@@ -1202,6 +1245,69 @@ mod tests {
             },
             external_baseline: None,
         })
+    }
+
+    /// The Postgres branch of the search init returns before it ever reaches the fused cold
+    /// build's graph claim, which used to leave the graph idle until the first
+    /// `graph`/`symbol_info` call — billing a whole-config build to a mid-session request.
+    /// The boot must start it regardless, so this drives the harshest case: an unavailable
+    /// baseline, where the search init bails immediately and touches no graph at all.
+    #[test]
+    fn postgres_boot_starts_the_graph_even_when_the_search_init_bails() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &workspace,
+            "Сервер",
+            "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
+        );
+
+        let graph = GraphState::for_workspace(workspace.clone());
+        // Postgres mode with no external baseline: `init_workspace_search_engine` warns and
+        // returns `None` without opening a store.
+        let baseline = DeferredBaselineRuntime::ready(BaselineRuntime {
+            configured_baseline: ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "test".to_owned(),
+                issue: Some("baseline unavailable".to_owned()),
+                support: None,
+            },
+            external_baseline: None,
+        });
+
+        SharedState::spawn_workspace_search_init(
+            Arc::new(Mutex::new(None)),
+            IndexProgress::new(),
+            Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            Arc::new(Mutex::new(OverlayWarmupState::Pending)),
+            workspace.clone(),
+            Arc::new(AtomicBool::new(false)),
+            baseline,
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            graph.clone(),
+            EmbedFlight::new(),
+            Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
+                DiagnosticsState::disabled(),
+            )),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
+
+        for _ in 0..600 {
+            match graph.status() {
+                crate::graph::GraphStatus::Ready { .. } => return,
+                crate::graph::GraphStatus::Failed(msg) => panic!("graph load failed: {msg}"),
+                _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        panic!("the boot left the graph at {:?}; it must not stay lazy", graph.status());
     }
 
     /// A postgres config failure (unconfigured section, credential rejection) must NOT

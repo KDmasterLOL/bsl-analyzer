@@ -97,6 +97,12 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
+                QueryParseError @ 6:9..6:9
+                  message: Ожидался список полей выборки после 'ВЫБРАТЬ' / 'SELECT'
+                  severity: Warning
+                QueryParseError @ 7:31..7:31
+                  message: Ожидался псевдоним источника после 'КАК' / 'AS'
+                  severity: Warning
                 QueryParseError @ 11:61..11:61
                   message: Неожиданный конец файла
                   severity: Warning

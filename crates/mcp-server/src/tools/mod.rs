@@ -8,6 +8,7 @@ pub mod metadata;
 pub mod platform;
 pub mod query;
 pub mod redact;
+pub mod resident;
 pub mod response;
 pub mod search;
 pub mod symbol_info;

@@ -99,6 +99,11 @@ impl GlobalState {
 
         self.update_diagnostics_config();
         self.update_features_config();
+        // `[analysis].diff_base` may have (dis)appeared with the (re)loaded
+        // config: rebuild the vendor-diff scope in the background.
+        self.request_scope_rebuild();
+        self.maybe_spawn_scope_build();
+        self.warn_author_filter_unsupported();
 
         self.vfs_progress_config_version += 1;
 

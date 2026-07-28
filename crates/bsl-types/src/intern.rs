@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::facet::{
     DateFacet, FormBindingFacet, FormBindingTargetFacet, FunctionFacet, MdoRefFacet, NumberFacet,
-    ProjectionFacet, StringFacet, TableFacet,
+    PlatformObjectFacet, ProjectionFacet, StringFacet, TableFacet,
 };
 use crate::kind::{
     Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin, TypeId, TypeKind,
@@ -82,7 +82,51 @@ pub fn canonicalise(db: &dyn TypeKernelDb, kind: TypeKind) -> TypeKind {
 
         TypeKind::Union(members) => canonicalise_union(db, members),
 
+        TypeKind::PlatformObject(PlatformObjectFacet { name }) => {
+            TypeKind::PlatformObject(PlatformObjectFacet { name: canonical_platform_name(name) })
+        }
+
         other => other,
+    }
+}
+
+/// Имена в BSL складывают регистр, а русское и английское написания одного
+/// платформенного типа обозначают один тип. Номинальный тип сравнивается по
+/// имени и интернируется по нему же, поэтому написание обязано быть
+/// каноническим: иначе `Файл` и `файл` становятся двумя несовместимыми типами и
+/// дают ложное несоответствие типов там, где его нет.
+///
+/// Канон берётся из корпуса платформы. Имя, которого корпус не знает
+/// (внекорпусные генерики вроде `ДокументМенеджер`, фантом от неизвестного
+/// `Новый X`), остаётся как записано; регистр таких имён складывает
+/// `subtype::is_assignable`, а не интернирование.
+///
+/// Отдельный случай — тёзки: `ЭлементыФормы` в корпусе дважды, как `FormItems`
+/// и как `Controls`, с разным API. Русское имя у них общее, английские разные,
+/// поэтому свести `Controls` к `ЭлементыФормы` значило бы объявить его тем же
+/// типом, что `FormItems`. Неоднозначное имя канонизируется только по регистру —
+/// то есть когда на входе оно само, а не другой алиас одного из тёзок.
+fn canonical_platform_name(name: String) -> String {
+    let platform = bsl_platform::PlatformData::instance();
+    let Some(ty) = platform.get_type(&name) else {
+        return name;
+    };
+
+    // У тёзок общее только русское имя, поэтому сводить их к нему нельзя. Но
+    // регистр сложить всё равно надо: канон здесь — то из написаний записи, под
+    // которое имя подошло, а разные написания тёзок так и остаются разными.
+    let canonical = if platform.is_ambiguous_type_name(&ty.name) {
+        [ty.name.as_str(), ty.english_name.as_str()]
+            .into_iter()
+            .chain(ty.xdto_name.as_deref())
+            .find(|alias| !alias.is_empty() && stdx::case::eq_ignore_case(alias, &name))
+    } else {
+        Some(ty.name.as_str())
+    };
+
+    match canonical {
+        Some(canonical) if canonical != name => canonical.to_string(),
+        _ => name,
     }
 }
 
@@ -328,4 +372,135 @@ fn write_projection_order_key(
         }
     }
     out.push(']');
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::builders::Builders;
+    use crate::intern::TypeKernelDb;
+    use crate::kind::TypeKind;
+    use crate::testing::InMemoryDb;
+
+    /// Имена в BSL складывают регистр, а русское и английское написания одного
+    /// платформенного типа обозначают один тип. Номинальный тип интернируется по
+    /// имени, поэтому разные написания обязаны давать один `TypeId` — иначе
+    /// `Файл` и `файл` несовместимы и дают ложное несоответствие типов.
+    #[test]
+    fn corpus_spellings_of_one_type_intern_to_one_id() {
+        let data = bsl_platform::PlatformData::instance();
+        let Some(file) = data.get_type("Файл") else {
+            return;
+        };
+        let db = InMemoryDb::new();
+        let canonical = db.platform_object(file.name.to_string());
+        assert_eq!(db.platform_object("файл".to_string()), canonical, "регистр");
+        assert_eq!(db.platform_object("ФАЙЛ".to_string()), canonical, "регистр");
+        if !file.english_name.is_empty() {
+            assert_eq!(
+                db.platform_object(file.english_name.to_string()),
+                canonical,
+                "английское имя обозначает тот же тип"
+            );
+        }
+    }
+
+    /// Канонизировать нечем — имя остаётся как записано, и различие написаний
+    /// по-прежнему держится на `name_eq_ci` в hir-ty.
+    #[test]
+    fn uncorpused_name_is_kept_as_written() {
+        let data = bsl_platform::PlatformData::instance();
+        if data.get_type("ДокументМенеджер").is_some() {
+            return;
+        }
+        let db = InMemoryDb::new();
+        assert_ne!(
+            db.platform_object("ДокументМенеджер".to_string()),
+            db.platform_object("документменеджер".to_string())
+        );
+    }
+
+    /// У тёзок русское имя общее, а английские разные. Свести `Controls` к
+    /// `ЭлементыФормы` значило бы объявить его тем же типом, что `FormItems`,
+    /// хотя у них разный API, — поэтому чужой алиас не канонизируется.
+    #[test]
+    fn twin_aliases_stay_distinct_types() {
+        let data = bsl_platform::PlatformData::instance();
+        if !data.is_ambiguous_type_name("ЭлементыФормы") {
+            return;
+        }
+        let db = InMemoryDb::new();
+        assert_ne!(
+            db.platform_object("FormItems".to_string()),
+            db.platform_object("Controls".to_string()),
+            "разные платформенные типы не должны склеиваться в один"
+        );
+    }
+
+    /// `canonicalise` зовётся на КАЖДОМ интернировании, поэтому канонизация
+    /// обязана быть идемпотентной: иначе повторный проход менял бы имя и `TypeId`
+    /// поплыл бы в зависимости от порядка обращений. Существующие
+    /// `canon_tests::intern_is_idempotent*` номинальных типов не касаются.
+    #[test]
+    fn canonicalisation_is_idempotent() {
+        let db = InMemoryDb::new();
+        for raw in [
+            "Файл",
+            "файл",
+            "ФАЙЛ",
+            "TextReader",
+            "ЧтениеТекста",
+            "ЭлементыФормы",
+            "элементыформы",
+            "Controls",
+            "controls",
+            "FormItems",
+            "ДокументМенеджер",
+            "документменеджер",
+            "ЗаведомоНесуществующийТип",
+            "",
+        ] {
+            let once = db.platform_object(raw.to_string());
+            let TypeKind::PlatformObject(facet) = db.lookup_type(once).clone() else {
+                panic!("{raw:?} должно оставаться PlatformObject");
+            };
+            let twice = db.platform_object(facet.name.clone());
+            assert_eq!(once, twice, "повторная канонизация {raw:?} изменила тип");
+        }
+    }
+
+    /// Различать тёзок нужно, а хранить их алиасы в произвольном регистре — нет:
+    /// канон для такого имени — то из написаний записи, под которое оно подошло.
+    #[test]
+    fn twin_alias_still_folds_case() {
+        let data = bsl_platform::PlatformData::instance();
+        if !data.is_ambiguous_type_name("ЭлементыФормы") {
+            return;
+        }
+        let db = InMemoryDb::new();
+        assert_eq!(
+            db.platform_object("Controls".to_string()),
+            db.platform_object("controls".to_string()),
+            "два регистра одного английского алиаса — один тип"
+        );
+        assert_ne!(
+            db.platform_object("Controls".to_string()),
+            db.platform_object("FormItems".to_string()),
+            "но разные алиасы — по-прежнему разные типы"
+        );
+    }
+
+    /// А вот регистр самого неоднозначного имени свести можно и нужно: тёзки
+    /// пишут его одинаково, выбирать между ними тут не приходится.
+    #[test]
+    fn ambiguous_name_still_folds_case() {
+        let data = bsl_platform::PlatformData::instance();
+        if !data.is_ambiguous_type_name("ЭлементыФормы") {
+            return;
+        }
+        let db = InMemoryDb::new();
+        assert_eq!(
+            db.platform_object("ЭлементыФормы".to_string()),
+            db.platform_object("элементыформы".to_string())
+        );
+    }
 }

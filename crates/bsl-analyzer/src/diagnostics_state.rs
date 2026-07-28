@@ -31,10 +31,15 @@ impl GlobalState {
                 },
             );
 
+        // The input was rebuilt from the project config; re-attach the current
+        // vendor-diff scope so a config reload does not silently drop the filter.
+        self.apply_scope_to_config();
+
         tracing::info!(
             disabled_count = self.diagnostics_config.disabled.len(),
             enabled_count = self.diagnostics_config.enabled.len(),
             params_count = self.diagnostics_config.parameters.len(),
+            scope = self.diagnostics_config.scope.is_some(),
             ?locale,
             "updated diagnostics config"
         );

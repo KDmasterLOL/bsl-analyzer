@@ -9,6 +9,7 @@ mod metadata;
 mod metadata_dispatch;
 mod query;
 mod runner;
+mod scope_gate;
 mod single_pass;
 mod suppression;
 mod types;
@@ -109,6 +110,9 @@ pub fn file_diagnostics(
     file_id: vfs::FileId,
     config: &DiagnosticsConfig,
 ) -> Vec<Diagnostic> {
+    if !scope_gate::file_in_scope(db, None, file_id, config) {
+        return Vec::new();
+    }
     let config_path_input = ide_db::configuration_path_for_file(db, file_id);
     let provider = ide_db::SalsaProvider::new(db, config_path_input);
     let standalone = diagnostics(&DiagnosticsContext::new(config, file_id, &provider));
@@ -143,7 +147,9 @@ pub fn apply_extension_merge<'db>(
     // Ordinary module (and any extension file with no resolvable base): byte-identical to the
     // standalone pass, minus any in-code suppression directives.
     if weaving.is_none() && effective.is_none() {
-        if suppression::apply(db, file_id, config, &mut standalone) {
+        let mut changed = suppression::apply(db, file_id, config, &mut standalone);
+        changed |= scope_gate::apply(db, file_set, file_id, config, &mut standalone);
+        if changed {
             normalize_diagnostics(&mut standalone);
         }
         return standalone;
@@ -216,6 +222,7 @@ pub fn apply_extension_merge<'db>(
     }
 
     suppression::apply(db, file_id, config, &mut standalone);
+    scope_gate::apply(db, file_set, file_id, config, &mut standalone);
     normalize_diagnostics(&mut standalone);
     standalone
 }

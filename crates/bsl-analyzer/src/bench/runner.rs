@@ -1300,6 +1300,7 @@ fn build_latency_ctx(env: &mut BenchEnv) -> LatencyRequestContext {
         client_sender: state.sender.clone(),
         mem_docs: state.mem_docs.freeze(),
         file_paths,
+        scope_dirty_docs: state.scope_dirty_docs.clone(),
     };
     let ns = t.elapsed().as_nanos() as u64;
     env.ctx_build_ns.get_or_insert(ns);

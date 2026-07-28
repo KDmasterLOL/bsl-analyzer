@@ -152,38 +152,48 @@ pub(crate) fn is_generic_bridge_target_name(name: &str) -> bool {
         || is_tabular_row_name(name)
 }
 
+const NON_CORPUS_SINGLETONS: &[(&str, &str)] = &[
+    // Form control base + collections + the legacy "control".
+    ("ЭлементФормы", "FormControl"),
+    ("КоллекцияЭлементовФормы", "FormItemsCollection"),
+    ("ЭлементУправления", "ManagedFormControl"),
+    // Managed form and its version-older / application-scoped spellings.
+    ("УправляемаяФорма", "ManagedForm"),
+    ("ФормаКлиентскогоПриложения", "ClientApplicationForm"),
+    ("ФормаУправляемогоПриложения", "ManagedApplicationForm"),
+    // External component.
+    ("ВнешняяКомпонента", "AddIn"),
+    ("ОбъектВнешнейКомпоненты", "ExternalComponentObject"),
+    // Bare register record set.
+    ("НаборЗаписей", "RecordSet"),
+    ("НаборЗаписейРегистра", "RegisterRecordSet"),
+    // Constant value manager (the corpus enumerates the metadata-kind managers
+    // but not the constant one).
+    ("КонстантаМенеджерЗначения", "ConstantValueManager"),
+    // Form attribute collection.
+    ("РеквизитФормыКоллекция", "FormAttributeCollection"),
+];
+
+/// The exactly-named half of [`is_known_non_corpus_type_name`]. Everything that
+/// predicate matches beyond this is a guess about the platform — a prefix/suffix
+/// shape, or a prefix × suffix product whose members are not all real types
+/// (there is no record manager for an accumulation register, no record key for a
+/// sequence). Guessing is right for a doc comment, where a real type must not
+/// degrade. A name that arrived as a *value* needs the opposite polarity — an
+/// unrecognised phantom there produces nothing but a false `TypeMismatch` — so it
+/// asks only for the names that are known exactly.
+pub(crate) fn is_exact_non_corpus_type_name(name: &str) -> bool {
+    is_generic_bridge_target_name(name)
+        || NON_CORPUS_SINGLETONS.iter().any(|(ru, en)| name_eq_ci(name, ru, en))
+}
+
 /// Real platform types the generated corpus omits but the type system still
 /// produces by other means — form controls/collections, managed-form family and
 /// its extensions, external components, metadata-object descriptions, register
 /// records / record sets / keys. A doc-typed parameter naming one of these must
 /// keep a nominal `PlatformObject`, never degrade to Unknown.
 pub(crate) fn is_known_non_corpus_type_name(name: &str) -> bool {
-    if is_generic_bridge_target_name(name) {
-        return true;
-    }
-
-    const SINGLETONS: &[(&str, &str)] = &[
-        // Form control base + collections + the legacy "control".
-        ("ЭлементФормы", "FormControl"),
-        ("КоллекцияЭлементовФормы", "FormItemsCollection"),
-        ("ЭлементУправления", "ManagedFormControl"),
-        // Managed form and its version-older / application-scoped spellings.
-        ("УправляемаяФорма", "ManagedForm"),
-        ("ФормаКлиентскогоПриложения", "ClientApplicationForm"),
-        ("ФормаУправляемогоПриложения", "ManagedApplicationForm"),
-        // External component.
-        ("ВнешняяКомпонента", "AddIn"),
-        ("ОбъектВнешнейКомпоненты", "ExternalComponentObject"),
-        // Bare register record set.
-        ("НаборЗаписей", "RecordSet"),
-        ("НаборЗаписейРегистра", "RegisterRecordSet"),
-        // Constant value manager (the corpus enumerates the metadata-kind managers
-        // but not the constant one).
-        ("КонстантаМенеджерЗначения", "ConstantValueManager"),
-        // Form attribute collection.
-        ("РеквизитФормыКоллекция", "FormAttributeCollection"),
-    ];
-    if SINGLETONS.iter().any(|(ru, en)| name_eq_ci(name, ru, en)) {
+    if is_exact_non_corpus_type_name(name) {
         return true;
     }
 

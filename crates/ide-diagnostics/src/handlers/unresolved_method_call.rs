@@ -238,4 +238,71 @@ mod tests {
             umc[0].message
         );
     }
+
+    fn form_umc(form_source: &str) -> Vec<String> {
+        crate::test_utils::check_form_with_common_modules(form_source, &[])
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall)
+            .map(|d| d.message)
+            .collect()
+    }
+
+    #[test]
+    fn form_self_call_to_missing_method_emits() {
+        let umc = form_umc(
+            "&НаКлиенте\nПроцедура Сохранить()\n    ЭтотОбъект.НетТакогоМетода();\nКонецПроцедуры\n",
+        );
+        assert_eq!(
+            umc.len(),
+            1,
+            "the form itself is a closed surface — a missing self method must surface, got: {umc:?}"
+        );
+        assert!(
+            umc[0].contains("НетТакогоМетода"),
+            "message must name the missing method, got: {}",
+            umc[0]
+        );
+    }
+
+    #[test]
+    fn form_self_call_to_own_method_is_silent() {
+        let umc = form_umc(
+            "&НаКлиенте\nПроцедура Показать()\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура Сохранить()\n    ЭтотОбъект.Показать();\nКонецПроцедуры\n",
+        );
+        assert!(umc.is_empty(), "the module declares the method, got: {umc:?}");
+    }
+
+    #[test]
+    fn form_self_call_to_platform_form_method_is_silent() {
+        let umc = form_umc(
+            "&НаКлиенте\nПроцедура Сохранить()\n    ЭтотОбъект.Закрыть();\nКонецПроцедуры\n",
+        );
+        assert!(
+            umc.is_empty(),
+            "a platform member of the form type resolves before the module's own methods, \
+             got: {umc:?}"
+        );
+    }
+
+    #[test]
+    fn this_form_alias_resolves_the_form_instead_of_an_unknown_module() {
+        let umc = form_umc(
+            "&НаКлиенте\nПроцедура Показать()\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура Сохранить()\n    ЭтаФорма.Показать();\nКонецПроцедуры\n",
+        );
+        assert!(
+            umc.is_empty(),
+            "`ЭтаФорма` is the form, not an unresolved module receiver, got: {umc:?}"
+        );
+    }
+
+    #[test]
+    fn parameter_shadowing_a_self_name_keeps_its_own_type() {
+        let umc = form_umc(
+            "&НаКлиенте\nПроцедура Тест(ЭтаФорма)\n    ЭтаФорма = Новый Массив;\n    ЭтаФорма.Вставить(0, 1);\nКонецПроцедуры\n",
+        );
+        assert!(
+            umc.is_empty(),
+            "the parameter shadows the predefined name and carries an array, got: {umc:?}"
+        );
+    }
 }

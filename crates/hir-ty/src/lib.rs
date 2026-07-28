@@ -34,6 +34,7 @@ pub mod structure_param_keys;
 pub mod subtype;
 pub mod this_object;
 pub mod this_object_attr;
+mod type_literal;
 mod user_call_candidates;
 
 pub use bsl_config::VisibleConfig;

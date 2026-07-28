@@ -1,6 +1,7 @@
 pub mod analyze;
 pub mod bench;
 pub mod check_config;
+pub mod contract;
 pub mod dap;
 pub mod deps;
 pub mod extension;

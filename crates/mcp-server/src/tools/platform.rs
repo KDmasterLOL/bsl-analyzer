@@ -1,9 +1,25 @@
+use crate::tools::response::text_within_budget;
 use bsl_platform::PlatformDataInner;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 use std::fmt::Write;
 
-pub fn bsl_syntax_help(name: &str, type_name: Option<&str>) -> Result<CallToolResult, McpError> {
+/// A large platform type unfolds its constructors, methods and properties in full, so the
+/// card goes out through the output budget. The note points at the cheaper follow-up: one
+/// member's card via `type_name` instead of the whole type.
+const BUDGET_NOTE: &str = "\n-- карточка усечена под max_output_tokens; повысьте бюджет или \
+                           запросите один метод: name=\"ИмяМетода\", type_name=\"ИмяТипа\" --\n";
+
+pub fn bsl_syntax_help(
+    name: &str,
+    type_name: Option<&str>,
+    max_output_tokens: usize,
+) -> Result<CallToolResult, McpError> {
+    let card = syntax_help_card(name, type_name)?;
+    Ok(text_within_budget(card, max_output_tokens, BUDGET_NOTE))
+}
+
+fn syntax_help_card(name: &str, type_name: Option<&str>) -> Result<String, McpError> {
     let platform = PlatformDataInner::instance();
 
     if let Some(tn) = type_name {
@@ -11,7 +27,7 @@ pub fn bsl_syntax_help(name: &str, type_name: Option<&str>) -> Result<CallToolRe
     }
 
     if let Some(func) = platform.get_global_function(name) {
-        return format_global_function(platform, func);
+        return Ok(format_global_function(platform, func));
     }
 
     let types = platform.all_types();
@@ -19,7 +35,7 @@ pub fn bsl_syntax_help(name: &str, type_name: Option<&str>) -> Result<CallToolRe
     if let Some(pt) = types.iter().find(|t| {
         t.name.to_lowercase() == name_lower || t.english_name.to_lowercase() == name_lower
     }) {
-        return format_type_info(platform, pt);
+        return Ok(format_type_info(platform, pt));
     }
 
     let all_methods = platform.all_methods();
@@ -47,11 +63,11 @@ pub fn bsl_syntax_help(name: &str, type_name: Option<&str>) -> Result<CallToolRe
             }
             out.push('\n');
         }
-        return Ok(CallToolResult::success(vec![Content::text(out)]));
+        return Ok(out);
     }
 
     if let Some(kw) = platform.get_keyword_docs(name) {
-        return format_keyword_docs(&kw);
+        return Ok(format_keyword_docs(&kw));
     }
 
     Err(McpError::invalid_params(
@@ -64,7 +80,7 @@ fn search_method(
     platform: &PlatformDataInner,
     type_name: &str,
     method_name: &str,
-) -> Result<CallToolResult, McpError> {
+) -> Result<String, McpError> {
     if let Some(method) = platform.get_method(type_name, method_name) {
         let mut out = format!(
             "# {}.{} / {}.{}\n\n",
@@ -79,7 +95,7 @@ fn search_method(
         if let Some(docs) = platform.get_method_docs(method.id) {
             format_docs(&mut out, &docs);
         }
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(out)
     } else {
         Err(McpError::invalid_params(
             format!("Метод '{method_name}' не найден у типа '{type_name}'"),
@@ -91,19 +107,16 @@ fn search_method(
 fn format_global_function(
     platform: &PlatformDataInner,
     func: &bsl_platform::GlobalFunction,
-) -> Result<CallToolResult, McpError> {
+) -> String {
     let mut out = format!("# {} / {}\n\n", func.name, func.english_name);
     format_method_signature(&mut out, &func.name, &func.parameters, func.return_type.as_deref());
     if let Some(docs) = platform.get_global_function_docs(func.id) {
         format_docs(&mut out, &docs);
     }
-    Ok(CallToolResult::success(vec![Content::text(out)]))
+    out
 }
 
-fn format_type_info(
-    platform: &PlatformDataInner,
-    pt: &bsl_platform::PlatformType,
-) -> Result<CallToolResult, McpError> {
+fn format_type_info(platform: &PlatformDataInner, pt: &bsl_platform::PlatformType) -> String {
     let mut out = format!("# {} / {}\n\n", pt.name, pt.english_name);
 
     format_constructors(&mut out, platform, &pt.name);
@@ -126,10 +139,10 @@ fn format_type_info(
         let _ = writeln!(out, "\nИспользуйте `bsl_syntax_help(name=\"ИмяМетода\", type_name=\"{}\")` для подробной справки.", pt.name);
     }
 
-    Ok(CallToolResult::success(vec![Content::text(out)]))
+    out
 }
 
-fn format_keyword_docs(kw: &bsl_platform::KeywordDocs) -> Result<CallToolResult, McpError> {
+fn format_keyword_docs(kw: &bsl_platform::KeywordDocs) -> String {
     let mut out = format!("# {} / {}\n\n", kw.keyword_ru, kw.keyword_en);
     let _ = writeln!(out, "## Синтаксис\n\n```bsl\n{}\n```\n", kw.syntax);
     let _ = writeln!(out, "## Описание\n\n{}", kw.description);
@@ -139,7 +152,7 @@ fn format_keyword_docs(kw: &bsl_platform::KeywordDocs) -> Result<CallToolResult,
             let _ = writeln!(out, "- **{}**: {}", p.name, p.description);
         }
     }
-    Ok(CallToolResult::success(vec![Content::text(out)]))
+    out
 }
 
 fn format_method_signature(
@@ -282,7 +295,7 @@ mod tests {
             return;
         }
 
-        let result = bsl_syntax_help("Массив", None).unwrap();
+        let result = bsl_syntax_help("Массив", None, 6000).unwrap();
         let text = extract_text(&result);
         assert!(text.contains("Массив"), "should find Array type");
         assert!(text.contains("Array"), "should show english name");
@@ -295,7 +308,7 @@ mod tests {
             return;
         }
 
-        let result = bsl_syntax_help("Array", None).unwrap();
+        let result = bsl_syntax_help("Array", None, 6000).unwrap();
         let text = extract_text(&result);
         assert!(text.contains("Массив") || text.contains("Array"), "should find by english name");
     }
@@ -315,7 +328,7 @@ mod tests {
             "RU type name must resolve to the CallbackDescription constructor"
         );
 
-        let result = bsl_syntax_help("ОписаниеОповещения", None).unwrap();
+        let result = bsl_syntax_help("ОписаниеОповещения", None, 6000).unwrap();
         let text = extract_text(&result);
         assert!(text.contains("Конструктор"), "constructor-only type must show its constructor");
         assert!(
@@ -336,7 +349,7 @@ mod tests {
         }
 
         let method = &platform.all_methods()[0];
-        let result = bsl_syntax_help(&method.name, Some(&method.type_name)).unwrap();
+        let result = bsl_syntax_help(&method.name, Some(&method.type_name), 6000).unwrap();
         let text = extract_text(&result);
         assert!(text.contains(method.name.as_str()), "should contain method name");
         assert!(text.contains("```bsl"), "should have code block");
@@ -349,14 +362,33 @@ mod tests {
             return;
         }
 
-        let result = bsl_syntax_help("Сообщить", None).unwrap();
+        let result = bsl_syntax_help("Сообщить", None, 6000).unwrap();
         let text = extract_text(&result);
         assert!(text.contains("Сообщить") || text.contains("Message"), "should find global fn");
     }
 
     #[test]
+    fn test_syntax_help_card_is_bounded_by_the_output_budget() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            return;
+        }
+
+        let full = extract_text(&bsl_syntax_help("Массив", None, 6000).unwrap()).to_string();
+        let clipped = bsl_syntax_help("Массив", None, 100).unwrap();
+        let clipped = extract_text(&clipped);
+        assert!(clipped.len() < full.len(), "a 100-token budget must clip the card");
+        assert!(clipped.contains("карточка усечена"), "must carry the note: {clipped}");
+        assert!(
+            clipped.len() <= 100 * 4,
+            "the note is reserved out of the budget, not added on top: {}",
+            clipped.len()
+        );
+    }
+
+    #[test]
     fn test_syntax_help_not_found() {
-        let result = bsl_syntax_help("НесуществующийТипМетодФункция", None);
+        let result = bsl_syntax_help("НесуществующийТипМетодФункция", None, 6000);
         assert!(result.is_err(), "should return error for unknown name");
     }
 
@@ -367,7 +399,7 @@ mod tests {
             return;
         }
 
-        let result = bsl_syntax_help("НесуществующийМетод", Some("Массив"));
+        let result = bsl_syntax_help("НесуществующийМетод", Some("Массив"), 6000);
         assert!(result.is_err(), "should return error for unknown method");
     }
 }

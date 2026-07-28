@@ -63,6 +63,27 @@ pub(super) fn search_not_ready(detail: &str, progress: &IndexProgress) -> CallTo
     }))
 }
 
+/// The text the reference profile has always answered with while its index builds, kept
+/// verbatim as the mirror of [`docs_not_ready`].
+pub(super) const DOCS_INDEX_BUILDING_TEXT: &str =
+    "Search index is being built, please try again in a moment.";
+
+/// The reference profile's "index still building" answer. The sentence stays the text block;
+/// the machine state rides alongside it so a docs consumer reads "retry, this is not an empty
+/// result" from a field instead of matching the sentence — the same distinction `search_code`
+/// gets from [`search_not_ready`]. No progress counters: this path holds no [`IndexProgress`]
+/// handle, and inventing zeros would read as a stalled build.
+pub(super) fn docs_not_ready() -> CallToolResult {
+    crate::tools::response::structured_with_text(
+        DOCS_INDEX_BUILDING_TEXT.to_owned(),
+        json!({
+            "status": "not_ready",
+            "detail": DOCS_INDEX_BUILDING_TEXT,
+            "retry_after_ms": SEARCH_NOT_READY_RETRY_MS,
+        }),
+    )
+}
+
 /// The `not_ready` retry envelope for a query that arrived while the deferred baseline
 /// connect is still running. Distinct from the `baseline_unavailable` config errors: the
 /// agent should simply retry in a few seconds, not go fix configuration or restart.

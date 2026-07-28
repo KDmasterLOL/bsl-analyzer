@@ -1,0 +1,310 @@
+//! The contract declaration over a real MCP session: a consumer must be able to discover
+//! and read it with the standard `resources/list` + `resources/read` calls, without
+//! knowing anything build-specific beforehand.
+
+use mcp_server::{contract, serve_stream, McpProfile, McpServer, SharedState};
+use rmcp::model::{CallToolRequestParams, ReadResourceRequestParams, ResourceContents};
+use rmcp::ServiceExt;
+use serde_json::{json, Map, Value};
+use tempfile::TempDir;
+
+/// The reference profile needs no workspace build, and the resource is profile-independent.
+fn reference_server() -> McpServer {
+    McpServer::new(McpProfile::Reference, SharedState::reference(None))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contract_is_discoverable_and_readable_over_a_session() {
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    tokio::spawn(serve_stream(reference_server(), server_io));
+    let client = ().serve(client_io).await.expect("session initialized");
+
+    let info = client.peer_info().expect("server info after initialize");
+    assert!(info.capabilities.resources.is_some(), "resources capability not advertised");
+    // A consumer reads `serverInfo` to learn which analyzer build it is talking to, so it
+    // must name the analyzer rather than the transport library underneath it.
+    assert_eq!(info.server_info.name, "bsl-analyzer");
+
+    let listed = client.list_resources(None).await.expect("resources/list");
+    assert!(
+        listed.resources.iter().any(|r| r.uri == contract::CONTRACT_URI),
+        "contract resource is not listed: {listed:?}"
+    );
+
+    let read = client
+        .read_resource(ReadResourceRequestParams::new(contract::CONTRACT_URI))
+        .await
+        .expect("resources/read");
+    let [ResourceContents::TextResourceContents { text, .. }] = &read.contents[..] else {
+        panic!("expected one text content, got {:?}", read.contents);
+    };
+    let doc: serde_json::Value = serde_json::from_str(text).expect("contract is valid JSON");
+
+    assert_eq!(doc["contract_version"], contract::CONTRACT_VERSION);
+    assert_eq!(doc["build_version"], env!("CARGO_PKG_VERSION"));
+
+    // Both profiles are declared regardless of which one is serving: a consumer choosing a
+    // profile must be able to see what it would get before starting that server.
+    let workspace = &doc["mcp"]["profiles"]["workspace"]["tools"];
+    let names: Vec<&str> =
+        workspace.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"diagnostics"), "{names:?}");
+
+    let diagnostics =
+        workspace.as_array().unwrap().iter().find(|t| t["name"] == "diagnostics").unwrap();
+    let actions: Vec<&str> = diagnostics["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(actions, ["catalog", "schema", "status", "file", "workspace"]);
+
+    let file_action =
+        diagnostics["actions"].as_array().unwrap().iter().find(|a| a["name"] == "file").unwrap();
+    assert_eq!(file_action["required"], serde_json::json!(["path"]));
+
+    client.cancel().await.expect("session closed");
+}
+
+/// Nothing else is served under the contract scheme; a typo must fail loudly rather than
+/// return some other resource.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_resource_uri_is_rejected() {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(serve_stream(reference_server(), server_io));
+    let client = ().serve(client_io).await.expect("session initialized");
+
+    let err = client
+        .read_resource(ReadResourceRequestParams::new("bsl-analyzer://nope"))
+        .await
+        .expect_err("unknown resource must be an error");
+    assert!(err.to_string().contains("nope"), "{err}");
+
+    client.cancel().await.expect("session closed");
+}
+
+/// A parameter the declaration says an action needs, with the other declared parameters
+/// present so the probe fails on this one alone.
+struct Probe {
+    tool: String,
+    action: String,
+    omitted: String,
+    arguments: Map<String, Value>,
+}
+
+fn dummy_for(ty: &str) -> Value {
+    match ty {
+        "integer" | "number" => json!(1),
+        "boolean" => json!(true),
+        "object" => json!({}),
+        ty if ty.starts_with("array<") => json!(["x"]),
+        _ => json!("x"),
+    }
+}
+
+/// `require()` runs before the readiness gate for most tools, so a missing parameter comes
+/// back as a parameter error even against an empty workspace. These two resolve their
+/// arguments inside the gate instead, where an unbuilt project answers "still loading"
+/// before it ever looks at them — probing them would assert on the gate, not the contract.
+fn resolves_arguments_behind_the_readiness_gate(tool: &str, action: &str) -> bool {
+    tool == "graph" || (tool == "metadata" && action == "object")
+}
+
+fn probes(profile: &Value) -> Vec<Probe> {
+    let mut probes = Vec::new();
+    for tool in profile["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        let types: std::collections::HashMap<&str, &str> = tool["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (p["name"].as_str().unwrap(), p["type"].as_str().unwrap()))
+            .collect();
+        for action in tool["actions"].as_array().unwrap() {
+            let action_name = action["name"].as_str().unwrap();
+            if resolves_arguments_behind_the_readiness_gate(name, action_name) {
+                continue;
+            }
+            let required: Vec<&str> = action["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r.as_str().unwrap())
+                .collect();
+            for omitted in &required {
+                let mut arguments = Map::new();
+                arguments.insert("action".into(), json!(action_name));
+                for other in required.iter().filter(|r| *r != omitted) {
+                    arguments.insert((*other).into(), dummy_for(types[*other]));
+                }
+                // Schema-level required parameters must be present or the call fails on
+                // deserialization instead of reaching the action's own check.
+                for param in tool["params"].as_array().unwrap() {
+                    let param_name = param["name"].as_str().unwrap();
+                    if param["required"] == json!(true)
+                        && param_name != "action"
+                        && param_name != *omitted
+                    {
+                        arguments.insert(param_name.into(), dummy_for(types[param_name]));
+                    }
+                }
+                probes.push(Probe {
+                    tool: name.to_string(),
+                    action: action_name.to_string(),
+                    omitted: (*omitted).to_string(),
+                    arguments,
+                });
+            }
+        }
+    }
+    probes
+}
+
+/// The declaration's required-parameter lists are hand-written, and the unknown-action
+/// messages are generated from the same tables — so a table that drifted from the dispatch
+/// code would drift consistently and every string comparison would still pass. This asks
+/// the running server instead: omit a parameter the contract calls required, and the tool
+/// must reject the call for exactly that parameter.
+async fn assert_required_params_are_enforced(server: McpServer, profile_key: &str) {
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    tokio::spawn(serve_stream(server, server_io));
+    let client = ().serve(client_io).await.expect("session initialized");
+
+    let doc = contract::document();
+    let probes = probes(&doc["mcp"]["profiles"][profile_key]);
+    assert!(!probes.is_empty(), "no required parameters declared for profile {profile_key}");
+
+    for probe in probes {
+        let call = client.call_tool(
+            CallToolRequestParams::new(probe.tool.clone()).with_arguments(probe.arguments.clone()),
+        );
+        let err = call.await.expect_err(&format!(
+            "{}/{} accepted a call without the required '{}': {:?}",
+            probe.tool, probe.action, probe.omitted, probe.arguments
+        ));
+        let expected = format!("'{}' is required", probe.omitted);
+        assert!(
+            err.to_string().contains(&expected),
+            "{}/{} rejected a call missing '{}' for another reason: {err}",
+            probe.tool,
+            probe.action,
+            probe.omitted
+        );
+    }
+
+    client.cancel().await.expect("session closed");
+}
+
+/// The full call the declaration says is complete: the action plus every parameter it
+/// declares required.
+fn complete_calls(profile: &Value) -> Vec<Probe> {
+    let mut calls = Vec::new();
+    for tool in profile["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        let types: std::collections::HashMap<&str, &str> = tool["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (p["name"].as_str().unwrap(), p["type"].as_str().unwrap()))
+            .collect();
+        for action in tool["actions"].as_array().unwrap() {
+            let action_name = action["name"].as_str().unwrap();
+            if resolves_arguments_behind_the_readiness_gate(name, action_name)
+                || reaches_out_of_process(name, action_name)
+            {
+                continue;
+            }
+            let mut arguments = Map::new();
+            arguments.insert("action".into(), json!(action_name));
+            for required in action["required"].as_array().unwrap() {
+                let required = required.as_str().unwrap();
+                arguments.insert(required.into(), dummy_for(types[required]));
+            }
+            for param in tool["params"].as_array().unwrap() {
+                let param_name = param["name"].as_str().unwrap();
+                if param["required"] == json!(true) && param_name != "action" {
+                    arguments.insert(param_name.into(), dummy_for(types[param_name]));
+                }
+            }
+            calls.push(Probe {
+                tool: name.to_string(),
+                action: action_name.to_string(),
+                omitted: String::new(),
+                arguments,
+            });
+        }
+    }
+    calls
+}
+
+/// `debug attach` opens a TCP connection to the address it is handed, so a probe with a
+/// placeholder host would leave the process. Nothing else here talks to the outside world:
+/// the other actions stop at "no 1C connection configured" or at an empty workspace.
+fn reaches_out_of_process(tool: &str, action: &str) -> bool {
+    tool == "debug" && action == "attach"
+}
+
+/// The mirror of [`assert_required_params_are_enforced`]: that one catches a requirement
+/// the declaration invented, this one catches a requirement it forgot. Hand the tool
+/// everything the contract says an action needs, and no answer may still be "'x' is
+/// required" — that would be a `require()` in the dispatch code with no counterpart in the
+/// declaration, which is how a consumer ends up with a call the contract promised.
+async fn assert_no_undeclared_requirements(server: McpServer, profile_key: &str) {
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    tokio::spawn(serve_stream(server, server_io));
+    let client = ().serve(client_io).await.expect("session initialized");
+
+    let doc = contract::document();
+    let calls = complete_calls(&doc["mcp"]["profiles"][profile_key]);
+    assert!(!calls.is_empty(), "no actions probed for profile {profile_key}");
+
+    for call in calls {
+        let answer = client
+            .call_tool(
+                CallToolRequestParams::new(call.tool.clone())
+                    .with_arguments(call.arguments.clone()),
+            )
+            .await;
+        if let Err(err) = answer {
+            let err = err.to_string();
+            assert!(
+                !err.contains("is required"),
+                "{}/{} needs a parameter the contract does not declare: {err}",
+                call.tool,
+                call.action
+            );
+        }
+    }
+
+    client.cancel().await.expect("session closed");
+}
+
+fn workspace_server(root: &TempDir) -> McpServer {
+    McpServer::new(
+        McpProfile::Workspace,
+        SharedState::workspace(root.path().to_path_buf()).expect("valid workspace project"),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_tools_enforce_their_declared_required_params() {
+    let ws = TempDir::new().unwrap();
+    assert_required_params_are_enforced(workspace_server(&ws), "workspace").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_tools_need_nothing_the_contract_omits() {
+    let ws = TempDir::new().unwrap();
+    assert_no_undeclared_requirements(workspace_server(&ws), "workspace").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reference_tools_need_nothing_the_contract_omits() {
+    assert_no_undeclared_requirements(reference_server(), "reference").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reference_tools_enforce_their_declared_required_params() {
+    assert_required_params_are_enforced(reference_server(), "reference").await;
+}
