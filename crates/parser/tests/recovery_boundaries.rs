@@ -171,20 +171,39 @@ fn clause_count(input: &str, kind: SyntaxKind) -> usize {
 }
 
 #[test]
-fn a_recovery_inside_a_query_takes_the_clause_that_follows_it() {
-    // Each of these has one defect inside one part of the query, and in each
-    // the clause after it — plainly present in the text — is consumed by the
-    // recovery and produces no node.
+fn a_recovery_inside_a_query_leaves_the_clause_that_follows_it() {
+    // Each of these has one defect inside one part of the query, and the
+    // clause after it used to be consumed by the recovery and produce no
+    // node — so a consumer could not see a source clause that is plainly
+    // written.
     let cases: &[(&str, SyntaxKind)] = &[
         ("ВЫБРАТЬ ВЫБОР КОГДА А ТОГДА Б ИЗ Т", SyntaxKind::SDBL_FROM_CLAUSE),
         ("ВЫБРАТЬ () ИЗ Т", SyntaxKind::SDBL_FROM_CLAUSE),
         ("ВЫБРАТЬ А В (1 ИЗ Т", SyntaxKind::SDBL_FROM_CLAUSE),
         ("ВЫБРАТЬ * ИЗ Т ГДЕ А В () УПОРЯДОЧИТЬ ПО Б", SyntaxKind::SDBL_ORDER_CLAUSE),
+        ("ВЫБРАТЬ А В (1 ИЗ Т ГДЕ Б", SyntaxKind::SDBL_WHERE_CLAUSE),
     ];
 
     for (input, kind) in cases {
         assert!(covers(input, false), "`{input}`");
-        assert_eq!(clause_count(input, *kind), 0, "`{input}` loses its {kind:?}");
+        assert_eq!(clause_count(input, *kind), 1, "`{input}` keeps its {kind:?}");
+    }
+}
+
+#[test]
+fn an_operand_never_written_still_costs_the_clause_after_it() {
+    // The other half of the same defect, and not fixed here. A rule with an
+    // operand it must have reports nothing at all — it reads the next word as
+    // that operand — and since every keyword of this language arrives as an
+    // identifier, the word it reads can be the clause keyword that follows.
+    //
+    // Refusing it needs the position, not the word: `ИЗ` opens a clause where
+    // a clause may start and names a source where a name may stand. Pinned as
+    // it behaves so that the remaining half is visible rather than implied.
+    for input in ["ВЫБРАТЬ А + ИЗ Т", "ВЫБРАТЬ А ССЫЛКА ИЗ Т", "ВЫБРАТЬ А ПОДОБНО ИЗ Т"]
+    {
+        assert!(covers(input, false), "`{input}`");
+        assert_eq!(clause_count(input, SyntaxKind::SDBL_FROM_CLAUSE), 0, "`{input}`");
     }
 }
 

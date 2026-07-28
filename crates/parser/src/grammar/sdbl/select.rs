@@ -224,20 +224,30 @@ fn query(p: &mut Parser) {
         return;
     }
 
-    p.skip_trivia();
-    if is_limitation_keyword(p) {
-        limitations(p);
+    // The words that open the clauses of this query are what the query is
+    // waiting for, so no rule inside it may report an error by taking one:
+    // an unfinished `ВЫБОР` used to report its missing `КОНЕЦ` by consuming
+    // the `ИЗ` that followed, and the source clause then existed nowhere.
+    //
+    // A clause keyword is still an ordinary name where a name is what
+    // belongs — `КАК Итоги` names a source — and that is why this is stated
+    // here rather than as a word the whole parse treats as a boundary.
+    p.within_boundary(is_clause_keyword, |p| {
         p.skip_trivia();
-    }
+        if is_limitation_keyword(p) {
+            limitations(p);
+            p.skip_trivia();
+        }
 
-    selected_fields(p);
+        selected_fields(p);
 
-    eat_query_extensions(p);
-    if at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ") {
-        into_clause(p);
-    }
+        eat_query_extensions(p);
+        if at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ") {
+            into_clause(p);
+        }
 
-    query_body_clauses(p);
+        query_body_clauses(p);
+    });
 
     m.complete(p, NodeKind::SdblQuery);
 }
