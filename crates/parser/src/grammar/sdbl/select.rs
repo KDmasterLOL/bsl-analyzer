@@ -537,10 +537,13 @@ fn table_ref(p: &mut Parser) {
             break;
         }
 
+        // A component after a dot is still part of a table's name, so it is
+        // closed to the same words the first component is. The dot does not
+        // exempt them: `Справочник.ПО` is no more a table than `ПО` is.
         if is_clause_keyword(p)
             || super::at_query_boundary(p)
-            || p.at_keyword("AS")
-            || p.at_keyword("КАК")
+            || super::at_the_alias_separator(p)
+            || super::at_a_list_separator(p)
         {
             let err = p.start();
             p.emit_error_at_marker(

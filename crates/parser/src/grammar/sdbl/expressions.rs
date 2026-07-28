@@ -455,7 +455,9 @@ fn primary_expr(p: &mut Parser) {
 /// needs to know whether the expression behind this position is complete,
 /// which is the caller's knowledge and not this one's.
 fn at_a_keyword_that_cannot_be_a_field(p: &Parser) -> bool {
-    p.names_are_fields() && super::select::is_clause_keyword(p) && !next_is_a_qualifying_dot(p)
+    p.names_are_fields()
+        && (super::select::is_clause_keyword(p) || super::at_a_list_separator(p))
+        && !next_is_a_qualifying_dot(p)
 }
 
 fn next_is_a_qualifying_dot(p: &Parser) -> bool {

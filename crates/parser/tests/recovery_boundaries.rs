@@ -534,6 +534,11 @@ const NAME_POSITIONS: &[(&str, usize, usize)] = &[
     // English form the same word was a boundary in one language and a table
     // name in the other.
     ("SELECT A FROM BY", 1, 1),
+    // The name predicate has to be asked wherever a name stands. These three
+    // asked the clause keywords directly, which do not carry `BY`.
+    ("SELECT BY FROM T", 1, 1),
+    ("SELECT A FROM Catalog.BY", 1, 1),
+    ("SELECT A FROM T WHERE B = BY", 1, 1),
 ];
 
 #[test]
