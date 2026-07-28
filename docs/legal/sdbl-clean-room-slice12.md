@@ -1276,6 +1276,11 @@ are covered by entries A6–A8 above.
   attested Slice 7 decision, one withdrawn after it broke two contracts.
   No finding touched the seven dot chains. Parser tests 673 → 677.
 
+After the slice was closed, the boundary defect it had tracked was taken up
+and half of it closed; see the follow-up section below. The commits are
+`a105cc00` (the pins), `93124e24` (the BSL closers) and `0c8af185` (the SDBL
+clause keywords).
+
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert
 disclosure shared with every closed slice in this programme.
@@ -1314,6 +1319,63 @@ not evidence that behaviour is unchanged, it is evidence of nothing.
 
 The remainder, the method and the four known defects are recorded outside
 this document rather than left implicit here.
+
+## Follow-up: the boundary became a position
+
+The slice closed with the boundary defect open, tracked separately, and its
+diagnosis written down: a boundary is a position, not a word. A predicate
+the parser consults with no idea which rule is asking cannot tell a clause
+keyword that opens a clause from one that names a source, and the attempt
+to make the two the same broke `КАК Итоги`.
+
+The mechanism the diagnosis asked for is now built, and the part of the
+defect it closes is the part that runs through error recovery. A construct
+states the words that close it where it descends into what it encloses; the
+statement stops applying when it returns, and it is made by a call that
+owns the scope rather than by hand, because a rule with an early return
+would otherwise leave one behind. A query states the words that open its
+clauses. A procedure, a function, `Если`, `Пока`, both `Для` forms,
+`Попытка` and a `#Если` region each state their own closers.
+
+The four inputs this document pinned as losing a clause — an unfinished
+`ВЫБОР`, an empty `()`, an unbalanced `(`, an empty `В ()` — now keep it.
+
+Three things about the work belong here rather than in the tracker.
+
+**A boundary is a promise that some rule will not advance, so every list
+that parses items until its own terminator has to end at an enclosing one
+too.** Slice 12 learned this once, when a refused token left the aggregate
+list spinning. It came back immediately: a `#Если` region opened inside
+`Если`, with the `ИначеЕсли` that closes that `Если` standing inside the
+region — real code in the testbed configuration — spun until the iteration
+guard aborted the parse. The corpus found it; the tests did not.
+
+**The rule cuts both ways, and the cost is measured rather than argued.**
+Where the offending word is stray rather than a stranded closer, a block
+now ends early and reports a closer that is present: a loose `Иначе` inside
+a loop inside `Если` costs one extra message, the first of the two false.
+Telling the two cases apart needs to know whether the block's own closer
+appears later, which is the whole rest of the input. Over 21 114 modules
+one module changes, by one message, where `#Вставка` and `#Удаление`
+regions hide the block structure inside them. Against that, the shape it
+replaces cost one false report per level of nesting on every half-written
+block: one unclosed call inside `Попытка` inside `Процедура` produced six
+messages and consumed three real closers, and now produces two and consumes
+none.
+
+**The first measurement of the SDBL half was not readable, and saying so is
+the point of insisting on a control.** The positive control classified
+identically in both builds: the harness watched whether a query drew an
+error, a leftover report and full coverage, and this change moves none of
+those — it moves which nodes exist. Counted that way the control differs by
+two nodes, and the corpus by nothing at all across 3 142 814 literals. A
+zero from the first run would have been a statement about the harness.
+
+Half of the defect stays open, pinned in the acceptance set rather than
+implied: a rule with an operand it must have reports nothing, reads the next
+word as that operand, and `ВЫБРАТЬ А + ИЗ Т` still loses its source clause.
+That half needs the position and not the word, which is the mechanism this
+follow-up did not build.
 
 ## Licensing note
 
