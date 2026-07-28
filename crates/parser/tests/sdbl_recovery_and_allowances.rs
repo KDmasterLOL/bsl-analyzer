@@ -988,8 +988,6 @@ fn no_rule_requires_the_word_that_begins_the_next_query() {
     // some twice, so the check lives in `expect` and covers every caller.
     for input in [
         "ВЫБРАТЬ А ИЗ ВЫБРАТЬ Б ИЗ У",
-        "ВЫБРАТЬ А КАК УНИЧТОЖИТЬ Т",
-        "ВЫБРАТЬ А ИЗ Т КАК УНИЧТОЖИТЬ У",
         "ВЫБРАТЬ А УНИЧТОЖИТЬ Т",
         "ВЫБРАТЬ А ИЗ Т ВНУТРЕННЕЕ СОЕДИНЕНИЕ ВЫБРАТЬ Б ИЗ У",
     ] {
@@ -1009,6 +1007,17 @@ fn no_rule_requires_the_word_that_begins_the_next_query() {
             parse.errors(),
         );
     }
+}
+
+#[test]
+fn an_explicit_alias_may_spell_anything() {
+    // The boundary is read from the word alone, and a word is not enough:
+    // after `КАК` nothing but a name can stand, so the rule standing there
+    // says so and the guess steps aside. Field and source aliases were
+    // already allowed to spell a keyword before this slice.
+    accepted("ВЫБРАТЬ А КАК УНИЧТОЖИТЬ ИЗ Т");
+    accepted("ВЫБРАТЬ А ИЗ Т КАК УНИЧТОЖИТЬ");
+    accepted("ВЫБРАТЬ А КАК Итоги ИЗ Т");
 }
 
 #[test]

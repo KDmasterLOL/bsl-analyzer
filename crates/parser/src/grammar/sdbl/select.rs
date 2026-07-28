@@ -30,11 +30,38 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
     let err = p.start();
     let mut case_depth = 0i32;
     let mut paren_depth = 0i32;
+    let mut brace_depth = 0i32;
     let mut consumed_any = false;
     let mut nested_query_starts: Vec<i32> = Vec::new();
 
     loop {
         p.check_iteration_limit();
+
+        // An extension region is opaque: the words inside it are not this
+        // query's, and a boundary read from one is a boundary that is not
+        // there.
+        if p.at(TokenKind::LBrace) {
+            brace_depth += 1;
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if p.at(TokenKind::RBrace) {
+            brace_depth = brace_depth.saturating_sub(1);
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if brace_depth > 0 {
+            if p.at_end() || p.at(TokenKind::Semicolon) {
+                break;
+            }
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
 
         if p.at_keyword("CASE") || p.at_keyword("ВЫБОР") {
             case_depth += 1;
@@ -336,7 +363,7 @@ fn selected_field_alias(p: &mut Parser) {
         return;
     }
 
-    let _ = p.expect(TokenKind::Ident);
+    let _ = p.expect_name();
 
     m.complete(p, NodeKind::SdblAlias);
 }
@@ -454,7 +481,11 @@ fn table_ref(p: &mut Parser) {
             break;
         }
 
-        if is_clause_keyword(p) || p.at_keyword("AS") || p.at_keyword("КАК") {
+        if is_clause_keyword(p)
+            || super::at_query_boundary(p)
+            || p.at_keyword("AS")
+            || p.at_keyword("КАК")
+        {
             let err = p.start();
             p.emit_error_at_marker(
                 err,
@@ -498,7 +529,7 @@ fn source_alias(p: &mut Parser) {
         return;
     }
 
-    p.expect(TokenKind::Ident);
+    p.expect_name();
 
     m.complete(p, NodeKind::SdblAlias);
 }

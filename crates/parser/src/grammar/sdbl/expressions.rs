@@ -9,6 +9,7 @@ pub(super) fn is_expression_start(p: &Parser) -> bool {
         Some(TokenKind::Decimal)
         | Some(TokenKind::Float)
         | Some(TokenKind::String)
+        | Some(TokenKind::Date)
         | Some(TokenKind::KwTrue)
         | Some(TokenKind::KwFalse)
         | Some(TokenKind::KwUndefined) => true,
@@ -95,6 +96,19 @@ fn recover_to_delimiter(p: &mut Parser) {
         if p.at(TokenKind::RBrace) {
             if brace_depth > 0 {
                 brace_depth -= 1;
+            }
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        // An extension region is opaque text, so the parser's own group
+        // count ignores parens inside one. This scan has to agree, or its
+        // idea of which `)` closes the caller's `(` drifts from the
+        // parser's and it walks out through a boundary that is still open.
+        if brace_depth > 0 {
+            if p.at_end() || p.at(TokenKind::Semicolon) {
+                break;
             }
             p.bump();
             consumed_any = true;
@@ -356,6 +370,10 @@ fn primary_expr(p: &mut Parser) {
         Some(TokenKind::LParen) => paren_or_subquery_expr(p),
         Some(TokenKind::Decimal) | Some(TokenKind::Float) => literal_expr(p),
         Some(TokenKind::String) => literal_expr(p),
+        // The lexer has taken `'ГГГГММДД[ЧЧММСС]'` as one token since the
+        // token set was re-derived; nothing here ever accepted it, so a
+        // whole class of literal was an error wherever it stood.
+        Some(TokenKind::Date) => literal_expr(p),
         Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => literal_expr(p),
         Some(TokenKind::KwUndefined) => literal_expr(p),
         Some(TokenKind::Ampersand) => parameter_expr(p),
@@ -580,7 +598,9 @@ fn predicate_expr(p: &mut Parser) {
             while p.eat(TokenKind::Dot) {
                 p.check_iteration_limit();
                 p.skip_trivia();
-                if at_property_name(p) {
+                // A word that begins a query is not the next part of a type
+                // name, however a dot before it reads.
+                if at_property_name(p) && !super::at_query_boundary(p) {
                     p.bump();
                     p.skip_trivia();
                 } else {
@@ -706,7 +726,7 @@ fn column_or_function(p: &mut Parser) {
             // is recovered, and on the same line only the alias separator AS/КАК — which
             // is never a field name — breaks out instead of being swallowed.
             let dangling_dot_recovery = if crossed_newline {
-                super::select::is_likely_clause_start_after_dot(p)
+                super::select::is_likely_clause_start_after_dot(p) || super::at_query_boundary(p)
             } else {
                 super::select::at_sdbl_keyword(p, "AS", "КАК")
             };
@@ -825,7 +845,9 @@ fn column_or_function(p: &mut Parser) {
                 // Same-line keyword after a dot is a member name; across a newline a
                 // clause keyword is a dangling-dot recovery point. See the column-ref
                 // dot loop above.
-                if crossed_newline && super::select::is_clause_keyword(p) {
+                if crossed_newline
+                    && (super::select::is_clause_keyword(p) || super::at_query_boundary(p))
+                {
                     let err = p.start();
                     p.emit_error_at_marker(
                         err,

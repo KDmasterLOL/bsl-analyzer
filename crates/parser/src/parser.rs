@@ -191,6 +191,22 @@ impl<'a> Parser<'a> {
         false
     }
 
+    /// Takes a word where the rule knows a name is what belongs, whatever
+    /// the word spells.
+    ///
+    /// The boundary `expect` enforces is a guess made from the word alone,
+    /// and a word is not enough: the one that begins a construct elsewhere
+    /// is an ordinary name in a position that admits nothing else. Only the
+    /// rule standing there knows which it is, so only the rule can say so —
+    /// and saying so is deliberately more work than staying silent.
+    pub fn expect_name(&mut self) -> bool {
+        if self.at(TokenKind::Ident) {
+            self.bump();
+            return true;
+        }
+        self.expect(TokenKind::Ident)
+    }
+
     pub fn eat_keyword(&mut self, text: &str) -> bool {
         if self.at_keyword(text) {
             self.bump();

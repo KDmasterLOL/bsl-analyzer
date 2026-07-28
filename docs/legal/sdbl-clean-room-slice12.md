@@ -997,6 +997,55 @@ slice as after it. Reporting them is a new diagnostic on real code, with a
 cost to be measured the way this slice measured its own, and it is tracked
 rather than smuggled in here.
 
+### The mechanism had the flaw it was built to name
+
+`expect` refusing a declared boundary broke a valid query in the next
+round: `ВЫБРАТЬ А КАК УНИЧТОЖИТЬ ИЗ Т` stopped parsing, because after an
+explicit `КАК` a keyword is an ordinary alias and two earlier slices say
+so in the code. The check that was meant to close the class of "a rule
+takes a word it has no claim to" had become an instance of the very thing
+this document had written down one round earlier: **a boundary is a
+position, not a word.** Reading the word alone, `expect` could not tell a
+source position from an alias position, exactly as the reverted keyword
+list could not.
+
+The repair is the smaller half of what that note proposed. The guess still
+runs everywhere, but a rule standing where nothing except a name can stand
+says so — `expect_name` — and the guess steps aside for it. Two rules say
+it: the field alias and the source alias, both after an explicit `КАК`.
+Saying it is deliberately more work than staying silent, so the default
+stays safe.
+
+Worse than the regression is what it exposes about the round before. This
+document's own acceptance test had pinned `ВЫБРАТЬ А КАК УНИЧТОЖИТЬ Т` as
+two queries — a behaviour invented in that round, contradicting a decision
+two earlier slices had attested, and pinned without a source for it. A
+test written from the change rather than from the language does not check
+the change; it repeats it.
+
+### The rest of that round
+
+Three dot chains bumped the next component with no boundary check, so
+`ИЗ Т.` followed by `УНИЧТОЖИТЬ У` on the next line read as one name and
+the second query vanished; two of the three already stopped at a clause
+keyword across a newline, and a query start is now stopped there too.
+
+Both recovery skips read words inside an extension region `{…}` as if they
+were this query's. They are not — the parser's own group count already
+treats such a region as opaque — so a `ВЫБРАТЬ` inside one ended a skip
+that should have run past it, and a `(` inside one shifted the skip's idea
+of which `)` closed the caller's.
+
+And a whole class of literal was an error wherever it stood: the lexer has
+taken `'ГГГГММДД[ЧЧММСС]'` as one token since the token set was
+re-derived, and nothing in the expression layer ever accepted it.
+
+One finding is tracked instead: expression parsing recurses without a
+depth limit, so ten thousand nested parens end the process rather than the
+parse. It predates this slice, the existing guard counts iterations and
+cannot see depth, and a limit is owed to the BSL grammar in the same
+motion.
+
 ### A test that was asserting something false
 
 `test_batch_with_drop` fed `ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ;
@@ -1134,9 +1183,13 @@ are covered by entries A6–A8 above.
 - C22 `1175e647` — the audit again. Three findings, all confirmed and all
   this slice's own, one of them a parse that never returns. Parser tests
   663 → 665.
-- C23 — the audit widened to the `SELECT` skeleton. Eight findings, all
-  confirmed, none a regression: six fixed here, two tracked as new
-  diagnostics needing their own measurement. Parser tests 665 → 668.
+- C23 `3503eea7` — the audit widened to the `SELECT` skeleton. Eight
+  findings, all confirmed, none a regression: six fixed here, two tracked
+  as new diagnostics needing their own measurement. Parser tests 665 → 668.
+- C24 — the audit over all four files at once. Eight findings, all
+  confirmed: seven fixed, one tracked. One was a regression of the round
+  before, and one of that round's own tests had pinned it. Parser tests
+  668 → 669.
 
 The absolute-last commit on the branch is the one that edits this trail,
 and is therefore necessarily not named in it — the anti-Hilbert
