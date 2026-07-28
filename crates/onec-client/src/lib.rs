@@ -8,6 +8,9 @@ pub enum Error {
     #[error("HTTP request failed: {0}")]
     Request(#[from] reqwest::Error),
 
+    #[error("invalid JSON response from 1C: {0}")]
+    Decode(#[from] serde_json::Error),
+
     #[error("1C returned status {status}: {body}")]
     Status { status: u16, body: String },
 
@@ -107,8 +110,14 @@ impl Client {
             return Err(Error::Status { status: status.as_u16(), body });
         }
 
-        Ok(resp.json().await?)
+        let body = resp.bytes().await?;
+        decode_json(&body)
     }
+}
+
+fn decode_json<R: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<R, Error> {
+    let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
+    Ok(serde_json::from_slice(body)?)
 }
 
 #[derive(Debug, Serialize)]
@@ -260,5 +269,15 @@ mod tests {
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["meta_type"], "Catalogs");
         assert_eq!(value["name"], "Организации");
+    }
+
+    #[test]
+    fn response_decoder_accepts_utf8_bom_emitted_by_1c() {
+        let result: QueryResult = decode_json(
+            b"\xEF\xBB\xBF{\"columns\":[\"Value\"],\"rows\":[[1]],\"total\":1,\"truncated\":false}",
+        )
+        .unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.rows[0][0], 1);
     }
 }
