@@ -524,14 +524,7 @@ fn table_ref(p: &mut Parser) {
         p.skip_trivia();
 
         if !super::at_table_name_component(p) {
-            let err = p.start();
-            p.emit_error_at_marker(
-                err,
-                ParseError::Custom {
-                    message: "ожидалось имя объекта, встречено ключевое слово",
-                    recovery: RecoveryKind::RecoverySpan,
-                },
-            );
+            report_the_component_the_dot_promised(p);
             break;
         }
 
@@ -960,15 +953,61 @@ fn for_update_clause(p: &mut Parser) {
         while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
             p.skip_trivia();
-            if super::at_table_name_component(p) {
-                p.bump();
-            } else {
+            if !super::at_table_name_component(p) {
+                // The list of targets is optional, so this rule said nothing
+                // here before. It says something now — the dot proves a name
+                // was being written — but only where a token actually stands
+                // and the lexer could read it. Nothing there is the unfinished
+                // path of a text built by concatenation, and a token the lexer
+                // rejected belongs to a text already reported as unreadable:
+                // the inputs that reach here that way are Russian prose whose
+                // `для` reads as `ДЛЯ` and whose full stop reads as a dot.
+                if p.current().is_some_and(|kind| kind != TokenKind::Error) {
+                    report_the_component_the_dot_promised(p);
+                }
                 break;
             }
+            p.bump();
         }
     }
 
     m.complete(p, NodeKind::SdblForUpdate);
+}
+
+/// Says that the name broke off, once the dot has proved it was being written.
+///
+/// Which of the two reasons it was depends on what stands there, and naming
+/// the wrong one is its own defect: a word that cannot be part of the name is
+/// a keyword, while nothing standing there at all is a name the text does not
+/// hold. The message said "keyword" for both, which is false at the end of
+/// input, after a comma, after a paren.
+///
+/// Leaving without saying anything is worse than either: the word left behind
+/// opens a clause of its own, so `ДЛЯ ИЗМЕНЕНИЯ Catalog.УПОРЯДОЧИТЬ ПО А`
+/// parsed as a whole clean query with a broken name inside it.
+fn report_the_component_the_dot_promised(p: &mut Parser) {
+    let err = p.start();
+
+    if super::expressions::at_property_name(p) {
+        p.emit_error_at_marker(
+            err,
+            ParseError::Custom {
+                message: "ожидалось имя объекта, встречено ключевое слово",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+        return;
+    }
+
+    let found = p.current();
+    p.emit_error_at_marker(
+        err,
+        ParseError::Expected {
+            expected: smallvec![TokenKind::Ident],
+            found,
+            recovery: RecoveryKind::RecoverySpan,
+        },
+    );
 }
 
 fn index_by_clause(p: &mut Parser) {

@@ -464,6 +464,21 @@ fn a_ternary_that_gives_up_leaves_the_bracket_holding_it() {
     }
 }
 
+#[test]
+fn a_broken_name_is_not_blamed_on_a_keyword_that_is_not_there() {
+    // Two reasons the name broke off, and naming the wrong one is its own
+    // defect: a word that cannot be part of it is a keyword, while nothing at
+    // all is a name the text does not hold.
+    for (input, keyword) in [
+        ("SELECT A FROM Catalog.BY", true),
+        ("SELECT A FROM Catalog.", false),
+        ("SELECT A FROM Catalog.1", false),
+    ] {
+        let said = messages(input, false).iter().any(|m| m.contains("ключевое слово"));
+        assert_eq!(said, keyword, "`{input}`: {:?}", messages(input, false));
+    }
+}
+
 // --- SDBL: a clause keyword taken by a recovery inside the clause ---------
 
 fn clause_count(input: &str, kind: SyntaxKind) -> usize {
@@ -543,7 +558,10 @@ const NAME_POSITIONS: &[(&str, usize, usize)] = &[
     // such a chain and each checked only its first component, so each let a
     // different set of words through the rest of it.
     ("SELECT A REFS Catalog.BY FROM T", 1, 1),
-    ("SELECT A FROM T FOR UPDATE Catalog.BY", 1, 1),
+    ("SELECT A FROM T FOR UPDATE Catalog.BY", 2, 1),
+    // The word left behind opens a clause of its own, so leaving without
+    // saying anything made a broken name into a whole clean query.
+    ("SELECT A FROM T FOR UPDATE Catalog.ORDER BY A", 1, 1),
 ];
 
 #[test]
