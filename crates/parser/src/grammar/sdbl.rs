@@ -231,8 +231,12 @@ pub(super) fn eat_name_here(p: &mut Parser, expected: &'static str) {
 /// delegated to the rules for variable identifiers, and a keyword landing
 /// there is documented as being read as the alias — so this must not reach
 /// one, and `КАК ИТОГИ` stays a name.
+///
+/// `КАК` itself is refused, and is not among the clause keywords: those are
+/// stated as a boundary elsewhere, and making the alias separator a boundary
+/// would cost every alias its name. Here it is only a word that cannot be one.
 pub(super) fn at_field_name(p: &Parser) -> bool {
-    at_name(p) && !select::is_clause_keyword(p)
+    at_name(p) && !select::is_clause_keyword(p) && !select::at_sdbl_keyword(p, "AS", "КАК")
 }
 
 pub(super) fn at_a_qualifying_dot(p: &Parser) -> bool {
@@ -350,11 +354,12 @@ fn drop_table_query(p: &mut Parser) {
     // Every keyword reaches the parser as an `Ident`, so a bare kind check
     // would take the next query's `ВЫБРАТЬ` for the name of the table being
     // dropped — and the package would then lose that query entirely.
-    if p.at(TokenKind::Ident) && !at_query_start(p) {
+    if at_field_name(p) {
         p.bump();
-    } else if at_query_start(p) {
-        // The next query's keyword is a boundary, like a separator: report
-        // without taking it, or the package loses the query behind it.
+    } else if p.at(TokenKind::Ident) {
+        // A keyword here belongs to whatever comes next — the following
+        // query, the following clause — so report without taking it, or the
+        // package loses what that word begins.
         p.error_custom_no_bump("ожидалось имя таблицы после 'УНИЧТОЖИТЬ' / 'DROP'");
     } else {
         p.error_custom("ожидалось имя таблицы после 'УНИЧТОЖИТЬ' / 'DROP'");

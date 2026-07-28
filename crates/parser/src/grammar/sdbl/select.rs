@@ -211,7 +211,22 @@ fn union_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblUnionClause);
 }
 
+/// A query reads its own names.
+///
+/// Every query arrives here — the package's own members, a subquery in a
+/// filter or a comparison, a parenthesised source, each member of a `UNION` —
+/// and whatever field-name scope the expression holding it was in says nothing
+/// about how its own clauses read theirs: its `УПОРЯДОЧИТЬ ПО` may name an
+/// alias its own selection declared, and an alias may spell a keyword.
+///
+/// Stated by a call owning the scope rather than by hand, because the body
+/// below returns early in several places and each of those would otherwise
+/// leave the holder's scope behind.
 fn query(p: &mut Parser) {
+    p.outside_field_names(query_content);
+}
+
+fn query_content(p: &mut Parser) {
     let m = p.start();
 
     if !eat_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ") {
@@ -477,6 +492,17 @@ fn table_ref(p: &mut Parser) {
             p.bump();
         }
         pm.complete(p, NodeKind::SdblParameter);
+        m.complete(p, NodeKind::SdblTableRef);
+        return;
+    }
+
+    // `expect` on a matching kind is refused only by a hard boundary, and a
+    // clause keyword is not one — so asking it here took `ГДЕ` for the table
+    // and the filter behind it existed nowhere. The first source of a list is
+    // reached without the list's own start check, which is why this belongs at
+    // the reference itself.
+    if p.at(TokenKind::Ident) && !super::at_field_name(p) {
+        p.error_custom_no_bump("ожидалось имя таблицы");
         m.complete(p, NodeKind::SdblTableRef);
         return;
     }

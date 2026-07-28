@@ -504,32 +504,38 @@ fn a_recovery_inside_a_query_leaves_the_clause_that_follows_it() {
 /// the same word may be an alias the select list declared. And a name
 /// carrying a dot is a qualifier, which may be the alias of a source. Both
 /// exceptions are held by `a_keyword_standing_where_a_name_belongs_is_a_name`.
-const NAME_POSITIONS: &[(&str, usize)] = &[
-    ("ВЫБРАТЬ А + ИЗ Т", 1),
-    ("ВЫБРАТЬ А ПОДОБНО ИЗ Т", 1),
-    ("ВЫБРАТЬ А ССЫЛКА ИЗ Т", 1),
-    ("ВЫБРАТЬ А ПОМЕСТИТЬ ИЗ Т", 1),
-    ("ВЫБРАТЬ А ИЗ Т ГДЕ Б = ИЗ", 2),
-    ("ВЫБРАТЬ А ИЗ Т1 ЛЕВОЕ СОЕДИНЕНИЕ Т2 ПО Т1.А = ИЗ", 2),
-    ("ВЫБРАТЬ СУММА(А) ИЗ Т СГРУППИРОВАТЬ ПО Б ИМЕЮЩИЕ СУММА(А) > ИЗ", 2),
+const NAME_POSITIONS: &[(&str, usize, usize)] = &[
+    ("ВЫБРАТЬ А + ИЗ Т", 1, 1),
+    ("ВЫБРАТЬ А ПОДОБНО ИЗ Т", 1, 1),
+    ("ВЫБРАТЬ А ССЫЛКА ИЗ Т", 1, 1),
+    ("ВЫБРАТЬ А ПОМЕСТИТЬ ИЗ Т", 1, 1),
+    ("ВЫБРАТЬ А ИЗ Т ГДЕ Б = ИЗ", 2, 1),
+    ("ВЫБРАТЬ А ИЗ Т1 ЛЕВОЕ СОЕДИНЕНИЕ Т2 ПО Т1.А = ИЗ", 2, 1),
+    ("ВЫБРАТЬ СУММА(А) ИЗ Т СГРУППИРОВАТЬ ПО Б ИМЕЮЩИЕ СУММА(А) > ИЗ", 2, 1),
+    // The name of a source, which `expect(Ident)` used to take: a matching
+    // kind is refused only by a hard boundary, and the first source of the
+    // list is reached without the list's own start check.
+    ("ВЫБРАТЬ А ИЗ ГДЕ Б", 1, 1),
+    ("УНИЧТОЖИТЬ ГДЕ", 2, 0),
+    // The alias separator is a word no name position admits either.
+    ("ВЫБРАТЬ А ССЫЛКА КАК Б ИЗ Т", 1, 1),
+    ("ВЫБРАТЬ А ПОМЕСТИТЬ КАК ИЗ Т", 1, 1),
     // A paren does not make a keyword a name. These cost more than one
-    // message because an SDBL bracketed list does not yet state the paren it
-    // ends with — the BSL half of that work is done, this half is not.
-    ("ВЫБРАТЬ (А + ИЗ) ИЗ Т", 4),
-    ("ВЫБРАТЬ ВЫРАЗИТЬ(А КАК ИЗ) ИЗ Т", 4),
-    ("ВЫБРАТЬ А ИЗ Т ГДЕ Б В (ИЗ)", 3),
-    ("ВЫБРАТЬ СУММА(ИЗ) ИЗ Т", 3),
+    // message, and the last two lose the source clause as well, because an
+    // SDBL bracketed list does not yet state the paren it ends with — the BSL
+    // half of that work is done, this half is not.
+    ("ВЫБРАТЬ (А + ИЗ) ИЗ Т", 4, 1),
+    ("ВЫБРАТЬ ВЫРАЗИТЬ(А КАК ИЗ) ИЗ Т", 4, 1),
+    ("ВЫБРАТЬ А ИЗ Т ГДЕ Б В (ИЗ)", 3, 1),
+    ("ВЫБРАТЬ СУММА(ИЗ) ИЗ Т", 3, 1),
+    ("ВЫБРАТЬ ВЫРАЗИТЬ(А КАК КАК) ИЗ Т", 3, 0),
 ];
 
 #[test]
 fn a_keyword_is_never_a_field_or_a_table_name() {
-    for (input, expected) in NAME_POSITIONS {
+    for (input, expected, sources) in NAME_POSITIONS {
         assert!(covers(input, false), "`{input}`");
-        assert_eq!(
-            clause_count(input, SyntaxKind::SDBL_FROM_CLAUSE),
-            1,
-            "`{input}` keeps its source clause"
-        );
+        assert_eq!(clause_count(input, SyntaxKind::SDBL_FROM_CLAUSE), *sources, "`{input}`");
         assert_eq!(
             messages(input, false).len(),
             *expected,
@@ -540,11 +546,20 @@ fn a_keyword_is_never_a_field_or_a_table_name() {
 }
 
 #[test]
+fn the_clause_a_taken_name_used_to_cost_is_parsed() {
+    // The point of refusing the word rather than consuming it: `ГДЕ` was the
+    // table of the source clause and `Б` was its alias, so the filter existed
+    // nowhere in the tree.
+    let input = "ВЫБРАТЬ А ИЗ ГДЕ Б";
+    assert_eq!(clause_count(input, SyntaxKind::SDBL_WHERE_CLAUSE), 1);
+}
+
+#[test]
 fn a_name_the_text_does_not_hold_is_never_accepted_in_silence() {
     // The half of this defect that is not about losing a clause: the position
     // reported nothing, so a consumer could not tell these from a query that
     // says what its author meant.
-    for (input, _) in NAME_POSITIONS {
+    for (input, _, _) in NAME_POSITIONS {
         assert!(!messages(input, false).is_empty(), "`{input}` says nothing");
     }
 }
@@ -611,6 +626,17 @@ fn a_keyword_standing_where_a_name_belongs_is_a_name() {
         "ВЫБРАТЬ А ССЫЛКА Справочник.Т ИЗ Т",
         "ВЫБРАТЬ А ПОМЕСТИТЬ Врем ИЗ Т",
         "ВЫБРАТЬ А ИЗ Т ГДЕ А МЕЖДУ 1 И 2",
+        // A query reads its own names. A subquery inside a filter, and each
+        // member of a `UNION`, order themselves by an alias their own
+        // selection declared — the scope of the clause holding them says
+        // nothing about it.
+        "ВЫБРАТЬ А ИЗ Т ГДЕ А В (ВЫБРАТЬ Б КАК Итоги ИЗ У УПОРЯДОЧИТЬ ПО Итоги)",
+        "ВЫБРАТЬ А ИЗ Т ОБЪЕДИНИТЬ ВСЕ ВЫБРАТЬ Б КАК Итоги ИЗ У УПОРЯДОЧИТЬ ПО Итоги",
+        // `КАК` is refused where a name is required, and this rule is also
+        // reached where an expression has ended and its alias follows. Eight
+        // production queries in a corpus of 3 142 814 literals hold this shape.
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ КОЛИЧЕСТВО(А) КАК А ПО Б",
+        "УНИЧТОЖИТЬ Врем",
     ] {
         let parse = parser::parse_sdbl(input);
         assert!(!parse.has_errors(), "`{input}`: {:#?}", parse.errors());

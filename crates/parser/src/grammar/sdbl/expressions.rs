@@ -418,14 +418,14 @@ fn primary_expr(p: &mut Parser) {
             column_or_function(p)
         }
 
-        // A clause keyword reaching here is an operand the text never wrote:
-        // this position admits only a field or a table name, and the source is
-        // explicit that neither may spell a keyword. Saying so beats
-        // "unexpected token", and the recovery choice stays the generic one so
-        // that a word no rule awaits is still consumed.
+        // A keyword reaching here is an operand the text never wrote. What is
+        // missing is an operand and not a field name: a literal, a parameter,
+        // a call or a parenthesised expression would all have done, and naming
+        // one of them would name the wrong thing. The recovery choice stays
+        // the generic one, so a word no rule awaits is still consumed.
         Some(TokenKind::Ident) => {
             let m = p.start();
-            p.error_custom("ожидалось имя поля, встречено ключевое слово");
+            p.error_custom("ожидался операнд, встречено ключевое слово");
             m.complete(p, NodeKind::SdblError);
         }
 
@@ -446,6 +446,14 @@ fn primary_expr(p: &mut Parser) {
 /// allowed to spell a keyword. `ПО Зак.Ссылка = Итоги.Регистратор` reads a
 /// source aliased `КАК Итоги`, and refusing the word would cost that join its
 /// condition.
+/// A clause keyword standing where only a field name can stand.
+///
+/// The alias separator is not among them, though `А + КАК Б` has no reading in
+/// which `КАК` is the operand: this rule is also reached where an expression
+/// has legitimately ended and its alias follows, and refusing `КАК` there cost
+/// eight production queries their `ИТОГИ … КАК Имя`. Telling the two apart
+/// needs to know whether the expression behind this position is complete,
+/// which is the caller's knowledge and not this one's.
 fn at_a_keyword_that_cannot_be_a_field(p: &Parser) -> bool {
     p.names_are_fields() && super::select::is_clause_keyword(p) && !next_is_a_qualifying_dot(p)
 }

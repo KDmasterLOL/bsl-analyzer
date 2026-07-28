@@ -214,6 +214,20 @@ impl<'a> Parser<'a> {
         result
     }
 
+    /// Runs `f` with the field-name scope of whatever holds it dropped.
+    ///
+    /// A nested query is its own query. The scope belongs to the clause that
+    /// declared it, and a subquery standing inside a filter must read its own
+    /// `УПОРЯДОЧИТЬ ПО` the way a top-level one does — by an alias its own
+    /// selection declared, which may spell a keyword.
+    pub fn outside_field_names<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let outer = self.names_are_fields;
+        self.names_are_fields = false;
+        let result = f(self);
+        self.names_are_fields = outer;
+        result
+    }
+
     pub fn names_are_fields(&self) -> bool {
         self.names_are_fields
     }
