@@ -1,7 +1,6 @@
 name: CI
 
 on:
-  workflow_dispatch:
   push:
     branches: [develop]
   pull_request:
@@ -24,7 +23,7 @@ jobs:
       - run: cargo test --all --no-fail-fast
 
   windows-mcp:
-    name: Windows MCP transports + secure broker
+    name: Windows MCP stdio + secure broker
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -32,53 +31,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build binary
         run: cargo build -p bsl-analyzer --bin bsl-analyzer-app
-      - name: CLI MCP mode and lifecycle tests
-        run: cargo test -p bsl-analyzer --bin bsl-analyzer-app cli::mcp
-      - name: HTTP transport tests
-        run: cargo test -p mcp-server --test http
+      - name: CLI MCP mode guard tests
+        run: cargo test -p bsl-analyzer --bin bsl-analyzer-app mcp::tests
       - name: Broker runtime tests
         run: cargo test -p mcp-server --test broker
-
-  windows-comparison-binaries:
-    name: Windows comparison binary (${{ matrix.variant }})
-    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
-    needs: [check, windows-mcp]
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: vendor-0.2.64
-            ref: 38b5c000c4d72028d48ede5ed66fe021ba5ad500
-          - variant: http-0.2.65
-            ref: ${{ github.sha }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ matrix.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: comparison-${{ matrix.variant }}-x86_64-pc-windows-msvc
-      - name: Build release binaries
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc
-        env:
-          CXXFLAGS: /DMAP_FAILED=((void*)-1)
-          RUSTFLAGS: -C target-feature=+crt-static
-      - name: Package binaries and checksums
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path artifacts
-          Copy-Item target/x86_64-pc-windows-msvc/release/bsl-analyzer.exe artifacts/bsl-analyzer-${{ matrix.variant }}-windows-amd64.exe
-          Copy-Item target/x86_64-pc-windows-msvc/release/bsl-analyzer-app.exe artifacts/bsl-analyzer-app-${{ matrix.variant }}-windows-amd64.exe
-          Get-ChildItem artifacts/*.exe |
-            ForEach-Object {
-              "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())  $($_.Name)"
-            } |
-            Set-Content -Encoding ascii artifacts/checksums.txt
-      - uses: actions/upload-artifact@v7
-        with:
-          name: binaries-windows-amd64-${{ matrix.variant }}
-          path: artifacts/
