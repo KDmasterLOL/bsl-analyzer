@@ -367,6 +367,12 @@ pub struct InferenceContext<'db> {
     /// first assignment.
     body_assigned_names: Option<rustc_hash::FxHashSet<NormName>>,
 
+    /// Memoised `bare_global_name_claim` verdicts. That lookup reaches past the
+    /// body into the module and the workspace while the body itself does not
+    /// change during a run, and the same collection root recurs throughout a
+    /// body, so it is asked once per name.
+    shadowed_root_names: FxHashMap<NormName, bool>,
+
     binding_types: FxHashMap<BindingId, TypeId>,
 
     expr_types: FxHashMap<ExprId, TypeId>,
@@ -607,6 +613,7 @@ impl<'db> InferenceContext<'db> {
             implicit_locals: FxHashMap::default(),
             assigned_var_names: rustc_hash::FxHashSet::default(),
             body_assigned_names: None,
+            shadowed_root_names: FxHashMap::default(),
             binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
@@ -868,9 +875,18 @@ impl<'db> InferenceContext<'db> {
         {
             return true;
         }
+        // Only the out-of-body half is memoised: the body checks above read
+        // state that grows as the walk proceeds (`var_types` gains loop
+        // variables), so their verdict is not stable across the run.
+        if let Some(cached) = self.shadowed_root_names.get(&key) {
+            return *cached;
+        }
         let resolver = self.get_resolver();
-        crate::platform_global_lookup::bare_global_name_claim(self.db, &resolver, None, name)
-            .is_some()
+        let claimed =
+            crate::platform_global_lookup::bare_global_name_claim(self.db, &resolver, None, name)
+                .is_some();
+        self.shadowed_root_names.insert(key, claimed);
+        claimed
     }
 
     /// Environment check for a bare manager-collection root (`Справочники`,
@@ -2059,6 +2075,19 @@ impl<'db> InferenceContext<'db> {
                     let mdo_type_plural = qualified_path.segments()[0].clone();
                     let mdo_name = qualified_path.segments()[1].clone();
                     let method_name = qualified_path.segments()[2].clone();
+                    // Lowering folds the whole chain into one node, so the root
+                    // never reaches `infer_path_name` and never meets the
+                    // barrier that keeps a held name from denoting a platform
+                    // global. It is applied here instead, on the only entry
+                    // where the root is spelled out in source: the other caller
+                    // synthesises the plural from the enclosing manager module,
+                    // where no such spelling exists to be shadowed.
+                    if self.manager_collection_shadowed(&mdo_type_plural) {
+                        for arg in args {
+                            self.infer_expr(*arg);
+                        }
+                        return self.db.unknown();
+                    }
                     return self.infer_three_level_call(
                         &mdo_type_plural,
                         &mdo_name,
