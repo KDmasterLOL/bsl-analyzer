@@ -206,13 +206,27 @@ fn collect_read_var_names(body: &hir::Body) -> FxHashSet<String> {
     read_vars
 }
 
-/// A metadata-collection name (`Справочники`, `Documents`, …) is a Global-context
-/// property, not a local: the platform refuses the write and declares nothing, so
-/// an unread assignment to it is no dead store. The write itself is reported by
-/// `GlobalPropertyNotWritable`.
-fn names_a_manager_collection(name_lower: &str) -> bool {
-    bsl_metadata::MdoType::from_plural(name_lower)
-        .is_some_and(|mdo| mdo.manager_type_prefix().is_some())
+/// Whether an unread assignment to `name_lower` stores into a Global-context
+/// property rather than declaring a local.
+///
+/// A metadata-collection name (`Справочники`, `Documents`, …) is such a property:
+/// the platform refuses the write and declares nothing, so the assignment is no
+/// dead store — `GlobalPropertyNotWritable` reports the write itself.
+///
+/// The name alone does not settle it, though. A NON-WRITABLE owner declared in the
+/// workspace — a same-named module method or common module — takes the name first,
+/// and an assignment over one of those does create a real implicit local whose
+/// being unread is a genuine finding. Writable owners (`Перем`, parameters) never
+/// reach here: `declared_vars` already excludes them.
+fn assignment_targets_a_global_property(name_lower: &str, ctx: &DiagnosticsContext) -> bool {
+    let names_a_collection = bsl_metadata::MdoType::from_plural(name_lower)
+        .is_some_and(|mdo| mdo.manager_type_prefix().is_some());
+    if !names_a_collection {
+        return false;
+    }
+    let held_by_method =
+        ctx.symbol_tree().methods().any(|method| method.name.as_str().fold_lower() == name_lower);
+    !held_by_method && !ctx.is_common_module_anywhere(name_lower)
 }
 
 fn check_method(
@@ -308,7 +322,7 @@ fn check_method(
 
                 if !declared_vars.contains(&lowercase_name)
                     && !skip_attr_names.contains(&lowercase_name)
-                    && !names_a_manager_collection(&lowercase_name)
+                    && !assignment_targets_a_global_property(&lowercase_name, ctx)
                 {
                     if let std::collections::hash_map::Entry::Vacant(e) =
                         implicit_vars.entry(lowercase_name)
@@ -360,7 +374,7 @@ fn check_module_level_code(
                 let lowercase_name = name.as_str().fold_lower();
 
                 if skip_attr_names.contains(&lowercase_name)
-                    || names_a_manager_collection(&lowercase_name)
+                    || assignment_targets_a_global_property(&lowercase_name, ctx)
                 {
                     continue;
                 }
@@ -437,6 +451,27 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
+    /// Имя коллекции может быть занято НЕИЗМЕНЯЕМЫМ объявленным владельцем —
+    /// одноимённым методом модуля или общим модулем. Писать в них нельзя, поэтому
+    /// присваивание создаёт настоящую неявную локаль, и её неиспользование —
+    /// законная находка. Фильтр по одному написанию имени глушил бы и её.
+    #[test]
+    fn assignment_over_a_same_named_method_is_still_an_unused_local() {
+        let code = "Процедура Справочники()\nКонецПроцедуры\n\nПроцедура Тест()\n    \
+                    Справочники = 1;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(code);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the method holds the name, so the assignment declares a real local"
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
+            0,
+            "and the write is not a write to the collection"
+        );
+    }
+
     /// Присваивание имени коллекции метаданных локаль не объявляет: имя
     /// принадлежит свойству глобального контекста, платформа запись отвергает.
     /// Поэтому непрочитанное присваивание ему — не мёртвая запись, а нарушение,

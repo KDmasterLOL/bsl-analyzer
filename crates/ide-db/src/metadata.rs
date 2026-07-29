@@ -1798,17 +1798,21 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
         return None;
     }
 
-    // The collection segment sits at a known distance from the end:
-    // `<…>/<Plural>/<Name>/Ext/<ModuleFile>.bsl`, and the `Ext` level is optional.
-    // Both candidates are tried outside-in, so an OBJECT named after a collection
-    // cannot win over the real type — scanning for the LAST plural-looking segment
-    // would make `Catalogs/Constants/Ext/ManagerModule.bsl` unparsable.
-    let type_idx =
-        [parts.len().checked_sub(4), parts.len().checked_sub(3)]
-            .into_iter()
-            .flatten()
-            .find(|&i| mdo_type_from_plural(parts[i]).is_some() || parts[i] == "CommonModules")?;
+    // The collection segment sits at a fixed distance from the end —
+    // `<…>/<Plural>/<Name>/Ext/<ModuleFile>.bsl` — and the `Ext` level is optional,
+    // so which distance applies is decided by whether that level is present, not by
+    // which segment happens to look like a collection. Guessing by appearance fails
+    // both ways: an OBJECT named after a collection would take the type
+    // (`Catalogs/Constants/Ext/…`), and so would an unrelated ANCESTOR directory
+    // (`C:/Users/…/Documents/Catalogs/Товары/…`).
+    let has_ext_level = parts[parts.len() - 2].eq_ignore_ascii_case("Ext");
+    let distance_from_end = if has_ext_level { 4 } else { 3 };
+    let type_idx = parts.len().checked_sub(distance_from_end)?;
     let type_plural = parts[type_idx];
+
+    if mdo_type_from_plural(type_plural).is_none() && type_plural != "CommonModules" {
+        return None;
+    }
 
     let name = parts[type_idx + 1].to_string();
 
@@ -2149,6 +2153,19 @@ mod tests {
                 "src/cf/Documents/Enums/Ext/ObjectModule.bsl",
                 bsl_metadata::MdoType::Document,
                 "Enums",
+            ),
+            // Каталог-предок может называться как коллекция (типичный случай —
+            // `C:\Users\...\Documents`), и у пути без `Ext` он стоит ровно там, где
+            // при наличии `Ext` стоит настоящая коллекция.
+            (
+                "/home/Documents/Catalogs/Товары/ManagerModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Товары",
+            ),
+            (
+                r"C:\Users\Alice\Documents\Catalogs\Товары\ManagerModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Товары",
             ),
             // Сегмент `Ext` не обязателен — так выглядят фикстуры и часть выгрузок.
             ("/Catalogs/Constants/ManagerModule.bsl", bsl_metadata::MdoType::Catalog, "Constants"),
