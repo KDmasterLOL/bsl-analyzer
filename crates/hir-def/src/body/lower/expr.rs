@@ -911,7 +911,7 @@ fn maybe_lower_as_qualified_call(
                 range: call_node.text_range(),
             });
 
-            if let Some(manager_type) = parse_manager_type(&mdo_type) {
+            if let Some(manager_type) = ManagerType::from_name(&mdo_type) {
                 ctx.external_refs.push(ExternalRef::ManagerAccess {
                     manager_type,
                     object_name: Name::new(&mdo_name),
@@ -1643,23 +1643,6 @@ fn find_string_in_node(node: &SyntaxNode) -> Option<String> {
         }
     }
     None
-}
-
-fn parse_manager_type(mdo_type: &str) -> Option<ManagerType> {
-    let lower = mdo_type.fold_lower();
-    match lower.as_str() {
-        "документы" | "documents" => Some(ManagerType::Documents),
-        "справочники" | "catalogs" => Some(ManagerType::Catalogs),
-        "обработки" | "dataprocessors" => Some(ManagerType::DataProcessors),
-        "отчёты" | "отчеты" | "reports" => Some(ManagerType::Reports),
-        "регистрысведений" | "informationregisters" => {
-            Some(ManagerType::InformationRegisters)
-        }
-        "регистрынакопления" | "accumulationregisters" => {
-            Some(ManagerType::AccumulationRegisters)
-        }
-        _ => None,
-    }
 }
 
 fn check_find_element_first_arg(args: &[ExprIdx], ctx: &LoweringCtx) -> bool {

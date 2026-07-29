@@ -82,6 +82,90 @@ fn three_level_missing_mdo_emits_unresolved() {
 }
 
 #[test]
+fn config_less_collection_member_promotes_to_object_manager() {
+    let fixture = r#"
+//- /Documents/ПКО/Ext/ManagerModule.bsl
+Процедура Метод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    М = Документы.ПКО;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    // An unknown type is not recorded at all, so a missing key means the promotion failed.
+    let ty = db.infer(file_id).var_types.get("м").copied();
+    let shape = ty.map(|ty| format!("{:?}", db.lookup_type(ty)));
+    assert!(
+        ty.is_some_and(|ty| matches!(db.lookup_type(ty), TypeKind::ObjectManager(_))),
+        "without a visible config the manager module found by path proves the object exists, \
+         exactly as locate_manager_module already decides; got {shape:?}"
+    );
+}
+
+#[test]
+fn visible_config_outranks_a_manager_module_on_disk() {
+    let fixture = r#"
+//- /Documents/ПКО/Ext/ManagerModule.bsl
+Процедура Метод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    М = Документы.ПКО;
+КонецПроцедуры
+"#;
+    let (mut db, file_id) = setup(fixture);
+    assert!(db.infer(file_id).var_types.contains_key("м"), "config-less baseline must promote");
+
+    db.set_all_config_paths(vec![(None, std::path::PathBuf::from("/does-not-exist"))]);
+    let ty = db.infer(file_id).var_types.get("м").copied();
+    let shape = ty.map(|ty| format!("{:?}", db.lookup_type(ty)));
+    assert!(
+        ty.is_none(),
+        "with configs visible they alone declare what exists — a module file must not \
+         resurrect an undeclared object; got {shape:?}"
+    );
+}
+
+#[test]
+fn self_qualified_call_in_report_manager_still_checks_the_method() {
+    let fixture = r#"
+//- /Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl
+Процедура Тест()
+    ТестовыйОтчёт.НетТакогоМетода();
+КонецПроцедуры
+"#;
+    let (db, file_id) =
+        setup_with_designer_config(fixture, "/Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl");
+    assert_eq!(
+        unresolved_kinds(&db, file_id),
+        vec![UnresolvedMethodKind::MethodNotFound],
+        "a self-qualified call is re-resolved as the collection-qualified one, so a \
+         misspelled method keeps its diagnostic"
+    );
+}
+
+#[test]
+fn self_qualified_call_in_constant_manager_still_checks_the_method() {
+    let fixture = r#"
+//- /Constants/СтрокаКонст/Ext/ManagerModule.bsl
+Процедура Тест()
+    СтрокаКонст.НетТакогоМетода();
+КонецПроцедуры
+"#;
+    let (db, file_id) =
+        setup_with_designer_config(fixture, "/Constants/СтрокаКонст/Ext/ManagerModule.bsl");
+    assert_eq!(
+        unresolved_kinds(&db, file_id),
+        vec![UnresolvedMethodKind::MethodNotFound],
+        "constants own a manager module like any other manager-backed kind — the \
+         self-qualified call must be checked the same way"
+    );
+}
+
+#[test]
 fn three_level_non_exported_method_emits_method_not_export() {
     let fixture = r#"
 //- /Documents/ПКО/Ext/ManagerModule.bsl

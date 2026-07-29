@@ -221,6 +221,14 @@ pub enum InferenceDiagnostic {
         field_name: Name,
     },
 
+    /// Assignment to a bare Global-context property (`Справочники = …`). The
+    /// platform refuses the write and declares no local, so the statement has no
+    /// effect a reader could rely on — and the name keeps denoting the global.
+    GlobalPropertyNotWritable {
+        lhs: ExprId,
+        name: Name,
+    },
+
     DeprecatedPlatformMember {
         expr: ExprId,
         type_name: Name,
@@ -359,13 +367,6 @@ pub struct InferenceContext<'db> {
     implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
 
     assigned_var_names: rustc_hash::FxHashSet<NormName>,
-
-    /// Names assigned anywhere in this body, computed on first demand.
-    /// Unlike `assigned_var_names`, which grows as the statement walk
-    /// progresses, this set is body-wide: a BSL implicit local shadows a
-    /// global in the whole procedure, including reads that precede its
-    /// first assignment.
-    body_assigned_names: Option<rustc_hash::FxHashSet<NormName>>,
 
     /// Memoised `bare_global_name_claim` verdicts. That lookup reaches past the
     /// body into the module and the workspace while the body itself does not
@@ -612,7 +613,6 @@ impl<'db> InferenceContext<'db> {
             var_types: FxHashMap::default(),
             implicit_locals: FxHashMap::default(),
             assigned_var_names: rustc_hash::FxHashSet::default(),
-            body_assigned_names: None,
             shadowed_root_names: FxHashMap::default(),
             binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
@@ -790,6 +790,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
             InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
             InferenceDiagnostic::ReadOnlyPropertyAssignment { lhs, .. } => *lhs,
+            InferenceDiagnostic::GlobalPropertyNotWritable { lhs, .. } => *lhs,
             InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
             InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
             InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
@@ -845,39 +846,23 @@ impl<'db> InferenceContext<'db> {
         });
     }
 
-    fn body_assigned_names(&mut self) -> &rustc_hash::FxHashSet<NormName> {
-        if self.body_assigned_names.is_none() {
-            let mut names = rustc_hash::FxHashSet::default();
-            for (_, stmt) in self.body.stmts_iter() {
-                if let Stmt::Assign { target, .. } = stmt {
-                    if let Expr::Path(name) = self.body.expr(ExprId::from_idx(*target)) {
-                        names.insert(NormName::intern(name.as_str()));
-                    }
-                }
-            }
-            self.body_assigned_names = Some(names);
-        }
-        self.body_assigned_names.as_ref().expect("filled above")
-    }
-
     /// True when a bare manager-collection name is shadowed by a user symbol
-    /// and thus does not denote the platform global: a body binding or typed
-    /// local/parameter, an assignment anywhere in the body, a module-level
-    /// variable or method, a form attribute or form-self property, an
-    /// implicit `ЭтотОбъект`/record-set member, or a workspace common module.
-    /// Shadowing is judged body-wide and preprocessor-blind, like every other
+    /// and thus does not denote the platform global: a body binding (`Перем`,
+    /// parameter, loop variable), a module-level variable or method, a form
+    /// attribute or form-self property, an implicit `ЭтотОбъект`/record-set
+    /// member, or a workspace common module.
+    ///
+    /// A plain assignment does NOT shadow. `Справочники = Новый Структура` does
+    /// not declare a local: the name belongs to a Global-context property, and
+    /// the platform refuses the write rather than creating a variable, so the
+    /// name keeps denoting the collection throughout the body. Only a DECLARED
+    /// owner takes it. Shadowing is preprocessor-blind, like every other
     /// shadowing decision in inference.
     fn manager_collection_shadowed(&mut self, name: &Name) -> bool {
         let key = NormName::intern(name.as_str());
-        if self.body_declares_binding(name)
-            || self.var_types.contains_key(&key)
-            || self.body_assigned_names().contains(&key)
-        {
+        if self.body_declares_binding(name) {
             return true;
         }
-        // Only the out-of-body half is memoised: the body checks above read
-        // state that grows as the walk proceeds (`var_types` gains loop
-        // variables), so their verdict is not stable across the run.
         if let Some(cached) = self.shadowed_root_names.get(&key) {
             return *cached;
         }
@@ -1350,6 +1335,9 @@ impl<'db> InferenceContext<'db> {
                         } else {
                             crate::form_self::resolve_form_self_property(self.db, &resolver, name)
                         };
+                        let unheld_collection = bsl_metadata::MdoType::from_plural(name.as_str())
+                            .filter(|mdo| mdo.manager_type_prefix().is_some())
+                            .filter(|_| !self.manager_collection_shadowed(name));
                         match form_self_resolution {
                             Some(prop) => {
                                 if prop.is_readonly {
@@ -1366,6 +1354,25 @@ impl<'db> InferenceContext<'db> {
                                 }
                             }
                             None if existing_module_variable => {}
+                            // Writing to an unheld metadata-collection name targets a
+                            // Global-context property, which the platform refuses — no
+                            // local is declared. Type the target as the collection and
+                            // stop: the availability check belongs to READING a member,
+                            // and the illegal write is a different defect, not yet
+                            // reported.
+                            None if unheld_collection.is_some() => {
+                                self.push_inference_diagnostic(
+                                    InferenceDiagnostic::GlobalPropertyNotWritable {
+                                        lhs: target_id,
+                                        name: name.clone(),
+                                    },
+                                );
+                                let collection = self
+                                    .db
+                                    .manager_collection(unheld_collection.expect("just checked"));
+                                self.expr_types.insert(target_id, collection);
+                                infer_target = false;
+                            }
                             None => {
                                 let key = name.as_str().fold_lower();
                                 let norm_key = NormName::intern(name.as_str());
@@ -1966,13 +1973,18 @@ impl<'db> InferenceContext<'db> {
         // name rules them all out. Declared bindings, module variables/methods,
         // form and `ЭтотОбъект` members have already returned above; what remains
         // is an implicit local written earlier in this body and a workspace common
-        // module. Re-typing a held name as the same-named global would contradict
-        // `manager_collection_shadowed`, which the availability diagnostic uses to
-        // stay silent on exactly these reads.
-        let user_holds_name = workspace_owns_common_module
-            || self.assigned_var_names.contains(&NormName::intern(name.as_str()));
+        // module.
+        let assigned_in_body = self.assigned_var_names.contains(&NormName::intern(name.as_str()));
+        let user_holds_name = workspace_owns_common_module || assigned_in_body;
 
-        if !user_holds_name {
+        // Metadata collections are the exception, and it is not a stylistic one: a
+        // collection name is a Global-context PROPERTY, and assigning to it does not
+        // declare a local — the platform refuses the write ("property is not
+        // writable") — so the name keeps denoting the collection throughout the body.
+        // Only a declared owner takes it, and every declared owner has returned
+        // above. `manager_collection_shadowed` judges the same way, so this typing
+        // and the availability diagnostic stay in agreement.
+        if !workspace_owns_common_module {
             if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(name.as_str()) {
                 if mdo_type.manager_type_prefix().is_some() {
                     trace!("resolved {} as manager collection {:?}", name, mdo_type);
@@ -2878,7 +2890,7 @@ impl<'db> InferenceContext<'db> {
                 // Resolve the call as the equivalent collection-qualified call so the
                 // method is still validated (a misspelled self-method keeps its
                 // unresolved-call diagnostic) and the return type stays precise.
-                if let Some(plural) = mdo_type_to_plural(mdo_type) {
+                if let Some(plural) = mdo_type.russian_plural() {
                     return Some(self.infer_three_level_call(
                         &Name::new(plural),
                         &self_name,
@@ -3119,42 +3131,20 @@ fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<h
             Some(hir_def::Name::new(&format!("{}.{}", plural, facet.name.as_str())))
         }
         TypeKind::ThisObject { owner, .. } | TypeKind::ThisManager { owner, .. } => {
-            let plural = mdo_type_to_plural(owner.mdo_type)?;
+            let plural = owner.mdo_type.russian_plural()?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, owner.name.as_str())))
         }
         TypeKind::ObjectManager(facet) => {
-            let plural = mdo_type_to_plural(facet.mdo)?;
+            let plural = facet.mdo.russian_plural()?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, facet.name.as_str())))
         }
         TypeKind::FormData { kind: FormDataFacet::Collection, underlying: Some(underlying) } => {
-            let plural = mdo_type_to_plural(underlying.mdo_type)?;
+            let plural = underlying.mdo_type.russian_plural()?;
             let name = &underlying.name;
             Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
         }
         _ => None,
     }
-}
-
-fn mdo_type_to_plural(mdo_type: bsl_metadata::MdoType) -> Option<&'static str> {
-    use bsl_metadata::MdoType;
-    Some(match mdo_type {
-        MdoType::Document => "Документы",
-        MdoType::Catalog => "Справочники",
-        MdoType::InformationRegister => "РегистрыСведений",
-        MdoType::AccumulationRegister => "РегистрыНакопления",
-        MdoType::AccountingRegister => "РегистрыБухгалтерии",
-        MdoType::CalculationRegister => "РегистрыРасчета",
-        MdoType::ChartOfCharacteristicTypes => "ПланыВидовХарактеристик",
-        MdoType::ChartOfAccounts => "ПланыСчетов",
-        MdoType::ChartOfCalculationTypes => "ПланыВидовРасчета",
-        MdoType::BusinessProcess => "БизнесПроцессы",
-        MdoType::Task => "Задачи",
-        MdoType::Enum => "Перечисления",
-        MdoType::ExchangePlan => "ПланыОбмена",
-        MdoType::DataProcessor => "Обработки",
-        MdoType::Report => "Отчеты",
-        _ => return None,
-    })
 }
 
 fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
@@ -3203,7 +3193,7 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         | MetadataKind::RegisterAttribute { .. }
         | MetadataKind::RegisterFilter { .. } => return None,
     };
-    mdo_type_to_plural(mdo)
+    mdo.russian_plural()
 }
 
 #[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap, returns(clone))]

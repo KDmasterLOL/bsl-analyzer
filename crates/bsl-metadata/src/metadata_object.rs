@@ -159,6 +159,38 @@ impl MdoType {
         }
     }
 
+    /// The Russian collection name a manager-backed object is addressed through
+    /// (`Справочники.Товары`). `None` for the kinds that own no manager module
+    /// and therefore have no collection — they are named directly.
+    ///
+    /// The inverse of [`Self::from_plural`], which also accepts the English
+    /// spellings; this one canonicalises to Russian, so a diagnostic naming a
+    /// receiver reads the same however the source spelled it.
+    pub fn russian_plural(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Catalog => "Справочники",
+            Self::Document => "Документы",
+            Self::InformationRegister => "РегистрыСведений",
+            Self::AccumulationRegister => "РегистрыНакопления",
+            Self::AccountingRegister => "РегистрыБухгалтерии",
+            Self::CalculationRegister => "РегистрыРасчета",
+            Self::ChartOfCharacteristicTypes => "ПланыВидовХарактеристик",
+            Self::ChartOfAccounts => "ПланыСчетов",
+            Self::ChartOfCalculationTypes => "ПланыВидовРасчета",
+            Self::BusinessProcess => "БизнесПроцессы",
+            Self::Task => "Задачи",
+            Self::Enum => "Перечисления",
+            Self::ExchangePlan => "ПланыОбмена",
+            Self::ExternalDataSource => "ВнешниеИсточникиДанных",
+            Self::Constant => "Константы",
+            Self::DataProcessor => "Обработки",
+            Self::Report => "Отчеты",
+            Self::CommonModule | Self::EventSubscription | Self::Subsystem | Self::Role => {
+                return None
+            }
+        })
+    }
+
     pub fn is_russian_keyword(&self, keyword: &str) -> bool {
         let keyword_lower = keyword.fold_lower();
         let russian_lower = self.russian_name().fold_lower();
@@ -1013,6 +1045,65 @@ impl std::fmt::Display for AttributeType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn russian_plural_covers_exactly_the_manager_backed_kinds() {
+        for &mdo in MdoType::all() {
+            assert_eq!(
+                mdo.russian_plural().is_some(),
+                mdo.manager_type_prefix().is_some(),
+                "{mdo:?}: a collection name exists iff a manager module does"
+            );
+        }
+    }
+
+    #[test]
+    fn russian_plural_round_trips_through_from_plural() {
+        for &mdo in MdoType::all() {
+            let Some(plural) = mdo.russian_plural() else {
+                continue;
+            };
+            assert_eq!(
+                MdoType::from_plural(plural),
+                Some(mdo),
+                "{mdo:?}: '{plural}' must resolve back to the same kind"
+            );
+        }
+    }
+
+    #[test]
+    fn russian_plural_is_spelled_in_russian() {
+        // The round-trip alone does not pin the language: `from_plural` accepts the
+        // English spellings too, so "Constants" would satisfy it while breaking the
+        // canonicalisation every diagnostic message relies on.
+        let expected = [
+            (MdoType::Catalog, "Справочники"),
+            (MdoType::Document, "Документы"),
+            (MdoType::InformationRegister, "РегистрыСведений"),
+            (MdoType::AccumulationRegister, "РегистрыНакопления"),
+            (MdoType::AccountingRegister, "РегистрыБухгалтерии"),
+            (MdoType::CalculationRegister, "РегистрыРасчета"),
+            (MdoType::ChartOfCharacteristicTypes, "ПланыВидовХарактеристик"),
+            (MdoType::ChartOfAccounts, "ПланыСчетов"),
+            (MdoType::ChartOfCalculationTypes, "ПланыВидовРасчета"),
+            (MdoType::BusinessProcess, "БизнесПроцессы"),
+            (MdoType::Task, "Задачи"),
+            (MdoType::Enum, "Перечисления"),
+            (MdoType::ExchangePlan, "ПланыОбмена"),
+            (MdoType::ExternalDataSource, "ВнешниеИсточникиДанных"),
+            (MdoType::Constant, "Константы"),
+            (MdoType::DataProcessor, "Обработки"),
+            (MdoType::Report, "Отчеты"),
+        ];
+        for (mdo, plural) in expected {
+            assert_eq!(mdo.russian_plural(), Some(plural), "{mdo:?}");
+        }
+        assert_eq!(
+            expected.len(),
+            MdoType::all().iter().filter(|mdo| mdo.manager_type_prefix().is_some()).count(),
+            "every manager-backed kind must be pinned by name here"
+        );
+    }
 
     #[test]
     fn is_standard_attribute_name_matches_every_kind() {

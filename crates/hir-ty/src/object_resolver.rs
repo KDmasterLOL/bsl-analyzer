@@ -22,6 +22,17 @@ pub trait ObjectResolver {
 
     fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>>;
 
+    /// Evidence that the object exists when no configuration is visible to the
+    /// current file: a manager module found by path. With configs visible they
+    /// are the sole authority over existence and this must answer `false`, so a
+    /// stray module file cannot resurrect an object the configs do not declare.
+    ///
+    /// Mirrors the `file_has_visible_config` escape in
+    /// `hir_def::Resolver::locate_manager_module`, which already resolves
+    /// manager methods this way — without it a config-less project types the
+    /// same chain as `Unknown` while its methods resolve.
+    fn manager_module_without_config(&self, mdo_type: MdoType, name: &str) -> bool;
+
     fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name>;
 
     fn metadata_reference_members(&self, kind: MetadataReferenceKind) -> Vec<Name>;
@@ -73,6 +84,20 @@ impl<D: ConfigsDatabase + ?Sized> ObjectResolver for DbObjectResolver<'_, D> {
 
     fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>> {
         self.db.resolve_register(self.file_id, mdo_type, name)
+    }
+
+    fn manager_module_without_config(&self, mdo_type: MdoType, name: &str) -> bool {
+        if self.db.file_has_visible_config(self.file_id) {
+            return false;
+        }
+        let Some(manager_type) = hir_def::body::ManagerType::from_mdo_type(mdo_type) else {
+            return false;
+        };
+        let source_root_id = self.db.file_source_root_input(self.file_id).source_root_id(self.db);
+        self.db
+            .module_index(source_root_id)
+            .resolve_manager(manager_type, &Name::new(name))
+            .is_some()
     }
 
     fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name> {
@@ -218,6 +243,12 @@ impl ObjectResolver for ConfigsObjectResolver<'_> {
             }
         }
         merged.map(Arc::new)
+    }
+
+    fn manager_module_without_config(&self, _mdo_type: MdoType, _name: &str) -> bool {
+        // Configs are this resolver's whole world; it has neither a file nor a
+        // module index, so it never holds the config-less evidence.
+        false
     }
 
     fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name> {

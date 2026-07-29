@@ -9,6 +9,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::TypeMismatchByDocComment,
     DiagnosticCode::UnresolvedField,
     DiagnosticCode::ReadOnlyPropertyAssignment,
+    DiagnosticCode::GlobalPropertyNotWritable,
     DiagnosticCode::DeprecatedPlatformApi,
     DiagnosticCode::RedundantAccessToObject,
     DiagnosticCode::MissedRequiredParameter,
@@ -87,6 +88,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
         InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
         InferenceDiagnostic::ReadOnlyPropertyAssignment { lhs, .. } => *lhs,
+        InferenceDiagnostic::GlobalPropertyNotWritable { lhs, .. } => *lhs,
         InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
         InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
         InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
@@ -151,6 +153,9 @@ fn dispatch_inference_diagnostic(
         }
         InferenceDiagnostic::ReadOnlyPropertyAssignment { receiver_ty, field_name, .. } => {
             handlers::read_only_property::from_hir(*receiver_ty, field_name, range, ctx)
+        }
+        InferenceDiagnostic::GlobalPropertyNotWritable { name, .. } => {
+            handlers::global_property_not_writable::from_hir(name, range, ctx)
         }
         InferenceDiagnostic::DeprecatedPlatformMember {
             type_name,

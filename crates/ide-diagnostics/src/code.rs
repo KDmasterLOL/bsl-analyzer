@@ -171,6 +171,7 @@ pub enum DiagnosticCode {
     TypeMismatchByDocComment,
     UnresolvedField,
     ReadOnlyPropertyAssignment,
+    GlobalPropertyNotWritable,
     UnavailableInEnvironment,
     ModuleAccessibility,
 

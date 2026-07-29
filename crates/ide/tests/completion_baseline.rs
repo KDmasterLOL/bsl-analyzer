@@ -459,7 +459,7 @@ fn completion_after_dot_on_array_variable_typed_prefix_full_ident() {
 }
 
 #[test]
-fn completion_after_dot_inside_preproc_branch_offers_members_of_local() {
+fn completion_after_dot_inside_preproc_branch_has_no_local_to_offer() {
     let items = complete(
         r#"//- /test.bsl
 &НаСервере
@@ -473,9 +473,11 @@ fn completion_after_dot_inside_preproc_branch_offers_members_of_local() {
     );
 
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    // Assigning to a Global-context property declares no local, so there is no
+    // `Структура` here — inside a preprocessor branch just as outside it.
     assert!(
-        has_label(&items, "Вставить"),
-        "члены типа затенённой локали должны предлагаться внутри #Если, как и вне ветки; got: {labels:?}"
+        !has_label(&items, "Вставить"),
+        "no local of type Структура exists, inside #Если or out; got: {labels:?}"
     );
 }
 

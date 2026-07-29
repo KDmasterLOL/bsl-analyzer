@@ -1822,40 +1822,14 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
     Some(ModulePathInfo { mdo_type, name: Some(name), module_type })
 }
 
+/// The directory segment naming a manager-backed collection (`Constants`,
+/// `Справочники`, …).
+///
+/// `CommonModules` is deliberately not one of them: it owns no manager module,
+/// and the caller matches that segment by name to keep its own branch.
 fn mdo_type_from_plural(type_plural: &str) -> Option<bsl_metadata::MdoType> {
-    match type_plural {
-        "Catalogs" | "Справочники" => Some(bsl_metadata::MdoType::Catalog),
-        "Documents" | "Документы" => Some(bsl_metadata::MdoType::Document),
-        "BusinessProcesses" | "БизнесПроцессы" => {
-            Some(bsl_metadata::MdoType::BusinessProcess)
-        }
-        "Tasks" | "Задачи" => Some(bsl_metadata::MdoType::Task),
-        "ExchangePlans" | "ПланыОбмена" => Some(bsl_metadata::MdoType::ExchangePlan),
-        "ChartsOfAccounts" | "ПланыСчетов" => {
-            Some(bsl_metadata::MdoType::ChartOfAccounts)
-        }
-        "ChartsOfCalculationTypes" | "ПланыВидовРасчета" => {
-            Some(bsl_metadata::MdoType::ChartOfCalculationTypes)
-        }
-        "ChartsOfCharacteristicTypes" | "ПланыВидовХарактеристик" => {
-            Some(bsl_metadata::MdoType::ChartOfCharacteristicTypes)
-        }
-        "InformationRegisters" | "РегистрыСведений" => {
-            Some(bsl_metadata::MdoType::InformationRegister)
-        }
-        "AccumulationRegisters" | "РегистрыНакопления" => {
-            Some(bsl_metadata::MdoType::AccumulationRegister)
-        }
-        "AccountingRegisters" | "РегистрыБухгалтерии" => {
-            Some(bsl_metadata::MdoType::AccountingRegister)
-        }
-        "CalculationRegisters" | "РегистрыРасчета" => {
-            Some(bsl_metadata::MdoType::CalculationRegister)
-        }
-        "DataProcessors" | "Обработки" => Some(bsl_metadata::MdoType::DataProcessor),
-        "Reports" | "Отчеты" => Some(bsl_metadata::MdoType::Report),
-        _ => None,
-    }
+    bsl_metadata::MdoType::from_plural(type_plural)
+        .filter(|mdo| mdo.manager_type_prefix().is_some())
 }
 
 pub fn find_metadata_object<DB: MetadataDb>(

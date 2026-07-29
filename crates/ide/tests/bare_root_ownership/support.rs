@@ -25,7 +25,11 @@ pub(super) enum Owner {
     /// Nobody claims it, in a hand-written configuration. Tells "shadowing
     /// works" apart from "this configuration resolves nothing at all".
     UnheldSynthetic,
-    Local,
+    /// A bare `Справочники = …` with no declaration. This claims NOTHING: the
+    /// name belongs to a Global-context property, and the platform refuses the
+    /// write instead of declaring a local, so the collection keeps the name. It
+    /// serves as a control — the surfaces must still answer for the platform.
+    ImplicitAssignment,
     Parameter,
     ModuleVariable,
     ModuleMethod,
@@ -39,8 +43,7 @@ impl Owner {
     /// answer for none of them. Enumerated, not sampled: fixing one
     /// representative and calling the class closed is what let the same defect
     /// return through a different owner four times.
-    pub(super) const HELD: [Owner; 7] = [
-        Owner::Local,
+    pub(super) const HELD: [Owner; 6] = [
         Owner::Parameter,
         Owner::ModuleVariable,
         Owner::ModuleMethod,
@@ -49,10 +52,16 @@ impl Owner {
         Owner::CommonModule,
     ];
 
+    /// Every case where the name still denotes the platform collection. These are
+    /// the controls: without them an absent platform answer would equally mean
+    /// "ownership is respected" and "this surface answers nothing here".
+    pub(super) const UNHELD: [Owner; 3] =
+        [Owner::Unheld, Owner::UnheldSynthetic, Owner::ImplicitAssignment];
+
     /// The module text claiming the name around `stmt`.
     fn wrap(self, stmt: &str) -> String {
         match self {
-            Owner::Local => format!(
+            Owner::ImplicitAssignment => format!(
                 "Функция Тест()\n    Справочники = НеизвестнаяФункция();\n    \
                  {stmt}\nКонецФункции\n"
             ),
@@ -102,7 +111,7 @@ pub(super) fn scenario(owner: Owner, stmt: &str) -> Scenario {
     let source = owner.wrap(stmt);
     match owner {
         Owner::Unheld
-        | Owner::Local
+        | Owner::ImplicitAssignment
         | Owner::Parameter
         | Owner::ModuleVariable
         | Owner::ModuleMethod => {

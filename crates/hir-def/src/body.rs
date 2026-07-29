@@ -1049,6 +1049,36 @@ mod tests {
     use ordered_float::NotNan;
 
     #[test]
+    fn every_manager_type_yields_a_manager_access_ref() {
+        // Dependency discovery must over-approximate: a missing `ManagerAccess`
+        // silently drops a file dependency, which no diagnostic or edge comparison
+        // would surface.
+        for &mdo in bsl_metadata::MdoType::all() {
+            let Some(manager_type) = ManagerType::from_mdo_type(mdo) else {
+                continue;
+            };
+            let plural = mdo.russian_plural().expect("manager-backed kinds name a collection");
+            let code = format!("Процедура Тест()\n    {plural}.Объект1.Метод();\nКонецПроцедуры");
+            let parse = parser::parse(&code);
+            let method = parse
+                .syntax_node()
+                .descendants()
+                .find(|node| node.kind() == syntax::SyntaxKind::PROCEDURE_DEF)
+                .expect("fixture declares a procedure");
+            let lowered = lower_method_with_externals(&method, false, None);
+            assert!(
+                lowered.external_refs.iter().any(|r| matches!(
+                    r,
+                    ExternalRef::ManagerAccess { manager_type: found, object_name, .. }
+                        if *found == manager_type && object_name.as_str() == "Объект1"
+                )),
+                "{manager_type:?} ({plural}) must produce a ManagerAccess ref; got {:?}",
+                lowered.external_refs
+            );
+        }
+    }
+
+    #[test]
     fn manager_type_to_mdo_type_round_trips() {
         let all = [
             ManagerType::Documents,

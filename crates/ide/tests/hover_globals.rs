@@ -130,7 +130,7 @@ fn hover_mdo_plural_shows_hbk_description_when_present() {
 }
 
 #[test]
-fn hover_mdo_plural_implicit_rebind_renders_rebound_shape() {
+fn hover_mdo_plural_assigned_from_another_collection_keeps_its_own_shape() {
     if !hbk_globals_available() {
         return;
     }
@@ -142,23 +142,21 @@ fn hover_mdo_plural_implicit_rebind_renders_rebound_shape() {
 КонецПроцедуры
 "#,
     )
-    .expect("hover should resolve at rebound site");
+    .expect("hover should resolve");
+    // The assignment writes to a Global-context property and rebinds nothing, so
+    // `Документы` is still the document collection — not the catalog one.
     assert!(
-        markup.contains("СправочникМенеджер"),
-        "rebound workspace shape must surface; markup: {markup}"
+        !markup.contains("СправочникМенеджер"),
+        "the assignment cannot turn Документы into the catalog collection; markup: {markup}"
     );
     assert!(
-        !markup.contains("Только чтение"),
-        "HBK readonly marker leaked despite rebind disagreement; markup: {markup}"
-    );
-    assert!(
-        !markup.contains("Документы (Documents)"),
-        "HBK bilingual title leaked despite rebind disagreement; markup: {markup}"
+        markup.contains("ДокументМенеджер") || markup.contains("Документы (Documents)"),
+        "the document collection is what the name denotes; markup: {markup}"
     );
 }
 
 #[test]
-fn hover_mdo_plural_primitive_shadow_renders_rebound_shape() {
+fn hover_mdo_plural_assigned_a_primitive_keeps_the_collection_card() {
     if !hbk_globals_available() {
         return;
     }
@@ -170,18 +168,12 @@ fn hover_mdo_plural_primitive_shadow_renders_rebound_shape() {
 КонецПроцедуры
 "#,
     )
-    .expect("hover should resolve at rebound site");
+    .expect("hover should resolve");
+    // Assigning a string declares no local either: the platform refuses the write,
+    // so the name is still the collection and the HBK card applies.
     assert!(
-        !markup.contains("Только чтение"),
-        "HBK readonly marker leaked despite primitive shadow; markup: {markup}"
-    );
-    assert!(
-        !markup.contains("Документы (Documents)"),
-        "HBK bilingual title leaked despite primitive shadow; markup: {markup}"
-    );
-    assert!(
-        !markup.contains("Используется для доступа"),
-        "HBK description leaked despite primitive shadow; markup: {markup}"
+        markup.contains("Документы (Documents)"),
+        "the collection card is the honest answer; markup: {markup}"
     );
 }
 
@@ -380,7 +372,7 @@ fn hover_implicit_local_of_unknown_type_shadows_hbk_property() {
 /// complete set of such readings; each was verified to leak before the guard
 /// moved to the caller.
 #[test]
-fn held_name_suppresses_metadata_collection_card() {
+fn assigned_collection_name_still_shows_the_collection_card() {
     let markup = hover_markup(
         r#"//- /test.bsl
 Процедура Тест()
@@ -389,9 +381,11 @@ fn held_name_suppresses_metadata_collection_card() {
 КонецПроцедуры
 "#,
     );
+    // An assignment to a Global-context property declares no local, so the read is
+    // still the collection and its card is the honest answer.
     assert!(
-        markup.as_deref().is_none_or(|m| !m.contains("СправочникМенеджер")),
-        "metadata-collection card leaked for a held name; markup: {markup:?}"
+        markup.as_deref().is_some_and(|m| m.contains("СправочникМенеджер")),
+        "the name still denotes the collection; markup: {markup:?}"
     );
 }
 

@@ -61,7 +61,7 @@ fn unheld_manager_chain_resolves_signature() {
 }
 
 #[test]
-fn local_holding_manager_root_does_not_resolve_manager_signature() {
+fn assignment_to_the_root_still_resolves_the_manager_signature() {
     let (analysis, file_id, offset) = setup(
         r#"//- /test.bsl
 Функция Тест()
@@ -72,8 +72,8 @@ fn local_holding_manager_root_does_not_resolve_manager_signature() {
     );
     let help = analysis.signature_help(file_id, offset);
     assert!(
-        help.is_none(),
-        "a local holds the root — the manager method's signature must not be offered; got: {:?}",
-        help.map(|h| h.signatures.len())
+        help.is_some(),
+        "an assignment declares no local, so the root is still the collection and the \
+         manager method resolves"
     );
 }
