@@ -57,18 +57,33 @@ struct HealthResponse {
     uptime_seconds: u64,
 }
 
-/// Split an authority into a comparable host and an optional port, normalizing the
-/// way rmcp does: IPv6 brackets stripped and the host lowercased. A value that is
-/// not a valid authority is still comparable as a bare host name.
-fn split_authority(value: &str) -> Option<(String, Option<u16>)> {
+fn normalize_host(host: &str) -> String {
+    host.trim_matches('[').trim_matches(']').to_ascii_lowercase()
+}
+
+/// Parse a `Host` header strictly, as rmcp does. Leniency belongs to the allowlist,
+/// never to the request: normalization strips brackets, so accepting a malformed value
+/// as a bare name would let `[[localhost]]` match an allowed `localhost`, widening the
+/// very gate that is supposed to narrow things.
+fn parse_request_authority(value: &str) -> Option<(String, Option<u16>)> {
     let value = value.trim();
     if value.is_empty() {
         return None;
     }
-    let normalize = |host: &str| host.trim_matches('[').trim_matches(']').to_ascii_lowercase();
+    let authority = Authority::try_from(value).ok()?;
+    Some((normalize_host(authority.host()), authority.port_u16()))
+}
+
+/// Parse one allowlist entry, which the operator writes by hand and may give as a bare
+/// name rather than a full authority.
+fn parse_allowed_authority(value: &str) -> Option<(String, Option<u16>)> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
     match Authority::try_from(value) {
-        Ok(authority) => Some((normalize(authority.host()), authority.port_u16())),
-        Err(_) => Some((normalize(value), None)),
+        Ok(authority) => Some((normalize_host(authority.host()), authority.port_u16())),
+        Err(_) => Some((normalize_host(value), None)),
     }
 }
 
@@ -77,10 +92,10 @@ fn split_authority(value: &str) -> Option<(String, Option<u16>)> {
 /// the MCP route, so `/health` needs its own to sit behind the same anti-DNS-rebinding
 /// gate rather than beside it.
 fn host_is_allowed(host_header: &str, allowed_hosts: &[String]) -> bool {
-    let Some((host, port)) = split_authority(host_header) else {
+    let Some((host, port)) = parse_request_authority(host_header) else {
         return false;
     };
-    allowed_hosts.iter().filter_map(|allowed| split_authority(allowed)).any(
+    allowed_hosts.iter().filter_map(|allowed| parse_allowed_authority(allowed)).any(
         |(allowed_host, allowed_port)| {
             allowed_host == host && allowed_port.is_none_or(|expected| port == Some(expected))
         },
@@ -104,6 +119,10 @@ async fn host_gate(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_owned();
+    if parse_request_authority(&host).is_none() {
+        tracing::warn!(host, "rejected request with a malformed Host header");
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     if !host_is_allowed(&host, &allowed_hosts) {
         tracing::warn!(host, "rejected request with disallowed Host header");
         return StatusCode::FORBIDDEN.into_response();
@@ -260,6 +279,28 @@ mod tests {
 
         assert!(!host_is_allowed("", &allowed));
         assert!(!host_is_allowed("   ", &allowed));
+    }
+
+    #[test]
+    fn a_malformed_host_cannot_normalize_into_an_allowed_one() {
+        let allowed = effective_allowed_hosts(address("127.0.0.1", 8021), Vec::new());
+
+        // None of these is a valid authority. Parsing the request leniently — treating
+        // an unparsable value as a bare name — would strip the brackets off the first
+        // two and match them against a legitimate allowlist entry.
+        for malformed in ["[[localhost]]", "[[::1]]", "::1", "local host"] {
+            assert!(
+                !host_is_allowed(malformed, &allowed),
+                "a malformed Host must not be normalized into an allowed one: {malformed}"
+            );
+        }
+
+        // The well-formed spellings of the same authorities still pass. `[localhost]`
+        // parses as an address literal and normalizes to `localhost`, which is rmcp's
+        // rule for the MCP route; matching it here keeps the two gates from disagreeing.
+        assert!(host_is_allowed("localhost", &allowed));
+        assert!(host_is_allowed("[::1]:8021", &allowed));
+        assert!(host_is_allowed("[localhost]", &allowed));
     }
 
     #[test]
