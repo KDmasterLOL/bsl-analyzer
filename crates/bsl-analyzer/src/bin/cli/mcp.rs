@@ -309,6 +309,15 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "--port must be in 1..=65535"));
     }
 
+    // A blank entry satisfies no `Host` at all, so counting it towards the allowlist
+    // would start a server that rejects every request it receives.
+    if args.allowed_hosts.iter().any(|host| host.trim().is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--allowed-host must not be empty",
+        ));
+    }
+
     let host = args.host.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     if !host.is_loopback() && args.allowed_hosts.is_empty() {
         return Err(io::Error::new(
@@ -1232,6 +1241,19 @@ mod tests {
 
         let err =
             validate_serve_args(&args).expect_err("non-loopback bind without allowlist is unsafe");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("--allowed-host"));
+    }
+
+    #[test]
+    fn a_blank_allowed_host_does_not_satisfy_the_allowlist() {
+        let mut args = serve_args(McpServeMode::Http, Some(8021));
+        args.host = Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        args.allowed_hosts = vec!["   ".to_owned()];
+
+        let err = validate_serve_args(&args)
+            .expect_err("a blank allowlist entry matches no Host and must be rejected");
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("--allowed-host"));

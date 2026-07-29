@@ -1,8 +1,15 @@
-use std::{net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
-    extract::State,
+    body::Body,
+    extract::{Request, State},
     http::{header::HOST, uri::Authority, HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -24,6 +31,12 @@ pub const MAX_HTTP_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 /// rmcp's own default, so an unconfigured server answers the same set of names on
 /// both routes.
 const DEFAULT_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+
+/// How long a cancelled server waits for requests already in flight. Reading a
+/// request body observes no cancellation token, so a client that sends headers and
+/// then stalls would otherwise hold the process — and its single-instance lock —
+/// open indefinitely.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct HealthState {
@@ -97,6 +110,36 @@ async fn health(
     }))
 }
 
+/// The authorities this server answers. One list drives both routes, so the MCP
+/// endpoint and the readiness endpoint cannot drift apart on what they accept.
+///
+/// With no operator allowlist the bound address joins the defaults: the CLI treats
+/// every address in 127.0.0.0/8 as safe to bind without one, while rmcp's defaults name
+/// only `127.0.0.1`, so a server on `127.0.0.2` would otherwise refuse its own address.
+fn effective_allowed_hosts(address: SocketAddr, allowed_hosts: Vec<String>) -> Arc<[String]> {
+    if allowed_hosts.is_empty() {
+        DEFAULT_ALLOWED_HOSTS
+            .iter()
+            .map(|host| (*host).to_owned())
+            .chain(std::iter::once(address.ip().to_string()))
+            .collect()
+    } else {
+        allowed_hosts.into()
+    }
+}
+
+/// Enforce the body limit ourselves so the answer does not depend on framing.
+/// `RequestBodyLimitLayer` only synthesizes 413 when `Content-Length` already exceeds
+/// the limit; a chunked body of the same size fails mid-read and reaches the client as
+/// rmcp's generic 500.
+async fn limit_request_body(request: Request, next: Next) -> Response {
+    let (parts, body) = request.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_HTTP_REQUEST_BODY_BYTES).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    next.run(Request::from_parts(parts, Body::from(bytes))).await
+}
+
 /// Serve stateful MCP sessions and a readiness endpoint on an already-bound
 /// listener. Binding remains the caller's responsibility so startup can fail
 /// before expensive shared state is constructed.
@@ -108,13 +151,7 @@ pub async fn serve_http(
     allowed_hosts: Vec<String>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<()> {
-    // One list drives both routes, so the MCP endpoint and the readiness endpoint
-    // cannot drift apart on which authorities they answer.
-    let allowed_hosts: Arc<[String]> = if allowed_hosts.is_empty() {
-        DEFAULT_ALLOWED_HOSTS.iter().map(|host| (*host).to_owned()).collect()
-    } else {
-        allowed_hosts.into()
-    };
+    let allowed_hosts = effective_allowed_hosts(address, allowed_hosts);
     let config = StreamableHttpServerConfig::default()
         .with_cancellation_token(cancellation.clone())
         .with_allowed_hosts(allowed_hosts.iter().cloned());
@@ -129,8 +166,91 @@ pub async fn serve_http(
         .route_service("/mcp", mcp)
         .route("/health", get(health))
         .with_state(health_state)
+        .layer(middleware::from_fn(limit_request_body))
         .layer(RequestBodyLimitLayer::new(MAX_HTTP_REQUEST_BODY_BYTES));
 
-    axum::serve(listener, app).with_graceful_shutdown(cancellation.cancelled_owned()).await?;
+    // `IntoFuture` rather than a bare await: the shutdown grace below needs to select
+    // against this future, and drop it if the grace runs out.
+    let serve = std::future::IntoFuture::into_future(
+        axum::serve(listener, app).with_graceful_shutdown(cancellation.clone().cancelled_owned()),
+    );
+    tokio::pin!(serve);
+
+    tokio::select! {
+        result = &mut serve => result?,
+        () = grace_after_cancel(&cancellation) => {
+            tracing::warn!(
+                grace_seconds = SHUTDOWN_GRACE.as_secs(),
+                "MCP HTTP shutdown grace elapsed with requests still in flight; dropping them"
+            );
+        }
+    }
     Ok(())
+}
+
+async fn grace_after_cancel(cancellation: &CancellationToken) {
+    cancellation.cancelled().await;
+    tokio::time::sleep(SHUTDOWN_GRACE).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, SocketAddr};
+
+    use super::{effective_allowed_hosts, host_is_allowed};
+
+    fn address(ip: &str, port: u16) -> SocketAddr {
+        SocketAddr::new(ip.parse::<IpAddr>().expect("test address should parse"), port)
+    }
+
+    #[test]
+    fn a_server_on_a_secondary_loopback_address_answers_its_own_host() {
+        let allowed = effective_allowed_hosts(address("127.0.0.2", 8021), Vec::new());
+
+        assert!(
+            host_is_allowed("127.0.0.2:8021", &allowed),
+            "a server the CLI let bind without an allowlist must answer its own address"
+        );
+        assert!(host_is_allowed("127.0.0.1:8021", &allowed), "the defaults must survive");
+        assert!(!host_is_allowed("attacker.example", &allowed));
+    }
+
+    #[test]
+    fn an_explicit_allowlist_replaces_the_defaults() {
+        let allowed =
+            effective_allowed_hosts(address("0.0.0.0", 8021), vec!["mcp.example.test".to_owned()]);
+
+        assert!(host_is_allowed("mcp.example.test", &allowed));
+        assert!(host_is_allowed("mcp.example.test:8021", &allowed), "a bare name accepts any port");
+        assert!(
+            !host_is_allowed("127.0.0.1:8021", &allowed),
+            "naming an allowlist must not silently keep loopback"
+        );
+    }
+
+    #[test]
+    fn an_allowlist_entry_with_a_port_binds_that_port_only() {
+        let allowed = effective_allowed_hosts(
+            address("0.0.0.0", 8021),
+            vec!["mcp.example.test:8021".to_owned()],
+        );
+
+        assert!(host_is_allowed("mcp.example.test:8021", &allowed));
+        assert!(!host_is_allowed("mcp.example.test:9021", &allowed));
+    }
+
+    #[test]
+    fn a_missing_or_unparsable_host_is_refused() {
+        let allowed = effective_allowed_hosts(address("127.0.0.1", 8021), Vec::new());
+
+        assert!(!host_is_allowed("", &allowed));
+        assert!(!host_is_allowed("   ", &allowed));
+    }
+
+    #[test]
+    fn ipv6_loopback_matches_regardless_of_brackets() {
+        let allowed = effective_allowed_hosts(address("::1", 8021), Vec::new());
+
+        assert!(host_is_allowed("[::1]:8021", &allowed));
+    }
 }

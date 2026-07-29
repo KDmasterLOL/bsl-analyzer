@@ -9,8 +9,9 @@ use mcp_server::McpProfile;
 use serde::{Deserialize, Serialize};
 
 const SCHEMA_VERSION: u32 = 1;
-const WORKSPACE_RECORD_NAME: &str = "bsl-analyzer-mcp-http.pid.json";
-const REFERENCE_RECORD_NAME: &str = "bsl-analyzer-mcp-http-reference.pid.json";
+/// How much of the key digest names the record. Wide enough that two projects never
+/// collide, short enough to stay readable in an error message.
+const DIGEST_CHARS: usize = 32;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -154,27 +155,39 @@ impl Drop for ProcessRecordGuard {
     }
 }
 
+/// Where the record for one `(profile, source_dir)` pair lives.
+///
+/// Deliberately outside the project. A file lock belongs to an inode rather than to a
+/// name, and `.build` is a cache directory users are told to clear — clearing it while
+/// a server ran would leave the owner holding an unlinked inode and let a second server
+/// claim a freshly created file. Keeping the record in our own state directory also
+/// means the path can never be a symlink planted by the repository being analyzed.
 fn record_path(profile: McpProfile, source_dir: Option<&Path>) -> io::Result<PathBuf> {
-    match profile {
-        McpProfile::Workspace => {
-            let source_dir = source_dir.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "workspace profile requires a source directory for its process record",
-                )
-            })?;
-            Ok(source_dir.join(".build").join(WORKSPACE_RECORD_NAME))
-        }
-        McpProfile::Reference => {
-            let base = dirs::state_dir().or_else(dirs::data_local_dir).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "application state directory is unavailable",
-                )
-            })?;
-            Ok(base.join("bsl-analyzer").join(REFERENCE_RECORD_NAME))
-        }
+    if matches!(profile, McpProfile::Workspace) && source_dir.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workspace profile requires a source directory for its process record",
+        ));
     }
+    let base = dirs::state_dir().or_else(dirs::data_local_dir).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "application state directory is unavailable")
+    })?;
+
+    // Both key components are hashed: the reference profile also loads project
+    // configuration from `--source-dir`, so two reference servers over different
+    // projects are different servers and must not exclude each other.
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(profile.as_str().as_bytes());
+    hasher.update(b"\0");
+    if let Some(source_dir) = source_dir {
+        hasher.update(source_dir.as_os_str().as_encoded_bytes());
+    }
+    let digest = hasher.finalize().to_hex();
+
+    Ok(base
+        .join("bsl-analyzer")
+        .join("mcp-http")
+        .join(format!("{}.pid.json", &digest[..DIGEST_CHARS])))
 }
 
 fn read_record(file: &mut File) -> io::Result<ProcessRecord> {
@@ -202,20 +215,114 @@ fn already_running_error(path: &Path, existing: Option<&ProcessRecord>) -> io::E
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        path::{Path, PathBuf},
+    };
 
     use mcp_server::McpProfile;
 
-    use super::{ProcessRecord, ProcessRecordGuard, ProcessState};
+    use super::{record_path, ProcessRecord, ProcessRecordGuard, ProcessState};
 
     fn address(port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    /// Records live in the user's state directory and outlive the process that wrote
+    /// them, so a test keyed on a temporary project must take its own away again.
+    struct RecordCleanup(PathBuf);
+
+    impl RecordCleanup {
+        fn for_key(profile: McpProfile, source_dir: Option<&Path>) -> Self {
+            Self(record_path(profile, source_dir).expect("record path should resolve"))
+        }
+    }
+
+    impl Drop for RecordCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(self.0.with_extension("json.lock"));
+        }
+    }
+
+    #[test]
+    fn clearing_the_build_cache_does_not_release_the_lock() {
+        let project = tempfile::tempdir().expect("temporary project should be created");
+        let source_dir = project.path().canonicalize().expect("project path should canonicalize");
+        let _cleanup = RecordCleanup::for_key(McpProfile::Workspace, Some(&source_dir));
+        let _first = ProcessRecordGuard::acquire(
+            McpProfile::Workspace,
+            Some(source_dir.clone()),
+            address(8021),
+        )
+        .expect("first server should acquire the project record");
+
+        let build_dir = source_dir.join(".build");
+        std::fs::create_dir_all(&build_dir).expect(".build should be creatable");
+        std::fs::remove_dir_all(&build_dir).expect(".build should be removable");
+
+        ProcessRecordGuard::acquire(McpProfile::Workspace, Some(source_dir), address(9021))
+            .expect_err("clearing the derived-cache directory must not admit a second server");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_planted_in_the_project_is_never_written() {
+        let project = tempfile::tempdir().expect("temporary project should be created");
+        let source_dir = project.path().canonicalize().expect("project path should canonicalize");
+        let victim = project.path().join("victim");
+        std::fs::write(&victim, "keep").expect("victim file should be written");
+        let build_dir = source_dir.join(".build");
+        std::fs::create_dir_all(&build_dir).expect(".build should be created");
+        for planted in ["bsl-analyzer-mcp-http.pid.json", "bsl-analyzer-mcp-http.pid.json.lock"] {
+            std::os::unix::fs::symlink(
+                victim.canonicalize().expect("victim should canonicalize"),
+                build_dir.join(planted),
+            )
+            .expect("symlink should be created");
+        }
+
+        let _cleanup = RecordCleanup::for_key(McpProfile::Workspace, Some(&source_dir));
+        let _guard =
+            ProcessRecordGuard::acquire(McpProfile::Workspace, Some(source_dir), address(8021))
+                .expect("record should be acquired");
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim should still be readable"),
+            "keep",
+            "the analyzed project must not be able to redirect the record write"
+        );
+    }
+
+    #[test]
+    fn reference_servers_over_different_projects_do_not_exclude_each_other() {
+        let first_project = tempfile::tempdir().expect("first project should be created");
+        let second_project = tempfile::tempdir().expect("second project should be created");
+
+        let _first_cleanup =
+            RecordCleanup::for_key(McpProfile::Reference, Some(first_project.path()));
+        let _second_cleanup =
+            RecordCleanup::for_key(McpProfile::Reference, Some(second_project.path()));
+        let _first = ProcessRecordGuard::acquire(
+            McpProfile::Reference,
+            Some(first_project.path().to_path_buf()),
+            address(8021),
+        )
+        .expect("first reference server should acquire its record");
+
+        ProcessRecordGuard::acquire(
+            McpProfile::Reference,
+            Some(second_project.path().to_path_buf()),
+            address(8022),
+        )
+        .expect("a reference server over a different project is a different server");
     }
 
     #[test]
     fn exclusive_record_lock_rejects_a_second_server_and_is_released_on_drop() {
         let project = tempfile::tempdir().expect("temporary project should be created");
         let source_dir = project.path().canonicalize().expect("project path should canonicalize");
+        let _cleanup = RecordCleanup::for_key(McpProfile::Workspace, Some(&source_dir));
         let first = ProcessRecordGuard::acquire(
             McpProfile::Workspace,
             Some(source_dir.clone()),
@@ -242,6 +349,7 @@ mod tests {
     fn process_record_tracks_actual_address_and_stopped_state() {
         let project = tempfile::tempdir().expect("temporary project should be created");
         let source_dir = project.path().canonicalize().expect("project path should canonicalize");
+        let _cleanup = RecordCleanup::for_key(McpProfile::Workspace, Some(&source_dir));
         let mut guard = ProcessRecordGuard::acquire(
             McpProfile::Workspace,
             Some(source_dir.clone()),
