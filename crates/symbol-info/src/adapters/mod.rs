@@ -56,6 +56,41 @@ pub fn build_signature_from_resolution(
     (!signatures.is_empty()).then_some(signatures)
 }
 
+/// The index in `signatures` of the candidate inference actually selected.
+///
+/// `None` when the call is ambiguous or rejected, or the selected candidate has
+/// no rendered signature — every consumer of a resolved call needs the same
+/// answer, so the mapping from `CallSelection` to a rendered signature lives
+/// here rather than in each IDE feature.
+pub fn selected_signature_index(
+    binding: &hir::CandidateCallBinding,
+    signatures: &[SymbolSignature],
+) -> Option<usize> {
+    match binding.resolution.selection {
+        hir::CallSelection::Unique { candidate } => match candidate {
+            hir::CandidateId::Platform {
+                method_id,
+                signature: hir::PlatformSignatureSlot::Base,
+            } => signatures.iter().position(|signature| {
+                signature.platform_id == Some(method_id) && signature.candidate_ordinal.is_none()
+            }),
+            hir::CandidateId::Platform {
+                method_id,
+                signature: hir::PlatformSignatureSlot::Variant(candidate_ordinal),
+            } => signatures.iter().position(|signature| {
+                signature.platform_id == Some(method_id)
+                    && signature.candidate_ordinal == Some(candidate_ordinal)
+            }),
+            hir::CandidateId::User { signature_ordinal: candidate_ordinal, .. }
+            | hir::CandidateId::Builtin { signature_ordinal: candidate_ordinal, .. } => signatures
+                .iter()
+                .position(|signature| signature.candidate_ordinal == Some(candidate_ordinal)),
+            hir::CandidateId::FunctionValue => None,
+        },
+        hir::CallSelection::Ambiguous { .. } | hir::CallSelection::Rejected(_) => None,
+    }
+}
+
 fn build_signature_from_candidate(
     db: &dyn RootDatabase,
     candidate: &hir::CallSignature,
