@@ -206,6 +206,15 @@ fn collect_read_var_names(body: &hir::Body) -> FxHashSet<String> {
     read_vars
 }
 
+/// A metadata-collection name (`Справочники`, `Documents`, …) is a Global-context
+/// property, not a local: the platform refuses the write and declares nothing, so
+/// an unread assignment to it is no dead store. The write itself is reported by
+/// `GlobalPropertyNotWritable`.
+fn names_a_manager_collection(name_lower: &str) -> bool {
+    bsl_metadata::MdoType::from_plural(name_lower)
+        .is_some_and(|mdo| mdo.manager_type_prefix().is_some())
+}
+
 fn check_method(
     local_id: u32,
     body: &hir::Body,
@@ -299,6 +308,7 @@ fn check_method(
 
                 if !declared_vars.contains(&lowercase_name)
                     && !skip_attr_names.contains(&lowercase_name)
+                    && !names_a_manager_collection(&lowercase_name)
                 {
                     if let std::collections::hash_map::Entry::Vacant(e) =
                         implicit_vars.entry(lowercase_name)
@@ -349,7 +359,9 @@ fn check_module_level_code(
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().fold_lower();
 
-                if skip_attr_names.contains(&lowercase_name) {
+                if skip_attr_names.contains(&lowercase_name)
+                    || names_a_manager_collection(&lowercase_name)
+                {
                     continue;
                 }
 
@@ -425,6 +437,39 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
+    /// Присваивание имени коллекции метаданных локаль не объявляет: имя
+    /// принадлежит свойству глобального контекста, платформа запись отвергает.
+    /// Поэтому непрочитанное присваивание ему — не мёртвая запись, а нарушение,
+    /// о котором сообщает `GlobalPropertyNotWritable`.
+    #[test]
+    fn assignment_to_a_collection_name_is_not_an_unused_local() {
+        for code in [
+            "Процедура Тест()\n    Справочники = Новый Структура;\nКонецПроцедуры\n",
+            "Процедура Тест()\n    Catalogs = Новый Структура;\nКонецПроцедуры\n",
+            "Справочники = Новый Структура;\n",
+        ] {
+            let diags = crate::test_utils::check_hir_diagnostic(code);
+            let unused: Vec<_> =
+                diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+            assert!(unused.is_empty(), "no local is declared here:\n{code}\ngot {unused:?}");
+        }
+    }
+
+    /// Контроль: обычное имя по-прежнему объявляет локаль, иначе проверка выше
+    /// не способна упасть.
+    #[test]
+    fn assignment_to_an_ordinary_name_is_still_an_unused_local() {
+        for code in [
+            "Процедура Тест()\n    МояПеременная = Новый Структура;\nКонецПроцедуры\n",
+            "МояПеременная = Новый Структура;\n",
+        ] {
+            let diags = crate::test_utils::check_hir_diagnostic(code);
+            let unused =
+                diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count();
+            assert_eq!(unused, 1, "an ordinary name is a real dead store:\n{code}");
+        }
+    }
+
     use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
     use expect_test::expect;

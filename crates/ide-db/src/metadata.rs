@@ -1798,14 +1798,18 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
         return None;
     }
 
+    // The collection segment sits at a known distance from the end:
+    // `<…>/<Plural>/<Name>/Ext/<ModuleFile>.bsl`, and the `Ext` level is optional.
+    // Both candidates are tried outside-in, so an OBJECT named after a collection
+    // cannot win over the real type — scanning for the LAST plural-looking segment
+    // would make `Catalogs/Constants/Ext/ManagerModule.bsl` unparsable.
     let type_idx =
-        parts.iter().rposition(|&p| mdo_type_from_plural(p).is_some() || p == "CommonModules")?;
-
-    if parts.len() < type_idx + 4 {
-        return None;
-    }
-
+        [parts.len().checked_sub(4), parts.len().checked_sub(3)]
+            .into_iter()
+            .flatten()
+            .find(|&i| mdo_type_from_plural(parts[i]).is_some() || parts[i] == "CommonModules")?;
     let type_plural = parts[type_idx];
+
     let name = parts[type_idx + 1].to_string();
 
     let mdo_type = mdo_type_from_plural(type_plural);
@@ -2119,6 +2123,46 @@ pub(crate) fn find_integration_service_by_path(
 
 #[cfg(test)]
 mod tests {
+    /// Имя объекта может совпадать с именем коллекции (`Справочник.Константы`).
+    /// Форма пути жёсткая — `<Коллекция>/<Имя>/Ext/<Модуль>.bsl`, поэтому тип
+    /// берётся по позиции, а не поиском последнего похожего сегмента: иначе имя
+    /// объекта выигрывает у настоящего типа и путь не разбирается вовсе.
+    #[test]
+    fn object_named_like_a_collection_still_parses() {
+        for (path, expected_type, expected_name) in [
+            (
+                "Catalogs/Constants/Ext/ManagerModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Constants",
+            ),
+            (
+                "Catalogs/Documents/Ext/ManagerModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Documents",
+            ),
+            (
+                "Справочники/Константы/Ext/ManagerModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Константы",
+            ),
+            (
+                "src/cf/Documents/Enums/Ext/ObjectModule.bsl",
+                bsl_metadata::MdoType::Document,
+                "Enums",
+            ),
+            // Сегмент `Ext` не обязателен — так выглядят фикстуры и часть выгрузок.
+            ("/Catalogs/Constants/ManagerModule.bsl", bsl_metadata::MdoType::Catalog, "Constants"),
+            ("/Documents/Enums/ObjectModule.bsl", bsl_metadata::MdoType::Document, "Enums"),
+            // Контроль: обычное имя разбирался и раньше.
+            ("Catalogs/Товары/Ext/ManagerModule.bsl", bsl_metadata::MdoType::Catalog, "Товары"),
+        ] {
+            let info =
+                super::parse_module_path(path).unwrap_or_else(|| panic!("{path} must parse"));
+            assert_eq!(info.mdo_type, Some(expected_type), "{path}");
+            assert_eq!(info.name.as_deref(), Some(expected_name), "{path}");
+        }
+    }
+
     use super::*;
 
     #[test]

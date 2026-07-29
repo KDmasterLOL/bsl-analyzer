@@ -1,6 +1,8 @@
 # Assignment to a Global-context property
 
-Fires on an assignment to a bare name that denotes a Global-context property — for example a metadata manager collection (`Справочники`, `Документы`, `Перечисления`, `РегистрыСведений`, …), in either the Russian or the English spelling.
+Fires on an assignment to a bare metadata manager collection name — `Справочники`, `Документы`, `Перечисления`, `РегистрыСведений` and the rest — in either the Russian or the English spelling.
+
+Manager collections are Global-context properties, but the diagnostic stops there: for other Global-context properties (`Метаданные` and friends) the analyzer keeps its previous behaviour, because the platform verdict was measured on collections specifically.
 
 ## Why this is a problem
 

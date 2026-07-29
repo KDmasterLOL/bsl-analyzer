@@ -166,6 +166,28 @@ fn self_qualified_call_in_constant_manager_still_checks_the_method() {
 }
 
 #[test]
+fn config_less_object_named_like_a_collection_promotes() {
+    let fixture = r#"
+//- /Documents/Constants/Ext/ManagerModule.bsl
+Процедура Метод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    М = Документы.Constants;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let ty = db.infer(file_id).var_types.get("м").copied();
+    let shape = ty.map(|ty| format!("{:?}", db.lookup_type(ty)));
+    assert!(
+        ty.is_some_and(|ty| matches!(db.lookup_type(ty), TypeKind::ObjectManager(_))),
+        "an object may be named after a collection; the index must still find its \
+         manager module by position; got {shape:?}"
+    );
+}
+
+#[test]
 fn three_level_non_exported_method_emits_method_not_export() {
     let fixture = r#"
 //- /Documents/ПКО/Ext/ManagerModule.bsl

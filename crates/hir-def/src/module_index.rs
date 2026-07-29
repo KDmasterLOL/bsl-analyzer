@@ -422,30 +422,33 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
     let is_manager_module =
         parts.last().is_some_and(|file_name| file_name.eq_ignore_ascii_case("ManagerModule.bsl"));
 
-    for (i, part) in parts.iter().enumerate().rev() {
-        let module_type = module_path_type_from_segment(part);
+    // The collection segment sits at a known distance from the end:
+    // `<…>/<Plural>/<Name>/Ext/<ModuleFile>.bsl`, and the `Ext` level is optional.
+    // Both candidates are tried outside-in, so an OBJECT named after a collection
+    // cannot win over the real type — walking from the end for the first
+    // plural-looking segment made `/Documents/Constants/Ext/ManagerModule.bsl`
+    // index as the manager of a constant named `Ext`.
+    let type_idx = [parts.len().checked_sub(4), parts.len().checked_sub(3)]
+        .into_iter()
+        .flatten()
+        .find(|&i| module_path_type_from_segment(parts[i]).is_some())?;
+    let mod_type = module_path_type_from_segment(parts[type_idx])?;
+    let name = parts[type_idx + 1].to_string();
 
-        if let Some(mod_type) = module_type {
-            if i + 1 < parts.len() {
-                let name = parts[i + 1].to_string();
-
-                if mod_type == ModulePathType::CommonModule {
-                    if path_lower.ends_with("module.bsl")
-                        && !path_lower.ends_with("managermodule.bsl")
-                        && !path_lower.ends_with("objectmodule.bsl")
-                        && !path_lower.ends_with("recordsetmodule.bsl")
-                    {
-                        return Some((mod_type, name, ModuleFileKind::Common));
-                    }
-                } else if is_manager_module {
-                    return Some((mod_type, name, ModuleFileKind::Manager));
-                } else if path_lower.ends_with("objectmodule.bsl") {
-                    return Some((mod_type, name, ModuleFileKind::Object));
-                } else if path_lower.ends_with("recordsetmodule.bsl") {
-                    return Some((mod_type, name, ModuleFileKind::RecordSet));
-                }
-            }
+    if mod_type == ModulePathType::CommonModule {
+        if path_lower.ends_with("module.bsl")
+            && !path_lower.ends_with("managermodule.bsl")
+            && !path_lower.ends_with("objectmodule.bsl")
+            && !path_lower.ends_with("recordsetmodule.bsl")
+        {
+            return Some((mod_type, name, ModuleFileKind::Common));
         }
+    } else if is_manager_module {
+        return Some((mod_type, name, ModuleFileKind::Manager));
+    } else if path_lower.ends_with("objectmodule.bsl") {
+        return Some((mod_type, name, ModuleFileKind::Object));
+    } else if path_lower.ends_with("recordsetmodule.bsl") {
+        return Some((mod_type, name, ModuleFileKind::RecordSet));
     }
 
     None
@@ -453,6 +456,36 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
 
 #[cfg(test)]
 mod tests {
+    /// Имя объекта может совпадать с именем коллекции. Тип берётся по позиции в
+    /// жёсткой форме `<Коллекция>/<Имя>/Ext/<Модуль>.bsl`, иначе обход с конца
+    /// принимает имя объекта за тип и индексирует модуль под именем `Ext`.
+    #[test]
+    fn object_named_like_a_collection_is_indexed_under_its_own_name() {
+        for (path, expected_type, expected_name) in [
+            ("/Documents/Constants/Ext/ManagerModule.bsl", ModulePathType::Document, "Constants"),
+            ("/Documents/Documents/Ext/ManagerModule.bsl", ModulePathType::Document, "Documents"),
+            (
+                "/Catalogs/Перечисления/Ext/ObjectModule.bsl",
+                ModulePathType::Catalog,
+                "Перечисления",
+            ),
+            // Сегмент `Ext` не обязателен.
+            (
+                "/CommonModules/ПервыйОбщийМодуль/Module.bsl",
+                ModulePathType::CommonModule,
+                "ПервыйОбщийМодуль",
+            ),
+            ("/Catalogs/Constants/ManagerModule.bsl", ModulePathType::Catalog, "Constants"),
+            // Контроль: обычное имя работало и раньше.
+            ("/Documents/ПКО/Ext/ManagerModule.bsl", ModulePathType::Document, "ПКО"),
+        ] {
+            let (mod_type, name, _kind) =
+                super::parse_module_path(path).unwrap_or_else(|| panic!("{path} must parse"));
+            assert_eq!(mod_type, expected_type, "{path}");
+            assert_eq!(name, expected_name, "{path}");
+        }
+    }
+
     use super::*;
 
     #[test]
