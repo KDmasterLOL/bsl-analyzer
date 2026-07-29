@@ -318,7 +318,7 @@ fn metadata_root_claim<DB: RootDatabase>(
     };
     let same_type = claim.reaching_value.is_some_and(|value_id| {
         owner.is_some_and(|owner| {
-            reaching_value_ty(db, position.file_id, owner, value_id)
+            crate::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)
                 .is_some_and(|ty| is_config_metadata_object(db, ty))
         })
     });
@@ -379,7 +379,7 @@ fn collection_root_claim<DB: RootDatabase>(
     };
     let same_type = claim.reaching_value.is_some_and(|value_id| {
         owner.is_some_and(|owner| {
-            reaching_value_ty(db, position.file_id, owner, value_id)
+            crate::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)
                 .is_some_and(|ty| is_this_manager_collection(db, ty, mdo_type))
         })
     });
@@ -402,11 +402,7 @@ fn is_this_manager_collection<DB: RootDatabase>(
 }
 
 /// The user symbol claiming the bare root name at this read, plus the body
-/// owner for typing its reaching assignment — the shared shadowing predicate
-/// of the availability diagnostic, fed with the enclosing body so locals
-/// count even when the receiver itself never got lowered. The read position
-/// is the receiver's own start, so only assignments that sequential inference
-/// has already completed claim the name.
+/// owner for typing its reaching assignment.
 fn root_claim_at<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
@@ -416,34 +412,9 @@ fn root_claim_at<DB: RootDatabase>(
     let Some(name_text) = get_single_ident(root) else {
         return (None, None);
     };
-    let name = Name::new(&name_text);
-    let module_id = hir::ModuleId::new(file_id);
-    let item_tree = db.item_tree(file_id);
-    let module_bodies = db.module_bodies_ref(module_id);
-    let (owner, lower_result) = match super::env_filter::method_item_at(&item_tree, offset) {
-        Some((local_id, _)) => {
-            (hir::DefWithBodyId::Method(local_id), module_bodies.lower_result(local_id))
-        }
-        None => (hir::DefWithBodyId::ModuleCode, module_bodies.module_code_result()),
-    };
-    let scope = lower_result.map(|r| hir::BodyShadowScope {
-        body: &r.body,
-        source_map: &r.source_map,
-        read_offset: root.text_range().start(),
-    });
-    let resolver = hir::Resolver::with_builtins_and_workspace(module_id);
-    (hir::bare_global_name_claim(db, &resolver, scope.as_ref(), &name), Some(owner))
-}
-
-/// The inferred type of a reaching assignment's value — the claiming local's
-/// type at the read. `None` when inference has nothing for the expression.
-fn reaching_value_ty<DB: RootDatabase>(
-    db: &DB,
-    file_id: vfs::FileId,
-    owner: hir::DefWithBodyId,
-    value_id: hir::ExprId,
-) -> Option<hir::TypeId> {
-    hir::infer_owner(db, file_id, owner).type_id_of_expr(value_id)
+    let (claim, owner) =
+        crate::bare_root::claim_at_node(db, file_id, offset, &Name::new(&name_text), root);
+    (claim, Some(owner))
 }
 
 /// Whether `Метаданные` is reachable from the cursor's environments. Its

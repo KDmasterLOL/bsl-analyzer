@@ -1012,4 +1012,27 @@ mod tests {
             ]
         );
     }
+
+    /// A module variable named like a metadata plural must win over the plural:
+    /// the cascade asks the metadata collection before module variables, so the
+    /// declaration would otherwise be unreachable from its own uses.
+    #[test]
+    fn goto_module_variable_named_like_metadata_plural() {
+        let source = r#"Перем Справочники;
+
+Функция Тест()
+    Рез = Справочники;
+    Возврат Рез;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(source);
+        let use_offset = source.rfind("Справочники").unwrap();
+        let target = goto_definition(&db, file_id, TextSize::from(use_offset as u32));
+        assert!(
+            target.is_some(),
+            "a module variable named like a metadata plural must be reachable from its use"
+        );
+        let target = target.expect("checked above");
+        assert_eq!(target.name, "Справочники");
+    }
 }

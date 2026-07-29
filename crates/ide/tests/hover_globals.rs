@@ -346,3 +346,152 @@ fn hover_receiver_property_now_shows_version_and_availability() {
         );
     }
 }
+
+/// The type-comparison heuristic in `hover_for_global_property` cannot catch a
+/// local of UNKNOWN type: nothing distinguishes it from the global unless the
+/// bare-name cascade refuses to re-type a held name in the first place.
+#[test]
+fn hover_implicit_local_of_unknown_type_shadows_hbk_property() {
+    if !hbk_globals_available() {
+        return;
+    }
+    let markup = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    Метаданные = НеизвестнаяФункция();
+    А = Метад$0анные;
+КонецПроцедуры
+"#,
+    );
+    if let Some(markup) = markup {
+        assert!(
+            !markup.contains("ОбъектМетаданныхКонфигурация"),
+            "HBK markup leaked when a local of unknown type holds the name; markup: {markup}"
+        );
+        assert!(
+            !markup.contains("Только чтение"),
+            "HBK readonly marker leaked when a local of unknown type holds the name; markup: {markup}"
+        );
+    }
+}
+
+/// A user symbol holding the name rules out EVERY text-keyed reading in
+/// `hover_free_name`, not just the global-property one. The four below are the
+/// complete set of such readings; each was verified to leak before the guard
+/// moved to the caller.
+#[test]
+fn held_name_suppresses_metadata_collection_card() {
+    let markup = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    Справочники = НеизвестнаяФункция();
+    А = Справоч$0ники;
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        markup.as_deref().is_none_or(|m| !m.contains("СправочникМенеджер")),
+        "metadata-collection card leaked for a held name; markup: {markup:?}"
+    );
+}
+
+#[test]
+fn held_name_suppresses_global_property_card() {
+    if !hbk_globals_available() {
+        return;
+    }
+    let markup = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    Метаданные = НеизвестнаяФункция();
+    А = Метад$0анные;
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        markup.as_deref().is_none_or(|m| !m.contains("ОбъектМетаданныхКонфигурация")),
+        "global-property card leaked for a held name; markup: {markup:?}"
+    );
+}
+
+#[test]
+fn held_name_suppresses_platform_type_card() {
+    let markup = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    ВидДвиженияБухгалтерии = НеизвестнаяФункция();
+    А = ВидДвиженияБухгалт$0ерии;
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        markup.as_deref().is_none_or(|m| !m.contains("**Тип:** ВидДвиженияБухгалтерии")),
+        "platform-type card leaked for a held name; markup: {markup:?}"
+    );
+}
+
+#[test]
+fn held_name_suppresses_global_function_card() {
+    let markup = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    НачатьТранзакцию = НеизвестнаяФункция();
+    А = Начать$0Транзакцию;
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        markup.as_deref().is_none_or(|m| !m.contains("Глобальная функция")),
+        "global-function card leaked for a held name; markup: {markup:?}"
+    );
+}
+
+/// Positive control for the whole class: with nobody holding the names, all four
+/// readings still render.
+#[test]
+fn unheld_names_still_render_all_four_readings() {
+    let plural = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    А = Справоч$0ники;
+КонецПроцедуры
+"#,
+    )
+    .expect("metadata collection must render");
+    assert!(plural.contains("Справочники"), "plural markup: {plural}");
+
+    if hbk_globals_available() {
+        let prop = hover_markup(
+            r#"//- /test.bsl
+Процедура Тест()
+    А = Метад$0анные;
+КонецПроцедуры
+"#,
+        )
+        .expect("global property must render");
+        assert!(prop.contains("ОбъектМетаданныхКонфигурация"), "property markup: {prop}");
+    }
+
+    let platform_type = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    А = ВидДвиженияБухгалт$0ерии;
+КонецПроцедуры
+"#,
+    )
+    .expect("platform type must render");
+    assert!(
+        platform_type.contains("ВидДвиженияБухгалтерии"),
+        "platform type markup: {platform_type}"
+    );
+
+    let func = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    А = Начать$0Транзакцию;
+КонецПроцедуры
+"#,
+    )
+    .expect("global function must render");
+    assert!(func.contains("НачатьТранзакцию"), "function markup: {func}");
+}

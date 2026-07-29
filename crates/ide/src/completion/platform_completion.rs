@@ -57,26 +57,39 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     let sema = Semantics::new(db);
     let mut receiver_id = sema.type_of_expr(position.file_id, &receiver_expr);
 
+    // `Unknown` here means inference has no type for the receiver, which happens
+    // both when a user symbol holds the name and when the name is a bare TYPE
+    // (`XBase.`, `Запрос.`) that the cascade never types. Only the claim below
+    // tells those apart — the lowering status cannot, since both are lowered.
     if matches!(db.lookup_type(receiver_id), TypeKind::Unknown) {
         if let Some(name) = extract_receiver_ident(&receiver_expr) {
             let name_node = Name::new(&name);
-            let workspace_module_shadows =
-                hir::Resolver::with_workspace_scope(hir::ModuleId::new(position.file_id))
-                    .user_common_module_exists(db, &name_node);
-            let same_file_shadows = {
-                let module_id = hir::ModuleId::new(position.file_id);
-                let tree = db.symbol_tree_ref(module_id);
-                tree.find_method(&name_node).is_some() || tree.find_variable(&name_node).is_some()
-            };
-            if workspace_module_shadows || same_file_shadows {
-                return None;
-            }
-
-            if let Some(id) = hir::resolve_platform_global_property_type(db, &name_node) {
-                receiver_id = id;
-            }
-            if matches!(db.lookup_type(receiver_id), TypeKind::Unknown) {
-                receiver_id = TyLoweringContext::new().lower_bare_name_id(db, &name_node);
+            let (claim, owner) = crate::bare_root::claim_at_node(
+                db,
+                position.file_id,
+                position.offset,
+                &name_node,
+                &receiver_expr,
+            );
+            match claim {
+                // A user symbol holds the name, so it does not denote the global.
+                // Its reaching assignment carries the receiver's real type; with no
+                // reaching write (a declared-but-unwritten local, a module item)
+                // there is nothing to complete against — and naming the global here
+                // is exactly the suggestion the availability diagnostic rejects.
+                Some(claim) => {
+                    let value_id = claim.reaching_value?;
+                    receiver_id =
+                        crate::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)?;
+                }
+                None => {
+                    if let Some(id) = hir::resolve_platform_global_property_type(db, &name_node) {
+                        receiver_id = id;
+                    }
+                    if matches!(db.lookup_type(receiver_id), TypeKind::Unknown) {
+                        receiver_id = TyLoweringContext::new().lower_bare_name_id(db, &name_node);
+                    }
+                }
             }
         }
     }

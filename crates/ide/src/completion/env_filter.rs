@@ -136,7 +136,7 @@ impl EnvFilter {
 /// belongs to that method, not to module code. The returned index is the
 /// module-wide top-level item index — the same numbering `ModuleBodies` uses
 /// for its per-method lower results.
-pub(super) fn method_item_at(
+pub(crate) fn method_item_at(
     item_tree: &hir::ItemTree,
     offset: TextSize,
 ) -> Option<(u32, &ModItem)> {

@@ -83,3 +83,83 @@ fn implicit_local_assignment_shadows_builtin_in_value_position() {
         "implicit local named like a builtin must win in value position"
     );
 }
+
+/// A local of unknown type owns the name: the platform steps of the bare-name
+/// cascade must not hand back the same-named global. Re-typing a claimed name
+/// as the global contradicts the availability diagnostic, which already treats
+/// such a name as owned by the local.
+#[test]
+fn implicit_local_of_unknown_type_claims_manager_collection_name() {
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Справочники = НеизвестнаяФункция();
+    Рез = Справочники;
+    Возврат Рез;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_type(&db, file_id, "рез"),
+        None,
+        "a local owning the name must not be re-typed as the manager collection"
+    );
+}
+
+#[test]
+fn implicit_local_of_unknown_type_claims_platform_global_property_name() {
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    ОбработкаОшибок = НеизвестнаяФункция();
+    Рез = ОбработкаОшибок;
+    Возврат Рез;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_type(&db, file_id, "рез"),
+        None,
+        "a local owning the name must not be re-typed as the platform global property"
+    );
+}
+
+/// Positive control for the two tests above: without a claiming local the very
+/// same reads still resolve to the globals.
+#[test]
+fn unclaimed_bare_global_names_still_resolve() {
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Рез = Справочники;
+    Рез2 = ОбработкаОшибок;
+    Возврат Рез;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_type(&db, file_id, "рез"),
+        Some(db.manager_collection(bsl_metadata::MdoType::Catalog)),
+        "an unclaimed manager-collection name must still resolve"
+    );
+    assert!(
+        var_type(&db, file_id, "рез2").is_some(),
+        "an unclaimed platform global property must still resolve"
+    );
+}
+
+/// Inside its own right-hand side the name still denotes the previous owner —
+/// the claim starts only once the assignment has completed.
+#[test]
+fn name_still_denotes_global_inside_its_own_right_hand_side() {
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Справочники = Справочники;
+    Рез = Справочники;
+    Возврат Рез;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_type(&db, file_id, "рез"),
+        Some(db.manager_collection(bsl_metadata::MdoType::Catalog)),
+        "the right-hand side reads the global, so the local carries it forward"
+    );
+}

@@ -88,7 +88,8 @@ fn hover_field<DB: RootDatabase>(
 
     let inferred_ty = type_of_token(db, &sema, file_id, token);
     if let Some(definition) = sema.resolve_name_to_definition(file_id, token) {
-        return definition_to_hover(db, &definition, range, inferred_ty, locale);
+        // A field name after a dot is not a bare name, so nothing can hold it.
+        return definition_to_hover(db, &definition, range, inferred_ty, false, locale);
     }
 
     if let Some(parent) = token.parent() {
@@ -152,17 +153,50 @@ fn hover_free_name<DB: RootDatabase>(
     let sema = Semantics::new(db);
     let inferred_ty = type_of_token(db, &sema, file_id, token);
 
+    // Every reading below that comes from the identifier's TEXT — metadata
+    // collection, global property, global function, platform type — presumes the
+    // name denotes a platform entity. A user symbol holding it rules out all four
+    // at once, so the question is asked here rather than inside each branch:
+    // guarding them one at a time is how three of the four ended up unguarded.
+    //
+    // Inference cannot answer it here. It reports a held name as `Unknown`, and
+    // `type_of_token` collapses that into `None` — indistinguishable from having
+    // no type at all.
+    let held = std::cell::OnceCell::new();
+    let name_is_held = || {
+        *held.get_or_init(|| {
+            crate::bare_root::claim_at(
+                db,
+                file_id,
+                token.text_range().start(),
+                &hir::Name::new(token.text()),
+                token.text_range().start(),
+            )
+            .0
+            .is_some()
+        })
+    };
+
     if let Some(definition) = sema.resolve_name_to_definition(file_id, token) {
-        if let Some(r) =
-            definition_to_hover(db, &definition, token.text_range(), inferred_ty, locale)
-        {
+        // Not suppressed wholesale: a metadata collection whose name is held
+        // still renders the holder's own shape, only the platform half drops.
+        if let Some(r) = definition_to_hover(
+            db,
+            &definition,
+            token.text_range(),
+            inferred_ty,
+            name_is_held(),
+            locale,
+        ) {
             return Some(r);
         }
     } else {
-        if let Some(r) =
-            hover_for_global_property(db, file_id, token.text(), token.text_range(), inferred_ty)
-        {
-            return Some(r);
+        if !name_is_held() {
+            if let Some(r) =
+                hover_for_global_property(db, token.text(), token.text_range(), inferred_ty)
+            {
+                return Some(r);
+            }
         }
         if let Some(ty) = inferred_ty {
             let mut markup = format!("**{}**\n\n", token.text());
@@ -171,6 +205,10 @@ fn hover_free_name<DB: RootDatabase>(
                 return Some(HoverResult { markup, range: Some(token.text_range()) });
             }
         }
+    }
+
+    if name_is_held() {
+        return None;
     }
 
     if let Some(r) = hover_for_global_function(
@@ -187,18 +225,15 @@ fn hover_free_name<DB: RootDatabase>(
     hover_for_platform_type(db, token.text(), token.text_range())
 }
 
+/// Ownership of the name is decided by the caller, for all text-keyed readings
+/// at once — do not add a second guard here.
 fn hover_for_global_property<DB: RootDatabase>(
     db: &DB,
-    file_id: FileId,
     name: &str,
     range: TextRange,
     inferred_ty: Option<TypeId>,
 ) -> Option<HoverResult> {
     if bsl_metadata::MdoType::from_plural(name).is_some() {
-        return None;
-    }
-    let resolver = hir::Resolver::with_workspace_scope(hir::ModuleId::new(file_id));
-    if resolver.user_common_module_exists(db, &hir::Name::new(name)) {
         return None;
     }
     let prop = PlatformDataInner::instance().get_global_property(name)?;
@@ -303,6 +338,9 @@ fn definition_to_hover<DB: RootDatabase>(
     definition: &hir::Definition,
     range: TextRange,
     inferred_ty: Option<TypeId>,
+    // `name_is_held`: a user symbol holds this name, so the PLATFORM half of the
+    // rendering is not about this symbol. The holder's own shape still renders.
+    name_is_held: bool,
     locale: Locale,
 ) -> Option<HoverResult> {
     let mut markup = String::new();
@@ -415,14 +453,18 @@ fn definition_to_hover<DB: RootDatabase>(
         }
 
         hir::Definition::MdoCollectionType(mdo_type) => {
-            let inferred_disagrees = match inferred_ty {
-                None => false,
-                Some(id) => match db.lookup_type(id) {
-                    TypeKind::Unknown => false,
-                    TypeKind::ManagerCollection(t) if t == mdo_type => false,
-                    _ => true,
-                },
-            };
+            // A held name disagrees regardless of type: inference reports the
+            // hold as `Unknown`, which `type_of_token` turns into `None` — the
+            // one value this match used to read as agreement.
+            let inferred_disagrees = name_is_held
+                || match inferred_ty {
+                    None => false,
+                    Some(id) => match db.lookup_type(id) {
+                        TypeKind::Unknown => false,
+                        TypeKind::ManagerCollection(t) if t == mdo_type => false,
+                        _ => true,
+                    },
+                };
             if inferred_disagrees {
                 if let Some(id) = inferred_ty {
                     if let Some(block) = ty_info_markup(db, id, locale) {
@@ -464,6 +506,10 @@ fn definition_to_hover<DB: RootDatabase>(
         | hir::Definition::BuiltinMethodHandle { .. }
         | hir::Definition::VirtualTableField { .. }
         | hir::Definition::Unresolved => return None,
+    }
+
+    if markup.trim().is_empty() {
+        return None;
     }
 
     Some(HoverResult { markup, range: Some(range) })

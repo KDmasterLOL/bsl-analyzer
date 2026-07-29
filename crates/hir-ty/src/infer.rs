@@ -1884,14 +1884,6 @@ impl<'db> InferenceContext<'db> {
             return self.db.unknown();
         }
 
-        if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(name.as_str()) {
-            if mdo_type.manager_type_prefix().is_some() {
-                trace!("resolved {} as manager collection {:?}", name, mdo_type);
-                self.check_manager_collection_env(expr_id, name, mdo_type);
-                return self.db.manager_collection(mdo_type);
-            }
-        }
-
         if !user_shadows && !body_binding_shadows {
             if let Some(resolution) =
                 crate::form_self::resolve_form_self_property(self.db, &resolver, name)
@@ -1954,7 +1946,27 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
-        if !user_shadows && !workspace_owns_common_module {
+        // Everything below denotes a PLATFORM global, so a user symbol holding the
+        // name rules them all out. Declared bindings, module variables/methods,
+        // form and `ЭтотОбъект` members have already returned above; what remains
+        // is an implicit local written earlier in this body and a workspace common
+        // module. Re-typing a held name as the same-named global would contradict
+        // `manager_collection_shadowed`, which the availability diagnostic uses to
+        // stay silent on exactly these reads.
+        let user_holds_name = workspace_owns_common_module
+            || self.assigned_var_names.contains(&NormName::intern(name.as_str()));
+
+        if !user_holds_name {
+            if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(name.as_str()) {
+                if mdo_type.manager_type_prefix().is_some() {
+                    trace!("resolved {} as manager collection {:?}", name, mdo_type);
+                    self.check_manager_collection_env(expr_id, name, mdo_type);
+                    return self.db.manager_collection(mdo_type);
+                }
+            }
+        }
+
+        if !user_holds_name {
             if let Some((id, env)) =
                 crate::platform_global_lookup::resolve_platform_global_property(self.db, name)
             {
@@ -1964,7 +1976,7 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
-        if !user_shadows && !workspace_owns_common_module {
+        if !user_holds_name {
             if let Some(id) =
                 crate::platform_global_lookup::resolve_platform_system_enum_type(self.db, name)
             {
