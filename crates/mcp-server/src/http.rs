@@ -7,7 +7,7 @@ use std::{
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{header::HOST, uri::Authority, HeaderMap, StatusCode},
+    http::{header::HOST, uri::Authority, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -43,7 +43,6 @@ struct HealthState {
     profile: McpProfile,
     address: SocketAddr,
     started_at: Instant,
-    allowed_hosts: Arc<[String]>,
 }
 
 #[derive(Serialize)]
@@ -88,17 +87,32 @@ fn host_is_allowed(host_header: &str, allowed_hosts: &[String]) -> bool {
     )
 }
 
-async fn health(
-    State(state): State<HealthState>,
-    headers: HeaderMap,
-) -> Result<Json<HealthResponse>, StatusCode> {
-    let host = headers.get(HOST).and_then(|value| value.to_str().ok()).unwrap_or_default();
-    if !host_is_allowed(host, &state.allowed_hosts) {
-        tracing::warn!(host, "rejected /health request with disallowed Host header");
-        return Err(StatusCode::FORBIDDEN);
+/// Refuse a disallowed `Host` before anything reads the request body.
+///
+/// rmcp applies this check inside its own service, which reaches only `/mcp` and only
+/// once the body has been collected. Gating the whole router here puts the readiness
+/// endpoint behind the same anti-DNS-rebinding rule, and stops a refused client from
+/// holding a connection open by never finishing the body it announced.
+async fn host_gate(
+    State(allowed_hosts): State<Arc<[String]>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let host = request
+        .headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    if !host_is_allowed(&host, &allowed_hosts) {
+        tracing::warn!(host, "rejected request with disallowed Host header");
+        return StatusCode::FORBIDDEN.into_response();
     }
+    next.run(request).await
+}
 
-    Ok(Json(HealthResponse {
+async fn health(State(state): State<HealthState>) -> Json<HealthResponse> {
+    Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         profile: state.profile.as_str(),
@@ -107,7 +121,7 @@ async fn health(
         port: state.address.port(),
         pid: std::process::id(),
         uptime_seconds: state.started_at.elapsed().as_secs(),
-    }))
+    })
 }
 
 /// The authorities this server answers. One list drives both routes, so the MCP
@@ -160,14 +174,15 @@ pub async fn serve_http(
         Arc::new(LocalSessionManager::default()),
         config,
     );
-    let health_state = HealthState { profile, address, started_at: Instant::now(), allowed_hosts };
+    let health_state = HealthState { profile, address, started_at: Instant::now() };
 
     let app = Router::new()
         .route_service("/mcp", mcp)
         .route("/health", get(health))
         .with_state(health_state)
         .layer(middleware::from_fn(limit_request_body))
-        .layer(RequestBodyLimitLayer::new(MAX_HTTP_REQUEST_BODY_BYTES));
+        .layer(RequestBodyLimitLayer::new(MAX_HTTP_REQUEST_BODY_BYTES))
+        .layer(middleware::from_fn_with_state(Arc::clone(&allowed_hosts), host_gate));
 
     // `IntoFuture` rather than a bare await: the shutdown grace below needs to select
     // against this future, and drop it if the grace runs out.

@@ -37,11 +37,20 @@ static ISOLATE_CACHE: Once = Once::new();
 /// `reference-search.db` while claiming to test only the transport. Every test runs
 /// this before constructing any state, and `Once` orders the write ahead of each
 /// caller's return, so no reader observes the environment mid-change.
+///
+/// Best effort, and only that: `dirs::cache_dir` reads `XDG_CACHE_HOME` on Linux and
+/// `$HOME` on macOS, but on Windows it calls a known-folder API that no environment
+/// variable redirects. What the reference profile writes there is derived from
+/// compile-time platform tables rather than from any test input, so on Windows the
+/// suite reproduces the same content a real run would write.
 fn isolate_reference_cache() {
     ISOLATE_CACHE.call_once(|| {
         let scratch = std::env::temp_dir().join(format!("bsl-http-tests-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).expect("scratch cache directory should be creatable");
         std::env::set_var("XDG_CACHE_HOME", &scratch);
+        if cfg!(target_os = "macos") {
+            std::env::set_var("HOME", &scratch);
+        }
     });
 }
 
@@ -324,6 +333,38 @@ async fn a_stalled_request_body_cannot_block_shutdown() {
         .expect("HTTP server should stop cleanly");
 
     drop(stalled);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disallowed_host_is_refused_without_waiting_for_the_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let server = TestServer::start(loopback_allowed_hosts()).await;
+    let mut stream =
+        tokio::net::TcpStream::connect(server.address).await.expect("test client should connect");
+    // Announces 100 bytes and sends one. A refused Host must not buy the client an
+    // open connection for as long as it withholds the rest.
+    stream
+        .write_all(
+            b"POST /mcp HTTP/1.1\r\nHost: attacker.example\r\nAccept: application/json, text/event-stream\r\n\
+              Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{",
+        )
+        .await
+        .expect("headers and a partial body should be written");
+
+    let mut response = [0u8; 64];
+    let read = tokio::time::timeout(TEST_TIMEOUT, stream.read(&mut response))
+        .await
+        .expect("the Host gate must answer before the body is complete")
+        .expect("response should be readable");
+    let status = String::from_utf8_lossy(&response[..read]);
+    assert!(
+        status.starts_with("HTTP/1.1 403"),
+        "expected a Host refusal, got: {}",
+        status.lines().next().unwrap_or_default()
+    );
+
+    server.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
