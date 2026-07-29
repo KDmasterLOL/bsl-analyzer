@@ -1798,23 +1798,13 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
         return None;
     }
 
-    // The collection segment sits at a fixed distance from the end —
-    // `<…>/<Plural>/<Name>/Ext/<ModuleFile>.bsl` — and the `Ext` level is optional,
-    // so which distance applies is decided by whether that level is present, not by
-    // which segment happens to look like a collection. Guessing by appearance fails
-    // both ways: an OBJECT named after a collection would take the type
-    // (`Catalogs/Constants/Ext/…`), and so would an unrelated ANCESTOR directory
-    // (`C:/Users/…/Documents/Catalogs/Товары/…`).
-    let has_ext_level = parts[parts.len() - 2].eq_ignore_ascii_case("Ext");
-    let distance_from_end = if has_ext_level { 4 } else { 3 };
-    let type_idx = parts.len().checked_sub(distance_from_end)?;
-    let type_plural = parts[type_idx];
-
-    if mdo_type_from_plural(type_plural).is_none() && type_plural != "CommonModules" {
-        return None;
-    }
-
-    let name = parts[type_idx + 1].to_string();
+    // Structure comes from the shared specification; the spelling table stays
+    // here, mirroring `MdoType::from_plural` plus the `CommonModules` directory.
+    let split = bsl_metadata::module_path::split_module_path(&normalized, |segment| {
+        mdo_type_from_plural(segment).is_some() || segment == "CommonModules"
+    })?;
+    let type_plural = split.collection;
+    let name = split.object_name.to_string();
 
     let mdo_type = mdo_type_from_plural(type_plural);
 

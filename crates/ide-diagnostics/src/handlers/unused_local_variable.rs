@@ -206,27 +206,43 @@ fn collect_read_var_names(body: &hir::Body) -> FxHashSet<String> {
     read_vars
 }
 
-/// Whether an unread assignment to `name_lower` stores into a Global-context
-/// property rather than declaring a local.
+/// Whether the bare name `name_lower` denotes a metadata manager collection —
+/// cheap and purely textual, used only to decide whether the question below is
+/// worth asking at all.
+fn names_a_manager_collection(name_lower: &str) -> bool {
+    bsl_metadata::MdoType::from_plural(name_lower)
+        .is_some_and(|mdo| mdo.manager_type_prefix().is_some())
+}
+
+/// Whether an unread bare assignment declares a local at all.
 ///
-/// A metadata-collection name (`Справочники`, `Documents`, …) is such a property:
-/// the platform refuses the write and declares nothing, so the assignment is no
-/// dead store — `GlobalPropertyNotWritable` reports the write itself.
+/// For an ordinary name it always does, unless a declaration or an implicit
+/// member already owns it. For a metadata-collection name the answer belongs to
+/// INFERENCE and nowhere else: assigning to a Global-context property declares
+/// nothing (the platform refuses the write, and `GlobalPropertyNotWritable`
+/// reports it), but a non-writable owner — a same-named method, a common module
+/// known from the configuration OR merely from the source root — takes the name
+/// first, and then the assignment does declare a real local.
 ///
-/// The name alone does not settle it, though. A NON-WRITABLE owner declared in the
-/// workspace — a same-named module method or common module — takes the name first,
-/// and an assignment over one of those does create a real implicit local whose
-/// being unread is a genuine finding. Writable owners (`Перем`, parameters) never
-/// reach here: `declared_vars` already excludes them.
-fn assignment_targets_a_global_property(name_lower: &str, ctx: &DiagnosticsContext) -> bool {
-    let names_a_collection = bsl_metadata::MdoType::from_plural(name_lower)
-        .is_some_and(|mdo| mdo.manager_type_prefix().is_some());
-    if !names_a_collection {
-        return false;
+/// Answering that here a second time is what produced three separate defects:
+/// the local copy disagreed with inference on config-less common modules, on
+/// methods, and on the method-versus-attribute resolution order. Inference is
+/// consulted only for collection names, so ordinary bodies pay nothing.
+fn declares_a_local(
+    name_lower: &str,
+    body: hir::DefWithBodyId,
+    declared_vars: &FxHashSet<String>,
+    skip_attr_names: &FxHashSet<String>,
+    ctx: &DiagnosticsContext,
+) -> bool {
+    if names_a_manager_collection(name_lower) {
+        return ctx
+            .infer()
+            .implicit_locals_by_body
+            .get(&body)
+            .is_some_and(|locals| locals.contains_key(name_lower));
     }
-    let held_by_method =
-        ctx.symbol_tree().methods().any(|method| method.name.as_str().fold_lower() == name_lower);
-    !held_by_method && !ctx.is_common_module_anywhere(name_lower)
+    !declared_vars.contains(name_lower) && !skip_attr_names.contains(name_lower)
 }
 
 fn check_method(
@@ -320,10 +336,13 @@ fn check_method(
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().fold_lower();
 
-                if !declared_vars.contains(&lowercase_name)
-                    && !skip_attr_names.contains(&lowercase_name)
-                    && !assignment_targets_a_global_property(&lowercase_name, ctx)
-                {
+                if declares_a_local(
+                    &lowercase_name,
+                    hir::DefWithBodyId::Method(local_id),
+                    &declared_vars,
+                    skip_attr_names,
+                    ctx,
+                ) {
                     if let std::collections::hash_map::Entry::Vacant(e) =
                         implicit_vars.entry(lowercase_name)
                     {
@@ -373,9 +392,13 @@ fn check_module_level_code(
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().fold_lower();
 
-                if skip_attr_names.contains(&lowercase_name)
-                    || assignment_targets_a_global_property(&lowercase_name, ctx)
-                {
+                if !declares_a_local(
+                    &lowercase_name,
+                    hir::DefWithBodyId::ModuleCode,
+                    &FxHashSet::default(),
+                    skip_attr_names,
+                    ctx,
+                ) {
                     continue;
                 }
 
@@ -451,6 +474,49 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
+    /// Неизменяемый владелец забирает имя раньше коллекции, поэтому присваивание
+    /// поверх него создаёт настоящую локаль. Вердикт даёт инференс — здесь его
+    /// не дублируют, иначе копия расходится с ним на каждом виде владельца.
+    #[test]
+    fn a_non_writable_owner_makes_the_assignment_a_real_local() {
+        let code = "Процедура Справочники()\nКонецПроцедуры\n\nПроцедура Тест()\n    \
+                    Справочники = 1;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(code);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the same-named method holds the name"
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
+            0,
+            "and the write is therefore not a write to the collection"
+        );
+    }
+
+    /// Тот же владелец, известный только по пути в source root: конфигурации нет,
+    /// общий модуль находится через индекс модулей. Инференс это учитывает, и
+    /// локальная копия вердикта — не учитывала.
+    #[test]
+    fn a_config_less_common_module_owner_also_makes_it_a_real_local() {
+        let fixture = r#"
+//- /CommonModules/Справочники/Ext/Module.bsl
+Процедура Метод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Справочники = 1;
+КонецПроцедуры
+"#;
+        let diags = crate::test_utils::check_hir_diagnostic_with_fixtures(fixture);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "a common module known only from the source root holds the name too"
+        );
+    }
+
     /// Имя коллекции может быть занято НЕИЗМЕНЯЕМЫМ объявленным владельцем —
     /// одноимённым методом модуля или общим модулем. Писать в них нельзя, поэтому
     /// присваивание создаёт настоящую неявную локаль, и её неиспользование —

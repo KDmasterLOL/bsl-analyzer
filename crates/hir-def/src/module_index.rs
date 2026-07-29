@@ -422,19 +422,13 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
     let is_manager_module =
         parts.last().is_some_and(|file_name| file_name.eq_ignore_ascii_case("ManagerModule.bsl"));
 
-    // The collection segment sits at a fixed distance from the end —
-    // `<…>/<Plural>/<Name>/Ext/<ModuleFile>.bsl` — and the `Ext` level is optional,
-    // so which distance applies is decided by whether that level is present, not by
-    // which segment happens to look like a collection. Guessing by appearance fails
-    // both ways: an OBJECT named after a collection would take the type
-    // (`/Documents/Constants/Ext/…` indexed as a constant named `Ext`), and so
-    // would an unrelated ANCESTOR directory (`…/Documents/Catalogs/Товары/…` under
-    // a Windows user profile indexed as a document named `Catalogs`).
-    let has_ext_level = parts[parts.len() - 2].eq_ignore_ascii_case("Ext");
-    let distance_from_end = if has_ext_level { 4 } else { 3 };
-    let type_idx = parts.len().checked_sub(distance_from_end)?;
-    let mod_type = module_path_type_from_segment(parts[type_idx])?;
-    let name = parts[type_idx + 1].to_string();
+    // Structure comes from the shared specification; the spelling table stays
+    // here, because this index accepts `Ё` variants the metadata builder does not.
+    let split = bsl_metadata::module_path::split_module_path(path, |segment| {
+        module_path_type_from_segment(segment).is_some()
+    })?;
+    let mod_type = module_path_type_from_segment(split.collection)?;
+    let name = split.object_name.to_string();
 
     if mod_type == ModulePathType::CommonModule {
         if path_lower.ends_with("module.bsl")
