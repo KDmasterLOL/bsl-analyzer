@@ -152,8 +152,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
+dependencies = [
+ "axum-core",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "itoa",
+ "matchit",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde_core",
+ "serde_json",
+ "serde_path_to_error",
+ "sync_wrapper",
+ "tokio",
+ "tower",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
+name = "axum-core"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "sync_wrapper",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
 name = "base-db"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "dashmap",
  "expect-test",
@@ -247,7 +295,7 @@ checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
 
 [[package]]
 name = "bsl-analyzer"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "anyhow",
  "base-db",
@@ -259,6 +307,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-channel",
+ "dirs",
  "expect-test",
  "hir",
  "ide",
@@ -288,10 +337,12 @@ dependencies = [
  "thiserror 1.0.69",
  "tikv-jemallocator",
  "tokio",
+ "tokio-util",
  "toml_edit",
  "tracing",
  "tracing-subscriber",
  "tracing-tree",
+ "uuid",
  "vcs",
  "vfs",
  "vfs-notify",
@@ -302,14 +353,14 @@ dependencies = [
 
 [[package]]
 name = "bsl-config"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "bsl-metadata",
 ]
 
 [[package]]
 name = "bsl-debug"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "dap",
  "quick-xml",
@@ -325,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "bsl-launcher"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "anyhow",
  "dirs",
@@ -344,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "bsl-metadata"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "bsl-platform",
  "intern",
@@ -372,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "bsl-search"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "blake3",
  "code-chunk",
@@ -397,7 +448,7 @@ dependencies = [
 
 [[package]]
 name = "bsl-types"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "bsl-config",
  "bsl-metadata",
@@ -471,7 +522,7 @@ checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 
 [[package]]
 name = "cfg"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "cfg-types",
  "expect-test",
@@ -493,7 +544,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cfg-types"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "la-arena",
 ]
@@ -611,7 +662,7 @@ checksum = "3f88a43d011fc4a6876cb7344703e297c71dda42494fee094d5f7c76bf13f746"
 
 [[package]]
 name = "code-chunk"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "lexer",
  "parser",
@@ -1016,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "dataflow"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "base-db",
  "bsl-platform",
@@ -1584,7 +1635,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hir"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "base-db",
  "bsl-config",
@@ -1607,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "hir-def"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "base-db",
  "bsl-config",
@@ -1716,6 +1767,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1737,6 +1794,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -1896,7 +1954,7 @@ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
 name = "ide"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "bsl-metadata",
  "bsl-platform",
@@ -1933,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "ide-assists"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "expect-test",
  "hir",
@@ -1946,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "ide-db"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "base-db",
  "bsl-config",
@@ -1980,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "ide-diagnostics"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "base-db",
  "bsl-config",
@@ -2017,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "ide-host-core"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "base-db",
  "bsl-metadata",
@@ -2120,7 +2178,7 @@ dependencies = [
 
 [[package]]
 name = "intern"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "boxcar",
  "criterion",
@@ -2332,7 +2390,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "lexer"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "expect-test",
  "logos",
@@ -2410,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "line-index"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "text-size",
 ]
@@ -2523,10 +2581,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "matchit"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
 name = "mcp-server"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "anyhow",
+ "axum",
  "base-db",
  "blake3",
  "bsl-debug",
@@ -2547,6 +2612,7 @@ dependencies = [
  "parser",
  "project-model",
  "rayon",
+ "reqwest",
  "rmcp",
  "rusqlite",
  "rustc-hash 2.1.2",
@@ -2560,6 +2626,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tower-http",
  "tracing",
  "vcs",
  "vfs",
@@ -2592,6 +2659,12 @@ checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "miniz_oxide"
@@ -2628,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "naparnik"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2781,7 +2854,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onec-client"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "reqwest",
  "serde",
@@ -2870,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "parser"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "expect-test",
  "lexer",
@@ -2883,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "parser-error"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "lexer",
  "smallvec",
@@ -3125,7 +3198,7 @@ dependencies = [
 
 [[package]]
 name = "profile"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "cfg-if",
  "libc",
@@ -3136,7 +3209,7 @@ dependencies = [
 
 [[package]]
 name = "project-model"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "base-db",
  "blake3",
@@ -3481,19 +3554,28 @@ checksum = "0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e"
 dependencies = [
  "async-trait",
  "base64",
+ "bytes",
  "chrono",
  "futures",
+ "http",
+ "http-body",
+ "http-body-util",
  "pastey",
  "pin-project-lite",
+ "rand 0.10.1",
+ "reqwest",
  "rmcp-macros",
  "schemars",
  "serde",
  "serde_json",
+ "sse-stream",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3779,7 +3861,7 @@ checksum = "d68f2ec51b097e4c1a75b681a8bec621909b5e91f15bb7b840c4f2f7b01148b2"
 
 [[package]]
 name = "sdbl-hir"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "base-db",
  "bsl-metadata",
@@ -3885,6 +3967,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -4040,6 +4133,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sse-stream"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c123f296ade4ec4b8b0f6162116e6629f5146922ca5ab40ca9d3c2e73ab4761e"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4047,7 +4153,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stdx"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
@@ -4104,7 +4210,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "symbol-info"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "bsl-metadata",
  "bsl-platform",
@@ -4151,7 +4257,7 @@ dependencies = [
 
 [[package]]
 name = "syntax"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "expect-test",
  "parser",
@@ -4207,7 +4313,7 @@ dependencies = [
 
 [[package]]
 name = "test-fixture"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "base-db",
  "ide-db",
@@ -4218,7 +4324,7 @@ dependencies = [
 
 [[package]]
 name = "test-utils"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "expect-test",
 ]
@@ -4547,6 +4653,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
  "tower",
@@ -4815,7 +4922,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vcs"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "anyhow",
  "git2",
@@ -4833,7 +4940,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vfs"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "crossbeam-channel",
  "indexmap",
@@ -5704,7 +5811,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.2.64"
+version = "0.2.65"
 dependencies = [
  "anyhow",
  "clap",

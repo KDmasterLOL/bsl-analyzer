@@ -492,10 +492,13 @@ mod contract_surface {
               lsp
               mcp
                 serve
-                  mode = stdio | broker | daemon
+                  allowed-host
+                  host
+                  mode = stdio | broker | daemon | http
                   onec-password
                   onec-url
                   onec-user
+                  port
                   profile = workspace | reference
                   source-dir (-s)
                 install
