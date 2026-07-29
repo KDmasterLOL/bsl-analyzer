@@ -1,3 +1,4 @@
+pub mod bare_root;
 mod definition;
 pub mod name_classify;
 mod semantic_symbol;

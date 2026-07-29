@@ -318,7 +318,7 @@ fn metadata_root_claim<DB: RootDatabase>(
     };
     let same_type = claim.reaching_value.is_some_and(|value_id| {
         owner.is_some_and(|owner| {
-            crate::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)
+            hir::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)
                 .is_some_and(|ty| is_config_metadata_object(db, ty))
         })
     });
@@ -379,7 +379,7 @@ fn collection_root_claim<DB: RootDatabase>(
     };
     let same_type = claim.reaching_value.is_some_and(|value_id| {
         owner.is_some_and(|owner| {
-            crate::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)
+            hir::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)
                 .is_some_and(|ty| is_this_manager_collection(db, ty, mdo_type))
         })
     });
@@ -413,7 +413,7 @@ fn root_claim_at<DB: RootDatabase>(
         return (None, None);
     };
     let (claim, owner) =
-        crate::bare_root::claim_at_node(db, file_id, offset, &Name::new(&name_text), root);
+        hir::bare_root::claim_at_node(db, file_id, offset, &Name::new(&name_text), root);
     (claim, Some(owner))
 }
 

@@ -8,6 +8,7 @@
 //! ВебКлиент` or unchecking the web client in `bsl-analyzer.toml` restores
 //! the corresponding suggestions.
 
+use hir::bare_root::method_item_at;
 use hir::execution_env::{self, EnvFlags};
 use hir::{AnnotationKind, ModItem};
 use ide_db::RootDatabase;
@@ -128,29 +129,4 @@ impl EnvFilter {
         }
         missing.is_empty()
     }
-}
-
-/// The top-level method whose source range contains `offset`. Inclusive end:
-/// while an unfinished method is being typed at the end of the file, the
-/// cursor commonly sits exactly at the method's current end — it still
-/// belongs to that method, not to module code. The returned index is the
-/// module-wide top-level item index — the same numbering `ModuleBodies` uses
-/// for its per-method lower results.
-pub(crate) fn method_item_at(
-    item_tree: &hir::ItemTree,
-    offset: TextSize,
-) -> Option<(u32, &ModItem)> {
-    item_tree
-        .top_level_items()
-        .iter()
-        .enumerate()
-        .find(|(_, item)| {
-            let range = match item {
-                ModItem::Procedure(idx) => item_tree.procedure(*idx).source_range,
-                ModItem::Function(idx) => item_tree.function(*idx).source_range,
-                ModItem::Variable(_) => return false,
-            };
-            range.contains(offset) || range.end() == offset
-        })
-        .map(|(local_id, item)| (local_id as u32, item))
 }

@@ -165,7 +165,7 @@ fn hover_free_name<DB: RootDatabase>(
     let held = std::cell::OnceCell::new();
     let name_is_held = || {
         *held.get_or_init(|| {
-            crate::bare_root::claim_at(
+            hir::bare_root::claim_at(
                 db,
                 file_id,
                 token.text_range().start(),

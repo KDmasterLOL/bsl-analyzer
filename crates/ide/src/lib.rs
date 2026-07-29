@@ -1,4 +1,3 @@
-mod bare_root;
 pub mod batch_fixes;
 mod call_hierarchy;
 mod call_hierarchy_index;

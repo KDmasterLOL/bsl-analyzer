@@ -64,7 +64,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     if matches!(db.lookup_type(receiver_id), TypeKind::Unknown) {
         if let Some(name) = extract_receiver_ident(&receiver_expr) {
             let name_node = Name::new(&name);
-            let (claim, owner) = crate::bare_root::claim_at_node(
+            let (claim, owner) = hir::bare_root::claim_at_node(
                 db,
                 position.file_id,
                 position.offset,
@@ -80,7 +80,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
                 Some(claim) => {
                     let value_id = claim.reaching_value?;
                     receiver_id =
-                        crate::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)?;
+                        hir::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)?;
                 }
                 None => {
                     if let Some(id) = hir::resolve_platform_global_property_type(db, &name_node) {
