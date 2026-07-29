@@ -322,13 +322,6 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
             return Some(def);
         }
 
-        if bsl_metadata::MdoType::is_plural_form(token_text) {
-            if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(token_text) {
-                tracing::debug!(?mdo_type, "resolved as MDO collection");
-                return Some(Definition::MdoCollectionType(mdo_type));
-            }
-        }
-
         if let Some(method_id) = self.module_method(&name) {
             tracing::debug!(?method_id, "resolved as module method");
             return Some(Definition::Method(method_id));
@@ -337,6 +330,17 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
         if let Some(var_id) = self.module_variable(&name) {
             tracing::debug!(?var_id, "resolved as module variable");
             return Some(Definition::Variable(var_id));
+        }
+
+        // Last, because it is a PLATFORM global: a module method or variable named
+        // like a metadata plural holds the name, and asking the collection first
+        // made its own declaration unreachable from its uses. Same Local → Module →
+        // Global order the comment above states for global common-module exports.
+        if bsl_metadata::MdoType::is_plural_form(token_text) {
+            if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(token_text) {
+                tracing::debug!(?mdo_type, "resolved as MDO collection");
+                return Some(Definition::MdoCollectionType(mdo_type));
+            }
         }
 
         tracing::debug!("unresolved identifier: {}", token_text);

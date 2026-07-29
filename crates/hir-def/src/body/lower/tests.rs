@@ -516,6 +516,131 @@ fn recovery_lowers_bare_field_access_as_stmt_expr() {
     );
 }
 
+fn find_preproc_if(body: &crate::body::Body) -> &crate::hir::PreprocIfStmt {
+    body.body_stmts
+        .iter()
+        .find_map(|stmt_id| match body.stmt_idx(*stmt_id) {
+            Stmt::PreprocIf(preproc) => Some(preproc.as_ref()),
+            _ => None,
+        })
+        .expect("body must contain a #Если statement")
+}
+
+fn assert_single_recovered_field_stmt(
+    body: &crate::body::Body,
+    branch: &[crate::hir::StmtIdx],
+    expected_field: &str,
+) {
+    assert_eq!(branch.len(), 1, "branch must hold exactly the recovered stmt");
+    let expr_id = match body.stmt_idx(branch[0]) {
+        Stmt::Expr(id) => *id,
+        other => panic!("branch stmt should be Stmt::Expr (recovered), got {:?}", other),
+    };
+    match body.expr_idx(expr_id) {
+        Expr::Field { base, field } => {
+            assert_eq!(field.as_str().fold_lower(), expected_field);
+            match body.expr_idx(*base) {
+                Expr::Path(name) => assert_eq!(name.as_str().fold_lower(), "сп"),
+                other => panic!("base should be Expr::Path, got {:?}", other),
+            }
+        }
+        other => panic!("recovered expr should be Expr::Field, got {:?}", other),
+    }
+    use crate::ExprId;
+    assert!(
+        body.is_recovered(ExprId::from_idx(expr_id)),
+        "field-access expr inside the branch must be recovered",
+    );
+}
+
+#[test]
+fn recovery_lifts_bare_field_access_inside_preproc_then_branch() {
+    let method = parse_method(
+        "Процедура Тест()
+            Сп = Новый Массив;
+            #Если Сервер Тогда
+            Сп.В
+            #КонецЕсли
+        КонецПроцедуры",
+    );
+    let result = super::lower_method(&method, false);
+
+    let preproc = find_preproc_if(&result.body);
+    assert_single_recovered_field_stmt(&result.body, &preproc.then_branch, "в");
+}
+
+#[test]
+fn recovery_lifts_bare_field_access_inside_preproc_elsif_and_else_branches() {
+    let method = parse_method(
+        "Процедура Тест()
+            Сп = Новый Массив;
+            #Если Сервер Тогда
+                А = 1;
+            #ИначеЕсли Клиент Тогда
+                Сп.В
+            #Иначе
+                Сп.Д
+            #КонецЕсли
+        КонецПроцедуры",
+    );
+    let result = super::lower_method(&method, false);
+
+    let preproc = find_preproc_if(&result.body);
+    assert_eq!(preproc.elsif_branches.len(), 1);
+    assert_single_recovered_field_stmt(&result.body, &preproc.elsif_branches[0].2, "в");
+    let else_branch = preproc.else_branch.as_ref().expect("fixture has #Иначе");
+    assert_single_recovered_field_stmt(&result.body, else_branch, "д");
+}
+
+#[test]
+fn recovery_does_not_lift_header_garbage_when_then_is_missing() {
+    // Без `Тогда` восстановление заголовка съедает начало следующей строки:
+    // ERROR с идентификатором стоит в позиции заголовка, не тела ветки, и
+    // подниматься как statement не должен.
+    let method = parse_method(
+        "Процедура Тест()
+            #Если Сервер
+            А = 1;
+            #КонецЕсли
+        КонецПроцедуры",
+    );
+    let result = super::lower_method(&method, false);
+
+    let preproc = find_preproc_if(&result.body);
+    let lifted_header_ident =
+        preproc.then_branch.iter().any(|stmt_id| match result.body.stmt_idx(*stmt_id) {
+            Stmt::Expr(expr_id) => matches!(
+                result.body.expr_idx(*expr_id),
+                Expr::Path(name) if name.as_str().fold_lower() == "а"
+            ),
+            _ => false,
+        });
+    assert!(!lifted_header_ident, "header-position ERROR must not be lifted into the branch body",);
+}
+
+#[test]
+fn recovery_ignores_malformed_condition_inside_pre_expr() {
+    let method = parse_method(
+        "Процедура Тест()
+            #Если Сервер И Тогда
+            А = 1;
+            #КонецЕсли
+        КонецПроцедуры",
+    );
+    let result = super::lower_method(&method, false);
+
+    let preproc = find_preproc_if(&result.body);
+    assert_eq!(
+        preproc.then_branch.len(),
+        1,
+        "branch must hold only the assignment, nothing lifted from the header",
+    );
+    assert!(
+        matches!(result.body.stmt_idx(preproc.then_branch[0]), Stmt::Assign { .. }),
+        "the only branch stmt must be the assignment",
+    );
+}
+
 #[test]
 fn recovery_does_not_kick_in_for_well_formed_call_stmt() {
     let method = parse_method(

@@ -1,3 +1,4 @@
+pub mod bare_root;
 mod definition;
 pub mod name_classify;
 mod semantic_symbol;
@@ -9,9 +10,12 @@ pub use definition::{Definition, ReferenceScope};
 pub use hir_ty::builtin::builtin_functions;
 pub use hir_ty::infer::CandidateCallBinding;
 pub use hir_ty::method_lookup::platform_type_key_id;
-pub use hir_ty::resolve_platform_global_property_type;
 pub use hir_ty::this_object::coerce_to_metadata_ref_id;
 pub use hir_ty::TyLoweringContext;
+pub use hir_ty::{
+    bare_global_name_claim, manager_collection_env, resolve_platform_global_property_type,
+    BareGlobalClaim, BodyShadowScope,
+};
 pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
 pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
 pub use name_classify::{classify_token, NameClass};
@@ -660,6 +664,39 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             }
         }
         None
+    }
+
+    /// Every recorded call-argument binding in the file, keyed by the source
+    /// range its binding expression was lowered from.
+    ///
+    /// One pass over the module's bodies, for callers that walk a whole range:
+    /// [`call_binding_at`](Self::call_binding_at) rescans every body per
+    /// position, which turns such a walk quadratic. The key is the callee's
+    /// range for ordinary calls and the whole call's range for the shapes
+    /// lowered as a qualified path, so look up both — same as `call_binding_at`
+    /// matches either.
+    pub fn call_bindings(&self, file_id: FileId) -> Vec<(syntax::TextRange, CandidateCallBinding)> {
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.db.module_bodies(module_id);
+        let mut bindings = Vec::new();
+
+        if let Some(result) = module_bodies.module_code_result() {
+            let routed = infer_owner(self.db, file_id, DefWithBodyId::ModuleCode);
+            for binding in routed.call_arg_bindings() {
+                if let Some(range) = result.source_map.expr_range(binding.call_expr) {
+                    bindings.push((range, binding.candidate.clone()));
+                }
+            }
+        }
+        for (local_id, _body, source_map) in module_bodies.method_bodies() {
+            let routed = infer_owner(self.db, file_id, DefWithBodyId::Method(local_id));
+            for binding in routed.call_arg_bindings() {
+                if let Some(range) = source_map.expr_range(binding.call_expr) {
+                    bindings.push((range, binding.candidate.clone()));
+                }
+            }
+        }
+        bindings
     }
 
     /// Expected parameter type(s) at a call-argument completion position.

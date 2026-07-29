@@ -7,6 +7,7 @@ use ide_db::RootDatabase;
 use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
+use super::env_filter::EnvFilter;
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
 pub(super) fn mdo_completions<DB: RootDatabase>(
@@ -23,19 +24,46 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
     let context = detect_mdo_context(&token)?;
     tracing::debug!(?context, "MDO completion context detected");
 
+    // A root the availability diagnostics would underline offers no members,
+    // and the suppression must be hard (`Some(vec![])`): falling through with
+    // `None` would hand the receiver to the platform source, which types it
+    // and lists the manager's members — none of them restricted on their own,
+    // all of them behind the flagged root.
+    let env_filter = EnvFilter::at(db, position.file_id, position.offset);
+
     match context {
         MdoContext::MetadataRoot { metadata_expr } => {
-            if !metadata_root_is_available(db, position.file_id, &metadata_expr) {
-                return None;
+            match metadata_root_claim(db, &position, &metadata_expr) {
+                MetadataRootClaim::NotMetadata | MetadataRootClaim::ShadowedOther => return None,
+                MetadataRootClaim::Global => {
+                    if !metadata_global_admitted(&env_filter) {
+                        return Some(Vec::new());
+                    }
+                }
+                MetadataRootClaim::ShadowedSameType => {}
             }
-            let items = complete_metadata_root_collections(db, position.locale);
-            if !items.is_empty() {
-                return Some(items);
-            }
+            // Authoritative even when the filter leaves nothing: falling
+            // through would reach the platform source's union handling, which
+            // deliberately skips env judgement and would resurrect the very
+            // members dropped here.
+            return Some(complete_metadata_root_collections(db, position.locale, &env_filter));
         }
         MdoContext::MetadataCollection { metadata_expr, collection } => {
-            if !metadata_root_is_available(db, position.file_id, &metadata_expr) {
-                return None;
+            match metadata_root_claim(db, &position, &metadata_expr) {
+                MetadataRootClaim::NotMetadata | MetadataRootClaim::ShadowedOther => return None,
+                MetadataRootClaim::Global => {
+                    if !metadata_global_admitted(&env_filter) {
+                        return Some(Vec::new());
+                    }
+                }
+                MetadataRootClaim::ShadowedSameType => {}
+            }
+            // The collection property carries its own availability mask, and
+            // the member-level diagnostic judges it even when the receiver is
+            // a variable — the second level is gated independently of the
+            // root's verdict.
+            if !metadata_collection_admitted(db, &env_filter, collection) {
+                return Some(Vec::new());
             }
             let items = match collection {
                 MetadataCollectionKind::Manager(mdo_type) => {
@@ -49,17 +77,35 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
                 return Some(items);
             }
         }
-        MdoContext::Collection { mdo_type } => {
+        MdoContext::Collection { mdo_type, collection_root } => {
+            match collection_root_claim(db, &position, &collection_root, mdo_type) {
+                RootClaim::Global => {
+                    if !env_filter.admits(hir::manager_collection_env(mdo_type)) {
+                        return Some(Vec::new());
+                    }
+                }
+                RootClaim::ShadowedSameType => {}
+                RootClaim::ShadowedOther => return None,
+            }
             let items = complete_mdo_objects(db, position.file_id, mdo_type);
             if !items.is_empty() {
                 return Some(items);
             }
         }
-        MdoContext::Object { mdo_type, object_name } => {
+        MdoContext::Object { mdo_type, object_name, collection_root } => {
+            match collection_root_claim(db, &position, &collection_root, mdo_type) {
+                RootClaim::Global => {
+                    if !env_filter.admits(hir::manager_collection_env(mdo_type)) {
+                        return Some(Vec::new());
+                    }
+                }
+                RootClaim::ShadowedSameType => {}
+                RootClaim::ShadowedOther => return None,
+            }
             let mut items = Vec::new();
 
             if let Some(prefix) = mdo_type.manager_type_prefix() {
-                items.extend(complete_manager_methods(db, prefix));
+                items.extend(complete_manager_methods(db, prefix, &env_filter));
             }
 
             items.extend(complete_manager_module_methods(
@@ -84,8 +130,8 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
 enum MdoContext {
     MetadataRoot { metadata_expr: SyntaxNode },
     MetadataCollection { metadata_expr: SyntaxNode, collection: MetadataCollectionKind },
-    Collection { mdo_type: MdoType },
-    Object { mdo_type: MdoType, object_name: String },
+    Collection { mdo_type: MdoType, collection_root: SyntaxNode },
+    Object { mdo_type: MdoType, object_name: String, collection_root: SyntaxNode },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,7 +160,7 @@ fn detect_from_dot(dot_token: &SyntaxToken) -> Option<MdoContext> {
             return Some(MdoContext::MetadataRoot { metadata_expr: receiver });
         }
         if let Some(mdo_type) = MdoType::from_plural(&ident_text) {
-            return Some(MdoContext::Collection { mdo_type });
+            return Some(MdoContext::Collection { mdo_type, collection_root: receiver });
         }
     }
 
@@ -129,7 +175,7 @@ fn detect_from_dot(dot_token: &SyntaxToken) -> Option<MdoContext> {
                 }
             }
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-                return Some(MdoContext::Object { mdo_type, object_name });
+                return Some(MdoContext::Object { mdo_type, object_name, collection_root: base });
             }
         }
     }
@@ -160,22 +206,22 @@ fn detect_from_ident_after_dot(ident_token: &SyntaxToken) -> Option<MdoContext> 
             return Some(MdoContext::MetadataRoot { metadata_expr: base });
         }
         if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-            return Some(MdoContext::Collection { mdo_type });
+            return Some(MdoContext::Collection { mdo_type, collection_root: base });
         }
     }
 
     if base.kind() == SyntaxKind::FIELD_EXPR {
-        if let Some((metadata_base, base_text, object_name)) = get_field_expr_parts(&base) {
+        if let Some((root, base_text, object_name)) = get_field_expr_parts(&base) {
             if is_metadata_root_name(&base_text) {
                 if let Some(collection) = metadata_collection_from_plural(&object_name) {
                     return Some(MdoContext::MetadataCollection {
-                        metadata_expr: metadata_base,
+                        metadata_expr: root,
                         collection,
                     });
                 }
             }
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-                return Some(MdoContext::Object { mdo_type, object_name });
+                return Some(MdoContext::Object { mdo_type, object_name, collection_root: root });
             }
         }
     }
@@ -243,17 +289,165 @@ fn metadata_collection_from_plural(text: &str) -> Option<MetadataCollectionKind>
     mdo_type.manager_type_prefix().map(|_| MetadataCollectionKind::Manager(mdo_type))
 }
 
-fn metadata_root_is_available<DB: RootDatabase>(
+enum MetadataRootClaim {
+    /// The receiver is not the configuration-metadata object at all.
+    NotMetadata,
+    /// The bare platform global — its availability gating applies.
+    Global,
+    /// A user symbol claims the name and its reaching assignment carries the
+    /// configuration-metadata object — same members, member masks still apply.
+    ShadowedSameType,
+    /// A user symbol of some other (or unknown) type claims the name.
+    ShadowedOther,
+}
+
+fn metadata_root_claim<DB: RootDatabase>(
     db: &DB,
-    file_id: vfs::FileId,
+    position: &CompletionPosition,
     metadata_expr: &SyntaxNode,
-) -> bool {
-    let sema = Semantics::new(db);
-    let ty = sema.type_of_expr(file_id, metadata_expr);
+) -> MetadataRootClaim {
+    let (claim, owner) = root_claim_at(db, position.file_id, position.offset, metadata_expr);
+    let Some(claim) = claim else {
+        let sema = Semantics::new(db);
+        let ty = sema.type_of_expr(position.file_id, metadata_expr);
+        return if is_config_metadata_object(db, ty) {
+            MetadataRootClaim::Global
+        } else {
+            MetadataRootClaim::NotMetadata
+        };
+    };
+    let same_type = claim.reaching_value.is_some_and(|value_id| {
+        owner.is_some_and(|owner| {
+            hir::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)
+                .is_some_and(|ty| is_config_metadata_object(db, ty))
+        })
+    });
+    if same_type {
+        MetadataRootClaim::ShadowedSameType
+    } else {
+        MetadataRootClaim::ShadowedOther
+    }
+}
+
+fn is_config_metadata_object<DB: RootDatabase>(db: &DB, ty: hir::TypeId) -> bool {
+    let ty = collapse_nullable_union(db, ty);
     let TypeKind::PlatformObject(facet) = db.lookup_type(ty) else {
         return false;
     };
     matches!(facet.name.as_str(), "ОбъектМетаданныхКонфигурация" | "ConfigurationMetadataObject")
+}
+
+/// Collapse a nullable union to its single filled arm — `Undefined`/`Null`
+/// arms are unfilled, the way every completion source treats union receivers.
+fn collapse_nullable_union<DB: RootDatabase>(db: &DB, ty: hir::TypeId) -> hir::TypeId {
+    if let TypeKind::Union(members) = db.lookup_type(ty) {
+        let mut filled = members
+            .iter()
+            .filter(|m| !matches!(db.lookup_type(**m), TypeKind::Undefined | TypeKind::Null));
+        if let (Some(&only), None) = (filled.next(), filled.next()) {
+            return only;
+        }
+    }
+    ty
+}
+
+enum RootClaim {
+    /// The bare platform global — availability gating applies.
+    Global,
+    /// A user symbol claims the name but its inferred type IS this manager
+    /// collection: the members are the same, and the availability diagnostic
+    /// is silent for shadowed receivers, so the suggestions stay ungated.
+    ShadowedSameType,
+    /// A user symbol of some other (or unknown) type claims the name — the
+    /// typed completion sources own the receiver.
+    ShadowedOther,
+}
+
+/// The completion mirror of the diagnostic's shadowing guard: who owns the
+/// plural root is decided by NAME through the shared predicate, and the
+/// owner's type by its reaching assignment — never by the type of the read
+/// itself, which inference falls back to the same-named global for.
+fn collection_root_claim<DB: RootDatabase>(
+    db: &DB,
+    position: &CompletionPosition,
+    collection_root: &SyntaxNode,
+    mdo_type: MdoType,
+) -> RootClaim {
+    let (claim, owner) = root_claim_at(db, position.file_id, position.offset, collection_root);
+    let Some(claim) = claim else {
+        return RootClaim::Global;
+    };
+    let same_type = claim.reaching_value.is_some_and(|value_id| {
+        owner.is_some_and(|owner| {
+            hir::bare_root::reaching_value_ty(db, position.file_id, owner, value_id)
+                .is_some_and(|ty| is_this_manager_collection(db, ty, mdo_type))
+        })
+    });
+    if same_type {
+        RootClaim::ShadowedSameType
+    } else {
+        RootClaim::ShadowedOther
+    }
+}
+
+/// Whether `ty` is the manager collection of `mdo_type`, looking through a
+/// nullable union.
+fn is_this_manager_collection<DB: RootDatabase>(
+    db: &DB,
+    ty: hir::TypeId,
+    mdo_type: MdoType,
+) -> bool {
+    let ty = collapse_nullable_union(db, ty);
+    matches!(db.lookup_type(ty), TypeKind::ManagerCollection(t) if *t == mdo_type)
+}
+
+/// The user symbol claiming the bare root name at this read, plus the body
+/// owner for typing its reaching assignment.
+fn root_claim_at<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    offset: syntax::TextSize,
+    root: &SyntaxNode,
+) -> (Option<hir::BareGlobalClaim>, Option<hir::DefWithBodyId>) {
+    let Some(name_text) = get_single_ident(root) else {
+        return (None, None);
+    };
+    let (claim, owner) =
+        hir::bare_root::claim_at_node(db, file_id, offset, &Name::new(&name_text), root);
+    (claim, Some(owner))
+}
+
+/// Whether `Метаданные` is reachable from the cursor's environments. Its
+/// availability, like the manager collections', lives on the platform's
+/// Global-context property record.
+fn metadata_global_admitted(env: &EnvFilter) -> bool {
+    let prop = bsl_platform::PlatformDataInner::instance().get_global_property("Метаданные");
+    env.admits_context(prop.and_then(|p| p.context.as_ref()))
+}
+
+/// Whether the chosen collection property of `ОбъектМетаданныхКонфигурация`
+/// (`Справочники`, `Роли`, …) is itself reachable — matched the same way the
+/// root listing renders these properties, so the two levels cannot disagree.
+fn metadata_collection_admitted<DB: RootDatabase>(
+    db: &DB,
+    env: &EnvFilter,
+    collection: MetadataCollectionKind,
+) -> bool {
+    let props_input = TypeNameInput::new(db, "ОбъектМетаданныхКонфигурация".to_string());
+    let props = type_properties_query(db, props_input);
+    let prop = props.iter().find(|p| match collection {
+        MetadataCollectionKind::Manager(mdo_type) => {
+            MdoType::from_plural(p.name.as_str())
+                .or_else(|| MdoType::from_plural(p.english_name.as_str()))
+                == Some(mdo_type)
+        }
+        MetadataCollectionKind::Reference(kind) => {
+            MetadataReferenceKind::from_plural(p.name.as_str())
+                .or_else(|| MetadataReferenceKind::from_plural(p.english_name.as_str()))
+                == Some(kind)
+        }
+    });
+    prop.is_none_or(|p| env.admits_context(p.context.as_ref()))
 }
 
 fn complete_mdo_objects<DB: RootDatabase>(
@@ -305,15 +499,18 @@ fn complete_mdo_objects<DB: RootDatabase>(
 fn complete_metadata_root_collections<DB: RootDatabase>(
     db: &DB,
     locale: ide_db::base_db::Locale,
+    env: &EnvFilter,
 ) -> Vec<CompletionItem> {
     let type_name = "ОбъектМетаданныхКонфигурация";
     let methods_input = TypeNameInput::new(db, type_name.to_string());
     let mut items: Vec<CompletionItem> = type_methods_query(db, methods_input)
         .iter()
+        .filter(|m| env.admits_context(m.context.as_ref()))
         .map(super::platform_completion::render_platform_method)
         .collect();
     let props_input = TypeNameInput::new(db, type_name.to_string());
-    items.extend(type_properties_query(db, props_input).iter().map(|prop| {
+    let props = type_properties_query(db, props_input);
+    items.extend(props.iter().filter(|p| env.admits_context(p.context.as_ref())).map(|prop| {
         if let Some(kind) = MetadataReferenceKind::from_plural(prop.name.as_str())
             .or_else(|| MetadataReferenceKind::from_plural(prop.english_name.as_str()))
         {
@@ -401,13 +598,18 @@ fn complete_metadata_reference_objects<DB: RootDatabase>(
 fn complete_manager_methods<DB: RootDatabase>(
     db: &DB,
     manager_prefix: &str,
+    env: &EnvFilter,
 ) -> Vec<CompletionItem> {
     let input = TypeNameInput::new(db, manager_prefix.to_string());
     let methods = manager_methods_query(db, input);
 
     tracing::debug!(manager_prefix, method_count = methods.len(), "Manager methods found");
 
-    methods.iter().map(super::platform_completion::render_manager_method).collect()
+    methods
+        .iter()
+        .filter(|m| env.admits_context(m.context.as_ref()))
+        .map(super::platform_completion::render_manager_method)
+        .collect()
 }
 
 fn complete_manager_module_methods<DB: RootDatabase>(

@@ -271,13 +271,6 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
 }
 
 fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, io::Error> {
-    if matches!(args.runtime_profile, McpProfileCli::Workspace) && args.source_dir.is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "workspace profile requires --source-dir",
-        ));
-    }
-
     if matches!(args.runtime_profile, McpProfileCli::Reference)
         && (args.onec_url.is_some() || !args.onec_user.is_empty() || !args.onec_password.is_empty())
     {
@@ -314,6 +307,15 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
     })?;
     if port == 0 {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "--port must be in 1..=65535"));
+    }
+
+    // A blank entry satisfies no `Host` at all, so counting it towards the allowlist
+    // would start a server that rejects every request it receives.
+    if args.allowed_hosts.iter().any(|host| host.trim().is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--allowed-host must not be empty",
+        ));
     }
 
     let host = args.host.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
@@ -1245,6 +1247,19 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_allowed_host_does_not_satisfy_the_allowlist() {
+        let mut args = serve_args(McpServeMode::Http, Some(8021));
+        args.host = Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        args.allowed_hosts = vec!["   ".to_owned()];
+
+        let err = validate_serve_args(&args)
+            .expect_err("a blank allowlist entry matches no Host and must be rejected");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("--allowed-host"));
+    }
+
+    #[test]
     fn non_loopback_http_host_accepts_an_allowed_host() {
         let mut args = serve_args(McpServeMode::Http, Some(8021));
         args.host = Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
@@ -1271,13 +1286,10 @@ mod tests {
 
     #[test]
     fn workspace_profile_still_requires_source_dir() {
-        let mut args = serve_args(McpServeMode::Stdio, None);
-        args.source_dir = None;
+        let err = ServeCli::try_parse_from(["serve", "--profile", "workspace"])
+            .expect_err("workspace must keep requiring --source-dir");
 
-        let err =
-            validate_serve_args(&args).expect_err("workspace must keep requiring --source-dir");
-
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
         assert!(err.to_string().contains("--source-dir"));
     }
 

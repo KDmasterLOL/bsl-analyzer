@@ -597,13 +597,37 @@ fn lower_call_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 }
 
 fn try_lower_recovered_expr_stmt(ctx: &mut LoweringCtx, error_node: &SyntaxNode) -> Option<Stmt> {
-    if error_node.parent().map(|p| p.kind()) != Some(SyntaxKind::STMT_LIST) {
+    if !in_recoverable_stmt_position(error_node) {
         return None;
     }
     let expr_node = error_node.children().find(|c| is_recoverable_expr(c.kind()))?;
     let expr = lower_expr_node(ctx, &expr_node);
     ctx.mark_recovered_rec(expr);
     Some(Stmt::Expr(expr))
+}
+
+/// Whether an `ERROR` node stands where a statement may stand.
+///
+/// Besides a statement list slot, that is the body region of a preprocessor
+/// branch: `#Если`-branch statements are direct children of the directive
+/// node, with no `STMT_LIST` wrapper. The header region is excluded — an
+/// `ERROR` before the branch's `Тогда` (a malformed condition, or what
+/// recovery consumed when `Тогда` itself is missing) is not a statement.
+fn in_recoverable_stmt_position(error_node: &SyntaxNode) -> bool {
+    let Some(parent) = error_node.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        SyntaxKind::STMT_LIST => true,
+        SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_ELSIF_CLAUSE => parent
+            .children_with_tokens()
+            .take_while(|child| child.as_node() != Some(error_node))
+            .any(|child| child.as_token().is_some_and(|t| t.kind() == SyntaxKind::KW_THEN)),
+        // `#Иначе` has no header: its body starts right after the directive
+        // token, which is the clause's first child.
+        SyntaxKind::PRE_ELSE_CLAUSE => true,
+        _ => false,
+    }
 }
 
 fn is_recoverable_expr(kind: SyntaxKind) -> bool {

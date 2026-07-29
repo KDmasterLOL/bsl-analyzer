@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
+use hir::{CandidateCallBinding, Semantics};
 use ide_db::RootDatabase;
 use stdx::case::CaseExt;
-use symbol_info::{build_signature, CalleeResolver};
+use symbol_info::{build_signature_from_resolution, selected_signature_index, SymbolSignature};
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize};
 use vfs::FileId;
 
@@ -28,25 +31,71 @@ pub enum InlayHintKind {
 /// per-binding inference surface, not yet exposed to this layer).
 pub fn inlay_hints<DB: RootDatabase>(db: &DB, file_id: FileId, range: TextRange) -> Vec<InlayHint> {
     let _span = tracing::info_span!("inlay_hints", ?file_id).entered();
-    let resolver = CalleeResolver::new(db, file_id);
+
+    // One pass for the whole file: asking per position would rescan every body
+    // once per argument list. Which callee an argument list belongs to is
+    // inference's answer — deriving it from the callee's identifier text
+    // labelled arguments of a global whose name the surrounding code had taken.
+    // First recorded binding wins, as `call_binding_at` takes its first match:
+    // bodies own disjoint text, so a repeated key means one body mapped two
+    // expressions onto one range, and the later one must not displace the
+    // answer the positional lookup would give.
+    let mut bindings: HashMap<TextRange, CandidateCallBinding> = HashMap::new();
+    for (range, binding) in Semantics::new(db).call_bindings(file_id) {
+        bindings.entry(range).or_insert(binding);
+    }
+    if bindings.is_empty() {
+        return Vec::new();
+    }
 
     let mut hints = Vec::new();
-    for node in resolver.root().descendants() {
+    for node in db.parse_ref(file_id).syntax_node().descendants() {
         if node.kind() != SyntaxKind::ARG_LIST {
             continue;
         }
         if range.intersect(node.text_range()).is_none() {
             continue;
         }
-        parameter_hints_for_arg_list(&resolver, db, file_id, &node, range, &mut hints);
+        parameter_hints_for_arg_list(db, &bindings, &node, range, &mut hints);
     }
     hints
 }
 
+/// The binding recorded for the call this argument list belongs to.
+///
+/// Inference keys ordinary calls by the callee expression and the shapes
+/// lowered as a qualified path by the whole call, so both are tried — the same
+/// pair `Semantics::call_binding_at` matches.
+fn binding_for_arg_list<'a>(
+    bindings: &'a HashMap<TextRange, CandidateCallBinding>,
+    arg_list: &SyntaxNode,
+) -> Option<&'a CandidateCallBinding> {
+    let call = arg_list.parent()?;
+    let callee = match call.kind() {
+        SyntaxKind::CALL_EXPR => call.children().next()?,
+        SyntaxKind::NEW_EXPR => call.clone(),
+        _ => return None,
+    };
+    bindings.get(&callee.text_range()).or_else(|| bindings.get(&call.text_range()))
+}
+
+/// The signature whose parameter names label these arguments: the candidate
+/// inference selected, falling back to the first rendered one when the
+/// selection maps to no signature — an ambiguous or rejected overload set still
+/// names its arguments the same way in the common case, and that fallback is
+/// what parameter hints have always shown.
+fn selected_signature<'a>(
+    binding: &CandidateCallBinding,
+    signatures: &'a [SymbolSignature],
+) -> Option<&'a SymbolSignature> {
+    selected_signature_index(binding, signatures)
+        .and_then(|index| signatures.get(index))
+        .or_else(|| signatures.first())
+}
+
 fn parameter_hints_for_arg_list<DB: RootDatabase>(
-    resolver: &CalleeResolver<'_, DB>,
     db: &DB,
-    file_id: FileId,
+    bindings: &HashMap<TextRange, CandidateCallBinding>,
     arg_list: &SyntaxNode,
     range: TextRange,
     hints: &mut Vec<InlayHint>,
@@ -54,13 +103,13 @@ fn parameter_hints_for_arg_list<DB: RootDatabase>(
     if arg_list.children().next().is_none() {
         return;
     }
-    let Some(callee) = resolver.resolve_arg_list(arg_list) else {
+    let Some(binding) = binding_for_arg_list(bindings, arg_list) else {
         return;
     };
-    let Some(signatures) = build_signature(db, file_id, &callee) else {
+    let Some(signatures) = build_signature_from_resolution(db, binding) else {
         return;
     };
-    let Some(signature) = signatures.first() else {
+    let Some(signature) = selected_signature(binding, &signatures) else {
         return;
     };
 

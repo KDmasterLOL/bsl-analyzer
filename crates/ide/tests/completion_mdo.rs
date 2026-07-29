@@ -770,3 +770,401 @@ fn completion_object_module_attribute_shadows_hbk_global() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn collection_objects_hidden_in_client_form_method() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Сохранить()
+    Справочники.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        items.is_empty(),
+        "a client method must not offer catalog names behind the unavailable collection root; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn collection_objects_offered_in_server_form_method() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Процедура Записать()
+    Справочники.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        has_label(&items, "Справочник1"),
+        "the server method must keep the catalog suggestions; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn collection_objects_restored_under_server_conditional() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Сохранить()
+    #Если Сервер Тогда
+    Справочники.$0
+    #КонецЕсли
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        has_label(&items, "Справочник1"),
+        "`#Если Сервер` narrowing must restore the suggestions, mirroring the diagnostic; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn english_collection_root_hidden_in_client_form_method() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Сохранить()
+    Catalogs.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        items.is_empty(),
+        "the English collection root must be hidden in a client method too; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn object_members_hidden_in_client_form_method() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Сохранить()
+    Справочники.Справочник1.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        items.is_empty(),
+        "manager members sit behind the flagged collection root and must be hidden in a client method; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shadowed_collection_root_falls_through_to_typed_completion() {
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    Справочники = Новый Структура("Код", 1);
+    Справочники.$0
+КонецФункции
+"#,
+    );
+    assert!(
+        !has_label(&items, "Справочник1"),
+        "a local shadowing the collection root must not receive catalog-name suggestions"
+    );
+    assert!(
+        has_label(&items, "Вставить"),
+        "the shadowing structure's own members must be offered instead; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn typed_collection_local_keeps_object_suggestions_in_client() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Функция ПолучитьСправочники()
+    Возврат Справочники;
+КонецФункции
+
+&НаКлиенте
+Процедура Тест()
+    Справочники = ПолучитьСправочники();
+    Справочники.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        has_label(&items, "Справочник1"),
+        "a local carrying the collection's own type shadows the global: the diagnostic is silent, so completion must keep the members; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shadowed_root_in_server_conditional_offers_no_objects() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Процедура Тест()
+    Справочники = Новый Структура("Код", 1);
+    #Если Сервер Тогда
+    Справочники.$0
+    #КонецЕсли
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        !has_label(&items, "Справочник1") && !has_label(&items, "СправочникСМенеджером"),
+        "an assigned local claims the name even when recovery left the receiver un-lowered; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shadowed_root_before_assignment_offers_no_objects() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Тест()
+    Справочники.$0
+    Справочники = Новый Структура("Код", 1);
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        !has_label(&items, "Справочник1"),
+        "an assignment anywhere in the body claims the name for the whole body; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn metadata_collection_hidden_behind_typed_local_in_client() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Функция ПолучитьМетаданные()
+    Возврат Метаданные;
+КонецФункции
+
+&НаКлиенте
+Процедура Тест()
+    Метаданные = ПолучитьМетаданные();
+    Метаданные.Справочники.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        !has_label(&items, "Справочник1"),
+        "the collection property has its own availability mask and is unreachable on the client even through a variable; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn metadata_collection_objects_offered_in_server_method() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Процедура Записать()
+    Метаданные.Справочники.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        has_label(&items, "Справочник1"),
+        "the server method must keep the second-level suggestions; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn optional_typed_collection_local_keeps_objects() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Функция ПолучитьСправочники()
+    Если Истина Тогда
+        Возврат Справочники;
+    КонецЕсли;
+    Возврат Неопределено;
+КонецФункции
+
+&НаКлиенте
+Процедура Тест()
+    Справочники = ПолучитьСправочники();
+    Справочники.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        has_label(&items, "Справочник1"),
+        "a nullable union collapses to its filled arm, like every union receiver in completion; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn optional_metadata_local_hides_server_collection() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Функция ПолучитьМетаданные()
+    Если Истина Тогда
+        Возврат Метаданные;
+    КонецЕсли;
+    Возврат Неопределено;
+КонецФункции
+
+&НаКлиенте
+Процедура Тест()
+    Метаданные = ПолучитьМетаданные();
+    Метаданные.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        !has_label(&items, "Справочники"),
+        "the server-only collection property must stay hidden behind a nullable metadata local on the client; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shadowed_root_before_assignment_with_prefix_offers_no_objects() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Тест()
+    Справочники.С$0
+    Справочники = Новый Структура("Код", 1);
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        !has_label(&items, "Справочник1"),
+        "before the first assignment the name still denotes the global, and the client gate applies; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn metadata_read_before_assignment_stays_root_gated() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Тест()
+    Метаданные.О$0
+    Метаданные = Новый Структура;
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        items.is_empty(),
+        "before the first assignment the read is the global `Метаданные`, unavailable on the client; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn collection_rhs_before_first_assignment_stays_root_gated() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Тест()
+    Справочники = Справочники.С$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        items.is_empty(),
+        "inside its own right-hand side the name still denotes the unavailable global; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unknown_shadowed_collection_offers_no_objects() {
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    Справочники = НеизвестнаяФункция();
+    Справочники.С$0
+КонецФункции
+"#,
+    );
+    assert!(
+        !has_label(&items, "Справочник1"),
+        "a local of unknown type owns the name — the read's fallback type proves nothing; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn conditional_module_metadata_assignment_does_not_supply_mdo_objects() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+Перем Метаданные;
+&НаСервере
+Процедура Тест()
+    Если Ложь Тогда
+        Метаданные = Metadata;
+    КонецЕсли;
+    Метаданные.Справочники.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        !has_label(&items, "Справочник1"),
+        "a body assignment to a module variable is not a flow-typed local write; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn assigned_collection_shadows_same_named_method() {
+    let items = complete(
+        r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Функция ПолучитьСправочники()
+    Возврат Catalogs;
+КонецФункции
+
+Процедура Справочники()
+КонецПроцедуры
+
+&НаКлиенте
+Процедура Тест()
+    Справочники = ПолучитьСправочники();
+    Справочники.$0
+КонецПроцедуры
+"#,
+    );
+    assert!(
+        has_label(&items, "Справочник1"),
+        "a same-named method cannot be assigned to — the write creates an implicit local, which inference flow-types; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn assigned_local_over_method_beats_same_named_object_member() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_catalog_with_metadata_attribute(temp_dir.path());
+    let object_module_path =
+        temp_dir.path().join("Catalogs/СправочникСМетаданными/Ext/ObjectModule.bsl");
+    let items = complete_with_config_path(
+        &format!(
+            "//- {}\nФункция Метаданные()\nКонецФункции\n\nФункция Тест()\n    Метаданные = Metadata;\n    Метаданные.Справочники.$0\nКонецФункции\n",
+            object_module_path.display()
+        ),
+        temp_dir.path(),
+    );
+    assert!(
+        has_label(&items, "СправочникСМетаданными"),
+        "the method wins resolution, so the assignment creates a flow-typed implicit local despite the same-named object member; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}

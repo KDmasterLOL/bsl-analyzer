@@ -370,6 +370,314 @@ mod tests {
         assert!(diags.is_empty(), "universally available types must stay silent, got: {diags:?}");
     }
 
+    /// Глобальные коллекции менеджеров (`Перечисления`, `Справочники`, …) —
+    /// серверная поверхность: тонкий и веб-клиент их не компилируют.
+    #[test]
+    fn manager_collection_flagged_on_client() {
+        let fixture_server = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Процедура УстановитьНаСервере()
+    ЭтоДействие = Перечисления.ВидыТочекМаршрута.Действие;
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture_server);
+        assert!(diags.is_empty(), "server context admits Перечисления, got: {diags:?}");
+
+        let fixture_client = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура УстановитьДоступность()
+    ЭтоДействие = Перечисления.ВидыТочекМаршрута.Действие;
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture_client);
+        assert_eq!(
+            diags.len(),
+            1,
+            "the collection root must be flagged exactly once, got: {diags:?}"
+        );
+        assert!(
+            diags[0].0.starts_with("Глобальное свойство 'Перечисления' недоступно"),
+            "message must name the global property: {}",
+            diags[0].0
+        );
+        assert!(
+            diags[0].0.contains("Тонкий клиент") && diags[0].0.contains("Веб-клиент"),
+            "thin and web clients lack manager collections: {}",
+            diags[0].0
+        );
+        assert!(
+            !diags[0].0.contains("управляемое приложение"),
+            "thick client admits manager collections — must not be reported: {}",
+            diags[0].0
+        );
+    }
+
+    /// Локальная переменная, названная как коллекция, затеняет глобальное
+    /// свойство — обращение к ней не ограничено средами.
+    #[test]
+    fn local_named_like_collection_not_flagged() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Установить(Данные)
+    Перечисления = Данные.Коллекция;
+    ЭтоДействие = Перечисления.ВидыТочекМаршрута.Действие;
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "a local shadows the global collection, got: {diags:?}");
+    }
+
+    /// Затенение действует на всё тело: неявная локаль существует с любого
+    /// присваивания, в том числе стоящего ПОСЛЕ обращения.
+    #[test]
+    fn late_assignment_shadows_collection() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Установить(Данные)
+    ЭтоДействие = Перечисления.ВидыТочекМаршрута.Действие;
+    Перечисления = Данные.Коллекция;
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "shadowing is body-wide, not order-dependent, got: {diags:?}");
+    }
+
+    /// Модульная переменная затеняет коллекцию и для вызывной формы,
+    /// пониженной в QualifiedPath.
+    #[test]
+    fn module_var_shadows_three_level_root() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+Перем Справочники;
+
+&НаКлиенте
+Процедура Тест()
+    Х = Справочники.Товары.НайтиПоКоду("1");
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "a module variable shadows the global, got: {diags:?}");
+    }
+
+    /// Общий модуль конфигурации с именем коллекции затеняет платформенный
+    /// глобал — доступность глобала не применяется.
+    #[test]
+    fn workspace_module_shadows_manager_collection() {
+        let fixture = r#"
+//- /CommonModules/Перечисления/Ext/Module.bsl
+Функция Получить() Экспорт
+    Возврат 1;
+КонецФункции
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Тест()
+    Х = Перечисления;
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "a workspace common module shadows the global, got: {diags:?}");
+    }
+
+    /// Диагностика вызывной формы стоит на корневом имени коллекции,
+    /// а не на всём вызове.
+    #[test]
+    fn three_level_diagnostic_anchors_on_collection_root() {
+        let source = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура НайтиНаКлиенте()
+    Товар = Справочники.Товары.НайтиПоКоду("1");
+КонецПроцедуры
+"#;
+        let content = source.split_once("Module.bsl\n").expect("fixture header present").1;
+        let diag = check_hir_diagnostic_with_fixtures(source)
+            .into_iter()
+            .find(|d| d.code == DiagnosticCode::UnavailableInEnvironment)
+            .expect("the call root must be flagged");
+        let flagged = &content[usize::from(diag.range.start())..usize::from(diag.range.end())];
+        assert_eq!(
+            flagged, "Справочники",
+            "the diagnostic must anchor on the collection root name"
+        );
+    }
+
+    /// Реквизит формы с именем коллекции затеняет платформенный глобал:
+    /// в клиентском коде имя обозначает реквизит, а не серверную коллекцию.
+    #[test]
+    fn form_attribute_shadows_manager_collection() {
+        let form_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <Properties>
+        <Name>ФормаЭлемента</Name>
+    </Properties>
+    <Attributes>
+        <Attribute name="Перечисления" id="1">
+            <Type/>
+        </Attribute>
+    </Attributes>
+</Form>"#;
+        let source = r#"&НаКлиенте
+Процедура Тест()
+    Х = Перечисления.ВидыТочекМаршрута.Действие;
+КонецПроцедуры
+"#;
+        let diags: Vec<String> = crate::test_utils::check_form_with_form_xml(source, form_xml)
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::UnavailableInEnvironment)
+            .map(|d| d.message)
+            .collect();
+        assert!(diags.is_empty(), "a form attribute shadows the global, got: {diags:?}");
+    }
+
+    /// Сознательное ограничение: затенение не учитывает ветки препроцессора.
+    /// Присваивание в серверной ветке `#Иначе` глушит проверку и в клиентской
+    /// ветке того же тела — пропуск (FN), а не ложное срабатывание, в
+    /// согласии с branch-blind моделью затенения во всём выводе типов.
+    #[test]
+    fn cross_branch_assignment_shadows_conservatively() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиентеНаСервере
+Процедура Тест()
+    #Если Клиент Тогда
+    Х = Перечисления.ВидыТочекМаршрута.Действие;
+    #Иначе
+    Перечисления = Новый Структура;
+    #КонецЕсли
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(
+            diags.is_empty(),
+            "body-wide shadowing deliberately ignores preprocessor branches, got: {diags:?}"
+        );
+    }
+
+    /// Корень, обёрнутый в скобки, — по-прежнему трёхуровневый вызов;
+    /// диагностика стоит на имени, а не на всём выражении.
+    #[test]
+    fn parenthesized_three_level_root_anchors_on_name() {
+        let source = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура НайтиНаКлиенте()
+    Товар = (Справочники).Товары.НайтиПоКоду("1");
+КонецПроцедуры
+"#;
+        let content = source.split_once("Module.bsl\n").expect("fixture header present").1;
+        let diag = check_hir_diagnostic_with_fixtures(source)
+            .into_iter()
+            .find(|d| d.code == DiagnosticCode::UnavailableInEnvironment)
+            .expect("the call root must be flagged");
+        let flagged = &content[usize::from(diag.range.start())..usize::from(diag.range.end())];
+        assert_eq!(
+            flagged, "Справочники",
+            "the diagnostic must anchor on the collection root name"
+        );
+    }
+
+    /// Клиентская замена — `ПредопределенноеЗначение` со строковым именем:
+    /// строка не резолвится в глобальное свойство и жалоб не даёт.
+    #[test]
+    fn predefined_value_replacement_not_flagged() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура УстановитьДоступность()
+    ЭтоДействие = ПредопределенноеЗначение("Перечисление.ВидыТочекМаршрута.Действие");
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "the client-safe replacement must stay silent, got: {diags:?}");
+    }
+
+    /// Английское имя коллекции ограничено так же, как русское.
+    #[test]
+    fn english_manager_collection_flagged_on_client() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура УстановитьДоступность()
+    ЭтоДействие = Enums.ВидыТочекМаршрута.Действие;
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert_eq!(diags.len(), 1, "English spelling names the same global, got: {diags:?}");
+        assert!(
+            diags[0].0.starts_with("Глобальное свойство 'Enums' недоступно"),
+            "message must carry the spelling as written: {}",
+            diags[0].0
+        );
+    }
+
+    /// Вызывная форма `Справочники.Товары.НайтиПоКоду()` лочится единым
+    /// QualifiedPath — корень цепочки проверяется и на этом пути.
+    #[test]
+    fn three_level_manager_call_flagged_on_client() {
+        let fixture_server = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Процедура НайтиНаСервере()
+    Товар = Справочники.Товары.НайтиПоКоду("1");
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture_server);
+        assert!(diags.is_empty(), "server context admits Справочники, got: {diags:?}");
+
+        let fixture_client = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура НайтиНаКлиенте()
+    Товар = Справочники.Товары.НайтиПоКоду("1");
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture_client);
+        assert_eq!(diags.len(), 1, "the call root must be flagged exactly once, got: {diags:?}");
+        assert!(
+            diags[0].0.starts_with("Глобальное свойство 'Справочники' недоступно"),
+            "message must name the collection root: {}",
+            diags[0].0
+        );
+    }
+
+    /// Сужение `#Если Сервер` действует и на вызывную форму: остатки
+    /// исходной цепочки callee, осиротевшие после переписывания в
+    /// QualifiedPath, не должны голосовать мимо сужения.
+    #[test]
+    fn three_level_call_under_server_guard_not_flagged() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиентеНаСервере
+Процедура Найти()
+    #Если Сервер Тогда
+    Товар = Справочники.Товары.НайтиПоКоду("1");
+    #КонецЕсли
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "the guard leaves only server environments, got: {diags:?}");
+    }
+
+    /// `#Если Сервер` сужает среды тела — внутри ветки коллекции доступны.
+    #[test]
+    fn manager_collection_under_server_guard_not_flagged() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиентеНаСервере
+Процедура Установить()
+    #Если Сервер Тогда
+    ЭтоДействие = Перечисления.ВидыТочекМаршрута.Действие;
+    #КонецЕсли
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert!(diags.is_empty(), "the guard leaves only server environments, got: {diags:?}");
+    }
+
     #[test]
     fn common_module_without_client_flag_not_checked_against_client() {
         // A server common module calling server API — no diagnostics.

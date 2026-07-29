@@ -464,6 +464,21 @@ fn a_ternary_that_gives_up_leaves_the_bracket_holding_it() {
     }
 }
 
+#[test]
+fn a_broken_name_is_not_blamed_on_a_keyword_that_is_not_there() {
+    // Two reasons the name broke off, and naming the wrong one is its own
+    // defect: a word that cannot be part of it is a keyword, while nothing at
+    // all is a name the text does not hold.
+    for (input, keyword) in [
+        ("SELECT A FROM Catalog.BY", true),
+        ("SELECT A FROM Catalog.", false),
+        ("SELECT A FROM Catalog.1", false),
+    ] {
+        let said = messages(input, false).iter().any(|m| m.contains("ключевое слово"));
+        assert_eq!(said, keyword, "`{input}`: {:?}", messages(input, false));
+    }
+}
+
 // --- SDBL: a clause keyword taken by a recovery inside the clause ---------
 
 fn clause_count(input: &str, kind: SyntaxKind) -> usize {
@@ -490,21 +505,109 @@ fn a_recovery_inside_a_query_leaves_the_clause_that_follows_it() {
     }
 }
 
+/// Every position where a bare name must be a field or a table, and what a
+/// clause keyword standing there costs.
+///
+/// The source closes these positions to keywords: «Имена таблиц и полей не
+/// могут совпадать с ключевыми словами языка запросов». Before this, each of
+/// these parsed clean and meant something else — the keyword became the
+/// operand, the source clause behind it became an alias, and nothing was
+/// reported at all.
+///
+/// What the position is matters twice over. A bare name is a field only where
+/// the query says what to read; where it says how to arrange what was read,
+/// the same word may be an alias the select list declared. And a name
+/// carrying a dot is a qualifier, which may be the alias of a source. Both
+/// exceptions are held by `a_keyword_standing_where_a_name_belongs_is_a_name`.
+const NAME_POSITIONS: &[(&str, usize, usize)] = &[
+    ("ВЫБРАТЬ А + ИЗ Т", 1, 1),
+    ("ВЫБРАТЬ А ПОДОБНО ИЗ Т", 1, 1),
+    ("ВЫБРАТЬ А ССЫЛКА ИЗ Т", 1, 1),
+    ("ВЫБРАТЬ А ПОМЕСТИТЬ ИЗ Т", 1, 1),
+    ("ВЫБРАТЬ А ИЗ Т ГДЕ Б = ИЗ", 2, 1),
+    ("ВЫБРАТЬ А ИЗ Т1 ЛЕВОЕ СОЕДИНЕНИЕ Т2 ПО Т1.А = ИЗ", 2, 1),
+    ("ВЫБРАТЬ СУММА(А) ИЗ Т СГРУППИРОВАТЬ ПО Б ИМЕЮЩИЕ СУММА(А) > ИЗ", 2, 1),
+    // The name of a source, which `expect(Ident)` used to take: a matching
+    // kind is refused only by a hard boundary, and the first source of the
+    // list is reached without the list's own start check.
+    ("ВЫБРАТЬ А ИЗ ГДЕ Б", 1, 1),
+    ("УНИЧТОЖИТЬ ГДЕ", 2, 0),
+    // The alias separator is a word no name position admits either.
+    ("ВЫБРАТЬ А ССЫЛКА КАК Б ИЗ Т", 1, 1),
+    ("ВЫБРАТЬ А ПОМЕСТИТЬ КАК ИЗ Т", 1, 1),
+    // A paren does not make a keyword a name. These cost more than one
+    // message, and the last two lose the source clause as well, because an
+    // SDBL bracketed list does not yet state the paren it ends with — the BSL
+    // half of that work is done, this half is not.
+    ("ВЫБРАТЬ (А + ИЗ) ИЗ Т", 4, 1),
+    ("ВЫБРАТЬ ВЫРАЗИТЬ(А КАК ИЗ) ИЗ Т", 4, 1),
+    ("ВЫБРАТЬ А ИЗ Т ГДЕ Б В (ИЗ)", 3, 1),
+    ("ВЫБРАТЬ СУММА(ИЗ) ИЗ Т", 3, 1),
+    ("ВЫБРАТЬ ВЫРАЗИТЬ(А КАК КАК) ИЗ Т", 3, 0),
+    ("ВЫБРАТЬ А ИЗ Т ДЛЯ ИЗМЕНЕНИЯ КАК", 1, 1),
+    // `ПО` covers the Russian half of both `ON` and `BY`, so without its
+    // English form the same word was a boundary in one language and a table
+    // name in the other.
+    ("SELECT A FROM BY", 1, 1),
+    // The name predicate has to be asked wherever a name stands. These three
+    // asked the clause keywords directly, which do not carry `BY`.
+    ("SELECT BY FROM T", 1, 1),
+    ("SELECT A FROM Catalog.BY", 1, 1),
+    ("SELECT A FROM T WHERE B = BY", 1, 1),
+    // A name after the dot is still part of the table's name. Four rules walk
+    // such a chain and each checked only its first component, so each let a
+    // different set of words through the rest of it.
+    ("SELECT A REFS Catalog.BY FROM T", 1, 1),
+    ("SELECT A FROM T FOR UPDATE Catalog.BY", 2, 1),
+    // The word left behind opens a clause of its own, so leaving without
+    // saying anything made a broken name into a whole clean query.
+    ("SELECT A FROM T FOR UPDATE Catalog.ORDER BY A", 1, 1),
+];
+
 #[test]
-fn an_operand_never_written_still_costs_the_clause_after_it() {
-    // The other half of the same defect, and not fixed here. A rule with an
-    // operand it must have reports nothing at all — it reads the next word as
-    // that operand — and since every keyword of this language arrives as an
-    // identifier, the word it reads can be the clause keyword that follows.
-    //
-    // Refusing it needs the position, not the word: `ИЗ` opens a clause where
-    // a clause may start and names a source where a name may stand. Pinned as
-    // it behaves so that the remaining half is visible rather than implied.
-    for input in ["ВЫБРАТЬ А + ИЗ Т", "ВЫБРАТЬ А ССЫЛКА ИЗ Т", "ВЫБРАТЬ А ПОДОБНО ИЗ Т"]
-    {
+fn a_keyword_is_never_a_field_or_a_table_name() {
+    for (input, expected, sources) in NAME_POSITIONS {
         assert!(covers(input, false), "`{input}`");
-        assert_eq!(clause_count(input, SyntaxKind::SDBL_FROM_CLAUSE), 0, "`{input}`");
+        assert_eq!(clause_count(input, SyntaxKind::SDBL_FROM_CLAUSE), *sources, "`{input}`");
+        assert_eq!(
+            messages(input, false).len(),
+            *expected,
+            "`{input}`: {:?}",
+            messages(input, false)
+        );
     }
+}
+
+#[test]
+fn the_clause_a_taken_name_used_to_cost_is_parsed() {
+    // The point of refusing the word rather than consuming it: `ГДЕ` was the
+    // table of the source clause and `Б` was its alias, so the filter existed
+    // nowhere in the tree.
+    let input = "ВЫБРАТЬ А ИЗ ГДЕ Б";
+    assert_eq!(clause_count(input, SyntaxKind::SDBL_WHERE_CLAUSE), 1);
+}
+
+#[test]
+fn a_name_the_text_does_not_hold_is_never_accepted_in_silence() {
+    // The half of this defect that is not about losing a clause: the position
+    // reported nothing, so a consumer could not tell these from a query that
+    // says what its author meant.
+    for (input, _, _) in NAME_POSITIONS {
+        assert!(!messages(input, false).is_empty(), "`{input}` says nothing");
+    }
+}
+
+#[test]
+fn what_closing_the_name_positions_costs() {
+    // The measured price, and the source is what makes it a price rather than
+    // a defect: a field may not be named `Итоги`, so this query is not legal
+    // either way — but recovery no longer reaches the source clause, where
+    // before the keyword was quietly taken as the operand and the clause was
+    // parsed.
+    let input = "ВЫБРАТЬ А + Итоги ИЗ Т";
+    assert!(covers(input, false));
+    assert_eq!(clause_count(input, SyntaxKind::SDBL_FROM_CLAUSE), 0);
+    assert_eq!(messages(input, false).len(), 2, "{:?}", messages(input, false));
 }
 
 #[test]
@@ -538,6 +641,65 @@ fn a_keyword_standing_where_a_name_belongs_is_a_name() {
         "ВЫБРАТЬ А КАК УНИЧТОЖИТЬ ИЗ Т",
         "ВЫБРАТЬ А ИЗ Т КАК Итоги",
         "ВЫБРАТЬ А ИЗ Т ИТОГИ СУММА(А) ПО Н КАК УНИЧТОЖИТЬ",
+        // An alias may spell a keyword, so a reference to one may too. Where
+        // the query arranges what it read, a bare name may be an alias the
+        // select list declared; and a name carrying a dot is the qualifier of
+        // a chain, which may be the alias of a source. A join condition
+        // reading `Итоги.Регистратор` is a whole join's worth of tree.
+        "ВЫБРАТЬ А КАК Итоги ИЗ Т УПОРЯДОЧИТЬ ПО Итоги",
+        "ВЫБРАТЬ А ИЗ Т СГРУППИРОВАТЬ ПО ИЗ",
+        "ВЫБРАТЬ А ИЗ Т УПОРЯДОЧИТЬ ПО ИЗ",
+        "ВЫБРАТЬ Зак.Ссылка ИЗ Т КАК Зак ЛЕВОЕ СОЕДИНЕНИЕ Т2 КАК Итоги \
+         ПО Зак.Ссылка = Итоги.Регистратор",
+        // Legal queries whose shape the field-name rule must not disturb.
+        "ВЫБРАТЬ А ИЗ Т ГДЕ Б В (ВЫБРАТЬ Ц ИЗ Т2)",
+        "ВЫБРАТЬ А ИЗ Т ОБЪЕДИНИТЬ ВСЕ ВЫБРАТЬ Б ИЗ Т2",
+        "ВЫБРАТЬ ВЫБОР КОГДА А ТОГДА 1 ИНАЧЕ 2 КОНЕЦ ИЗ Т",
+        "ВЫБРАТЬ ВЫРАЗИТЬ(А КАК ЧИСЛО(10, 2)) ИЗ Т",
+        "ВЫБРАТЬ А ССЫЛКА Справочник.Т ИЗ Т",
+        "ВЫБРАТЬ А ПОМЕСТИТЬ Врем ИЗ Т",
+        "ВЫБРАТЬ А ИЗ Т ГДЕ А МЕЖДУ 1 И 2",
+        // A query reads its own names. A subquery inside a filter, and each
+        // member of a `UNION`, order themselves by an alias their own
+        // selection declared — the scope of the clause holding them says
+        // nothing about it.
+        "ВЫБРАТЬ А ИЗ Т ГДЕ А В (ВЫБРАТЬ Б КАК Итоги ИЗ У УПОРЯДОЧИТЬ ПО Итоги)",
+        "ВЫБРАТЬ А ИЗ Т ОБЪЕДИНИТЬ ВСЕ ВЫБРАТЬ Б КАК Итоги ИЗ У УПОРЯДОЧИТЬ ПО Итоги",
+        // `КАК` is refused where a name is required, and this rule is also
+        // reached where an expression has ended and its alias follows. Eight
+        // production queries in a corpus of 3 142 814 literals hold this shape.
+        "ВЫБРАТЬ А ИЗ Т ИТОГИ КОЛИЧЕСТВО(А) КАК А ПО Б",
+        "УНИЧТОЖИТЬ Врем",
+        // Every English clause that spells its second word `BY`, which is a
+        // boundary and still has to be consumed by the clause that owns it.
+        "SELECT A FROM T GROUP BY A",
+        "SELECT A FROM T ORDER BY A",
+        "SELECT SUM(A) FROM T TOTALS SUM(A) BY B",
+        "SELECT A FROM T INDEX BY A",
+        "SELECT A FROM T1 LEFT JOIN T2 ON T1.A = T2.B",
+        "ВЫБРАТЬ А ИЗ Т ДЛЯ ИЗМЕНЕНИЯ Т",
+        // `BY` ends a list, so no rule inside one may consume it — and it is
+        // still an ordinary name where a name may stand. Saying both with one
+        // predicate cost these four.
+        "SELECT BY.A FROM T AS BY",
+        "SELECT A BY FROM T",
+        "SELECT A FROM T BY",
+        "SELECT A FROM T TOTALS SUM(A) BY N BY",
+        // A field chain is open to keywords where a table's name is not, and
+        // closing the one must not close the other.
+        "ВЫБРАТЬ Т.Итоги ИЗ Справочник.Товары КАК Т",
+        "ВЫБРАТЬ Т.Конец ИЗ Т",
+        "ВЫБРАТЬ Т.И ИЗ Т",
+        // Attested by slice 10a: a configuration may name an object `В`, so a
+        // word carrying a kind of its own is a name after a dot. Refusing it
+        // here broke three of that slice's tests.
+        "ВЫБРАТЬ * ИЗ Справочник.В",
+        "ВЫБРАТЬ * ИЗ Т КАК Т ДЛЯ ИЗМЕНЕНИЯ Т.В",
+        "ВЫБРАТЬ * ИЗ Т КАК Т ГДЕ Т.Поле ССЫЛКА Справочник.В",
+        "ВЫБРАТЬ А ССЫЛКА Справочник.Товары ИЗ Т",
+        "ВЫБРАТЬ А ИЗ РегистрСведений.Курсы.СрезПоследних",
+        "SELECT CAST(A AS Catalog.Goods) FROM T",
+        "SELECT A FROM T FOR UPDATE Catalog.Goods",
     ] {
         let parse = parser::parse_sdbl(input);
         assert!(!parse.has_errors(), "`{input}`: {:#?}", parse.errors());

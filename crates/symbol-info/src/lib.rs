@@ -5,6 +5,7 @@ pub mod use_cases;
 
 pub use adapters::{
     build_signature, build_signature_from_resolution, from_global_function, from_platform_method,
+    selected_signature_index,
 };
 pub use domain::{
     CalleeKind, CodeExample, Lang, MethodKind, SignatureParam, SignatureSource, SymbolSignature,
@@ -14,4 +15,4 @@ pub use presenters::{
     render_completion_detail, render_declaration, render_hover_markdown, render_signature_help,
     CompletionDetail, ParameterInfoView, SignatureHelpView, SignatureInformation,
 };
-pub use use_cases::{resolve_callee_at, ActiveParam, CalleeResolver};
+pub use use_cases::{resolve_callee_at, ActiveParam};

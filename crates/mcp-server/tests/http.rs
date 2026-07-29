@@ -1,10 +1,10 @@
 //! End-to-end contract for the Streamable HTTP transport.
 //!
-//! The server is deliberately built before the transport starts: the future CLI
-//! owns validation, project locking, listener binding, and the one final
+//! The server is deliberately built before the transport starts: the CLI owns
+//! validation, project locking, listener binding, and the one final
 //! `McpServer::shutdown` call. This suite verifies only the transport boundary.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Once, time::Duration};
 
 use mcp_server::{serve_http, McpProfile, McpServer, SharedState, MAX_HTTP_REQUEST_BODY_BYTES};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HOST};
@@ -17,6 +17,9 @@ use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Comfortably above the transport's own shutdown grace, so this fails on a server
+/// that never stops rather than on one that merely waits out its grace.
+const SHUTDOWN_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MCP_ACCEPT: &str = "application/json, text/event-stream";
 
 type Client = RunningService<RoleClient, ()>;
@@ -27,8 +30,33 @@ struct TestServer {
     task: JoinHandle<anyhow::Result<()>>,
 }
 
+static ISOLATE_CACHE: Once = Once::new();
+
+/// Point the reference profile's search database at a scratch directory. It otherwise
+/// resolves to the developer's own cache, so the suite would read and write the real
+/// `reference-search.db` while claiming to test only the transport. Every test runs
+/// this before constructing any state, and `Once` orders the write ahead of each
+/// caller's return, so no reader observes the environment mid-change.
+///
+/// Best effort, and only that: `dirs::cache_dir` reads `XDG_CACHE_HOME` on Linux and
+/// `$HOME` on macOS, but on Windows it calls a known-folder API that no environment
+/// variable redirects. What the reference profile writes there is derived from
+/// compile-time platform tables rather than from any test input, so on Windows the
+/// suite reproduces the same content a real run would write.
+fn isolate_reference_cache() {
+    ISOLATE_CACHE.call_once(|| {
+        let scratch = std::env::temp_dir().join(format!("bsl-http-tests-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch cache directory should be creatable");
+        std::env::set_var("XDG_CACHE_HOME", &scratch);
+        if cfg!(target_os = "macos") {
+            std::env::set_var("HOME", &scratch);
+        }
+    });
+}
+
 impl TestServer {
     async fn start(allowed_hosts: Vec<String>) -> Self {
+        isolate_reference_cache();
         Self::start_with_state(McpProfile::Reference, SharedState::reference(None), allowed_hosts)
             .await
     }
@@ -208,16 +236,148 @@ async fn disallowed_host_is_rejected_before_mcp_dispatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oversized_request_body_is_rejected() {
     let server = TestServer::start(loopback_allowed_hosts()).await;
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let outcome = client
         .post(server.mcp_url())
         .header(ACCEPT, MCP_ACCEPT)
         .header(CONTENT_TYPE, "application/json")
         .body(vec![b'x'; MAX_HTTP_REQUEST_BODY_BYTES + 1])
         .send()
-        .await
-        .expect("oversized request should receive an HTTP response");
+        .await;
 
-    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    // The limit is enforced from `Content-Length`, before the body is read, so the
+    // server may answer 413 and close while the client is still writing its megabyte.
+    // Either outcome proves the request was refused rather than dispatched; which one
+    // the client observes is a scheduling race.
+    match outcome {
+        Ok(response) => assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE),
+        Err(error) => assert!(error.is_request(), "unexpected transport failure: {error}"),
+    }
+
+    let health =
+        client.get(server.health_url()).send().await.expect("server should survive the refusal");
+    assert_eq!(health.status(), reqwest::StatusCode::OK);
+
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_chunked_body_is_rejected_with_the_same_status() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let server = TestServer::start(loopback_allowed_hosts()).await;
+    let oversized = MAX_HTTP_REQUEST_BODY_BYTES + 1;
+    let mut stream =
+        tokio::net::TcpStream::connect(server.address).await.expect("test client should connect");
+    stream
+        .write_all(
+            format!(
+                "POST /mcp HTTP/1.1\r\nHost: {}\r\nAccept: {MCP_ACCEPT}\r\n\
+                 Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{oversized:x}\r\n",
+                server.address
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("headers should be written");
+    // The body is written concurrently with reading the reply: the server refuses
+    // mid-body and keeps the connection alive, so neither waiting for the write to
+    // finish nor reading to EOF would terminate.
+    let (mut reader, mut writer) = stream.into_split();
+    let body = tokio::spawn(async move {
+        let _ = writer.write_all(&vec![b'x'; oversized]).await;
+        let _ = writer.write_all(b"\r\n0\r\n\r\n").await;
+    });
+
+    let mut response = [0u8; 64];
+    let read = tokio::time::timeout(TEST_TIMEOUT, reader.read(&mut response))
+        .await
+        .expect("server should answer the oversized chunked body")
+        .expect("response should be readable");
+    let status = String::from_utf8_lossy(&response[..read]);
+    assert!(
+        status.starts_with("HTTP/1.1 413"),
+        "the limit must not depend on request framing, got: {}",
+        status.lines().next().unwrap_or_default()
+    );
+
+    body.abort();
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_request_body_cannot_block_shutdown() {
+    use tokio::io::AsyncWriteExt;
+
+    let server = TestServer::start(loopback_allowed_hosts()).await;
+    let mut stalled =
+        tokio::net::TcpStream::connect(server.address).await.expect("test client should connect");
+    stalled
+        .write_all(
+            format!(
+                "POST /mcp HTTP/1.1\r\nHost: {}\r\nAccept: {MCP_ACCEPT}\r\n\
+                 Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{{",
+                server.address
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("headers and a partial body should be written");
+
+    // The connection stays open with 99 bytes outstanding. Shutdown must still finish.
+    server.cancellation.cancel();
+    tokio::time::timeout(SHUTDOWN_TEST_TIMEOUT, server.task)
+        .await
+        .expect("a half-sent body must not hold the server open")
+        .expect("HTTP task should not panic")
+        .expect("HTTP server should stop cleanly");
+
+    drop(stalled);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disallowed_host_is_refused_without_waiting_for_the_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let server = TestServer::start(loopback_allowed_hosts()).await;
+    let mut stream =
+        tokio::net::TcpStream::connect(server.address).await.expect("test client should connect");
+    // Announces 100 bytes and sends one. A refused Host must not buy the client an
+    // open connection for as long as it withholds the rest.
+    stream
+        .write_all(
+            b"POST /mcp HTTP/1.1\r\nHost: attacker.example\r\nAccept: application/json, text/event-stream\r\n\
+              Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{",
+        )
+        .await
+        .expect("headers and a partial body should be written");
+
+    let mut response = [0u8; 64];
+    let read = tokio::time::timeout(TEST_TIMEOUT, stream.read(&mut response))
+        .await
+        .expect("the Host gate must answer before the body is complete")
+        .expect("response should be readable");
+    let status = String::from_utf8_lossy(&response[..read]);
+    assert!(
+        status.starts_with("HTTP/1.1 403"),
+        "expected a Host refusal, got: {}",
+        status.lines().next().unwrap_or_default()
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disallowed_host_is_rejected_on_the_readiness_endpoint() {
+    let server = TestServer::start(loopback_allowed_hosts()).await;
+    let response = reqwest::Client::new()
+        .get(server.health_url())
+        .header(HOST, "attacker.example")
+        .send()
+        .await
+        .expect("request should receive an HTTP response");
+
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
     server.stop().await;
 }
 

@@ -211,7 +211,22 @@ fn union_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblUnionClause);
 }
 
+/// A query reads its own names.
+///
+/// Every query arrives here — the package's own members, a subquery in a
+/// filter or a comparison, a parenthesised source, each member of a `UNION` —
+/// and whatever field-name scope the expression holding it was in says nothing
+/// about how its own clauses read theirs: its `УПОРЯДОЧИТЬ ПО` may name an
+/// alias its own selection declared, and an alias may spell a keyword.
+///
+/// Stated by a call owning the scope rather than by hand, because the body
+/// below returns early in several places and each of those would otherwise
+/// leave the holder's scope behind.
 fn query(p: &mut Parser) {
+    p.outside_field_names(query_content);
+}
+
+fn query_content(p: &mut Parser) {
     let m = p.start();
 
     if !eat_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ") {
@@ -276,13 +291,17 @@ pub(super) fn selected_fields(p: &mut Parser) {
         || p.at_end();
 
     if !list_is_absent {
-        super::expressions::parse_delimited_list(
-            p,
-            TokenKind::Comma,
-            &super::LIST_RECOVERY,
-            is_field_start,
-            selected_field,
-        );
+        // A bare name in the selection is a field of a source, so a clause
+        // keyword here is not a name at all.
+        p.within_field_names(|p| {
+            super::expressions::parse_delimited_list(
+                p,
+                TokenKind::Comma,
+                &super::LIST_RECOVERY,
+                is_field_start,
+                selected_field,
+            )
+        });
     } else if !p.at_end() {
         // The list is mandatory, so its absence is worth saying — but say
         // it without moving, or the clause keyword that revealed the
@@ -400,7 +419,7 @@ fn into_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
     p.skip_trivia();
 
-    if super::at_name(p) {
+    if super::at_field_name(p) {
         let table_m = p.start();
         p.bump();
         table_m.complete(p, NodeKind::SdblTempTableName);
@@ -477,6 +496,17 @@ fn table_ref(p: &mut Parser) {
         return;
     }
 
+    // `expect` on a matching kind is refused only by a hard boundary, and a
+    // clause keyword is not one — so asking it here took `ГДЕ` for the table
+    // and the filter behind it existed nowhere. The first source of a list is
+    // reached without the list's own start check, which is why this belongs at
+    // the reference itself.
+    if p.at(TokenKind::Ident) && !super::at_field_name(p) {
+        p.error_custom_no_bump("ожидалось имя таблицы");
+        m.complete(p, NodeKind::SdblTableRef);
+        return;
+    }
+
     if !p.expect(TokenKind::Ident) {
         m.complete(p, NodeKind::SdblTableRef);
         return;
@@ -493,33 +523,8 @@ fn table_ref(p: &mut Parser) {
         p.check_iteration_limit();
         p.skip_trivia();
 
-        if !super::expressions::at_property_name(p) {
-            let err = p.start();
-            let found = p.current();
-            p.emit_error_at_marker(
-                err,
-                ParseError::Expected {
-                    expected: smallvec![TokenKind::Ident],
-                    found,
-                    recovery: RecoveryKind::RecoverySpan,
-                },
-            );
-            break;
-        }
-
-        if is_clause_keyword(p)
-            || super::at_query_boundary(p)
-            || p.at_keyword("AS")
-            || p.at_keyword("КАК")
-        {
-            let err = p.start();
-            p.emit_error_at_marker(
-                err,
-                ParseError::Custom {
-                    message: "ожидалось имя объекта, встречено ключевое слово",
-                    recovery: RecoveryKind::RecoverySpan,
-                },
-            );
+        if !super::at_table_name_component(p) {
+            report_the_component_the_dot_promised(p);
             break;
         }
 
@@ -610,7 +615,7 @@ fn join_clause(p: &mut Parser) {
     }
     p.skip_trivia();
 
-    expressions::logical_expression(p);
+    p.within_field_names(expressions::logical_expression);
 
     m.complete(p, NodeKind::SdblJoinClause);
 }
@@ -755,7 +760,7 @@ fn where_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "WHERE", "ГДЕ");
     p.skip_trivia();
 
-    expressions::logical_expression(p);
+    p.within_field_names(expressions::logical_expression);
 
     m.complete(p, NodeKind::SdblWhereClause);
 }
@@ -929,7 +934,7 @@ fn having_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ");
     p.skip_trivia();
 
-    super::expressions::expression(p);
+    p.within_field_names(super::expressions::expression);
 
     m.complete(p, NodeKind::SdblHavingClause);
 }
@@ -943,20 +948,66 @@ fn for_update_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "UPDATE", "ИЗМЕНЕНИЯ");
     p.skip_trivia();
 
-    if super::at_name(p) && !is_clause_keyword(p) {
+    if super::at_field_name(p) {
         p.bump();
         while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
             p.skip_trivia();
-            if super::at_name_component(p) {
-                p.bump();
-            } else {
+            if !super::at_table_name_component(p) {
+                // The list of targets is optional, so this rule said nothing
+                // here before. It says something now — the dot proves a name
+                // was being written — but only where a token actually stands
+                // and the lexer could read it. Nothing there is the unfinished
+                // path of a text built by concatenation, and a token the lexer
+                // rejected belongs to a text already reported as unreadable:
+                // the inputs that reach here that way are Russian prose whose
+                // `для` reads as `ДЛЯ` and whose full stop reads as a dot.
+                if p.current().is_some_and(|kind| kind != TokenKind::Error) {
+                    report_the_component_the_dot_promised(p);
+                }
                 break;
             }
+            p.bump();
         }
     }
 
     m.complete(p, NodeKind::SdblForUpdate);
+}
+
+/// Says that the name broke off, once the dot has proved it was being written.
+///
+/// Which of the two reasons it was depends on what stands there, and naming
+/// the wrong one is its own defect: a word that cannot be part of the name is
+/// a keyword, while nothing standing there at all is a name the text does not
+/// hold. The message said "keyword" for both, which is false at the end of
+/// input, after a comma, after a paren.
+///
+/// Leaving without saying anything is worse than either: the word left behind
+/// opens a clause of its own, so `ДЛЯ ИЗМЕНЕНИЯ Catalog.УПОРЯДОЧИТЬ ПО А`
+/// parsed as a whole clean query with a broken name inside it.
+fn report_the_component_the_dot_promised(p: &mut Parser) {
+    let err = p.start();
+
+    if super::expressions::at_property_name(p) {
+        p.emit_error_at_marker(
+            err,
+            ParseError::Custom {
+                message: "ожидалось имя объекта, встречено ключевое слово",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+        return;
+    }
+
+    let found = p.current();
+    p.emit_error_at_marker(
+        err,
+        ParseError::Expected {
+            expected: smallvec![TokenKind::Ident],
+            found,
+            recovery: RecoveryKind::RecoverySpan,
+        },
+    );
 }
 
 fn index_by_clause(p: &mut Parser) {

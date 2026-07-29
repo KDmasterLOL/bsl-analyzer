@@ -365,3 +365,89 @@ fn completion_global_function_sorts_after_mdo_plural() {
         );
     }
 }
+
+/// A user symbol holding the name of a platform global must not surface that
+/// global's members. Each shape below reaches the receiver through a different
+/// route: an implicit local is typed by inference, a declared `Перем` makes
+/// inference return `Unknown`, and both must end up with no platform members.
+#[test]
+fn implicit_local_holding_global_name_offers_no_platform_members() {
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    ОбработкаОшибок = НеизвестнаяФункция();
+    ОбработкаОшибок.$0
+КонецФункции
+"#,
+    );
+    assert!(
+        !items.iter().any(|i| i.label == "КраткоеПредставлениеОшибки"),
+        "a local holds the name — the global's members must not be offered; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn declared_local_holding_global_name_offers_no_platform_members() {
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    Перем ОбработкаОшибок;
+    ОбработкаОшибок.$0
+КонецФункции
+"#,
+    );
+    assert!(
+        !items.iter().any(|i| i.label == "КраткоеПредставлениеОшибки"),
+        "a declared local holds the name — the global's members must not be offered; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn implicit_local_holding_metadata_name_offers_no_metadata_members() {
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    Метаданные = НеизвестнаяФункция();
+    Метаданные.$0
+КонецФункции
+"#,
+    );
+    assert!(
+        !items.iter().any(|i| i.label == "НайтиПоПолномуИмени"),
+        "a local holds `Метаданные` — configuration-metadata members must not be offered; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+/// Positive control for the three tests above: with nobody holding the name the
+/// very same receivers still complete against the platform globals.
+#[test]
+fn unheld_global_names_still_offer_platform_members() {
+    let error_items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    ОбработкаОшибок.$0
+КонецФункции
+"#,
+    );
+    assert!(
+        error_items.iter().any(|i| i.label == "КраткоеПредставлениеОшибки"),
+        "an unheld global property must still complete; got: {:?}",
+        error_items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+
+    let metadata_items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    Метаданные.$0
+КонецФункции
+"#,
+    );
+    assert!(
+        metadata_items.iter().any(|i| i.label == "НайтиПоПолномуИмени"),
+        "an unheld `Метаданные` must still complete; got: {:?}",
+        metadata_items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}

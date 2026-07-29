@@ -411,8 +411,22 @@ fn primary_expr(p: &mut Parser) {
         // boundary check in `error` then leaves the keyword where it is.
         // Taking it instead would cost the package that whole member — and
         // an operand left unwritten is exactly what an editor buffer holds.
-        Some(TokenKind::Ident) if p.open_group_count() > 0 || !super::at_query_boundary(p) => {
+        Some(TokenKind::Ident)
+            if (p.open_group_count() > 0 || !super::at_query_boundary(p))
+                && !at_a_keyword_that_cannot_be_a_field(p) =>
+        {
             column_or_function(p)
+        }
+
+        // A keyword reaching here is an operand the text never wrote. What is
+        // missing is an operand and not a field name: a literal, a parameter,
+        // a call or a parenthesised expression would all have done, and naming
+        // one of them would name the wrong thing. The recovery choice stays
+        // the generic one, so a word no rule awaits is still consumed.
+        Some(TokenKind::Ident) => {
+            let m = p.start();
+            p.error_custom("ожидался операнд, встречено ключевое слово");
+            m.complete(p, NodeKind::SdblError);
         }
 
         _ => {
@@ -421,6 +435,33 @@ fn primary_expr(p: &mut Parser) {
             m.complete(p, NodeKind::SdblError);
         }
     }
+}
+
+/// A clause keyword standing where only a field name can stand.
+///
+/// A bare name here is a field, and the source closes that position to
+/// keywords: «Имена таблиц и полей не могут совпадать с ключевыми словами
+/// языка запросов». A name carrying a dot is a different thing — the
+/// qualifier of a chain, which may be the alias of a source, and an alias is
+/// allowed to spell a keyword. `ПО Зак.Ссылка = Итоги.Регистратор` reads a
+/// source aliased `КАК Итоги`, and refusing the word would cost that join its
+/// condition.
+/// A clause keyword standing where only a field name can stand.
+///
+/// The alias separator is not among them, though `А + КАК Б` has no reading in
+/// which `КАК` is the operand: this rule is also reached where an expression
+/// has legitimately ended and its alias follows, and refusing `КАК` there cost
+/// eight production queries their `ИТОГИ … КАК Имя`. Telling the two apart
+/// needs to know whether the expression behind this position is complete,
+/// which is the caller's knowledge and not this one's.
+fn at_a_keyword_that_cannot_be_a_field(p: &Parser) -> bool {
+    p.names_are_fields()
+        && (super::select::is_clause_keyword(p) || super::at_a_list_separator(p))
+        && !next_is_a_qualifying_dot(p)
+}
+
+fn next_is_a_qualifying_dot(p: &Parser) -> bool {
+    matches!(p.nth_non_trivia(0), Some(TokenKind::Dot))
 }
 
 fn literal_expr(p: &mut Parser) {
@@ -612,20 +653,33 @@ fn predicate_expr(p: &mut Parser) {
         p.bump();
         p.skip_trivia();
 
-        if super::at_name(p) {
+        if super::at_field_name(p) {
             p.bump();
             p.skip_trivia();
 
             while super::eat_qualifying_dot(p) {
                 p.check_iteration_limit();
                 p.skip_trivia();
-                if super::at_name_component(p) {
-                    p.bump();
-                    p.skip_trivia();
-                } else {
+                if !super::at_table_name_component(p) {
+                    // A word stands here and cannot be part of the name: say
+                    // so, or it is taken in silence. Nothing standing here at
+                    // all is the unfinished path of a query built by
+                    // concatenation, which `QueryParseError` already reports —
+                    // and reporting it twice, from a layer that does not know
+                    // it is a fragment, is worse than not reporting it here.
+                    if at_property_name(p) {
+                        report_missing_name(p, "ожидалось имя объекта после '.'");
+                    }
                     break;
                 }
+                p.bump();
+                p.skip_trivia();
             }
+        } else {
+            // The source is explicit that what stands here is a table:
+            // «проверяется, является ли значение выражения, указанного слева
+            // от него, ссылкой на таблицу, указанную справа».
+            report_missing_name(p, "ожидалось имя таблицы после 'ССЫЛКА' / 'REFS'");
         }
 
         m.complete(p, NodeKind::SdblRefsExpr);
@@ -654,7 +708,7 @@ fn is_cast_function(p: &Parser) -> bool {
 fn parse_cast_type(p: &mut Parser) {
     let m = p.start();
 
-    if super::at_name(p) {
+    if super::at_field_name(p) {
         let is_number_type = p.at_keyword("NUMBER") || p.at_keyword("ЧИСЛО");
 
         p.bump();
@@ -664,22 +718,28 @@ fn parse_cast_type(p: &mut Parser) {
             p.check_iteration_limit();
             p.skip_trivia();
 
-            if super::at_name_component(p) {
-                p.bump();
-                p.skip_trivia();
-            } else {
-                let err = p.start();
-                let found = p.current();
-                p.emit_error_at_marker(
-                    err,
-                    ParseError::Expected {
-                        expected: smallvec![TokenKind::Ident],
-                        found,
-                        recovery: RecoveryKind::RecoverySpan,
-                    },
-                );
+            if !super::at_table_name_component(p) {
+                // Saying «expected an identifier» of a word that IS one reads
+                // as nonsense; what is wrong with it is that it is a keyword.
+                if at_property_name(p) {
+                    report_missing_name(p, "ожидалось имя объекта после '.'");
+                } else {
+                    let err = p.start();
+                    let found = p.current();
+                    p.emit_error_at_marker(
+                        err,
+                        ParseError::Expected {
+                            expected: smallvec![TokenKind::Ident],
+                            found,
+                            recovery: RecoveryKind::RecoverySpan,
+                        },
+                    );
+                }
                 break;
             }
+
+            p.bump();
+            p.skip_trivia();
         }
 
         if p.at(TokenKind::LParen) {
@@ -701,9 +761,26 @@ fn parse_cast_type(p: &mut Parser) {
 
             p.expect(TokenKind::RParen);
         }
+    } else {
+        report_missing_name(p, "ожидался тип после 'КАК' / 'AS'");
     }
 
     m.complete(p, NodeKind::SdblType);
+}
+
+/// Reports a name the text does not hold, at the gap where it belongs.
+///
+/// A position that requires a name and finds none used to leave the node
+/// empty and say nothing, so a query meaning something else parsed clean.
+///
+/// The message names what the position wants rather than what stands there:
+/// a clause keyword is one thing that cannot be a name here, a parameter is
+/// another, and a message that names only the first is wrong for the second.
+/// The report goes in the gap, because whatever stands here is not this
+/// rule's to take.
+fn report_missing_name(p: &mut Parser, message: &'static str) {
+    let m = p.start();
+    p.emit_error_at_marker(m, ParseError::Custom { message, recovery: RecoveryKind::RecoverySpan });
 }
 
 fn column_or_function(p: &mut Parser) {

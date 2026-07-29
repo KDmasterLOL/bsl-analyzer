@@ -8,6 +8,7 @@
 //! ВебКлиент` or unchecking the web client in `bsl-analyzer.toml` restores
 //! the corresponding suggestions.
 
+use hir::bare_root::method_item_at;
 use hir::execution_env::{self, EnvFlags};
 use hir::{AnnotationKind, ModItem};
 use ide_db::RootDatabase;
@@ -30,17 +31,7 @@ impl EnvFilter {
         let opts = db.env_options();
         let metadata = db.module_metadata(hir::ModuleId::new(file_id));
         let item_tree = db.item_tree(file_id);
-        // Inclusive end: while an unfinished method is being typed at the end
-        // of the file, the cursor commonly sits exactly at the method's
-        // current end — it still belongs to that method, not to module code.
-        let method_at_cursor = item_tree.top_level_items().iter().enumerate().find(|(_, item)| {
-            let range = match item {
-                ModItem::Procedure(idx) => item_tree.procedure(*idx).source_range,
-                ModItem::Function(idx) => item_tree.function(*idx).source_range,
-                ModItem::Variable(_) => return false,
-            };
-            range.contains(offset) || range.end() == offset
-        });
+        let method_at_cursor = method_item_at(&item_tree, offset);
         // A weaving interceptor's effective directive comes from the method it
         // intercepts, unknown here — never judge availability inside one
         // (mirrors inference disabling the checks for weaving bodies).
@@ -65,7 +56,7 @@ impl EnvFilter {
         }
         let mut body_env = match method_at_cursor {
             Some((local_id, _)) => {
-                execution_env::method_env(&item_tree, local_id as u32, &metadata, &opts)
+                execution_env::method_env(&item_tree, local_id, &metadata, &opts)
             }
             None => execution_env::module_code_env(&metadata, &opts),
         };

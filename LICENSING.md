@@ -21,8 +21,21 @@ rewrite is incomplete in identifiable places, listed in the audit.
 
 ## Tier A — `MIT OR Apache-2.0`
 
-SPDX: `MIT OR Apache-2.0`. Anyone may take any of these crates in
-isolation and redistribute under either MIT or Apache-2.0.
+SPDX: `MIT OR Apache-2.0`. Anyone may take any of these crates and
+redistribute it under either MIT or Apache-2.0.
+
+Two caveats apply to the phrase "in isolation", which earlier versions
+of this document used without qualification:
+
+- **A crate is only as reusable as its dependencies.** `hir-ty`, `hir`
+  and `dataflow` depend on `cfg`; fourteen crates depend on
+  `bsl-metadata`; several depend on Tier B crates. Taking such a crate
+  means taking its dependency tree under whatever those crates are
+  licensed. The per-crate SPDX describes that crate's own code, not the
+  terms on which the resulting build can be redistributed.
+- **`cfg` and `bsl-metadata` are under review.** Both were written with
+  a copyleft-licensed project open as the working reference; see the
+  notice in `NOTICE`. Their tier may change.
 
 | Crate | Purpose |
 |---|---|
@@ -53,8 +66,8 @@ that traces back to the `bsl-parser` project (LGPL-3.0-or-later).
 
 | Crate | Blocker | Tracking document |
 |---|---|---|
-| `parser` | BSL grammar in `src/grammar/*.rs` (no rewrite plan exists yet); SDBL recovery layer unattested | `docs/legal/parser-bsl-grammar-audit.md`, `docs/legal/sdbl-provenance-2026-07-audit.md` |
-| `lexer` | Metadata-object, function and virtual-table vocabularies in `src/sdbl/mod.rs` (Slices 3b / 4 / 5); shares the crate with the BSL lexer | `docs/legal/sdbl-provenance-2026-07-audit.md` |
+| `parser` | BSL grammar in `src/grammar/*.rs`; SDBL rule naming (exit-criteria item 7). The SDBL recovery layer was attested in July 2026 (Slice 12) | `docs/legal/parser-bsl-grammar-audit.md`, `docs/legal/sdbl-provenance-2026-07-audit.md` |
+| `lexer` | Shares the crate with the BSL lexer. The SDBL side is complete: every `SdblTokenKind` variant is covered by an attestation (Slices 1–5) | `docs/legal/sdbl-provenance-2026-07-audit.md` |
 | `sdbl-hir` | Assessed as medium risk in April 2026, never compared line by line; parts of the lowering were written against `bsl-language-server` | `docs/legal/parser-sdbl-hir-audit.md`, `docs/legal/sdbl-provenance-2026-07-audit.md` |
 | `ide-diagnostics` | 17 diagnostics depend on the SDBL parser chain | `docs/legal/ide-diagnostics-licensing-summary.md` |
 | `bsl-analyzer` | Top-level LSP server, statically links the crates above | — |

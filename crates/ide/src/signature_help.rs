@@ -1,8 +1,8 @@
-use hir::{CallSelection, CandidateId, PlatformSignatureSlot, Semantics};
+use hir::Semantics;
 use ide_db::RootDatabase;
 use symbol_info::{
-    build_signature_from_resolution, render_signature_help, resolve_callee_at, ParameterInfoView,
-    SignatureHelpView,
+    build_signature_from_resolution, render_signature_help, resolve_callee_at,
+    selected_signature_index, ParameterInfoView, SignatureHelpView,
 };
 use syntax::TextSize;
 use vfs::FileId;
@@ -34,32 +34,10 @@ pub fn signature_help<DB: RootDatabase>(
 ) -> Option<SignatureHelp> {
     let _span = tracing::info_span!("signature_help", ?file_id, ?offset).entered();
 
-    let active_parameter = resolve_callee_at(db, file_id, offset)?.1;
+    let active_parameter = resolve_callee_at(&db.parse(file_id).syntax_node(), offset)?;
     let binding = Semantics::new(db).call_binding_at(file_id, offset)?;
     let sigs = build_signature_from_resolution(db, &binding)?;
-    let active_signature = match binding.resolution.selection {
-        CallSelection::Unique { candidate } => match candidate {
-            CandidateId::Platform { method_id, signature: PlatformSignatureSlot::Base } => {
-                sigs.iter().position(|signature| {
-                    signature.platform_id == Some(method_id)
-                        && signature.candidate_ordinal.is_none()
-                })
-            }
-            CandidateId::Platform {
-                method_id,
-                signature: PlatformSignatureSlot::Variant(candidate_ordinal),
-            } => sigs.iter().position(|signature| {
-                signature.platform_id == Some(method_id)
-                    && signature.candidate_ordinal == Some(candidate_ordinal)
-            }),
-            CandidateId::User { signature_ordinal: candidate_ordinal, .. }
-            | CandidateId::Builtin { signature_ordinal: candidate_ordinal, .. } => sigs
-                .iter()
-                .position(|signature| signature.candidate_ordinal == Some(candidate_ordinal)),
-            CandidateId::FunctionValue => None,
-        },
-        CallSelection::Ambiguous { .. } | CallSelection::Rejected(_) => None,
-    };
+    let active_signature = selected_signature_index(&binding, &sigs);
     Some(from_view(render_signature_help(&sigs, active_parameter.index, active_signature)))
 }
 

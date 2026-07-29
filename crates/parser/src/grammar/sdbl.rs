@@ -223,6 +223,72 @@ pub(super) fn eat_name_here(p: &mut Parser, expected: &'static str) {
     p.error_custom_no_bump(expected);
 }
 
+/// A word standing where a field or a table name belongs.
+///
+/// The source is explicit that this position is closed to keywords, and only
+/// this one: «Имена таблиц и полей не могут совпадать с ключевыми словами
+/// языка запросов». An alias is a different position — its spelling is
+/// delegated to the rules for variable identifiers, and a keyword landing
+/// there is documented as being read as the alias — so this must not reach
+/// one, and `КАК ИТОГИ` stays a name.
+///
+/// The two separators are refused here as well, and neither is among the
+/// clause keywords: that predicate also says which word ends a list, and a
+/// word named there is one no rule inside the list may consume. Saying both
+/// with one bit is what cost every alias its name once already.
+pub(super) fn at_field_name(p: &Parser) -> bool {
+    at_name(p)
+        && !select::is_clause_keyword(p)
+        && !at_the_alias_separator(p)
+        && !at_a_list_separator(p)
+}
+
+/// The word that introduces an alias.
+///
+/// Refused where a name is required, and nowhere else: this is also reached
+/// where an expression has legitimately ended and its alias follows, so a
+/// position that merely wants an operand must not consult it.
+pub(super) fn at_the_alias_separator(p: &Parser) -> bool {
+    select::at_sdbl_keyword(p, "AS", "КАК")
+}
+
+/// The word that separates a list from what it is keyed by.
+///
+/// `ПО` is already among the clause keywords, as the Russian for `ON`. Its
+/// English spelling is here instead, because that predicate would also make it
+/// a boundary — and `BY` is a legal alias and a legal qualifier
+/// (`SELECT A FROM T BY`, `SELECT BY.A FROM T AS BY`), which a boundary
+/// forbids. Only a position that must hold a field or a table is closed to it.
+pub(super) fn at_a_list_separator(p: &Parser) -> bool {
+    p.at_keyword("BY")
+}
+
+/// Whether the word here can be the next part of a table's name.
+///
+/// A field chain is open to keywords: `Объект.Итоги` names a field, and after
+/// a dot the language does not reserve them, which is why the expression layer
+/// reads a chain by asking only for a property name. A table's name is not
+/// open to them, and the dot exempts no component of it.
+///
+/// Stated once because four rules walk such a chain — the source of an `ИЗ`,
+/// the table of a `ССЫЛКА`, the type of a `ВЫРАЗИТЬ`, the target of
+/// `ДЛЯ ИЗМЕНЕНИЯ` — and each of them checked only its first component, so
+/// each let a different set of words through the rest of the name.
+///
+/// What it does NOT refuse is a word carrying a kind of its own — `В`, `И`,
+/// `НЕ`, `ИСТИНА`. A configuration may name an object `В`, and
+/// `ВЫБРАТЬ * ИЗ Справочник.В` is a query slice 10a attested as clean. Only
+/// the words that open a clause or separate its parts are closed here, and
+/// only after a dot: the first component of a name is read as an identifier,
+/// where `В` could not be told from the operator.
+pub(super) fn at_table_name_component(p: &Parser) -> bool {
+    expressions::at_property_name(p)
+        && !at_query_boundary(p)
+        && !select::is_clause_keyword(p)
+        && !at_the_alias_separator(p)
+        && !at_a_list_separator(p)
+}
+
 pub(super) fn at_a_qualifying_dot(p: &Parser) -> bool {
     p.at(TokenKind::Dot) || (at_trivia(p) && p.nth_non_trivia(0) == Some(TokenKind::Dot))
 }
@@ -240,15 +306,6 @@ pub(super) fn eat_qualifying_dot(p: &mut Parser) -> bool {
     }
 
     false
-}
-
-/// Whether the word here is the next part of a qualified name.
-///
-/// After a dot most keywords are ordinary field names — the language does
-/// not reserve them — but the two that begin a query are never one: taking
-/// either costs the package the query it starts.
-pub(super) fn at_name_component(p: &Parser) -> bool {
-    expressions::at_property_name(p) && !at_query_boundary(p)
 }
 
 /// Takes whatever the query rules refused, up to the next boundary, so that
@@ -338,11 +395,12 @@ fn drop_table_query(p: &mut Parser) {
     // Every keyword reaches the parser as an `Ident`, so a bare kind check
     // would take the next query's `ВЫБРАТЬ` for the name of the table being
     // dropped — and the package would then lose that query entirely.
-    if p.at(TokenKind::Ident) && !at_query_start(p) {
+    if at_field_name(p) {
         p.bump();
-    } else if at_query_start(p) {
-        // The next query's keyword is a boundary, like a separator: report
-        // without taking it, or the package loses the query behind it.
+    } else if p.at(TokenKind::Ident) {
+        // A keyword here belongs to whatever comes next — the following
+        // query, the following clause — so report without taking it, or the
+        // package loses what that word begins.
         p.error_custom_no_bump("ожидалось имя таблицы после 'УНИЧТОЖИТЬ' / 'DROP'");
     } else {
         p.error_custom("ожидалось имя таблицы после 'УНИЧТОЖИТЬ' / 'DROP'");
