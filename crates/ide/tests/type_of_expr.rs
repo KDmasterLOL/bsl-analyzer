@@ -217,6 +217,50 @@ fn type_of_field_expr_matches_infer() {
 }
 
 #[test]
+fn type_of_recovered_receiver_inside_preproc_branch_matches_outside() {
+    let fixture = r#"
+//- /test.bsl
+Процедура Внутри()
+    Сп = Новый Структура("Код", 1);
+    #Если Сервер Тогда
+    Сп.В
+    #КонецЕсли
+КонецПроцедуры
+
+Процедура Снаружи()
+    Сп2 = Новый Структура("Код", 1);
+    Сп2.В
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let sema = Semantics::new(&db);
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+
+    let receiver = |var: &str| {
+        root.descendants()
+            .filter_map(ast::FieldExpr::cast)
+            .filter_map(|fe| fe.syntax().children().next())
+            .find(|receiver| receiver.text() == var)
+            .unwrap_or_else(|| panic!("fixture has a field access on `{var}`"))
+    };
+    let outside_ty = sema.type_of_expr(file_id, &receiver("Сп2"));
+    let inside_ty = sema.type_of_expr(file_id, &receiver("Сп"));
+
+    // Positive control: with an unresolved outside type the parity assert
+    // below would pass vacuously as Unknown == Unknown.
+    assert_ne!(
+        outside_ty,
+        db.unknown(),
+        "control: recovered receiver outside #Если must resolve to a known type"
+    );
+    assert_eq!(
+        inside_ty, outside_ty,
+        "recovered receiver inside a #Если branch must type like the same code outside"
+    );
+}
+
+#[test]
 fn type_of_expr_unknown_for_non_expression_node() {
     let fixture = r#"
 //- /test.bsl

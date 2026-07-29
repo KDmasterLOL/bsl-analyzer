@@ -459,6 +459,27 @@ fn completion_after_dot_on_array_variable_typed_prefix_full_ident() {
 }
 
 #[test]
+fn completion_after_dot_inside_preproc_branch_offers_members_of_local() {
+    let items = complete(
+        r#"//- /test.bsl
+&НаСервере
+Процедура Тест()
+    Справочники = Новый Структура("Код", 1);
+    #Если Сервер Тогда
+    Справочники.$0
+    #КонецЕсли
+КонецПроцедуры
+"#,
+    );
+
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        has_label(&items, "Вставить"),
+        "члены типа затенённой локали должны предлагаться внутри #Если, как и вне ветки; got: {labels:?}"
+    );
+}
+
+#[test]
 fn completion_after_dot_member_substring_is_offered_below_prefix() {
     // `чест` is an interior substring of `Количество`, not a prefix — member
     // matching is now fuzzy, so it is offered, but ranked below the prefix tier.
