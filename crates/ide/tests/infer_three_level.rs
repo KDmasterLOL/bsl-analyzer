@@ -7,7 +7,8 @@ use ide_db::base_db::SourceDatabase;
 mod support;
 
 use support::{
-    mismatched_arg_counts, setup, setup_with_designer_config, unresolved_fields, unresolved_kinds,
+    mismatched_arg_counts, redundant_three_level, setup, setup_with_designer_config,
+    unresolved_fields, unresolved_kinds,
 };
 
 const MANAGER_FIXTURE: &str = r#"
@@ -392,5 +393,54 @@ fn a_trailing_dot_is_not_an_unresolved_field() {
         unresolved_fields(&db, file_id).is_empty(),
         "incomplete access must not accuse the configuration: {:?}",
         unresolved_fields(&db, file_id)
+    );
+}
+
+/// Вердикт об избыточном обращении принимает инференс, а не лоуэринг, и разница
+/// видна ровно здесь: `Перем Справочники` на уровне модуля делает три токена
+/// обращением к переменной. Гард лоуэринга смотрел только объявления ТЕЛА и потому
+/// обвинял этот код.
+#[test]
+fn a_module_variable_root_is_not_a_redundant_access() {
+    let fixture = r#"
+//- /Catalogs/Товары/Ext/ManagerModule.bsl
+Процедура Метод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Перем Справочники;
+
+Процедура Тест()
+    Справочники.Товары.Метод();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        redundant_three_level(&db, file_id).is_empty(),
+        "a module variable holds the name: {:?}",
+        redundant_three_level(&db, file_id)
+    );
+}
+
+/// Контроль: без объявления вердикт выносится, иначе проверка выше зелена сама по
+/// себе. Применимость к КОНКРЕТНОМУ модулю решает адаптер по метаданным — это его
+/// прежняя, не тронутая логика.
+#[test]
+fn a_collection_root_yields_the_redundancy_verdict() {
+    let fixture = r#"
+//- /Catalogs/Товары/Ext/ManagerModule.bsl
+Процедура Метод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Справочники.Товары.Метод();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        redundant_three_level(&db, file_id),
+        vec![("Справочники".to_string(), "Товары".to_string())],
+        "the chain is spelled out, and the plural comes from the source"
     );
 }

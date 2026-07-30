@@ -268,9 +268,26 @@ impl<'a> Forwarder<'a> {
                 // collection name declares nothing — the platform refuses the write — and
                 // treating it as a declaration would make the same name a collection for
                 // inference and a local for completion.
+                //
+                // The two conditions below are exactly the two of
+                // `Infer::manager_collection_shadowed` — a body binding, or a claim on the
+                // bare name from anywhere else (module variable, module method, object or
+                // form member, common module). Asking the SAME predicate is the point: a
+                // second copy of the verdict is what made the layers disagree, and the
+                // predicate itself needs no inference, only the resolver.
                 Expr::Field { base: root, field: mdo_name } => {
                     let Expr::Path(plural) = body.expr_idx(*root) else { return None };
                     if self.declared_bindings.contains(&plural.as_str().fold_lower()) {
+                        return None;
+                    }
+                    if crate::platform_global_lookup::bare_global_name_claim(
+                        self.db,
+                        self.resolver,
+                        None,
+                        plural,
+                    )
+                    .is_some()
+                    {
                         return None;
                     }
                     self.resolver

@@ -93,6 +93,23 @@ pub(super) fn unresolved_fields(db: &RootDatabaseImpl, file_id: FileId) -> Vec<S
         .collect()
 }
 
+/// Пары «plural, объект» из вердиктов об избыточном обращении к объекту.
+pub(super) fn redundant_three_level(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+) -> Vec<(String, String)> {
+    db.infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            InferenceDiagnostic::RedundantAccessToObjectThreeLevel {
+                mdo_type, mdo_name, ..
+            } => Some((mdo_type.as_str().to_string(), mdo_name.as_str().to_string())),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn mismatched_arg_counts(
     db: &RootDatabaseImpl,
     file_id: FileId,

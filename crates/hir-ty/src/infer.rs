@@ -248,6 +248,17 @@ pub enum InferenceDiagnostic {
         args: Vec<bool>,
     },
 
+    /// `Справочники.Товары.Метод()` written INSIDE the manager module of `Товары`:
+    /// the object is already the module's own, so the chain is a detour. Decided here
+    /// and not in lowering, because it takes the ownership verdict — a module variable
+    /// named `Справочники` makes the same three tokens something else entirely, and
+    /// lowering cannot know that.
+    RedundantAccessToObjectThreeLevel {
+        expr: ExprId,
+        mdo_type: Name,
+        mdo_name: Name,
+    },
+
     /// A resolved platform member is not available in some of the execution
     /// environments this body runs in (`missing` — the EDT-style
     /// "[Web client]" qualifier set).
@@ -794,6 +805,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
             InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
             InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
+            InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
             InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
             InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
         };
@@ -1627,7 +1639,7 @@ impl<'db> InferenceContext<'db> {
             Expr::Call { callee, args } => {
                 let converted_args: Vec<ExprId> =
                     args.iter().map(|&arg| ExprId::from_idx(arg)).collect();
-                self.infer_call(ExprId::from_idx(*callee), &converted_args)
+                self.infer_call(expr_id, ExprId::from_idx(*callee), &converted_args)
             }
 
             Expr::MethodCall { receiver, method, args } => {
@@ -2095,7 +2107,40 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    fn infer_call(&mut self, callee: ExprId, args: &[ExprId]) -> TypeId {
+    /// Report `Справочники.Товары.Метод()` written inside the manager module of
+    /// `Товары` — but only for the chain literally spelled that way.
+    ///
+    /// The receiver must be a `<Path>.<Field>` whose root types as a metadata
+    /// collection: that root type IS the ownership verdict, already applied by
+    /// `infer_path_name`, so a module variable or a local of the same name never
+    /// reaches here. The two-step form (`М = Справочники.Товары; М.Метод()`) is not
+    /// this defect — nothing is redundant in the call itself — and the plural name is
+    /// taken from the source spelling, because that is what the author would delete.
+    fn report_redundant_three_level_access(
+        &mut self,
+        call_expr: ExprId,
+        receiver: ExprId,
+        mdo_name: &Name,
+    ) {
+        let Expr::Field { base: root, .. } = self.body.expr(receiver) else { return };
+        let root_id = ExprId::from_idx(*root);
+        let Expr::Path(plural) = self.body.expr(root_id) else { return };
+        let plural = plural.clone();
+        if !matches!(
+            self.db
+                .lookup_type(self.expr_types.get(&root_id).copied().unwrap_or(self.db.unknown())),
+            TypeKind::ManagerCollection(_)
+        ) {
+            return;
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::RedundantAccessToObjectThreeLevel {
+            expr: call_expr,
+            mdo_type: plural,
+            mdo_name: mdo_name.clone(),
+        });
+    }
+
+    fn infer_call(&mut self, call_expr: ExprId, callee: ExprId, args: &[ExprId]) -> TypeId {
         let callee_expr = self.body.expr(callee);
         if let Expr::QualifiedPath(qualified_path) = callee_expr {
             match qualified_path.segments().len() {
@@ -2313,6 +2358,7 @@ impl<'db> InferenceContext<'db> {
             if let TypeKind::ObjectManager(facet) = manager_receiver_kind {
                 let mdo_type = facet.mdo;
                 let mdo_name = hir_def::Name::new(&facet.name);
+                self.report_redundant_three_level_access(call_expr, base_id, &mdo_name);
                 let resolver = self.get_resolver();
                 match crate::method_resolution::resolve_aliased_manager_call(
                     self.db,

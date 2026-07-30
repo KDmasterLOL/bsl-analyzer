@@ -892,14 +892,6 @@ fn record_qualified_call_facts(
             }
         }
         QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
-            ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
-                kind: RedundantAccessKind::ThreeLevel {
-                    mdo_type: mdo_type.clone(),
-                    mdo_name: mdo_name.clone(),
-                },
-                range: call_node.text_range(),
-            });
-
             ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
                 callee: field_name.as_str().to_string(),
                 module: None,
