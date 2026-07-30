@@ -3217,6 +3217,7 @@ dependencies = [
  "bsl-metadata",
  "chrono",
  "expect-test",
+ "libc",
  "serde",
  "serde_json",
  "stdx",

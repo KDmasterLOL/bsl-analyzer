@@ -94,8 +94,8 @@ impl fmt::Display for SourceSetArgsError {
             ),
             Self::AmbiguousExtensionValue { value } => write!(
                 f,
-                "--extension {value}: reads both as a directory of that name and as NAME=PATH, and both exist; \
-                 rename the directory or pass an absolute path"
+                "--extension {value}: reads both as a directory of that name and as NAME=PATH, \
+                 and both exist; name it explicitly, as in --extension NAME={value}"
             ),
             Self::EmptyDependsOnTarget { value } => {
                 write!(f, "--extension-depends-on {value}: a dependency name is empty")
@@ -568,6 +568,27 @@ mod tests {
         let err = args(&["--extension", "wanted=real"]).resolve(dir.path()).unwrap_err();
 
         assert!(matches!(err, SourceSetArgsError::AmbiguousExtensionValue { .. }), "got {err}");
+    }
+
+    #[test]
+    fn the_escape_the_error_advertises_actually_works() {
+        let dir = tempdir().unwrap();
+        extension_dir(dir.path(), "wanted=real");
+        extension_dir(dir.path(), "real");
+
+        // The message tells the user to name it explicitly. Splitting on the
+        // *first* `=` is what makes that work, so this pins the advice to the
+        // parser rather than to the sentence.
+        let resolved = args(&["--extension", "W=wanted=real"]).resolve(dir.path()).unwrap();
+
+        assert_eq!(
+            resolved.extensions.unwrap(),
+            vec![ExtensionDecl::Structured(StructuredExtensionDecl {
+                name: "W".to_string(),
+                path: "wanted=real".to_string(),
+                depends_on: Vec::new(),
+            })]
+        );
     }
 
     #[test]
