@@ -1777,13 +1777,18 @@ enum ModuleCollection {
 
 fn module_collection(segment: &str) -> Option<ModuleCollection> {
     match segment {
-        "CommonModules" => Some(ModuleCollection::CommonModules),
         "HTTPServices" => Some(ModuleCollection::HttpServices),
         "WebServices" => Some(ModuleCollection::WebServices),
         "IntegrationServices" => Some(ModuleCollection::IntegrationServices),
         "CommonCommands" | "ОбщиеКоманды" => Some(ModuleCollection::CommonCommands),
         "Commands" => Some(ModuleCollection::Commands),
-        _ => mdo_type_from_plural(segment).map(ModuleCollection::Mdo),
+        // Common modules answer to both spellings, as the module index does — an
+        // English-only branch left the Russian directory without a module type at
+        // all, though `MdoType::from_plural` has always known it.
+        _ => match bsl_metadata::MdoType::from_plural(segment) {
+            Some(bsl_metadata::MdoType::CommonModule) => Some(ModuleCollection::CommonModules),
+            _ => mdo_type_from_plural(segment).map(ModuleCollection::Mdo),
+        },
     }
 }
 
@@ -1792,26 +1797,46 @@ fn collection_module_type(
     module_file: &str,
 ) -> Option<bsl_metadata::ModuleType> {
     use bsl_metadata::ModuleType;
+    // A collection holds one kind of object, but not one FILE: the dump puts a
+    // command module next to an object module. The file name has to be named
+    // explicitly everywhere, or a sibling `.bsl` inherits a type it has no claim to.
     match collection {
-        // A service collection holds one module per object, whatever the dump
-        // spells its file — the collection alone settles the type.
-        ModuleCollection::CommonModules => Some(ModuleType::CommonModule),
-        ModuleCollection::HttpServices => Some(ModuleType::HTTPServiceModule),
-        ModuleCollection::WebServices => Some(ModuleType::WebServiceModule),
-        ModuleCollection::IntegrationServices => Some(ModuleType::IntegrationServiceModule),
+        ModuleCollection::CommonModules if module_file == "Module.bsl" => {
+            Some(ModuleType::CommonModule)
+        }
+        ModuleCollection::HttpServices if module_file == "Module.bsl" => {
+            Some(ModuleType::HTTPServiceModule)
+        }
+        ModuleCollection::WebServices if module_file == "Module.bsl" => {
+            Some(ModuleType::WebServiceModule)
+        }
+        ModuleCollection::IntegrationServices if module_file == "Module.bsl" => {
+            Some(ModuleType::IntegrationServiceModule)
+        }
         ModuleCollection::CommonCommands if module_file == "CommandModule.bsl" => {
             Some(ModuleType::CommandModule)
         }
         ModuleCollection::Commands if module_file.ends_with("CommandModule.bsl") => {
             Some(ModuleType::CommandModule)
         }
-        ModuleCollection::CommonCommands | ModuleCollection::Commands => None,
+        // A constant owns a module no other collection has.
+        ModuleCollection::Mdo(bsl_metadata::MdoType::Constant)
+            if module_file == "ValueManagerModule.bsl" =>
+        {
+            Some(ModuleType::ValueManagerModule)
+        }
         ModuleCollection::Mdo(_) => match module_file {
             "ObjectModule.bsl" => Some(ModuleType::ObjectModule),
             "ManagerModule.bsl" => Some(ModuleType::ManagerModule),
             "RecordSetModule.bsl" => Some(ModuleType::RecordSetModule),
             _ => None,
         },
+        ModuleCollection::CommonModules
+        | ModuleCollection::HttpServices
+        | ModuleCollection::WebServices
+        | ModuleCollection::IntegrationServices
+        | ModuleCollection::CommonCommands
+        | ModuleCollection::Commands => None,
     }
 }
 
@@ -2700,6 +2725,43 @@ mod tests {
             assert!(parse_module_path(path).is_none(), "{path}");
             assert_eq!(get_module_type_from_uri(path), None, "{path}");
         }
+
+        // Имя файла обязано подходить коллекции: сосед по каталогу чужой тип не
+        // наследует.
+        for path in [
+            "CommonModules/Общий/ObjectModule.bsl",
+            "HTTPServices/API/ManagerModule.bsl",
+            "WebServices/В/RecordSetModule.bsl",
+            "IntegrationServices/И/ObjectModule.bsl",
+            "Catalogs/Товары/Ext/ValueManagerModule.bsl",
+        ] {
+            assert_eq!(get_module_type_from_uri(path), None, "{path}");
+        }
+
+        // Обе записи каталога общих модулей, как в индексе модулей.
+        for path in ["ОбщиеМодули/Общий/Ext/Module.bsl", "CommonModules/Общий/Ext/Module.bsl"]
+        {
+            assert_eq!(
+                get_module_type_from_uri(path),
+                Some(bsl_metadata::ModuleType::CommonModule),
+                "{path}"
+            );
+            assert_eq!(
+                parse_module_path(path).unwrap().module_type,
+                bsl_metadata::ModuleType::CommonModule,
+                "{path}"
+            );
+        }
+
+        // Модуль менеджера значения есть только у константы, и тип у него свой.
+        assert_eq!(
+            get_module_type_from_uri("Constants/Условие/Ext/ValueManagerModule.bsl"),
+            Some(bsl_metadata::ModuleType::ValueManagerModule)
+        );
+        assert_eq!(
+            parse_module_path("Constants/Условие/Ext/ValueManagerModule.bsl").unwrap().module_type,
+            bsl_metadata::ModuleType::ValueManagerModule
+        );
 
         // Коллекция, которой нет в `MdoType`, всё ещё держит модули своего вида —
         // форму в этом случае доказывает служебный уровень.
