@@ -1753,8 +1753,13 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         return match parts[parts.len() - 1] {
             "ObjectModule.bsl" => Some(bsl_metadata::ModuleType::ObjectModule),
             "ManagerModule.bsl" => Some(bsl_metadata::ModuleType::ManagerModule),
-            // No record set here: every collection that owns one is a register, and
-            // every register spelling is recognised above — the `ё` variants too.
+            // A record set is NOT a register's alone: the platform gives one to
+            // eight kinds, and half of them — sequences, recalculations, external
+            // data source tables and cubes — have no `MdoType` here and land in this
+            // branch. Where the collection IS known the answer is known too and the
+            // arm above refuses a catalog's record set; where it is not, the file
+            // name plus the service level is the only evidence there is.
+            "RecordSetModule.bsl" => Some(bsl_metadata::ModuleType::RecordSetModule),
             _ => None,
         };
     }
@@ -2588,7 +2593,21 @@ mod tests {
             Some(bsl_metadata::ModuleType::RecordSetModule)
         );
         assert_eq!(get_module_type_from_uri("Catalogs/Товары/Ext/RecordSetModule.bsl"), None);
-        assert_eq!(get_module_type_from_uri("SettingsStorages/Х/Ext/RecordSetModule.bsl"), None);
+
+        // Но набор записей есть не только у регистров: платформа даёт его восьми
+        // видам, и половина из них — последовательности, перерасчёты, таблицы и
+        // кубы внешних источников — в `MdoType` отсутствует. Про них известна
+        // только форма пути, и она же остаётся единственным свидетельством.
+        for path in [
+            "Sequences/Очередность/Ext/RecordSetModule.bsl",
+            "CalculationRegisters/Р/Recalculations/П/Ext/RecordSetModule.bsl",
+        ] {
+            assert_eq!(
+                get_module_type_from_uri(path),
+                Some(bsl_metadata::ModuleType::RecordSetModule),
+                "{path}"
+            );
+        }
 
         // Каталог выгрузки — не имя из кода: написание через `ё` называет ту же
         // коллекцию, поэтому регистр расчёта распознаётся в обеих записях и его

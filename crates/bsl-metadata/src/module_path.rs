@@ -67,7 +67,14 @@ pub fn collection_directory(segment: &str) -> Option<MdoType> {
 
     // Case first, composition second: a decomposed CAPITAL `Ё` only looks like the
     // lowercase sequence after folding, and composing before that misses it.
-    let composed = segment.fold_lower().replace("е\u{0308}", "ё");
+    // Russian has exactly two composed letters — `ё` and `й` — so handling both
+    // makes the normalization complete for every name this table can hold.
+    let folded = segment.fold_lower();
+    let composed = if folded.contains('\u{0308}') || folded.contains('\u{0306}') {
+        folded.replace("е\u{0308}", "ё").replace("и\u{0306}", "й")
+    } else {
+        folded
+    };
     let canonical = YO_SPELLINGS
         .iter()
         .find(|(yo, _)| *yo == composed)
@@ -231,6 +238,9 @@ mod tests {
             ("Отче\u{0308}ты", MdoType::Report),
             ("ОТЧЕ\u{0308}ТЫ", MdoType::Report),
             ("Планывидоврасче\u{0308}та", MdoType::ChartOfCalculationTypes),
+            // `й` — вторая и последняя составная буква русского алфавита.
+            ("РегистрыСведении\u{0306}", MdoType::InformationRegister),
+            ("РЕГИСТРЫСВЕДЕНИИ\u{0306}", MdoType::InformationRegister),
         ] {
             assert_eq!(collection_directory(segment), Some(expected), "{segment}");
         }
