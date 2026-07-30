@@ -241,9 +241,6 @@ fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
                 .join(",");
             format!("new({}({}))", type_str.fold_lower(), args_str)
         }
-        Expr::QualifiedPath(qname) => {
-            qname.segments().iter().map(|s| s.as_str().fold_lower()).collect::<Vec<_>>().join(".")
-        }
         Expr::MethodCall { receiver, method, args } => {
             let receiver_str = expr_to_string(ExprId::from_idx(*receiver), body);
             let args_str = args
@@ -700,14 +697,13 @@ mod tests {
     }
 
     /// Регистр в BSL не значим, поэтому две записи одного имени — одно выражение.
-    /// Трёхзвенная цепочка это проверяет отдельно: пока она сворачивалась в один
-    /// узел, свёртку регистра делал арм `QualifiedPath`, и починка сравнения на
-    /// `Path`/`Field` контролем не подтверждалась.
+    /// Цепочка проверяется отдельно от голого имени: её сравнение идёт по звеньям
+    /// (`Field` над `Path`), и свёртка регистра нужна на каждом звене.
     #[test]
     fn a_chain_written_in_another_case_is_the_same_expression() {
-        // Сравнение сторон оператора идёт через `are_exprs_semantically_equal` — это
-        // другой маршрут, чем свёртка ключа у цепочки `И`, и регистр он до сих пор
-        // различал.
+        // Сравнение сторон оператора идёт через `are_exprs_semantically_equal` —
+        // маршрут, отличный от свёртки строкового ключа у цепочки `И`, поэтому
+        // проверять регистр надо именно на нём.
         let code = "Функция Тест()\n    \
                     Возврат Справочники.Товары.Найти() = сПРАВОЧНИКИ.тОВАРЫ.нАЙТИ();\n\
                     КонецФункции\n";

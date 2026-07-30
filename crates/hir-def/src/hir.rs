@@ -51,8 +51,6 @@ pub enum Expr {
 
     Path(Name),
 
-    QualifiedPath(Box<crate::path::QualifiedName>),
-
     BinaryOp { lhs: ExprIdx, rhs: ExprIdx, op: BinaryOp },
 
     UnaryOp { expr: ExprIdx, op: UnaryOp },

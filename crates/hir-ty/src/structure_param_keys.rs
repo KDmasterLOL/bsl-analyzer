@@ -297,14 +297,6 @@ impl<'a> Forwarder<'a> {
                 }
                 _ => None,
             },
-            Expr::QualifiedPath(qname) => match qname.segments() {
-                [mdo_type, mdo_name, method_name] => self
-                    .resolver
-                    .resolve_three_level_method(self.db, mdo_type, mdo_name, method_name)
-                    .ok()
-                    .map(|r| r.method_id),
-                _ => None,
-            },
             _ => None,
         }
     }

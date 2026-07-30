@@ -492,7 +492,7 @@ fn expr_uses_binding(body: &hir::Body, expr_id: ExprId, binding_id: BindingId) -
             uses(*condition) || uses(*then_expr) || uses(*else_expr)
         }
         Expr::Await { expr } => uses(*expr),
-        Expr::QualifiedPath(_) | Expr::Literal(_) | Expr::Missing => false,
+        Expr::Literal(_) | Expr::Missing => false,
     }
 }
 

@@ -250,7 +250,7 @@ pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult 
 
 fn collect_child_exprs(expr: &Expr) -> Vec<ExprIdx> {
     match expr {
-        Expr::Missing | Expr::Literal(_) | Expr::Path(_) | Expr::QualifiedPath(_) => Vec::new(),
+        Expr::Missing | Expr::Literal(_) | Expr::Path(_) => Vec::new(),
         Expr::BinaryOp { lhs, rhs, .. } => vec![*lhs, *rhs],
         Expr::UnaryOp { expr, .. } | Expr::Await { expr } => vec![*expr],
         Expr::Ternary { condition, then_expr, else_expr } => {

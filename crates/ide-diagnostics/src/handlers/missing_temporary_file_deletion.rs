@@ -238,9 +238,6 @@ fn extract_call_path(body: &Body, callee: ExprIdx) -> String {
                 format!("{}.{}", base_path, field.as_str())
             }
         }
-        Expr::QualifiedPath(path) => {
-            path.segments().iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".")
-        }
         _ => String::new(),
     }
 }
@@ -289,7 +286,6 @@ fn collect_referenced_vars(
         | Expr::Array(_)
         | Expr::Await { .. }
         | Expr::Literal(_)
-        | Expr::QualifiedPath(_)
         | Expr::Missing => {}
     }
 }

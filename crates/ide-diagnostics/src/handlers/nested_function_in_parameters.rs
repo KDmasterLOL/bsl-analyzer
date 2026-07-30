@@ -323,7 +323,6 @@ fn check_call_expr(
     let method_name = match body.expr(callee) {
         Expr::Path(name) => name.as_str(),
         Expr::Field { field, .. } => field.as_str(),
-        Expr::QualifiedPath(path) => path.last().as_str(),
         _ => "метод",
     };
 

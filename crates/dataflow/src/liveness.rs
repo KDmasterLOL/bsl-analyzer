@@ -483,8 +483,6 @@ fn collect_expr_vars(expr_id: ExprId, body: &Body, liveness: &mut Liveness) {
             collect_expr_vars(ExprId::from_idx(*expr), body, liveness);
         }
 
-        Expr::QualifiedPath(_) => {}
-
         Expr::Array(elements) => {
             for &elem_expr in elements.iter() {
                 collect_expr_vars(ExprId::from_idx(elem_expr), body, liveness);

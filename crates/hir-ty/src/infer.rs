@@ -1303,9 +1303,9 @@ impl<'db> InferenceContext<'db> {
         let stmts: Vec<StmtIdx> = self.body.body_stmts_typed().to_vec();
         self.infer_stmts(&stmts);
 
-        // Exprs the statement walk never reached are lowering leftovers — e.g.
-        // the original callee chain a qualified-call rewrite replaced. They
-        // are still typed here for the IDE layer (hover/goto resolve through
+        // Not every expr belongs to a statement: a parameter's default value
+        // hangs off its binding, so the statement walk never reaches it. Such
+        // exprs are typed here for the IDE layer (hover/goto resolve through
         // the source map), but they carry no execution context: statement-level
         // `#Если` narrowing never saw them, so an environment verdict from
         // this sweep would double or contradict the one issued during the
@@ -1627,8 +1627,6 @@ impl<'db> InferenceContext<'db> {
             Expr::Literal(lit) => self.infer_literal(lit),
 
             Expr::Path(name) => self.infer_path_name(name, expr_id),
-
-            Expr::QualifiedPath(_path) => self.db.unknown(),
 
             Expr::BinaryOp { lhs, rhs, op } => {
                 self.infer_binary_op(ExprId::from_idx(*lhs), ExprId::from_idx(*rhs), *op)

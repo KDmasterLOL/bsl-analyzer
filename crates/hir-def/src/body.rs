@@ -213,7 +213,7 @@ fn expr_contains(body: &Body, root: ExprIdx, target: ExprIdx) -> bool {
         return true;
     }
     match body.expr_idx(root) {
-        Expr::Missing | Expr::Path(_) | Expr::QualifiedPath(_) | Expr::Literal(_) => false,
+        Expr::Missing | Expr::Path(_) | Expr::Literal(_) => false,
         Expr::BinaryOp { lhs, rhs, .. } => {
             expr_contains(body, *lhs, target) || expr_contains(body, *rhs, target)
         }
@@ -350,7 +350,6 @@ pub(crate) fn body_heap(body: &Body) -> usize {
         bytes += match expr {
             Expr::Literal(Literal::String(s)) | Expr::Literal(Literal::Date(s)) => s.capacity(),
             Expr::Path(name) => name_bytes(name),
-            Expr::QualifiedPath(_) => size_of::<crate::path::QualifiedName>(),
             Expr::Field { field, .. } => name_bytes(field),
             Expr::MethodCall { method, args, .. } => {
                 name_bytes(method) + vec_bytes::<ExprIdx>(args.len())

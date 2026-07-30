@@ -272,7 +272,7 @@ impl MetricsVisitor {
                 }
             }
             Expr::Await { expr } => self.visit_expr(body, *expr),
-            Expr::Missing | Expr::Literal(_) | Expr::Path(_) | Expr::QualifiedPath(_) => {}
+            Expr::Missing | Expr::Literal(_) | Expr::Path(_) => {}
         }
     }
 
@@ -323,7 +323,7 @@ impl MetricsVisitor {
                 }
             }
             Expr::Await { expr } => self.count_extras_only(body, *expr),
-            Expr::Missing | Expr::Literal(_) | Expr::Path(_) | Expr::QualifiedPath(_) => {}
+            Expr::Missing | Expr::Literal(_) | Expr::Path(_) => {}
         }
     }
 
@@ -381,7 +381,7 @@ fn count_logical_ops(body: &Body, expr: ExprIdx) -> u32 {
                 }
             }
             Expr::Await { expr } => walk(body, *expr, total),
-            Expr::Missing | Expr::Literal(_) | Expr::Path(_) | Expr::QualifiedPath(_) => {}
+            Expr::Missing | Expr::Literal(_) | Expr::Path(_) => {}
         }
     }
     walk(body, expr, &mut total);

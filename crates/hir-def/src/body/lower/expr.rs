@@ -901,14 +901,13 @@ fn record_qualified_call_facts(
                 });
             }
 
-            // The chain keeps the Expr language of its source: `Call{Field{Field{Path}}}`.
-            // Folding it into a single `QualifiedPath` node made lowering answer questions
-            // it cannot answer — whether the root name belongs to the collection, which
-            // object the middle segment names — and every consumer that met the folded
-            // node had to re-derive them from three strings instead of reading a resolved
-            // type. Dependency discovery keeps its answer above (`ExternalRef`), because
-            // it must run before inference and may over-approximate; typing, diagnostics
-            // and completion now take the ordinary route.
+            // No node of its own: the chain keeps the Expr language of its source,
+            // `Call{Field{Field{Path}}}`. Whether the root name belongs to the
+            // collection, and which object the middle segment names, are questions
+            // lowering cannot answer — they need a resolver. Dependency discovery
+            // keeps its answer above (`ExternalRef`), because it runs before
+            // inference and may over-approximate; typing, diagnostics and
+            // completion read the resolved type instead.
         }
     }
 }
@@ -1231,11 +1230,6 @@ pub(crate) fn exprs_are_equal(body: &Body, lhs: ExprIdx, rhs: ExprIdx) -> bool {
     match (body.expr_idx(lhs), body.expr_idx(rhs)) {
         (Expr::Missing, Expr::Missing) => true,
         (Expr::Path(name1), Expr::Path(name2)) => name1.eq_ignore_case(name2),
-        (Expr::QualifiedPath(p1), Expr::QualifiedPath(p2)) => {
-            let s1 = p1.segments();
-            let s2 = p2.segments();
-            s1.len() == s2.len() && s1.iter().zip(s2.iter()).all(|(a, b)| a.eq_ignore_case(b))
-        }
         (Expr::Field { base: b1, field: f1 }, Expr::Field { base: b2, field: f2 }) => {
             f1.eq_ignore_case(f2) && exprs_are_equal(body, *b1, *b2)
         }

@@ -103,22 +103,6 @@ fn diagnostic_range(source_map: &BodySourceMap, diag: &InferenceDiagnostic) -> O
     source_map.expr_range(diagnostic_expr(diag))
 }
 
-fn anchor_on_leading_name(
-    ctx: &DiagnosticsContext,
-    range: TextRange,
-    name: &hir::Name,
-) -> TextRange {
-    let parse = ctx.parse();
-    let Some(token) = parse.syntax_node().token_at_offset(range.start()).right_biased() else {
-        return range;
-    };
-    if token.text_range().start() == range.start() && token.text() == name.as_str() {
-        token.text_range()
-    } else {
-        range
-    }
-}
-
 fn dispatch_inference_diagnostic(
     diag: &InferenceDiagnostic,
     range: TextRange,
@@ -209,16 +193,6 @@ fn dispatch_inference_diagnostic(
             ctx,
         ),
         InferenceDiagnostic::UnavailableInEnvironment { name, member_kind, missing, .. } => {
-            // The verdict on a three-level call (`Справочники.X.Метод()`) is
-            // anchored on the synthetic callee, whose range spans the whole
-            // call; the message names the collection root — the call's first
-            // token. Shrink to that token when it is the named root, a no-op
-            // for a bare name whose range already is the identifier.
-            let range = if matches!(member_kind, hir::EnvMemberKind::GlobalProperty) {
-                anchor_on_leading_name(ctx, range, name)
-            } else {
-                range
-            };
             handlers::unavailable_in_environment::from_hir(name, *member_kind, *missing, range, ctx)
         }
         InferenceDiagnostic::ModuleAccessibility { name, callee_kind, missing, .. } => {
