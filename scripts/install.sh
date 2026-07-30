@@ -109,18 +109,73 @@ download_file() {
     fi
 }
 
+file_sha256() {
+    local file="$1"
+
+    if check_command sha256sum; then
+        sha256sum "$file" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]'
+    elif check_command shasum; then
+        shasum -a 256 "$file" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]'
+    fi
+}
+
+# sha256 of one asset out of the release manifest the release server publishes.
+# Whitespace is stripped first so the value survives both compact and pretty JSON.
+manifest_sha256() {
+    local manifest="$1"
+    local asset="$2"
+    local asset_re
+
+    asset_re=$(printf '%s' "$asset" | sed 's/[.[\*^$+?()|]/\\&/g')
+
+    tr -d ' \n\r\t' < "$manifest" \
+        | grep -oE "\"${asset_re}\":\{[^}]*\}" \
+        | grep -oE '"sha256":"[0-9a-fA-F]{64}"' \
+        | head -n1 \
+        | cut -d'"' -f4 \
+        | tr '[:upper:]' '[:lower:]'
+}
+
+# GitHub releases carry no manifest; checksums.txt is what the launcher reads there.
+checksums_sha256() {
+    local checksums="$1"
+    local asset="$2"
+
+    awk -v name="$asset" '{ sub(/^\*/, "", $2); if ($2 == name) { print tolower($1); exit } }' "$checksums"
+}
+
+# Expected checksum for the asset, from whichever source this installer is built for.
+# Empty output means the release does not let the download be verified.
+expected_checksum() {
+    local version="$1"
+    local asset="$2"
+
+    case "$INSTALL_SOURCE" in
+        gitlab)
+            local manifest="${TMP_DIR}/manifest.json"
+            if download_file "$(download_url_gitlab "$version" "manifest.json")" "$manifest"; then
+                manifest_sha256 "$manifest" "$asset"
+            fi
+            ;;
+        github)
+            local checksums="${TMP_DIR}/checksums.txt"
+            if download_file "$(download_url_github "$version" "checksums.txt")" "$checksums"; then
+                checksums_sha256 "$checksums" "$asset"
+            fi
+            ;;
+    esac
+}
+
 verify_checksum() {
     local file="$1"
     local expected="$2"
     local actual
 
-    if check_command sha256sum; then
-        actual=$(sha256sum "$file" | cut -d' ' -f1)
-    elif check_command shasum; then
-        actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
-    else
-        warn "sha256sum/shasum not found, skipping checksum verification"
-        return 0
+    actual=$(file_sha256 "$file")
+
+    if [ -z "$actual" ]; then
+        error "sha256sum or shasum is required to verify the download"
+        return 1
     fi
 
     if [ "$actual" != "$expected" ]; then
@@ -216,7 +271,30 @@ main() {
 
     info "Version: ${VERSION}"
 
+    # The launcher, not the app: it keeps the working binary up to date by itself, and
+    # docs/mcp/SETUP.md makes it the single entry point that belongs on PATH.
+    local file_name="bsl-analyzer-${PLATFORM}"
+
+    TMP_DIR=$(mktemp -d)
+    trap 'rm -rf "$TMP_DIR"' EXIT
+
+    local expected
+    expected=$(expected_checksum "$VERSION" "$file_name")
+    if [ -z "$expected" ]; then
+        error "Release ${VERSION} publishes no checksum for ${file_name}, refusing to install unverified"
+        exit 1
+    fi
+
+    # Identity by content, not by version number: the release source is compiled into the
+    # launcher, so a GitHub and a release-server build share a version yet differ, and
+    # skipping on the number alone would silently keep the other source's binary.
     local existing="${INSTALL_DIR}/${BINARY_NAME}"
+    if [ -f "$existing" ] && [ "$(file_sha256 "$existing")" = "$expected" ]; then
+        ok "bsl-analyzer ${VERSION} is already installed"
+        check_path
+        exit 0
+    fi
+
     if [ -f "$existing" ]; then
         local current
         # --launcher-version answers from the launcher itself; plain --version would make
@@ -224,25 +302,14 @@ main() {
         # The whole trailing token, so a prerelease suffix survives: matching only three
         # numeric parts would read 0.3.0-beta.1 as 0.3.0 and reinstall it on every run.
         current=$("$existing" --launcher-version 2>/dev/null | awk 'NR==1{print $NF}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-        if [ "$current" = "$VERSION" ]; then
-            ok "bsl-analyzer ${VERSION} is already installed"
-            check_path
-            exit 0
-        fi
         info "Upgrading from ${current} to ${VERSION}"
     fi
 
-    # The launcher, not the app: it keeps the working binary up to date by itself, and
-    # docs/mcp/SETUP.md makes it the single entry point that belongs on PATH.
-    local file_name="bsl-analyzer-${PLATFORM}"
     local url
     case "$INSTALL_SOURCE" in
         github) url=$(download_url_github "$VERSION" "$file_name") ;;
         gitlab) url=$(download_url_gitlab "$VERSION" "$file_name") ;;
     esac
-
-    TMP_DIR=$(mktemp -d)
-    trap 'rm -rf "$TMP_DIR"' EXIT
 
     local tmp_file="${TMP_DIR}/${file_name}"
 
@@ -252,26 +319,9 @@ main() {
         exit 1
     fi
 
-    local checksums_file="${TMP_DIR}/checksums.txt"
-    local checksums_url
-    case "$INSTALL_SOURCE" in
-        github)
-            checksums_url=$(download_url_github "$VERSION" "checksums.txt")
-            ;;
-        gitlab)
-            checksums_url=$(download_url_gitlab "$VERSION" "checksums.txt")
-            ;;
-    esac
-
-    if download_file "$checksums_url" "$checksums_file" 2>/dev/null; then
-        local expected_checksum
-        expected_checksum=$(grep "$file_name" "$checksums_file" | awk '{print $1}')
-        if [ -n "$expected_checksum" ]; then
-            info "Verifying checksum..."
-            verify_checksum "$tmp_file" "$expected_checksum"
-            ok "Checksum verified"
-        fi
-    fi
+    info "Verifying checksum..."
+    verify_checksum "$tmp_file" "$expected"
+    ok "Checksum verified"
 
     chmod +x "$tmp_file"
 
