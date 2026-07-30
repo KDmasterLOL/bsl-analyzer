@@ -4,7 +4,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::RegionTree;
 use ide_db::TextRange;
 use std::collections::HashMap;
-use stdx::case::CaseExt;
+use stdx::case::fold_lower_per_char;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -42,7 +42,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 fn canonical_key(name: &str) -> String {
     hir::module_structure::canonical::canonical_alias(name)
         .map(str::to_string)
-        .unwrap_or_else(|| name.fold_lower())
+        .unwrap_or_else(|| fold_lower_per_char(name))
 }
 
 fn report_duplicates(
@@ -158,6 +158,15 @@ mod tests {
         "#;
 
         check_diagnostics_snapshot_for(code, DiagnosticCode::DuplicateRegion, expect![[r#""#]]);
+    }
+
+    /// The grouping key must split names exactly where `eq_ignore_case` says they
+    /// differ. `str::to_lowercase` applies contextual mappings — Greek final sigma
+    /// among them — and would put these two spellings in different buckets.
+    #[test]
+    fn test_contextual_lowercase_does_not_split_a_name() {
+        let code = "#Область ΟΔΟΣ\n#КонецОбласти\n\n#Область οδοσ\n#КонецОбласти\n";
+        assert_eq!(check_ast_diagnostic(code, check).len(), 1);
     }
 
     #[test]
