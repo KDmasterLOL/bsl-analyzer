@@ -40,6 +40,19 @@ test:
     - if: $CI_COMMIT_TAG
 
 
+test:powershell:
+  stage: test
+  image: mcr.microsoft.com/powershell:latest
+  tags:
+    - autoscale
+  script:
+    - pwsh -NoProfile -File scripts/lint-powershell.ps1
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+
 .build-base:
   stage: build
   image: ${CI_IMAGE}
@@ -144,6 +157,14 @@ publish:
         --data-binary "@scripts/install.sh"
 
       echo "install.sh uploaded"
+
+      echo "Uploading install.ps1..."
+      curl -f -X POST "${RELEASE_SERVER_URL}/upload-static" \
+        -H "Authorization: Bearer ${RELEASE_UPLOAD_TOKEN}" \
+        -H "X-Filename: install.ps1" \
+        --data-binary "@scripts/install.ps1"
+
+      echo "install.ps1 uploaded"
   rules:
     - if: $CI_COMMIT_TAG && $RELEASE_SERVER_URL
 

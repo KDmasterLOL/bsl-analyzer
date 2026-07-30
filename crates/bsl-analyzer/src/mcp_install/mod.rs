@@ -3,6 +3,7 @@ mod error;
 mod model;
 mod ports;
 mod preset;
+mod program;
 mod usecase;
 
 pub use error::InstallError;

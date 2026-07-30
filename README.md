@@ -71,11 +71,29 @@ curl -fsSL https://dev.runsystems.ru/releases/static/install.sh | bash -s -- --v
 
 ### Windows (PowerShell)
 
+<!-- INSTALL_URL_WINDOWS:gitlab -->
 ```powershell
-Invoke-WebRequest "https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-analyzer-windows-amd64.exe" -OutFile bsl-analyzer.exe
+irm https://dev.runsystems.ru/releases/static/install.ps1 | iex
 ```
 
+Или с указанием версии:
+
+```powershell
+& ([scriptblock]::Create((irm https://dev.runsystems.ru/releases/static/install.ps1))) -Version <version>
+```
+<!-- /INSTALL_URL_WINDOWS -->
+
+Инсталлятор кладёт `bsl-analyzer.exe` в `%LOCALAPPDATA%\Programs\bsl-analyzer` и
+добавляет каталог в пользовательский `PATH` (отключается ключом `-NoPathUpdate`).
+
 ## Использование
+
+> **Запуск из интеграций — прямой вызов бинарника, без shell-обёрток.**
+> `bsl-analyzer` — обычный исполняемый файл, и режимы задаются его подкомандами
+> (`lsp`, `analyze`, `mcp serve`). Не запускайте через `CreateProcess` шелл-скрипты:
+> `install.sh` — это установщик, а не точка входа, и на Windows такой вызов даёт
+> `os error 193` («не является приложением Win32»). Если обёртка на Windows всё же
+> нужна, она обязана быть `.cmd`, `.bat` или `.exe`.
 
 ### LSP-сервер
 

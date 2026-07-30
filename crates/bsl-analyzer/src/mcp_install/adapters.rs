@@ -14,6 +14,7 @@ use crate::mcp_install::{
         InstallResult, InstallScope, InstallStatus, InstallTarget, ServerSpec,
     },
     ports::{CommandOutput, CommandRunner, FileStore},
+    program::resolve_program,
 };
 
 const LEGACY_SERVER_NAME: &str = "bsl-analyzer";
@@ -27,17 +28,19 @@ impl CommandRunner for RealCommandRunner {
         args: &[String],
         cwd: &Path,
     ) -> Result<CommandOutput, InstallError> {
-        let output = Command::new(program).args(args).current_dir(cwd).output().map_err(|err| {
-            if err.kind() == io::ErrorKind::NotFound {
-                InstallError::TargetBinaryNotFound { program: program.to_owned() }
-            } else {
-                InstallError::ExternalCommandFailed {
-                    program: program.to_owned(),
-                    status: -1,
-                    message: err.to_string(),
+        let resolved = resolve_program(program);
+        let output =
+            Command::new(resolved).args(args).current_dir(cwd).output().map_err(|err| {
+                if err.kind() == io::ErrorKind::NotFound {
+                    InstallError::TargetBinaryNotFound { program: program.to_owned() }
+                } else {
+                    InstallError::ExternalCommandFailed {
+                        program: program.to_owned(),
+                        status: -1,
+                        message: err.to_string(),
+                    }
                 }
-            }
-        })?;
+            })?;
 
         Ok(CommandOutput {
             status: output.status.code().unwrap_or(-1),
