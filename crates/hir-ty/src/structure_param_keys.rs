@@ -238,13 +238,29 @@ impl<'a> Forwarder<'a> {
                 }
                 self.global_methods().get(&lower).copied()
             }
-            Expr::Field { base, field } => {
-                let Expr::Path(module_name) = body.expr_idx(*base) else { return None };
-                self.resolver
+            Expr::Field { base, field } => match body.expr_idx(*base) {
+                Expr::Path(module_name) => self
+                    .resolver
                     .resolve_qualified_method(self.db, module_name, field)
                     .ok()
-                    .map(|r| r.method_id)
-            }
+                    .map(|r| r.method_id),
+                // `Справочники.Товары.Метод(С)` — three-level, in the Expr language of the
+                // source since the fold was removed. This pass deliberately stays on syntax
+                // (materialising signatures through inference is what it must avoid), so the
+                // root-ownership question is answered here with the one fact it has: a local
+                // or parameter of that name means the chain is not a manager call.
+                Expr::Field { base: root, field: mdo_name } => {
+                    let Expr::Path(plural) = body.expr_idx(*root) else { return None };
+                    if self.shadowing_locals.contains(&plural.as_str().fold_lower()) {
+                        return None;
+                    }
+                    self.resolver
+                        .resolve_three_level_method(self.db, plural, mdo_name, field)
+                        .ok()
+                        .map(|r| r.method_id)
+                }
+                _ => None,
+            },
             Expr::QualifiedPath(qname) => match qname.segments() {
                 [mdo_type, mdo_name, method_name] => self
                     .resolver

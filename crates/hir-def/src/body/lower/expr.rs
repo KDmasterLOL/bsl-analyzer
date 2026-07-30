@@ -9,7 +9,7 @@ use crate::body::{
     Body, BodyDiagnostic, ExternalRef, MagicNumberContext, ManagerType, RedundantAccessKind,
 };
 use crate::hir::{BinaryOp, Expr, ExprIdx, Literal, UnaryOp};
-use crate::{Name, QualifiedName};
+use crate::Name;
 
 use super::diagnostics::{is_deprecated_method, is_followed_by_loop_exit};
 use super::utils::{extract_string_content, looks_like_sdbl};
@@ -848,26 +848,27 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     }
 
     if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
-        if let Some(replacement) =
-            maybe_lower_as_qualified_call(ctx, node, &actual_callee, arg_list_node.as_ref(), &args)
-        {
-            return replacement;
-        }
+        record_qualified_call_facts(ctx, node, &actual_callee, arg_list_node.as_ref());
     }
 
     Expr::Call { callee, args: args.into_boxed_slice() }
 }
 
-fn maybe_lower_as_qualified_call(
+/// Record what a qualified call tells the layers that cannot ask inference: the
+/// dependency edge it implies, and the two syntactic diagnostics that read the
+/// spelling of the chain.
+///
+/// It builds no expression: the call keeps the shape it has in the source. The name
+/// says `record`, not `lower`, because a lowering that also decided ownership is
+/// exactly what this stage stopped doing.
+fn record_qualified_call_facts(
     ctx: &mut LoweringCtx,
     call_node: &SyntaxNode,
     field_expr_node: &SyntaxNode,
     arg_list_node: Option<&SyntaxNode>,
-    args: &[ExprIdx],
-) -> Option<Expr> {
-    let call_info = analyze_qualified_call(field_expr_node, ctx)?;
-
-    let field_token = field_name_token(field_expr_node)?;
+) {
+    let Some(call_info) = analyze_qualified_call(field_expr_node, ctx) else { return };
+    let Some(field_token) = field_name_token(field_expr_node) else { return };
     let field_name = Name::new(field_token.text());
 
     let arg_presence = arg_list_node.map(extract_arg_presence).unwrap_or_default();
@@ -888,10 +889,7 @@ fn maybe_lower_as_qualified_call(
                     args: arg_presence,
                     range: call_node.text_range(),
                 });
-                return None;
             }
-
-            None
         }
         QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
             ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
@@ -920,15 +918,14 @@ fn maybe_lower_as_qualified_call(
                 });
             }
 
-            let qualified_path = QualifiedName::from_segments([
-                Name::new(&mdo_type),
-                Name::new(&mdo_name),
-                field_name.clone(),
-            ]);
-            let new_callee = ctx
-                .alloc_expr(Expr::QualifiedPath(Box::new(qualified_path)), call_node.text_range());
-
-            Some(Expr::Call { callee: new_callee, args: args.to_vec().into_boxed_slice() })
+            // The chain keeps the Expr language of its source: `Call{Field{Field{Path}}}`.
+            // Folding it into a single `QualifiedPath` node made lowering answer questions
+            // it cannot answer — whether the root name belongs to the collection, which
+            // object the middle segment names — and every consumer that met the folded
+            // node had to re-derive them from three strings instead of reading a resolved
+            // type. Dependency discovery keeps its answer above (`ExternalRef`), because
+            // it must run before inference and may over-approximate; typing, diagnostics
+            // and completion now take the ordinary route.
         }
     }
 }

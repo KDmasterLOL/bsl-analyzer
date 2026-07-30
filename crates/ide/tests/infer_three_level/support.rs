@@ -78,6 +78,21 @@ pub(super) fn unresolved_kinds(
         .collect()
 }
 
+/// Имена полей, по которым инференс не нашёл члена. Промах по СРЕДНЕМУ звену
+/// трёхзвенной цепочки — это именно промах поля коллекции, а не метода.
+pub(super) fn unresolved_fields(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String> {
+    db.infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            InferenceDiagnostic::UnresolvedField { field_name, .. } => {
+                Some(field_name.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn mismatched_arg_counts(
     db: &RootDatabaseImpl,
     file_id: FileId,

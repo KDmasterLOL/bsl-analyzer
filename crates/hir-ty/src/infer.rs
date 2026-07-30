@@ -1690,7 +1690,17 @@ impl<'db> InferenceContext<'db> {
                     info.ty
                 } else {
                     let base_kind = self.db.lookup_type(base_ty);
-                    if matches!(base_kind, TypeKind::MetadataRef(_) | TypeKind::ThisObject { .. }) {
+                    // A metadata collection is as closed a receiver as an object: its
+                    // members are exactly the configuration's objects of that kind, so a
+                    // miss is a real defect and not an unknown shape. Reporting it here is
+                    // what keeps `Справочники.НетТакого.Метод()` from going silent now that
+                    // the chain is no longer folded into one node.
+                    if matches!(
+                        base_kind,
+                        TypeKind::MetadataRef(_)
+                            | TypeKind::ThisObject { .. }
+                            | TypeKind::ManagerCollection(_)
+                    ) {
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedField {
                             expr: expr_id,
                             receiver_ty: base_ty,

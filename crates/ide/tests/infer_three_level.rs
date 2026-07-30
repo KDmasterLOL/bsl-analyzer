@@ -6,7 +6,9 @@ use ide_db::base_db::SourceDatabase;
 #[path = "infer_three_level/support.rs"]
 mod support;
 
-use support::{mismatched_arg_counts, setup, setup_with_designer_config, unresolved_kinds};
+use support::{
+    mismatched_arg_counts, setup, setup_with_designer_config, unresolved_fields, unresolved_kinds,
+};
 
 const MANAGER_FIXTURE: &str = r#"
 //- /Documents/ПКО/Ext/ManagerModule.bsl
@@ -60,8 +62,12 @@ fn three_level_arity_mismatch_emits_diagnostic() {
     );
 }
 
+/// Промах по объекту — это промах СРЕДНЕГО звена, и диагностика теперь называет
+/// именно его. Пока цепочка сворачивалась в один узел, сказать было нечего кроме
+/// «метод не найден» на всём вызове: узел не различал, какое из трёх звеньев
+/// подвело.
 #[test]
-fn three_level_missing_mdo_emits_unresolved() {
+fn three_level_missing_mdo_reports_the_middle_segment() {
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -70,15 +76,57 @@ fn three_level_missing_mdo_emits_unresolved() {
 "#;
     let (db, file_id) = setup(fixture);
     assert_eq!(
-        unresolved_kinds(&db, file_id),
-        vec![UnresolvedMethodKind::MethodNotFound],
-        "missing MDO must emit MethodNotFound"
+        unresolved_fields(&db, file_id),
+        vec!["НетТакогоДокумента".to_string()],
+        "the collection has no such member — that is the defect, and its place is the middle"
+    );
+    assert!(
+        unresolved_kinds(&db, file_id).is_empty(),
+        "and the method is not the defect: got {:?}",
+        unresolved_kinds(&db, file_id)
     );
     assert!(
         mismatched_arg_counts(&db, file_id).is_empty(),
         "resolution failed before arity check; got {:?}",
         mismatched_arg_counts(&db, file_id)
     );
+}
+
+/// Принятая потеря, названная прямо. `ОбщиеМодули` — узнаваемый plural, но
+/// менеджерной коллекции за ним нет (`manager_type_prefix` пуст), поэтому корень
+/// цепочки не становится `ManagerCollection` и промах не сообщается ничем. До
+/// снятия свёртки форма давала `UnresolvedMethodCall{MethodNotFound}`.
+///
+/// Потеря принята потому, что форма в BSL бессмысленна: общий модуль зовут
+/// `ОбщийМодуль.Метод()`, а не через коллекцию с объектом.
+#[test]
+fn common_modules_chain_is_no_longer_diagnosed() {
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    ОбщиеМодули.Утилиты.Метод();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        db.infer(file_id).diagnostics.is_empty(),
+        "declared loss: got {:?}",
+        db.infer(file_id).diagnostics
+    );
+}
+
+/// Предсуществующая дыра, а не следствие снятия свёртки: нераспознанный plural не
+/// сворачивался и раньше, поэтому цепочка молчала и до, и после.
+#[test]
+fn an_unknown_plural_chain_stays_silent() {
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    Неизвестные.Х.Метод();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(db.infer(file_id).diagnostics.is_empty(), "got {:?}", db.infer(file_id).diagnostics);
 }
 
 #[test]
@@ -220,9 +268,9 @@ fn three_level_invalidates_on_config_change() {
 
     db.set_all_config_paths(vec![(None, std::path::PathBuf::from("/does-not-exist"))]);
     assert_eq!(
-        unresolved_kinds(&db, file_id),
-        vec![UnresolvedMethodKind::MethodNotFound],
-        "bogus config must hide the MDO and flip to MethodNotFound"
+        unresolved_fields(&db, file_id),
+        vec!["ПКО".to_string()],
+        "bogus config must hide the MDO, and the miss lands on the object segment"
     );
 
     db.set_all_config_paths(vec![]);
