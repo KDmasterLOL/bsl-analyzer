@@ -340,6 +340,28 @@ mod tests {
         check_diagnostics_snapshot_for(code, DiagnosticCode::CodeOutOfRegion, expect![[r#""#]]);
     }
 
+    /// An off-canon closing directive must close the region. Mistaken for an
+    /// opening one, it leaves the region open to EOF and everything after it
+    /// silently counts as regioned code.
+    #[test]
+    fn code_after_off_canon_closing_directive_is_out_of_region() {
+        let code = "#Область Р\n\
+Процедура Первая()\n\
+КонецПроцедуры\n\
+#Конецобласти\n\
+\n\
+Процедура Вторая()\n\
+КонецПроцедуры";
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 6:11..6:17
+                  message: Процедура находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
+    }
+
     #[test]
     fn test_execute() {
         let code = "\nПроцедура Запустить()\n\nКонецПроцедуры\n";

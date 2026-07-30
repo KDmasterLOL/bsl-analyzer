@@ -3,6 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use stdx::case::CaseExt;
+use syntax::ast::{AstNode, PreRegionDir};
 use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -202,43 +203,15 @@ fn should_report(id: &IdentifierInfo, config: &Config) -> bool {
 }
 
 fn extract_region_name(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
-    let text = node.text().to_string();
-    let first_line = text.lines().next()?;
-
-    let (name, prefix_len) = if let Some(n) = first_line.strip_prefix("#Область") {
-        (n, "#Область".len())
-    } else if let Some(n) = first_line.strip_prefix("#область") {
-        (n, "#область".len())
-    } else if let Some(n) = first_line.strip_prefix("#Region") {
-        (n, "#Region".len())
-    } else {
-        let n = first_line.strip_prefix("#region")?;
-        (n, "#region".len())
-    };
-
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
+    let dir = PreRegionDir::cast(node.clone())?;
+    if !dir.is_start() {
         return None;
     }
 
-    let identifier = if let Some(comment_pos) = trimmed.find("//") {
-        trimmed[..comment_pos].trim()
-    } else {
-        trimmed.split_whitespace().next().unwrap_or(trimmed)
-    };
-
-    if identifier.is_empty() {
-        return None;
-    }
-
-    let name_start = prefix_len + (name.len() - trimmed.len());
-    let byte_start: u32 = node.text_range().start().into();
-    let byte_start = byte_start + name_start as u32;
-
-    Some(IdentifierInfo {
-        text: identifier.to_string(),
-        range: TextRange::new(byte_start.into(), (byte_start + identifier.len() as u32).into()),
-    })
+    node.children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| token.kind() == SyntaxKind::IDENT)
+        .map(|token| IdentifierInfo { text: token.text().to_string(), range: token.text_range() })
 }
 
 fn extract_goto_label(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
@@ -584,6 +557,29 @@ mod tests {
                   severity: Information
                 LatinAndCyrillicSymbolInWord @ 38:11..38:19
                   message: Identifier 'XПириенс' contains mixed Latin and Cyrillic characters
+                  severity: Information"#]],
+        );
+    }
+
+    /// Region directives are case-insensitive and admit a blank after `#`, so the
+    /// name must be found under every spelling the lexer accepts.
+    #[test]
+    fn region_name_checked_under_off_canon_directive() {
+        check_diagnostics_snapshot_for(
+            "#ОБЛАСТЬ Regiоn\n#КОНЕЦОБЛАСТИ\n",
+            DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            expect![[r#"
+                LatinAndCyrillicSymbolInWord @ 1:10..1:16
+                  message: Identifier 'Regiоn' contains mixed Latin and Cyrillic characters
+                  severity: Information"#]],
+        );
+
+        check_diagnostics_snapshot_for(
+            "# Область Regiоn\n# КонецОбласти\n",
+            DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            expect![[r#"
+                LatinAndCyrillicSymbolInWord @ 1:11..1:17
+                  message: Identifier 'Regiоn' contains mixed Latin and Cyrillic characters
                   severity: Information"#]],
         );
     }

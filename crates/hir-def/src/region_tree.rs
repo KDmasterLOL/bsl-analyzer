@@ -864,4 +864,62 @@ EndProcedure
             "directive_range should isolate the opening directive line, got: {dir_text:?}"
         );
     }
+
+    /// Directives are case-insensitive in 1C, so an off-canon closing marker must
+    /// close the region. A marker mistaken for an opening one leaves the region
+    /// open to EOF, swallowing everything that follows.
+    #[track_caller]
+    fn check_closing_directive(end: &str) {
+        let code = format!(
+            "#Область Р\nПроцедура Т()\nКонецПроцедуры\n{end}\nПроцедура Хвост()\nКонецПроцедуры\n"
+        );
+        let tree = parse_and_lower(&code);
+
+        assert_eq!(tree.len(), 1, "{end}");
+        assert_eq!(tree.root_regions().len(), 1, "{end}");
+
+        let region = tree.region(tree.root_regions()[0]);
+        assert_eq!(region.name.as_str(), "Р", "{end}");
+
+        let expected_end = code.find(end).unwrap() + end.len();
+        assert_eq!(u32::from(region.range.end()) as usize, expected_end, "{end}");
+
+        let tail = text_size::TextSize::from(code.find("Процедура Хвост").unwrap() as u32);
+        assert!(!tree.is_inside_region(tail), "code after {end} must be outside the region");
+    }
+
+    #[test]
+    fn closing_directive_pairs_in_any_case() {
+        for end in [
+            "#КонецОбласти",
+            "#конецобласти",
+            "#Конецобласти",
+            "#КОнецОбласти",
+            "#КОНЕЦОБЛАСТИ",
+            "# КонецОбласти",
+        ] {
+            check_closing_directive(end);
+        }
+    }
+
+    #[test]
+    fn opening_directive_keeps_name_in_any_case() {
+        for start in ["#Область Р", "#область Р", "#ОБЛАСТЬ Р", "#ОблАсть Р", "# Область Р"]
+        {
+            let code = format!("{start}\nПроцедура Т()\nКонецПроцедуры\n#КонецОбласти\n");
+            let tree = parse_and_lower(&code);
+
+            assert_eq!(tree.len(), 1, "{start}");
+            let region = tree.region(tree.root_regions()[0]);
+            assert_eq!(region.name.as_str(), "Р", "{start}");
+            assert_eq!(&code[region.name_range], "Р", "{start}");
+        }
+    }
+
+    #[test]
+    fn english_closing_directive_pairs_in_any_case() {
+        for end in ["#EndRegion", "#endregion", "#ENDREGION", "#EndregioN"] {
+            check_closing_directive(end);
+        }
+    }
 }
