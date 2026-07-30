@@ -375,3 +375,22 @@ fn three_level_candidate_invalidation() {
     assert!(!after_candidate.resolution.is_survivor(before_selected));
     assert!(after_candidate.resolution.is_survivor(after_selected));
 }
+
+/// Незавершённый доступ во время набора текста — `Справочники.` — не дефект
+/// конфигурации: имя поля отсутствует, и лоуэринг записывает его как `<missing>`.
+/// Диагностика о ненайденном поле здесь была бы шумом на каждом нажатии клавиши.
+#[test]
+fn a_trailing_dot_is_not_an_unresolved_field() {
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    Х = Справочники.;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        unresolved_fields(&db, file_id).is_empty(),
+        "incomplete access must not accuse the configuration: {:?}",
+        unresolved_fields(&db, file_id)
+    );
+}

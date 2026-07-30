@@ -1695,12 +1695,18 @@ impl<'db> InferenceContext<'db> {
                     // miss is a real defect and not an unknown shape. Reporting it here is
                     // what keeps `Справочники.НетТакого.Метод()` from going silent now that
                     // the chain is no longer folded into one node.
-                    if matches!(
-                        base_kind,
-                        TypeKind::MetadataRef(_)
-                            | TypeKind::ThisObject { .. }
-                            | TypeKind::ManagerCollection(_)
-                    ) {
+                    //
+                    // A name the author has not finished writing (`Справочники.`) is not a
+                    // miss: lowering keeps the incomplete field as the missing placeholder,
+                    // and accusing the configuration on every keystroke would be noise.
+                    if !field.is_missing()
+                        && matches!(
+                            base_kind,
+                            TypeKind::MetadataRef(_)
+                                | TypeKind::ThisObject { .. }
+                                | TypeKind::ManagerCollection(_)
+                        )
+                    {
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedField {
                             expr: expr_id,
                             receiver_ty: base_ty,

@@ -20,6 +20,13 @@ impl Name {
     pub fn missing() -> Self {
         Name::new("<missing>")
     }
+
+    /// Whether this is the placeholder lowering records where the source has no name
+    /// yet — a trailing dot mid-edit, a truncated expression. Consumers that report a
+    /// name as unknown must ask first: the author has not written one.
+    pub fn is_missing(&self) -> bool {
+        self.0 == "<missing>"
+    }
 }
 
 impl From<&str> for Name {

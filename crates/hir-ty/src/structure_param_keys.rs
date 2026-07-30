@@ -143,6 +143,11 @@ pub(crate) struct Forwarder<'a> {
     /// Names (lowercased) that are body bindings or assignment targets — a same-named method is
     /// shadowed and must not be resolved as a callee (mirrors the inference dispatch guard).
     shadowing_locals: FxHashSet<String>,
+    /// Names (lowercased) that are DECLARED bindings: parameters, `Перем`, loop variables.
+    /// The narrower question, and the right one for a metadata-collection root: assigning to
+    /// such a name is a refused write to a Global-context property, not a declaration, so it
+    /// must not turn a manager chain into something else.
+    declared_bindings: FxHashSet<String>,
     /// Lazily-built lowercased method-name → `MethodId` of the visible global common modules.
     global_methods: OnceCell<FxHashMap<String, MethodId>>,
     /// Produces a callee's summary — the memoised query (construction site) or recursive
@@ -158,10 +163,11 @@ impl<'a> Forwarder<'a> {
         body: &Body,
         summarize: &'a dyn Fn(MethodId) -> Arc<StructureParamSummary>,
     ) -> Self {
-        let mut shadowing_locals = FxHashSet::default();
+        let mut declared_bindings = FxHashSet::default();
         for (_, binding) in body.bindings_iter() {
-            shadowing_locals.insert(binding.name.as_str().fold_lower());
+            declared_bindings.insert(binding.name.as_str().fold_lower());
         }
+        let mut shadowing_locals = declared_bindings.clone();
         for (_, stmt) in body.stmts_iter() {
             if let Stmt::Assign { target, .. } = stmt {
                 if let Expr::Path(name) = body.expr_idx(*target) {
@@ -169,7 +175,15 @@ impl<'a> Forwarder<'a> {
                 }
             }
         }
-        Self { db, resolver, module, shadowing_locals, global_methods: OnceCell::new(), summarize }
+        Self {
+            db,
+            resolver,
+            module,
+            shadowing_locals,
+            declared_bindings,
+            global_methods: OnceCell::new(),
+            summarize,
+        }
     }
 
     /// Fold a single call's callee summary into the tracked roots it is passed (whole). A no-op
@@ -247,11 +261,16 @@ impl<'a> Forwarder<'a> {
                 // `Справочники.Товары.Метод(С)` — three-level, in the Expr language of the
                 // source since the fold was removed. This pass deliberately stays on syntax
                 // (materialising signatures through inference is what it must avoid), so the
-                // root-ownership question is answered here with the one fact it has: a local
-                // or parameter of that name means the chain is not a manager call.
+                // root-ownership question is answered here with the one fact it has: a
+                // DECLARED binding of that name means the chain is not a manager call.
+                //
+                // Assignment targets are deliberately not consulted: writing to a metadata
+                // collection name declares nothing — the platform refuses the write — and
+                // treating it as a declaration would make the same name a collection for
+                // inference and a local for completion.
                 Expr::Field { base: root, field: mdo_name } => {
                     let Expr::Path(plural) = body.expr_idx(*root) else { return None };
-                    if self.shadowing_locals.contains(&plural.as_str().fold_lower()) {
+                    if self.declared_bindings.contains(&plural.as_str().fold_lower()) {
                         return None;
                     }
                     self.resolver
