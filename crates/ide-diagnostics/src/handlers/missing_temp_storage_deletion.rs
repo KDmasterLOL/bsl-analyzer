@@ -147,7 +147,6 @@ fn canonicalize_expr(body: &Body, expr_idx: ExprIdx) -> Option<CanonExpr> {
         }
         Expr::Literal(lit) => Some(format!("l:{:?}", lit)),
         Expr::Missing
-        | Expr::QualifiedPath(_)
         | Expr::BinaryOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::Ternary { .. }

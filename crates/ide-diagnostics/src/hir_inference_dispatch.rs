@@ -9,6 +9,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::TypeMismatchByDocComment,
     DiagnosticCode::UnresolvedField,
     DiagnosticCode::ReadOnlyPropertyAssignment,
+    DiagnosticCode::GlobalPropertyNotWritable,
     DiagnosticCode::DeprecatedPlatformApi,
     DiagnosticCode::RedundantAccessToObject,
     DiagnosticCode::MissedRequiredParameter,
@@ -87,9 +88,12 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
         InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
         InferenceDiagnostic::ReadOnlyPropertyAssignment { lhs, .. } => *lhs,
+        InferenceDiagnostic::GlobalPropertyNotWritable { lhs, .. } => *lhs,
         InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
         InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
         InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
+        InferenceDiagnostic::MissedRequiredParameterManagerModule { expr, .. } => *expr,
+        InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
         InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
         InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
     }
@@ -97,22 +101,6 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
 
 fn diagnostic_range(source_map: &BodySourceMap, diag: &InferenceDiagnostic) -> Option<TextRange> {
     source_map.expr_range(diagnostic_expr(diag))
-}
-
-fn anchor_on_leading_name(
-    ctx: &DiagnosticsContext,
-    range: TextRange,
-    name: &hir::Name,
-) -> TextRange {
-    let parse = ctx.parse();
-    let Some(token) = parse.syntax_node().token_at_offset(range.start()).right_biased() else {
-        return range;
-    };
-    if token.text_range().start() == range.start() && token.text() == name.as_str() {
-        token.text_range()
-    } else {
-        range
-    }
 }
 
 fn dispatch_inference_diagnostic(
@@ -152,6 +140,9 @@ fn dispatch_inference_diagnostic(
         InferenceDiagnostic::ReadOnlyPropertyAssignment { receiver_ty, field_name, .. } => {
             handlers::read_only_property::from_hir(*receiver_ty, field_name, range, ctx)
         }
+        InferenceDiagnostic::GlobalPropertyNotWritable { name, .. } => {
+            handlers::global_property_not_writable::from_hir(name, range, ctx)
+        }
         InferenceDiagnostic::DeprecatedPlatformMember {
             type_name,
             member_name,
@@ -168,6 +159,28 @@ fn dispatch_inference_diagnostic(
             let kind = RedundantAccessKind::TwoLevel { module: module.as_str().to_string() };
             handlers::redundant_access_to_object::from_hir(&kind, range, ctx)
         }
+        InferenceDiagnostic::MissedRequiredParameterManagerModule {
+            callee,
+            mdo_type,
+            mdo_name,
+            args,
+            ..
+        } => handlers::missed_required_parameter::from_hir(
+            callee.as_str(),
+            None,
+            Some(mdo_type.as_str()),
+            Some(mdo_name.as_str()),
+            args,
+            range,
+            ctx,
+        ),
+        InferenceDiagnostic::RedundantAccessToObjectThreeLevel { mdo_type, mdo_name, .. } => {
+            let kind = RedundantAccessKind::ThreeLevel {
+                mdo_type: mdo_type.as_str().to_string(),
+                mdo_name: mdo_name.as_str().to_string(),
+            };
+            handlers::redundant_access_to_object::from_hir(&kind, range, ctx)
+        }
         InferenceDiagnostic::MissedRequiredParameterCommonModule {
             callee, module, args, ..
         } => handlers::missed_required_parameter::from_hir(
@@ -180,16 +193,6 @@ fn dispatch_inference_diagnostic(
             ctx,
         ),
         InferenceDiagnostic::UnavailableInEnvironment { name, member_kind, missing, .. } => {
-            // The verdict on a three-level call (`Справочники.X.Метод()`) is
-            // anchored on the synthetic callee, whose range spans the whole
-            // call; the message names the collection root — the call's first
-            // token. Shrink to that token when it is the named root, a no-op
-            // for a bare name whose range already is the identifier.
-            let range = if matches!(member_kind, hir::EnvMemberKind::GlobalProperty) {
-                anchor_on_leading_name(ctx, range, name)
-            } else {
-                range
-            };
             handlers::unavailable_in_environment::from_hir(name, *member_kind, *missing, range, ctx)
         }
         InferenceDiagnostic::ModuleAccessibility { name, callee_kind, missing, .. } => {

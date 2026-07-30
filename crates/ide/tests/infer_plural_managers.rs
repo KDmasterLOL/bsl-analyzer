@@ -64,7 +64,7 @@ fn bare_spravochniki_yields_manager_collection() {
 }
 
 #[test]
-fn implicit_local_shadows_manager_plural() {
+fn assignment_does_not_shadow_a_manager_plural() {
     let fixture = r#"//- /test.bsl
 Функция Тест()
     Документы = 42;
@@ -73,9 +73,12 @@ fn implicit_local_shadows_manager_plural() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
+    // `Документы = 42` writes to a Global-context property and declares no local, so
+    // the read is still the collection; the illegal write is reported separately by
+    // `GlobalPropertyNotWritable`.
     assert_eq!(
         var_ty(&db, file_id, "м"),
-        Some(db.number(None, None)),
-        "local `Документы = 42` must shadow the manager collective"
+        Some(db.manager_collection(bsl_metadata::MdoType::Document)),
+        "the name still denotes the manager collective"
     );
 }

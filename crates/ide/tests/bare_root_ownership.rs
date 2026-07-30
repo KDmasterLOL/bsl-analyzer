@@ -49,8 +49,8 @@ fn completion_offers_the_metadata_object(owner: Owner) -> bool {
 fn hover_names_platform_manager(owner: Owner) -> bool {
     let s = scenario(owner, CHAIN);
     // The chain's own root, not the first spelling of the name in the module:
-    // an owner that claims the name by assigning to it spells it earlier, and
-    // at that target the name still denotes its previous owner by design.
+    // the assignment control spells it earlier, and an assignment target is not
+    // the read this test is about.
     let offset = s.offset_of(CHAIN);
     s.analysis
         .hover(s.file_id, offset, Locale::Ru)
@@ -60,14 +60,12 @@ fn hover_names_platform_manager(owner: Owner) -> bool {
 
 #[test]
 fn signature_help_respects_every_owner() {
-    assert!(
-        signature_names_platform_manager(Owner::Unheld),
-        "control: an unheld chain must offer the manager method's signature"
-    );
-    assert!(
-        signature_names_platform_manager(Owner::UnheldSynthetic),
-        "control: the synthetic configuration must resolve an unheld chain"
-    );
+    for owner in Owner::UNHELD {
+        assert!(
+            signature_names_platform_manager(owner),
+            "control {owner:?}: an unheld chain must offer the manager method's signature"
+        );
+    }
     for owner in Owner::HELD {
         assert!(
             !signature_names_platform_manager(owner),
@@ -78,14 +76,12 @@ fn signature_help_respects_every_owner() {
 
 #[test]
 fn inlay_hints_respect_every_owner() {
-    assert!(
-        hints_label_the_argument(Owner::Unheld),
-        "control: an unheld chain must label its argument"
-    );
-    assert!(
-        hints_label_the_argument(Owner::UnheldSynthetic),
-        "control: the synthetic configuration must label an unheld chain"
-    );
+    for owner in Owner::UNHELD {
+        assert!(
+            hints_label_the_argument(owner),
+            "control {owner:?}: an unheld chain must label its argument"
+        );
+    }
     for owner in Owner::HELD {
         assert!(
             !hints_label_the_argument(owner),
@@ -96,14 +92,12 @@ fn inlay_hints_respect_every_owner() {
 
 #[test]
 fn completion_respects_every_owner() {
-    assert!(
-        completion_offers_the_metadata_object(Owner::Unheld),
-        "control: an unheld collection must offer its metadata objects"
-    );
-    assert!(
-        completion_offers_the_metadata_object(Owner::UnheldSynthetic),
-        "control: the synthetic configuration must offer its metadata objects"
-    );
+    for owner in Owner::UNHELD {
+        assert!(
+            completion_offers_the_metadata_object(owner),
+            "control {owner:?}: an unheld collection must offer its metadata objects"
+        );
+    }
     for owner in Owner::HELD {
         assert!(
             !completion_offers_the_metadata_object(owner),
@@ -114,14 +108,12 @@ fn completion_respects_every_owner() {
 
 #[test]
 fn hover_respects_every_owner() {
-    assert!(
-        hover_names_platform_manager(Owner::Unheld),
-        "control: an unheld collection must hover as the platform manager"
-    );
-    assert!(
-        hover_names_platform_manager(Owner::UnheldSynthetic),
-        "control: the synthetic configuration must hover as the platform manager"
-    );
+    for owner in Owner::UNHELD {
+        assert!(
+            hover_names_platform_manager(owner),
+            "control {owner:?}: an unheld collection must hover as the platform manager"
+        );
+    }
     for owner in Owner::HELD {
         assert!(
             !hover_names_platform_manager(owner),

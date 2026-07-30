@@ -9,7 +9,7 @@ use crate::body::{
     Body, BodyDiagnostic, ExternalRef, MagicNumberContext, ManagerType, RedundantAccessKind,
 };
 use crate::hir::{BinaryOp, Expr, ExprIdx, Literal, UnaryOp};
-use crate::{Name, QualifiedName};
+use crate::Name;
 
 use super::diagnostics::{is_deprecated_method, is_followed_by_loop_exit};
 use super::utils::{extract_string_content, looks_like_sdbl};
@@ -848,26 +848,27 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     }
 
     if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
-        if let Some(replacement) =
-            maybe_lower_as_qualified_call(ctx, node, &actual_callee, arg_list_node.as_ref(), &args)
-        {
-            return replacement;
-        }
+        record_qualified_call_facts(ctx, node, &actual_callee, arg_list_node.as_ref());
     }
 
     Expr::Call { callee, args: args.into_boxed_slice() }
 }
 
-fn maybe_lower_as_qualified_call(
+/// Record what a qualified call tells the layers that cannot ask inference: the
+/// dependency edge it implies, and the two syntactic diagnostics that read the
+/// spelling of the chain.
+///
+/// It builds no expression: the call keeps the shape it has in the source. The name
+/// says `record`, not `lower`, because a lowering that also decided ownership is
+/// exactly what this stage stopped doing.
+fn record_qualified_call_facts(
     ctx: &mut LoweringCtx,
     call_node: &SyntaxNode,
     field_expr_node: &SyntaxNode,
     arg_list_node: Option<&SyntaxNode>,
-    args: &[ExprIdx],
-) -> Option<Expr> {
-    let call_info = analyze_qualified_call(field_expr_node, ctx)?;
-
-    let field_token = field_name_token(field_expr_node)?;
+) {
+    let Some(call_info) = analyze_qualified_call(field_expr_node, ctx) else { return };
+    let Some(field_token) = field_name_token(field_expr_node) else { return };
     let field_name = Name::new(field_token.text());
 
     let arg_presence = arg_list_node.map(extract_arg_presence).unwrap_or_default();
@@ -888,30 +889,10 @@ fn maybe_lower_as_qualified_call(
                     args: arg_presence,
                     range: call_node.text_range(),
                 });
-                return None;
             }
-
-            None
         }
         QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
-            ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
-                kind: RedundantAccessKind::ThreeLevel {
-                    mdo_type: mdo_type.clone(),
-                    mdo_name: mdo_name.clone(),
-                },
-                range: call_node.text_range(),
-            });
-
-            ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
-                callee: field_name.as_str().to_string(),
-                module: None,
-                mdo_type: Some(mdo_type.clone()),
-                mdo_name: Some(mdo_name.clone()),
-                args: arg_presence,
-                range: call_node.text_range(),
-            });
-
-            if let Some(manager_type) = parse_manager_type(&mdo_type) {
+            if let Some(manager_type) = ManagerType::from_name(&mdo_type) {
                 ctx.external_refs.push(ExternalRef::ManagerAccess {
                     manager_type,
                     object_name: Name::new(&mdo_name),
@@ -920,15 +901,13 @@ fn maybe_lower_as_qualified_call(
                 });
             }
 
-            let qualified_path = QualifiedName::from_segments([
-                Name::new(&mdo_type),
-                Name::new(&mdo_name),
-                field_name.clone(),
-            ]);
-            let new_callee = ctx
-                .alloc_expr(Expr::QualifiedPath(Box::new(qualified_path)), call_node.text_range());
-
-            Some(Expr::Call { callee: new_callee, args: args.to_vec().into_boxed_slice() })
+            // No node of its own: the chain keeps the Expr language of its source,
+            // `Call{Field{Field{Path}}}`. Whether the root name belongs to the
+            // collection, and which object the middle segment names, are questions
+            // lowering cannot answer — they need a resolver. Dependency discovery
+            // keeps its answer above (`ExternalRef`), because it runs before
+            // inference and may over-approximate; typing, diagnostics and
+            // completion read the resolved type instead.
         }
     }
 }
@@ -1141,11 +1120,12 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
             .last()
             .map(|tok| tok.text().to_string())?;
 
-        let key = NormName::intern(&mdo_type);
-        if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
-            return None;
-        }
-
+        // No ownership check here. What this branch still feeds is dependency
+        // discovery, which runs BEFORE inference and is allowed to over-approximate:
+        // one extra edge costs one extra invalidation, a missing edge costs a wrong
+        // answer. The judgement that a local or a module variable holds the name
+        // belongs to inference, which has the resolver — and the guard here was
+        // incomplete anyway, seeing only declarations of the body.
         bsl_metadata::MdoType::from_plural(&mdo_type)?;
 
         tracing::debug!(
@@ -1250,11 +1230,6 @@ pub(crate) fn exprs_are_equal(body: &Body, lhs: ExprIdx, rhs: ExprIdx) -> bool {
     match (body.expr_idx(lhs), body.expr_idx(rhs)) {
         (Expr::Missing, Expr::Missing) => true,
         (Expr::Path(name1), Expr::Path(name2)) => name1.eq_ignore_case(name2),
-        (Expr::QualifiedPath(p1), Expr::QualifiedPath(p2)) => {
-            let s1 = p1.segments();
-            let s2 = p2.segments();
-            s1.len() == s2.len() && s1.iter().zip(s2.iter()).all(|(a, b)| a.eq_ignore_case(b))
-        }
         (Expr::Field { base: b1, field: f1 }, Expr::Field { base: b2, field: f2 }) => {
             f1.eq_ignore_case(f2) && exprs_are_equal(body, *b1, *b2)
         }
@@ -1643,23 +1618,6 @@ fn find_string_in_node(node: &SyntaxNode) -> Option<String> {
         }
     }
     None
-}
-
-fn parse_manager_type(mdo_type: &str) -> Option<ManagerType> {
-    let lower = mdo_type.fold_lower();
-    match lower.as_str() {
-        "документы" | "documents" => Some(ManagerType::Documents),
-        "справочники" | "catalogs" => Some(ManagerType::Catalogs),
-        "обработки" | "dataprocessors" => Some(ManagerType::DataProcessors),
-        "отчёты" | "отчеты" | "reports" => Some(ManagerType::Reports),
-        "регистрысведений" | "informationregisters" => {
-            Some(ManagerType::InformationRegisters)
-        }
-        "регистрынакопления" | "accumulationregisters" => {
-            Some(ManagerType::AccumulationRegisters)
-        }
-        _ => None,
-    }
 }
 
 fn check_find_element_first_arg(args: &[ExprIdx], ctx: &LoweringCtx) -> bool {

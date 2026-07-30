@@ -182,7 +182,7 @@ fn type_mismatch_fires_on_three_level_manager_call() {
     assert_eq!(
         mismatches(&db, file_id),
         vec![(db.number(None, None), db.string(None, false))],
-        "3-level manager call must emit TypeMismatch through infer_three_level_call"
+        "a three-level manager call must emit TypeMismatch like any other resolved call"
     );
 }
 

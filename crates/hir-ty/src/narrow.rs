@@ -682,7 +682,7 @@ fn for_each_stmt_expr_root(body: &Body, stmt_idx: StmtIdx, f: &mut impl FnMut(Ex
 
 fn for_each_expr_child(body: &Body, root: ExprIdx, f: &mut impl FnMut(ExprIdx)) {
     match body.expr_idx(root) {
-        Expr::Missing | Expr::Path(_) | Expr::QualifiedPath(_) | Expr::Literal(_) => {}
+        Expr::Missing | Expr::Path(_) | Expr::Literal(_) => {}
         Expr::BinaryOp { lhs, rhs, .. } => {
             f(*lhs);
             f(*rhs);

@@ -206,6 +206,51 @@ fn collect_read_var_names(body: &hir::Body) -> FxHashSet<String> {
     read_vars
 }
 
+/// Whether the bare name `name_lower` denotes a metadata manager collection —
+/// cheap and purely textual, used only to decide whether the question below is
+/// worth asking at all.
+fn names_a_manager_collection(name_lower: &str) -> bool {
+    bsl_metadata::MdoType::from_plural(name_lower)
+        .is_some_and(|mdo| mdo.manager_type_prefix().is_some())
+}
+
+/// Whether an unread bare assignment declares a local at all.
+///
+/// For an ordinary name it always does, unless a declaration or an implicit
+/// member already owns it. For a metadata-collection name the answer belongs to
+/// INFERENCE and nowhere else: assigning to a Global-context property declares
+/// nothing (the platform refuses the write, and `GlobalPropertyNotWritable`
+/// reports it), but a non-writable owner — a same-named method, a common module
+/// known from the configuration OR merely from the source root — takes the name
+/// first, and then the assignment does declare a real local.
+///
+/// Answering that here a second time is what produced three separate defects:
+/// the local copy disagreed with inference on config-less common modules, on
+/// methods, and on the method-versus-attribute resolution order. Inference is
+/// consulted only for collection names, so ordinary bodies pay nothing.
+fn declares_a_local(
+    name_lower: &str,
+    body: hir::DefWithBodyId,
+    declared_vars: &FxHashSet<String>,
+    skip_attr_names: &FxHashSet<String>,
+    ctx: &DiagnosticsContext,
+) -> bool {
+    if names_a_manager_collection(name_lower) {
+        // A syntactic binding — parameter, `Перем`, loop variable — owns the name
+        // outright, and its own dead-store check already covers it. Inference
+        // keeps writes to such bindings in the same table as implicit locals, so
+        // that table answers "does a local by this name exist", not "did THIS
+        // write declare one"; the declaration is what tells the two apart.
+        return !declared_vars.contains(name_lower)
+            && ctx
+                .infer()
+                .implicit_locals_by_body
+                .get(&body)
+                .is_some_and(|locals| locals.contains_key(name_lower));
+    }
+    !declared_vars.contains(name_lower) && !skip_attr_names.contains(name_lower)
+}
+
 fn check_method(
     local_id: u32,
     body: &hir::Body,
@@ -297,9 +342,13 @@ fn check_method(
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().fold_lower();
 
-                if !declared_vars.contains(&lowercase_name)
-                    && !skip_attr_names.contains(&lowercase_name)
-                {
+                if declares_a_local(
+                    &lowercase_name,
+                    hir::DefWithBodyId::Method(local_id),
+                    &declared_vars,
+                    skip_attr_names,
+                    ctx,
+                ) {
                     if let std::collections::hash_map::Entry::Vacant(e) =
                         implicit_vars.entry(lowercase_name)
                     {
@@ -349,7 +398,13 @@ fn check_module_level_code(
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().fold_lower();
 
-                if skip_attr_names.contains(&lowercase_name) {
+                if !declares_a_local(
+                    &lowercase_name,
+                    hir::DefWithBodyId::ModuleCode,
+                    &FxHashSet::default(),
+                    skip_attr_names,
+                    ctx,
+                ) {
                     continue;
                 }
 
@@ -425,6 +480,236 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
+    /// Неизменяемый владелец забирает имя раньше коллекции, поэтому присваивание
+    /// поверх него создаёт настоящую локаль. Вердикт даёт инференс — здесь его
+    /// не дублируют, иначе копия расходится с ним на каждом виде владельца.
+    #[test]
+    fn a_non_writable_owner_makes_the_assignment_a_real_local() {
+        let code = "Процедура Справочники()\nКонецПроцедуры\n\nПроцедура Тест()\n    \
+                    Справочники = 1;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(code);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the same-named method holds the name"
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
+            0,
+            "and the write is therefore not a write to the collection"
+        );
+    }
+
+    /// Тот же владелец, известный только по пути в source root: конфигурации нет,
+    /// общий модуль находится через индекс модулей. Инференс это учитывает, и
+    /// локальная копия вердикта — не учитывала.
+    #[test]
+    fn a_config_less_common_module_owner_also_makes_it_a_real_local() {
+        let fixture = r#"
+//- /CommonModules/Справочники/Ext/Module.bsl
+Процедура Метод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Справочники = 1;
+КонецПроцедуры
+"#;
+        let diags = crate::test_utils::check_hir_diagnostic_with_fixtures(fixture);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "a common module known only from the source root holds the name too"
+        );
+    }
+
+    /// Имя коллекции может быть занято НЕИЗМЕНЯЕМЫМ объявленным владельцем —
+    /// одноимённым методом модуля или общим модулем. Писать в них нельзя, поэтому
+    /// присваивание создаёт настоящую неявную локаль, и её неиспользование —
+    /// законная находка. Фильтр по одному написанию имени глушил бы и её.
+    #[test]
+    fn assignment_over_a_same_named_method_is_still_an_unused_local() {
+        let code = "Процедура Справочники()\nКонецПроцедуры\n\nПроцедура Тест()\n    \
+                    Справочники = 1;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(code);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the method holds the name, so the assignment declares a real local"
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
+            0,
+            "and the write is not a write to the collection"
+        );
+    }
+
+    /// Присваивание имени коллекции метаданных локаль не объявляет: имя
+    /// принадлежит свойству глобального контекста, платформа запись отвергает.
+    /// Поэтому непрочитанное присваивание ему — не мёртвая запись, а нарушение,
+    /// о котором сообщает `GlobalPropertyNotWritable`.
+    #[test]
+    fn assignment_to_a_collection_name_is_not_an_unused_local() {
+        for code in [
+            "Процедура Тест()\n    Справочники = Новый Структура;\nКонецПроцедуры\n",
+            "Процедура Тест()\n    Catalogs = Новый Структура;\nКонецПроцедуры\n",
+            "Справочники = Новый Структура;\n",
+        ] {
+            let diags = crate::test_utils::check_hir_diagnostic(code);
+            let unused: Vec<_> =
+                diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+            assert!(unused.is_empty(), "no local is declared here:\n{code}\ngot {unused:?}");
+        }
+    }
+
+    /// Уже объявленное имя коллекции локаль присваиванием не создаёт: параметр,
+    /// `Перем` и счётчик цикла связывают имя раньше, и запись поверх них — просто
+    /// запись в известную переменную. Инференс держит их в той же таблице, что и
+    /// неявные локали, поэтому один её просмотр вердиктом об объявлении не является.
+    #[test]
+    fn an_already_declared_collection_name_is_not_declared_twice() {
+        let param = "Процедура Тест(Справочники)\n    Справочники = 1;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(param);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            0,
+            "a parameter is not a dead store at its assignment:\n{diags:#?}"
+        );
+
+        let var_decl =
+            "Процедура Тест()\n    Перем Справочники;\n    Справочники = 1;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(var_decl);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the unread declaration is reported once, not once more at the write:\n{diags:#?}"
+        );
+
+        let loop_var =
+            "Процедура Тест(Коллекция)\n    Для Каждого Справочники Из Коллекция Цикл\n        \
+                        Справочники = 1;\n    КонецЦикла;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(loop_var);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the loop variable is reported once, not once more at the write:\n{diags:#?}"
+        );
+    }
+
+    /// Диагностики модуля расширения, спаренного с базовым: обе стороны лежат по
+    /// одному пути в своих корнях, поэтому слияние расширения включается целиком.
+    fn extension_pair_diagnostics(base_text: &str, ext_text: &str) -> Vec<crate::Diagnostic> {
+        use crate::DiagnosticsConfig;
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{FileId, FileSet, VfsPath};
+
+        let temp = tempfile::tempdir().unwrap();
+        let main_root = temp.path().join("src/cf");
+        let ext_root = temp.path().join("src/cfe/X");
+        std::fs::create_dir_all(&main_root).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+
+        let mut db = RootDatabaseImpl::new();
+        db.set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+
+        let main_file = FileId(0);
+        let ext_file = FileId(1);
+        let mut file_set = FileSet::new();
+        let main_path = main_root.join("CommonModules/М/Ext/Module.bsl");
+        let ext_path = ext_root.join("CommonModules/М/Ext/Module.bsl");
+        file_set.insert(main_file, VfsPath::new(main_path.to_string_lossy().as_ref()));
+        file_set.insert(ext_file, VfsPath::new(ext_path.to_string_lossy().as_ref()));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(main_file, SourceRootId(0));
+        db.set_file_source_root(ext_file, SourceRootId(0));
+
+        db.set_file_text(main_file, base_text);
+        db.set_file_text(ext_file, ext_text);
+        assert!(
+            ide_db::weaving_target(&db, ext_file).is_some(),
+            "fixture must actually pair the extension to its base"
+        );
+
+        crate::file_diagnostics(&db, ext_file, &DiagnosticsConfig::all_enabled())
+    }
+
+    /// Владельца имени может дать только базовый модуль пары расширения. Тогда
+    /// вердикт о локали меняется после weaving, и диагностика обязана считаться
+    /// заново: standalone-проход видит имя коллекции и локали не находит.
+    #[test]
+    fn a_base_module_owner_is_seen_through_the_extension_merge() {
+        let diags = extension_pair_diagnostics(
+            "Процедура Справочники() Экспорт\nКонецПроцедуры\n\nПроцедура Цель() Экспорт\nКонецПроцедуры\n",
+            "&Вместо(\"Цель\")\nПроцедура Расш_Цель()\n\tСправочники = 1;\nКонецПроцедуры\n",
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the base method holds the name, so the write declares a dead local:\n{diags:#?}"
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
+            0,
+            "and it is therefore not a write to the collection:\n{diags:#?}"
+        );
+    }
+
+    /// Код `#Вставка` принадлежит effective-проходу, и мёртвая запись внутри него
+    /// обязана дожить до конца конвейера — обычная, ничего не знающая об именах
+    /// коллекций.
+    #[test]
+    fn a_dead_store_inside_a_change_and_validate_insert_survives() {
+        let diags = extension_pair_diagnostics(
+            "Процедура Цель() Экспорт\nКонецПроцедуры\n",
+            "&ИзменениеИКонтроль(\"Цель\")\nПроцедура Цель()\n#Вставка\n\tМертвая = 1;\n#КонецВставки\nКонецПроцедуры\n",
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the insert's own dead store belongs to the extension author:\n{diags:#?}"
+        );
+    }
+
+    /// Синтаксическую находку вытесняет только тот вердикт, который дожил до конца.
+    /// Базовый модуль отменяет `GlobalPropertyNotWritable`, и вытесненная им
+    /// `SelfAssign` обязана вернуться.
+    #[test]
+    fn a_superseded_self_assign_returns_when_the_base_cancels_the_verdict() {
+        let diags = extension_pair_diagnostics(
+            "Процедура Справочники() Экспорт\nКонецПроцедуры\n\nПроцедура Цель() Экспорт\nКонецПроцедуры\n",
+            "&Вместо(\"Цель\")\nПроцедура Расш_Цель()\n\tСправочники = Справочники;\nКонецПроцедуры\n",
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
+            0,
+            "the base method owns the name:\n{diags:#?}"
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::SelfAssign).count(),
+            1,
+            "nothing supersedes the self-assignment any more:\n{diags:#?}"
+        );
+    }
+
+    /// Контроль: обычное имя по-прежнему объявляет локаль, иначе проверка выше
+    /// не способна упасть.
+    #[test]
+    fn assignment_to_an_ordinary_name_is_still_an_unused_local() {
+        for code in [
+            "Процедура Тест()\n    МояПеременная = Новый Структура;\nКонецПроцедуры\n",
+            "МояПеременная = Новый Структура;\n",
+        ] {
+            let diags = crate::test_utils::check_hir_diagnostic(code);
+            let unused =
+                diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count();
+            assert_eq!(unused, 1, "an ordinary name is a real dead store:\n{code}");
+        }
+    }
+
     use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
     use expect_test::expect;

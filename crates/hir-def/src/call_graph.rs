@@ -802,12 +802,6 @@ fn extract_from_body(
                             });
                         }
                     }
-                    Expr::QualifiedPath(qname) => {
-                        if let Some(edge) = qualified_path_to_edge(caller, qname.segments(), range)
-                        {
-                            call_edges.push(edge);
-                        }
-                    }
                     Expr::Field { base: field_base, field } => {
                         if is_set_action(&field.as_str().fold_lower())
                             && is_form_element_action_receiver(body, *field_base)
@@ -1010,37 +1004,6 @@ fn extract_notify_reg_at(
         _ => NotifyTarget::Unsupported,
     };
     Some(NotifyReg { caller, callback_name: Name::new(&callback_name), target, range })
-}
-
-fn qualified_path_to_edge(
-    caller: CallerId,
-    segments: &[Name],
-    range: TextRange,
-) -> Option<CallEdge> {
-    match segments.len() {
-        2 => Some(CallEdge {
-            caller,
-            target: CallTarget::QualifiedModule {
-                module_name: segments[0].clone(),
-                method_name: segments[1].clone(),
-            },
-            kind: EdgeKind::DirectQualifiedModule,
-            range,
-        }),
-        3 => {
-            let target = if let Some(manager_type) = ManagerType::from_name(segments[0].as_str()) {
-                CallTarget::ManagerAccess {
-                    manager_type,
-                    object_name: segments[1].clone(),
-                    method_name: Some(segments[2].clone()),
-                }
-            } else {
-                CallTarget::Unresolved
-            };
-            Some(CallEdge { caller, target, kind: EdgeKind::DirectQualifiedModule, range })
-        }
-        _ => None,
-    }
 }
 
 fn field_callee_to_edge(
@@ -1887,6 +1850,38 @@ EndProcedure
             } if object_name.as_str() == "ПриходнаяНакладная"
                 && method.as_str() == "СоздатьЭлемент"
         ));
+    }
+
+    /// Ребро графа для трёхзвенной цепочки строит единственная функция
+    /// `field_callee_to_edge`, поэтому её покрытие обязано быть полным по видам
+    /// метаданных: пропуск одного вида — молча потерянная зависимость.
+    #[test]
+    fn every_manager_type_yields_a_manager_access_edge() {
+        for &mdo in bsl_metadata::MdoType::all() {
+            let Some(manager_type) = ManagerType::from_mdo_type(mdo) else {
+                continue;
+            };
+            let plural = mdo
+                .russian_plural()
+                .unwrap_or_else(|| panic!("{mdo:?} has a manager module but no collection name"));
+            let code = format!("Процедура Тест()\n    {plural}.Объект1.Метод();\nКонецПроцедуры\n");
+            let summary = parse_and_extract(&code);
+
+            let found = summary.call_edges.iter().any(|e| {
+                matches!(
+                    &e.target,
+                    CallTarget::ManagerAccess { manager_type: got, object_name, method_name: Some(method) }
+                        if *got == manager_type
+                            && object_name.as_str() == "Объект1"
+                            && method.as_str() == "Метод"
+                )
+            });
+            assert!(
+                found,
+                "{mdo:?} ({plural}): no ManagerAccess edge, got {:?}",
+                summary.call_edges
+            );
+        }
     }
 
     #[test]

@@ -277,6 +277,10 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
     (DiagnosticCode::UnresolvedField, "known bug: message embeds field/type names"),
     (DiagnosticCode::ReadOnlyPropertyAssignment, "known bug: message embeds property/type names"),
     (
+        DiagnosticCode::GlobalPropertyNotWritable,
+        "message names the property as the source spells it, by design",
+    ),
+    (
         DiagnosticCode::UnavailableInEnvironment,
         "message embeds the member name and environment qualifiers by design",
     ),
@@ -597,7 +601,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 189, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 190, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]

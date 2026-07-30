@@ -127,7 +127,6 @@ where
                         Expr::Path(module) => Some(CalleeKey::Qualified { module, method: field }),
                         _ => None,
                     },
-                    Expr::QualifiedPath(_) => None,
                     _ => None,
                 };
                 if let Some(key) = key {

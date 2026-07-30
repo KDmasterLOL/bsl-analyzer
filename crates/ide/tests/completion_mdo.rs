@@ -859,7 +859,7 @@ fn object_members_hidden_in_client_form_method() {
 }
 
 #[test]
-fn shadowed_collection_root_falls_through_to_typed_completion() {
+fn assigned_collection_root_still_offers_its_objects() {
     let items = complete(
         r#"//- /test.bsl
 Функция Тест()
@@ -868,13 +868,18 @@ fn shadowed_collection_root_falls_through_to_typed_completion() {
 КонецФункции
 "#,
     );
+    // The assignment writes to a Global-context property and declares no local, so
+    // the name never became a `Структура`. Offering that structure's members would
+    // promise an object the code does not have; the illegal write is reported by
+    // `GlobalPropertyNotWritable` instead.
     assert!(
-        !has_label(&items, "Справочник1"),
-        "a local shadowing the collection root must not receive catalog-name suggestions"
+        has_label(&items, "Справочник1"),
+        "the name still denotes the collection; got: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
     );
     assert!(
-        has_label(&items, "Вставить"),
-        "the shadowing structure's own members must be offered instead; got: {:?}",
+        !has_label(&items, "Вставить"),
+        "no local of type Структура exists here; got: {:?}",
         items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
     );
 }
@@ -896,14 +901,15 @@ fn typed_collection_local_keeps_object_suggestions_in_client() {
 "#,
     );
     assert!(
-        has_label(&items, "Справочник1"),
-        "a local carrying the collection's own type shadows the global: the diagnostic is silent, so completion must keep the members; got: {:?}",
+        !has_label(&items, "Справочник1"),
+        "the assignment declares no local, so the name is the collection again — and a \
+         client method may not touch it; got: {:?}",
         items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
     );
 }
 
 #[test]
-fn shadowed_root_in_server_conditional_offers_no_objects() {
+fn assigned_root_in_server_conditional_still_offers_objects() {
     let items = complete(
         r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
 &НаСервере
@@ -916,8 +922,8 @@ fn shadowed_root_in_server_conditional_offers_no_objects() {
 "#,
     );
     assert!(
-        !has_label(&items, "Справочник1") && !has_label(&items, "СправочникСМенеджером"),
-        "an assigned local claims the name even when recovery left the receiver un-lowered; got: {:?}",
+        has_label(&items, "Справочник1"),
+        "an assignment claims nothing, and the server branch admits the collection; got: {:?}",
         items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
     );
 }
@@ -1000,8 +1006,9 @@ fn optional_typed_collection_local_keeps_objects() {
 "#,
     );
     assert!(
-        has_label(&items, "Справочник1"),
-        "a nullable union collapses to its filled arm, like every union receiver in completion; got: {:?}",
+        !has_label(&items, "Справочник1"),
+        "the assignment declares no local, so the name is the collection again — and a \
+         client method may not touch it; got: {:?}",
         items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
     );
 }
@@ -1086,7 +1093,45 @@ fn collection_rhs_before_first_assignment_stays_root_gated() {
 }
 
 #[test]
-fn unknown_shadowed_collection_offers_no_objects() {
+fn assignment_does_not_take_the_name_from_a_collection() {
+    // Assigning to a Global-context property does not create a local: the platform
+    // refuses the write instead ("property is not writable"), so the name keeps
+    // denoting the collection throughout the body — before and after the assignment
+    // alike. Only a DECLARED owner (parameter, `Перем`, form attribute, method,
+    // common module) takes the name.
+    for (label, fixture) in [
+        (
+            "read before the assignment",
+            r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Процедура Тест()
+    Справочники.С$0
+    Справочники = Новый Структура("Код", 1);
+КонецПроцедуры
+"#,
+        ),
+        (
+            "read after the assignment",
+            r#"//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаСервере
+Процедура Тест()
+    Справочники = Новый Структура("Код", 1);
+    Справочники.С$0
+КонецПроцедуры
+"#,
+        ),
+    ] {
+        let items = complete(fixture);
+        assert!(
+            has_label(&items, "Справочник1"),
+            "{label}: the name still denotes the platform collection; got: {:?}",
+            items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn assignment_of_unknown_value_still_leaves_the_collection() {
     let items = complete(
         r#"//- /test.bsl
 Функция Тест()
@@ -1096,8 +1141,8 @@ fn unknown_shadowed_collection_offers_no_objects() {
 "#,
     );
     assert!(
-        !has_label(&items, "Справочник1"),
-        "a local of unknown type owns the name — the read's fallback type proves nothing; got: {:?}",
+        has_label(&items, "Справочник1"),
+        "an assignment of an unknown value declares no local either; got: {:?}",
         items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
     );
 }

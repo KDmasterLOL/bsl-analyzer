@@ -64,6 +64,7 @@ pub mod function_returns_same_primitive;
 pub mod function_should_have_return;
 pub mod get_form_method;
 pub mod global_context_method_collision8312;
+pub mod global_property_not_writable;
 pub mod identical_expressions;
 pub mod if_condition_complexity;
 pub mod if_else_duplicated_code_block;
@@ -476,6 +477,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::TypeMismatchByDocComment => Some(&type_mismatch_by_doc_comment::METADATA),
         DiagnosticCode::UnresolvedField => Some(&unresolved_field::METADATA),
         DiagnosticCode::ReadOnlyPropertyAssignment => Some(&read_only_property::METADATA),
+        DiagnosticCode::GlobalPropertyNotWritable => Some(&global_property_not_writable::METADATA),
         DiagnosticCode::UnavailableInEnvironment => Some(&unavailable_in_environment::METADATA),
         DiagnosticCode::ModuleAccessibility => Some(&module_accessibility::METADATA),
 
