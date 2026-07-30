@@ -57,6 +57,7 @@ pub enum SourceSetArgsError {
     MalformedDependsOn { value: String },
     UnknownDependsOnOwner { name: String },
     UnknownDependsOnTarget { owner: String, name: String },
+    AmbiguousExtensionValue { value: String },
     EmptyDependsOnTarget { value: String },
 }
 
@@ -90,6 +91,11 @@ impl fmt::Display for SourceSetArgsError {
             Self::UnknownDependsOnTarget { owner, name } => write!(
                 f,
                 "--extension-depends-on {owner}={name}: {name} is not declared by any --extension NAME=PATH"
+            ),
+            Self::AmbiguousExtensionValue { value } => write!(
+                f,
+                "--extension {value}: reads both as a directory of that name and as NAME=PATH, and both exist; \
+                 rename the directory or pass an absolute path"
             ),
             Self::EmptyDependsOnTarget { value } => {
                 write!(f, "--extension-depends-on {value}: a dependency name is empty")
@@ -135,7 +141,10 @@ impl SourceSetArgs {
             return Ok(None);
         };
         let candidate = root.join(value);
-        if !candidate.join("Configuration.xml").exists() {
+        // `is_file`, not `exists`: a directory (or a fifo) named
+        // `Configuration.xml` satisfies mere existence, and the root would be
+        // accepted as a configuration it cannot possibly be.
+        if !candidate.join("Configuration.xml").is_file() {
             // The config file's own key degrades to auto-discovery here; a flag
             // must not, or the command would quietly analyze whichever
             // configuration the search happens to find instead of the named one.
@@ -168,7 +177,7 @@ impl SourceSetArgs {
         let mut claimed: HashMap<PathBuf, String> = HashMap::new();
 
         for value in &self.extensions {
-            let (name, path) = split_extension_value(value)?;
+            let (name, path) = split_extension_value(value, root)?;
             if let Some(ref name) = name {
                 named.insert(fold_lower_per_char(name), decls.len());
             }
@@ -279,7 +288,19 @@ impl SourceSetArgs {
 /// surrounding blanks cannot be meaningful; a path is a filesystem path, where
 /// they can — trimming it would quietly analyze a different directory than the
 /// one that was passed.
-fn split_extension_value(value: &str) -> Result<(Option<String>, String), SourceSetArgsError> {
+fn split_extension_value(
+    value: &str,
+    root: &Path,
+) -> Result<(Option<String>, String), SourceSetArgsError> {
+    // The one case where both readings are live: the whole value names an
+    // extension directory *and* the split names another one. Guessing here
+    // would analyze a directory the caller did not ask for, so say so instead.
+    if value.contains('=')
+        && is_extension_dir(root, value)
+        && value.split_once('=').is_some_and(|(_, path)| is_extension_dir(root, path))
+    {
+        return Err(SourceSetArgsError::AmbiguousExtensionValue { value: value.to_string() });
+    }
     match value.split_once('=') {
         Some((name, path)) => {
             let name = name.trim();
@@ -298,6 +319,10 @@ fn split_extension_value(value: &str) -> Result<(Option<String>, String), Source
             Ok((None, value.to_string()))
         }
     }
+}
+
+fn is_extension_dir(root: &Path, rel: &str) -> bool {
+    root.join(rel).join("Configuration.xml").is_file()
 }
 
 /// Where a resolved source-set field actually came from. Reported per field
@@ -530,6 +555,41 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, SourceSetArgsError::UnknownDependsOnTarget { .. }), "got {err}");
+    }
+
+    #[test]
+    fn a_value_that_reads_both_ways_is_refused() {
+        let dir = tempdir().unwrap();
+        extension_dir(dir.path(), "wanted=real");
+        extension_dir(dir.path(), "real");
+
+        // Both readings name a real extension directory. Picking one silently
+        // would analyze a directory the caller never asked for.
+        let err = args(&["--extension", "wanted=real"]).resolve(dir.path()).unwrap_err();
+
+        assert!(matches!(err, SourceSetArgsError::AmbiguousExtensionValue { .. }), "got {err}");
+    }
+
+    #[test]
+    fn only_one_live_reading_needs_no_refusal() {
+        let dir = tempdir().unwrap();
+        extension_dir(dir.path(), "real");
+
+        let resolved = args(&["--extension", "wanted=real"]).resolve(dir.path()).unwrap();
+
+        assert_eq!(names(&resolved.extensions.unwrap()), vec!["wanted"]);
+    }
+
+    #[test]
+    fn a_directory_named_configuration_xml_is_not_a_configuration() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("base/Configuration.xml")).unwrap();
+
+        // Mere existence is satisfied by a directory or a fifo; the flag is
+        // authoritative, so it has to insist on a file.
+        let err = args(&["--configuration-root", "base"]).resolve(dir.path()).unwrap_err();
+
+        assert!(matches!(err, SourceSetArgsError::ConfigurationRootNotFound { .. }), "got {err}");
     }
 
     #[test]
