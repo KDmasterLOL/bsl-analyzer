@@ -219,7 +219,9 @@ main() {
     local existing="${INSTALL_DIR}/${BINARY_NAME}"
     if [ -f "$existing" ]; then
         local current
-        current=$("$existing" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+        # --launcher-version answers from the launcher itself; plain --version would make
+        # it fetch the whole app binary just to report a number.
+        current=$("$existing" --launcher-version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
         if [ "$current" = "$VERSION" ]; then
             ok "bsl-analyzer ${VERSION} is already installed"
             check_path
@@ -228,7 +230,9 @@ main() {
         info "Upgrading from ${current} to ${VERSION}"
     fi
 
-    local file_name="bsl-analyzer-app-${PLATFORM}"
+    # The launcher, not the app: it keeps the working binary up to date by itself, and
+    # docs/mcp/SETUP.md makes it the single entry point that belongs on PATH.
+    local file_name="bsl-analyzer-${PLATFORM}"
     local url
     case "$INSTALL_SOURCE" in
         github) url=$(download_url_github "$VERSION" "$file_name") ;;
@@ -282,13 +286,15 @@ main() {
 
     check_path
 
-    if check_command "$BINARY_NAME"; then
-        local installed_version
-        installed_version=$("$BINARY_NAME" --version 2>/dev/null || echo "")
-        if [ -n "$installed_version" ]; then
-            ok "$installed_version"
-        fi
+    # Report the binary that was just installed: another bsl-analyzer earlier in PATH
+    # would otherwise make the installer confirm a version it did not put there.
+    local installed_version
+    installed_version=$("${INSTALL_DIR}/${BINARY_NAME}" --launcher-version 2>/dev/null || echo "")
+    if [ -n "$installed_version" ]; then
+        ok "$installed_version"
     fi
+
+    info "The analyzer itself is fetched on first run; force it now with: ${BINARY_NAME} --launcher-update"
 
     echo ""
 }
