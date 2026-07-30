@@ -597,6 +597,15 @@ impl GlobalState {
         let _ = self.sender.send(notification.into());
     }
 
+    /// `window/showMessage` with warning severity — for a workspace that loads
+    /// but will produce misleading results, which the user cannot infer from
+    /// the diagnostics themselves.
+    pub fn show_warning_message(&self, message: String) {
+        let params = lsp_types::ShowMessageParams { typ: lsp_types::MessageType::WARNING, message };
+        let notification = lsp_server::Notification::new("window/showMessage".to_string(), params);
+        let _ = self.sender.send(notification.into());
+    }
+
     pub fn clear_batch_push_for(&mut self, uri: &Url) {
         if self.batch_pushed.remove(uri).is_some() {
             let params =

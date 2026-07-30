@@ -185,6 +185,11 @@ fn build_check_config_report(
         }
     );
     let _ = writeln!(out, "  Extensions from: {}", providers.extensions.label(config_path));
+    if let Ok(project) = project {
+        if let Some(notice) = project_model::standalone_extension_notice(project.source_path()) {
+            let _ = writeln!(out, "  WARNING: {notice}");
+        }
+    }
     let _ =
         writeln!(out, "  Language:    {}", project_config.language.as_deref().unwrap_or("default"));
     let _ = writeln!(
@@ -466,6 +471,61 @@ backend = "postgres"
         let error = diagnostics_config_from_project(&project_config).unwrap_err();
 
         assert!(error.to_string().contains("failed to parse diagnostics section"));
+    }
+
+    fn configuration_dir(root: &std::path::Path, rel: &str, extension: bool) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        let purpose = if extension {
+            "<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>"
+        } else {
+            ""
+        };
+        std::fs::write(
+            dir.join("Configuration.xml"),
+            format!(
+                "<MetaDataObject><Configuration><Properties>\
+                 <ConfigurationExtensionCompatibilityMode>8.3.21</ConfigurationExtensionCompatibilityMode>\
+                 {purpose}</Properties></Configuration></MetaDataObject>"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn report_for(root: &std::path::Path, configuration_root: &str) -> String {
+        let project_config = project_model::ProjectConfig {
+            configuration_root: Some(configuration_root.to_string()),
+            extensions: Some(Vec::new()),
+            ..Default::default()
+        };
+        let project = project_model::Project::with_config(root, project_config.clone());
+        build_check_config_report(
+            &root.join("bsl-analyzer.toml"),
+            &project_config,
+            &project,
+            &diagnostics_config_from_project(&project_config).unwrap(),
+            &mcp_server::resolve_project_baseline_diagnostics(Some(root), &project_config),
+            &SourceProviders {
+                configuration_root: SourceProvider::Cli,
+                extensions: SourceProvider::Cli,
+            },
+        )
+    }
+
+    #[test]
+    fn report_warns_only_when_the_root_is_itself_an_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        configuration_dir(dir.path(), "cf", false);
+        configuration_dir(dir.path(), "cfe", true);
+
+        assert!(
+            report_for(dir.path(), "cfe").contains("is a configuration extension analyzed without"),
+            "an extension taken as the main root must say so"
+        );
+        assert!(
+            !report_for(dir.path(), "cf").contains("is a configuration extension analyzed without"),
+            "a main configuration carries the compatibility-mode element too and must stay silent"
+        );
     }
 
     #[test]

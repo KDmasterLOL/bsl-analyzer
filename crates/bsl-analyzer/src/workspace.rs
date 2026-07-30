@@ -67,6 +67,10 @@ impl GlobalState {
             }
         };
 
+        if let Some(notice) = project_model::standalone_extension_notice(project.source_path()) {
+            self.show_warning_message(notice);
+        }
+
         self.supersede_call_hierarchy_index(base_db::SourceRootId(0));
 
         let source_path = project.source_path().to_path_buf();

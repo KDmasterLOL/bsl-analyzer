@@ -446,6 +446,77 @@ fn search_configuration_xml_recursive(
     None
 }
 
+/// What a `Configuration.xml`-bearing directory actually is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationKind {
+    /// A main configuration.
+    Configuration,
+    /// A configuration extension (CFE).
+    Extension,
+    /// No readable `Configuration.xml` at that path.
+    Unknown,
+}
+
+/// How much of `Configuration.xml` is read looking for the extension marker.
+///
+/// The marker sits in `<Properties>`, which the platform writes near the top —
+/// about 3 KB into real extension dumps. Everything after it is `<ChildObjects>`,
+/// which reaches megabytes on a main configuration. Reading a bounded prefix
+/// keeps this cheap enough to run on every project build; a main configuration
+/// simply has no marker to find, however far one reads.
+const CONFIGURATION_KIND_PROBE_BYTES: usize = 256 * 1024;
+
+/// The element the platform writes only for an extension. Deliberately not
+/// `ConfigurationExtensionCompatibilityMode`, which a *main* configuration also
+/// carries — that one states which extensions it accepts, not that it is one.
+const EXTENSION_MARKER: &[u8] = b"<ConfigurationExtensionPurpose";
+
+/// Classifies a configuration root by its `Configuration.xml`.
+///
+/// Used to tell an operator that the directory handed to us is an extension
+/// analyzed without its main configuration — the state in which valid calls
+/// into the main configuration's exported common modules are reported as
+/// unresolved.
+pub fn configuration_kind(root: &Path) -> ConfigurationKind {
+    use std::io::Read as _;
+
+    let path = root.join("Configuration.xml");
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        return ConfigurationKind::Unknown;
+    };
+    let mut head = Vec::new();
+    if std::io::Read::by_ref(&mut file)
+        .take(CONFIGURATION_KIND_PROBE_BYTES as u64)
+        .read_to_end(&mut head)
+        .is_err()
+    {
+        return ConfigurationKind::Unknown;
+    }
+    if head.windows(EXTENSION_MARKER.len()).any(|w| w == EXTENSION_MARKER) {
+        ConfigurationKind::Extension
+    } else {
+        ConfigurationKind::Configuration
+    }
+}
+
+/// Advisory for a root that is itself an extension, analyzed without the main
+/// configuration it extends. Returns `None` for anything else.
+///
+/// In that state the extension's calls into the main configuration's exported
+/// common modules cannot resolve, so the analyzer reports valid code as broken.
+/// Saying so beats letting the findings speak for themselves — from the outside
+/// they read as the analyzer being wrong.
+pub fn standalone_extension_notice(source_path: &Path) -> Option<String> {
+    (configuration_kind(source_path) == ConfigurationKind::Extension).then(|| {
+        format!(
+            "{} is a configuration extension analyzed without its main configuration. \
+             Calls into the main configuration will be reported as unresolved. \
+             Point --configuration-root at the main configuration, or declare it in [source].root.",
+            source_path.display()
+        )
+    })
+}
+
 /// One entry of the `extensions` list: either a bare path string (legacy,
 /// independent extension) or a structured entry with a stable name and
 /// declared dependencies.
@@ -1839,6 +1910,7 @@ mod tests {
         SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
         SourceSetOverride, StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
     };
+    use super::{configuration_kind, ConfigurationKind};
     use chrono::{Duration, TimeZone, Utc};
     use std::fs;
     use tempfile::tempdir;
@@ -2545,6 +2617,54 @@ extensions = [{ name = "T" }]
         let config = ProjectConfig { extensions: Some(vec![]), ..Default::default() };
         let resolved = Project::resolve_extensions(root, &config).unwrap();
         assert!(resolved.is_empty(), "explicit empty list must disable auto-discovery");
+    }
+
+    fn write_configuration_xml(root: &std::path::Path, body: &str) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("Configuration.xml"), body).unwrap();
+    }
+
+    #[test]
+    fn an_extension_root_is_told_apart_from_a_main_configuration() {
+        let dir = tempdir().unwrap();
+
+        // A main configuration carries ConfigurationExtensionCompatibilityMode
+        // too, so that element cannot be the marker.
+        write_configuration_xml(
+            &dir.path().join("cf"),
+            "<MetaDataObject><Configuration><Properties>\
+             <ConfigurationExtensionCompatibilityMode>8.3.21</ConfigurationExtensionCompatibilityMode>\
+             </Properties></Configuration></MetaDataObject>",
+        );
+        write_configuration_xml(
+            &dir.path().join("cfe"),
+            "<MetaDataObject><Configuration><Properties>\
+             <ConfigurationExtensionCompatibilityMode>8.3.21</ConfigurationExtensionCompatibilityMode>\
+             <ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>\
+             </Properties></Configuration></MetaDataObject>",
+        );
+
+        assert_eq!(configuration_kind(&dir.path().join("cf")), ConfigurationKind::Configuration);
+        assert_eq!(configuration_kind(&dir.path().join("cfe")), ConfigurationKind::Extension);
+        assert_eq!(configuration_kind(&dir.path().join("absent")), ConfigurationKind::Unknown);
+    }
+
+    #[test]
+    fn the_marker_is_found_past_a_realistic_amount_of_preamble() {
+        let dir = tempdir().unwrap();
+        // Real dumps put the marker about 3 KB in; pad well beyond that to show
+        // the probe window is not the binding constraint.
+        let padding = " ".repeat(64 * 1024);
+        write_configuration_xml(
+            &dir.path().join("cfe"),
+            &format!(
+                "<MetaDataObject>{padding}<Configuration><Properties>\
+                 <ConfigurationExtensionPurpose>Patch</ConfigurationExtensionPurpose>\
+                 </Properties></Configuration></MetaDataObject>"
+            ),
+        );
+
+        assert_eq!(configuration_kind(&dir.path().join("cfe")), ConfigurationKind::Extension);
     }
 
     #[test]

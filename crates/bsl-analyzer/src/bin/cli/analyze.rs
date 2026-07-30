@@ -295,6 +295,11 @@ fn analyze_salsa(
     // instead of the raw `-s` dir, so vendored/build copies such as
     // `.build/vendor` are not analyzed as a duplicate configuration.
     let project = project_model::Project::with_config(&source_dir, proj_config.clone())?;
+    // Deliberately not gated on `--quiet`: this explains why the findings that
+    // follow are wrong, and suppressing it leaves the run looking merely broken.
+    if let Some(notice) = project_model::standalone_extension_notice(project.source_path()) {
+        eprintln!("warning: {notice}");
+    }
     let source_roots = project.source_roots();
 
     tracing::info!("Creating database");
