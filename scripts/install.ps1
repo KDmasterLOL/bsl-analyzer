@@ -282,8 +282,11 @@ function Add-ToUserPath {
 
     $current = Get-UserPath
     $entries = $current.Value -split ';' | Where-Object { $_ }
-    $normalized = $Directory.TrimEnd('\')
-    if ($entries | Where-Object { $_.TrimEnd('\') -ieq $normalized }) {
+    # The stored value is deliberately unexpanded, so an entry written as
+    # %LOCALAPPDATA%\... names the same directory as the absolute path and must not be
+    # appended a second time. Paths themselves compare case-insensitively on Windows.
+    $normalized = [Environment]::ExpandEnvironmentVariables($Directory).TrimEnd('\')
+    if ($entries | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $normalized }) {
         return $false
     }
 
@@ -341,6 +344,10 @@ function Invoke-Install {
         $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\bsl-analyzer'
     }
 
+    # PATH is stored once and read later from other working directories, so a relative
+    # -InstallDir has to be resolved before it is written anywhere.
+    $InstallDir = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $InstallDir))
+
     Write-Info 'Platform: windows-amd64'
     Write-Info "Install dir: $InstallDir"
 
@@ -352,7 +359,9 @@ function Invoke-Install {
 
     $target = Join-Path $InstallDir $BinaryName
     $installed = Get-InstalledVersion -Path $target
-    if ($installed -eq $Version) {
+    # -ceq: SemVer prerelease identifiers and release tags are case-sensitive, while the
+    # ordinary PowerShell operators are not, so 0.3.0-RC.1 would pass for 0.3.0-rc.1.
+    if ($installed -ceq $Version) {
         Write-Ok "bsl-analyzer $Version is already installed"
         # A rerun still has to finish what an interrupted or -NoPathUpdate run left undone.
         Update-Path -Directory $InstallDir
@@ -365,6 +374,11 @@ function Invoke-Install {
     $info = Get-AssetInfo -ReleaseVersion $Version
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+
+    # An upgrade performed while the server was running had to leave the old binary
+    # behind; sweep those once nothing holds them any more, or they pile up per upgrade.
+    Get-ChildItem -Path $InstallDir -Filter "$BinaryName.old-*" -File -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 
     # Staged inside the install directory so the final move stays on one volume.
     $staged = "$target.new-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
