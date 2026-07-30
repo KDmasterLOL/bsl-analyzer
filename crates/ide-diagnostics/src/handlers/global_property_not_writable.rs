@@ -102,6 +102,27 @@ mod tests {
         assert!(writes(code).is_empty(), "an ordinary name declares a local as always");
     }
 
+    /// Одно нарушение — одна диагностика. Синтаксическая проверка самоприсваивания
+    /// видит только равные стороны и называет цель переменной; здесь переменной нет,
+    /// поэтому точный вердикт её вытесняет.
+    #[test]
+    fn a_refused_self_assignment_is_reported_once() {
+        let code = "Процедура Тест()\n    Справочники = Справочники;\n    А = А;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(code);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
+            1,
+            "{diags:#?}"
+        );
+        let self_assigns: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::SelfAssign).collect();
+        assert_eq!(
+            self_assigns.len(),
+            1,
+            "only the ordinary self-assignment survives:\n{self_assigns:#?}"
+        );
+    }
+
     #[test]
     fn repeated_assignment_is_flagged_once_per_statement() {
         let code = r#"

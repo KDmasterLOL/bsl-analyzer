@@ -236,11 +236,17 @@ fn declares_a_local(
     ctx: &DiagnosticsContext,
 ) -> bool {
     if names_a_manager_collection(name_lower) {
-        return ctx
-            .infer()
-            .implicit_locals_by_body
-            .get(&body)
-            .is_some_and(|locals| locals.contains_key(name_lower));
+        // A syntactic binding — parameter, `Перем`, loop variable — owns the name
+        // outright, and its own dead-store check already covers it. Inference
+        // keeps writes to such bindings in the same table as implicit locals, so
+        // that table answers "does a local by this name exist", not "did THIS
+        // write declare one"; the declaration is what tells the two apart.
+        return !declared_vars.contains(name_lower)
+            && ctx
+                .infer()
+                .implicit_locals_by_body
+                .get(&body)
+                .is_some_and(|locals| locals.contains_key(name_lower));
     }
     !declared_vars.contains(name_lower) && !skip_attr_names.contains(name_lower)
 }
@@ -554,6 +560,99 @@ mod tests {
                 diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
             assert!(unused.is_empty(), "no local is declared here:\n{code}\ngot {unused:?}");
         }
+    }
+
+    /// Уже объявленное имя коллекции локаль присваиванием не создаёт: параметр,
+    /// `Перем` и счётчик цикла связывают имя раньше, и запись поверх них — просто
+    /// запись в известную переменную. Инференс держит их в той же таблице, что и
+    /// неявные локали, поэтому один её просмотр вердиктом об объявлении не является.
+    #[test]
+    fn an_already_declared_collection_name_is_not_declared_twice() {
+        let param = "Процедура Тест(Справочники)\n    Справочники = 1;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(param);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            0,
+            "a parameter is not a dead store at its assignment:\n{diags:#?}"
+        );
+
+        let var_decl =
+            "Процедура Тест()\n    Перем Справочники;\n    Справочники = 1;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(var_decl);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the unread declaration is reported once, not once more at the write:\n{diags:#?}"
+        );
+
+        let loop_var =
+            "Процедура Тест(Коллекция)\n    Для Каждого Справочники Из Коллекция Цикл\n        \
+                        Справочники = 1;\n    КонецЦикла;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_hir_diagnostic(loop_var);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the loop variable is reported once, not once more at the write:\n{diags:#?}"
+        );
+    }
+
+    /// Владельца имени может дать только базовый модуль пары расширения. Тогда
+    /// вердикт о локали меняется после weaving, и диагностика обязана считаться
+    /// заново: standalone-проход видит имя коллекции и локали не находит.
+    #[test]
+    fn a_base_module_owner_is_seen_through_the_extension_merge() {
+        use crate::DiagnosticsConfig;
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{FileId, FileSet, VfsPath};
+
+        let temp = tempfile::tempdir().unwrap();
+        let main_root = temp.path().join("src/cf");
+        let ext_root = temp.path().join("src/cfe/X");
+        std::fs::create_dir_all(&main_root).unwrap();
+        std::fs::create_dir_all(&ext_root).unwrap();
+
+        let mut db = RootDatabaseImpl::new();
+        db.set_all_config_paths(vec![
+            (None, main_root.clone()),
+            (Some("X".to_string()), ext_root.clone()),
+        ]);
+
+        let main_file = FileId(0);
+        let ext_file = FileId(1);
+        let mut file_set = FileSet::new();
+        let main_path = main_root.join("CommonModules/М/Ext/Module.bsl");
+        let ext_path = ext_root.join("CommonModules/М/Ext/Module.bsl");
+        file_set.insert(main_file, VfsPath::new(main_path.to_string_lossy().as_ref()));
+        file_set.insert(ext_file, VfsPath::new(ext_path.to_string_lossy().as_ref()));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(main_file, SourceRootId(0));
+        db.set_file_source_root(ext_file, SourceRootId(0));
+
+        db.set_file_text(
+            main_file,
+            "Процедура Справочники() Экспорт\nКонецПроцедуры\n\nПроцедура Цель() Экспорт\nКонецПроцедуры\n",
+        );
+        db.set_file_text(
+            ext_file,
+            "&Вместо(\"Цель\")\nПроцедура Расш_Цель()\n\tСправочники = 1;\nКонецПроцедуры\n",
+        );
+        assert!(
+            ide_db::weaving_target(&db, ext_file).is_some(),
+            "fixture must actually pair the extension to its base"
+        );
+
+        let diags = crate::file_diagnostics(&db, ext_file, &DiagnosticsConfig::all_enabled());
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the base method holds the name, so the write declares a dead local:\n{diags:#?}"
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
+            0,
+            "and it is therefore not a write to the collection:\n{diags:#?}"
+        );
     }
 
     /// Контроль: обычное имя по-прежнему объявляет локаль, иначе проверка выше

@@ -413,11 +413,6 @@ pub fn parse_form_module_path(path: &str) -> Option<FormKey> {
 
 fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKind)> {
     let parts: Vec<&str> = path.split('/').collect();
-
-    if parts.len() < 4 {
-        return None;
-    }
-
     let path_lower = path.fold_lower();
     let is_manager_module =
         parts.last().is_some_and(|file_name| file_name.eq_ignore_ascii_case("ManagerModule.bsl"));
@@ -478,6 +473,9 @@ mod tests {
                 "ПервыйОбщийМодуль",
             ),
             ("/Catalogs/Constants/ManagerModule.bsl", ModulePathType::Catalog, "Constants"),
+            // Кратчайшая форма: относительный путь без служебного уровня.
+            ("Documents/ПКО/ManagerModule.bsl", ModulePathType::Document, "ПКО"),
+            ("CommonModules/Общий/Module.bsl", ModulePathType::CommonModule, "Общий"),
             // Контроль: обычное имя работало и раньше.
             ("/Documents/ПКО/Ext/ManagerModule.bsl", ModulePathType::Document, "ПКО"),
         ] {

@@ -1768,7 +1768,11 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         }
     }
 
-    if parts.len() >= 4 {
+    // `<Collection>/<Object>/<File>` is the shortest form the dump can take — the
+    // `Ext` level is optional, and a relative path carries no leading empty
+    // segment. The file names below occur nowhere but a dump, so the length is a
+    // shape check, not a filter.
+    if parts.len() >= 3 {
         let module_file = parts[parts.len() - 1];
         return match module_file {
             "ObjectModule.bsl" => Some(bsl_metadata::ModuleType::ObjectModule),
@@ -1793,10 +1797,6 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
     // `get_module_type_from_uri`).
     let normalized = file_uri.replace('\\', "/");
     let parts: Vec<&str> = normalized.split('/').collect();
-
-    if parts.len() < 4 {
-        return None;
-    }
 
     // Structure comes from the shared specification; the spelling table stays
     // here, mirroring `MdoType::from_plural` plus the `CommonModules` directory.
@@ -2639,6 +2639,33 @@ mod tests {
         assert_eq!(info.mdo_type, Some(bsl_metadata::MdoType::Catalog));
         assert_eq!(info.name.as_deref(), Some("Справочник1"));
         assert_eq!(info.module_type, bsl_metadata::ModuleType::ObjectModule);
+    }
+
+    /// Кратчайшая форма: относительный путь без служебного `Ext` и без префикса.
+    /// Спецификация пути объявляет её допустимой, и отдельная проверка минимальной
+    /// длины у вызывающего отсекала её до разбора.
+    #[test]
+    fn test_parse_module_path_relative_without_service_level() {
+        for (path, expected_type, expected_name, expected_module) in [
+            (
+                "Catalogs/Товары/ObjectModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Товары",
+                bsl_metadata::ModuleType::ObjectModule,
+            ),
+            (
+                "Documents/ПКО/ManagerModule.bsl",
+                bsl_metadata::MdoType::Document,
+                "ПКО",
+                bsl_metadata::ModuleType::ManagerModule,
+            ),
+        ] {
+            let info = parse_module_path(path).unwrap_or_else(|| panic!("{path} must parse"));
+            assert_eq!(info.mdo_type, Some(expected_type), "{path}");
+            assert_eq!(info.name.as_deref(), Some(expected_name), "{path}");
+            assert_eq!(info.module_type, expected_module, "{path}");
+            assert_eq!(get_module_type_from_uri(path), Some(expected_module), "{path}");
+        }
     }
 
     #[test]

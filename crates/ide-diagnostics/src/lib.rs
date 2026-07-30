@@ -195,6 +195,27 @@ pub fn apply_extension_merge<'db>(
         w_inference.retain(|d| !effective::range_inside_any(d.range, &cav_bodies));
         standalone.extend(w_inference);
 
+        // The dead-store check is not an inference diagnostic, yet it asks inference
+        // one question the base changes the answer to: whether a write to a metadata
+        // collection name declares a local at all, or is refused as a write to the
+        // Global context. A same-named base sibling owns the name and makes it a real
+        // local, so the base-blind verdict is replaced here — by identity, exactly as
+        // the inference layer above.
+        let mut std_dead_store = safe_collect("merge:standalone_unused_local", || {
+            collect_dead_store_diagnostics(&std_ctx)
+        });
+        standalone.retain(|d| match std_dead_store.iter().position(|s| s == d) {
+            Some(pos) => {
+                std_dead_store.swap_remove(pos);
+                false
+            }
+            None => true,
+        });
+        let mut w_dead_store =
+            safe_collect("merge:weaving_unused_local", || collect_dead_store_diagnostics(&w_ctx));
+        w_dead_store.retain(|d| !effective::range_inside_any(d.range, &cav_bodies));
+        standalone.extend(w_dead_store);
+
         // Structural applicability check: every `&Вместо`/`&Перед`/`&После` interceptor must
         // declare the same signature as the base method it weaves onto. Independent of the
         // overlay resolver — compares the extension's own symbols against the base module's.
@@ -225,6 +246,11 @@ pub fn apply_extension_merge<'db>(
     scope_gate::apply(db, file_set, file_id, config, &mut standalone);
     normalize_diagnostics(&mut standalone);
     standalone
+}
+
+/// The one non-inference collector whose verdict a paired base module can change.
+fn collect_dead_store_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    handlers::unused_local_variable::check(ctx)
 }
 
 fn safe_collect(name: &str, f: impl FnOnce() -> Vec<Diagnostic>) -> Vec<Diagnostic> {
@@ -265,6 +291,16 @@ fn safe_collect(name: &str, f: impl FnOnce() -> Vec<Diagnostic>) -> Vec<Diagnost
 /// run to run; sorting once here makes every consumer (LSP publish, CLI reporters,
 /// SARIF baselines compared byte-for-byte) deterministic without each handler having
 /// to enforce its own emit order.
+/// Pairs `(superseded, by)`: the second finding is the precise account of the same
+/// statement, so the first — reported by a syntactic check that cannot know better —
+/// is dropped when it spans the winner.
+///
+/// `Справочники = Справочники` is refused by the platform outright, and saying in the
+/// same breath that a VARIABLE is assigned to itself contradicts the finding that no
+/// variable is created at all.
+const SUPERSEDED_ON_THE_SAME_STATEMENT: &[(DiagnosticCode, DiagnosticCode)] =
+    &[(DiagnosticCode::SelfAssign, DiagnosticCode::GlobalPropertyNotWritable)];
+
 fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
     let dedupe_codes = [DiagnosticCode::UnreachableCode];
 
@@ -289,6 +325,16 @@ fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
             }
         }
         keep.extend(deduped);
+    }
+
+    for (superseded, by) in SUPERSEDED_ON_THE_SAME_STATEMENT {
+        let winners: Vec<_> = keep.iter().filter(|d| d.code == *by).map(|d| d.range).collect();
+        if winners.is_empty() {
+            continue;
+        }
+        keep.retain(|d| {
+            d.code != *superseded || !winners.iter().any(|w| d.range.contains_range(*w))
+        });
     }
 
     keep.sort_by(|a, b| {
@@ -345,6 +391,27 @@ mod normalize_tests {
                 (10, "LineLength", "b"),
                 (10, "MagicNumber", "a"),
             ]
+        );
+    }
+
+    /// Точный вердикт вытесняет общий на том же операторе, но только когда он
+    /// действительно внутри: соседнее самоприсваивание остаётся.
+    #[test]
+    fn a_refused_write_supersedes_the_self_assign_on_the_same_statement() {
+        let mut diagnostics = vec![
+            diag(DiagnosticCode::SelfAssign, 10, 30, "self"),
+            diag(DiagnosticCode::GlobalPropertyNotWritable, 10, 21, "write"),
+            diag(DiagnosticCode::SelfAssign, 40, 50, "elsewhere"),
+        ];
+
+        normalize_diagnostics(&mut diagnostics);
+
+        let keys: Vec<_> =
+            diagnostics.iter().map(|d| (u32::from(d.range.start()), d.code.as_str())).collect();
+        assert_eq!(
+            keys,
+            vec![(10, "GlobalPropertyNotWritable"), (40, "SelfAssign")],
+            "only the self-assign spanning the refused write is dropped"
         );
     }
 
