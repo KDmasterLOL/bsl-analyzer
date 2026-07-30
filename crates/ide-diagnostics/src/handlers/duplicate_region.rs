@@ -4,6 +4,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::RegionTree;
 use ide_db::TextRange;
 use std::collections::HashMap;
+use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -35,10 +36,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// Grouping key for one section. Standard names collapse to their canonical
+/// alias across both languages; anything else groups by the case-folded name,
+/// since BSL identifiers are case-insensitive.
 fn canonical_key(name: &str) -> String {
     hir::module_structure::canonical::canonical_alias(name)
         .map(str::to_string)
-        .unwrap_or_else(|| name.to_string())
+        .unwrap_or_else(|| name.fold_lower())
 }
 
 fn report_duplicates(
@@ -216,17 +220,23 @@ mod tests {
     }
 
     #[test]
-    fn test_non_standard_exact_match() {
+    fn test_non_standard_case_insensitive_match() {
         let code = r#"
 #Область КастомнаяОбласть
 #КонецОбласти
 
 #Область кастомнаяобласть
-// Different case - non-standard regions are case-sensitive
 #КонецОбласти
         "#;
 
-        check_diagnostics_snapshot_for(code, DiagnosticCode::DuplicateRegion, expect![[r#""#]]);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DuplicateRegion,
+            expect![[r#"
+                DuplicateRegion @ 2:1..2:26
+                  message: Нужно удалить дубли раздела "КастомнаяОбласть"
+                  severity: Hint"#]],
+        );
     }
 
     #[test]
