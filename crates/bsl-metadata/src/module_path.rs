@@ -3,9 +3,10 @@
 //! Both the workspace module index and the per-file metadata builder need to
 //! read a collection and an object name out of a path, and both used to do it
 //! with their own scan. Every scan variant broke on a different shape, so the
-//! structure lives here once; the CALLER still owns its own spelling table,
-//! because those legitimately differ (the index accepts `Отчёты` with `Ё`, the
-//! metadata builder mirrors `MdoType::from_plural`).
+//! structure lives here once — and so does the question of which spellings name
+//! a collection ([`collection_directory`]). Two tables for one question drifted
+//! apart in practice: one layer gave a module its metadata while the other left
+//! it out of the index.
 //!
 //! # The shape
 //!
@@ -35,6 +36,43 @@
 //!    is what let an ancestor directory take the type.
 //! 6. Form modules are NOT this shape (`…/Forms/<Form>/Ext/Form/Module.bsl`);
 //!    they carry their own parser and must be matched before this one.
+
+use crate::MdoType;
+use stdx::case::CaseExt;
+
+/// The metadata collection a dump DIRECTORY names, or `None`.
+///
+/// A directory name is not a name written in code, and the difference is the whole
+/// reason this function exists apart from [`MdoType::from_plural`]:
+///
+/// * `Отчёты` and `Отчеты` are the same directory of the same dump — the exporter
+///   that wrote one could have written the other — while the two spellings in BSL
+///   source are two different identifiers, only one of which resolves.
+/// * A filesystem may hand back `ё` decomposed (`е` + U+0308); HFS+ does. The same
+///   directory must still be recognised.
+///
+/// What this must NOT do is fold `ё` blindly: `РегистрыСвёдений` is a misspelling,
+/// not a variant, and accepting it would attach a real register's metadata to a
+/// stray file. Only the words that genuinely carry `ё` have a second spelling, and
+/// they are listed below.
+pub fn collection_directory(segment: &str) -> Option<MdoType> {
+    /// Legitimate `ё` spellings and their `е` counterparts. `счетов` is absent on
+    /// purpose: «счёт» loses its `ё` in the genitive plural, so `ПланыСчётов` is a
+    /// misspelling the way `РегистрыСвёдений` is.
+    const YO_SPELLINGS: &[(&str, &str)] = &[
+        ("отчёты", "отчеты"),
+        ("регистрырасчёта", "регистрырасчета"),
+        ("планывидоврасчёта", "планывидоврасчета"),
+    ];
+
+    let composed = segment.replace("е\u{0308}", "ё").fold_lower();
+    let canonical = YO_SPELLINGS
+        .iter()
+        .find(|(yo, _)| *yo == composed)
+        .map_or(composed.as_str(), |(_, plain)| *plain);
+
+    MdoType::from_plural(canonical)
+}
 
 /// A module path split into its meaningful parts. Borrows from the normalized
 /// path the caller passes in.
@@ -171,6 +209,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Написание каталога: обе орфографии одного слова — одна коллекция, а
+    /// подстановка `ё` вместо обычной `е` коллекцией не становится.
+    #[test]
+    fn a_directory_spelling_names_the_same_collection() {
+        for (segment, expected) in [
+            ("Отчеты", MdoType::Report),
+            ("Отчёты", MdoType::Report),
+            ("ОТЧЁТЫ", MdoType::Report),
+            ("Reports", MdoType::Report),
+            ("РегистрыРасчёта", MdoType::CalculationRegister),
+            ("РегистрыРасчета", MdoType::CalculationRegister),
+            ("ПланыВидовРасчёта", MdoType::ChartOfCalculationTypes),
+            // `ё`, разложенная файловой системой на `е` и надстрочный знак.
+            ("РегистрыРасче\u{0308}та", MdoType::CalculationRegister),
+            ("Отче\u{0308}ты", MdoType::Report),
+        ] {
+            assert_eq!(collection_directory(segment), Some(expected), "{segment}");
+        }
+
+        for segment in [
+            "РегистрыСвёдений",
+            "Пёречисления",
+            "БизнёсПроцессы",
+            "ПланыСчётов",
+            "СовсемНеКоллекция",
+        ] {
+            assert_eq!(collection_directory(segment), None, "{segment} is a misspelling");
+        }
+
+        // Контроль: правильные написания тех же коллекций принимаются.
+        assert_eq!(collection_directory("РегистрыСведений"), Some(MdoType::InformationRegister));
+        assert_eq!(collection_directory("ПланыСчетов"), Some(MdoType::ChartOfAccounts));
     }
 
     #[test]
