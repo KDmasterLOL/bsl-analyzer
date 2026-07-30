@@ -11,7 +11,7 @@ use crate::cache::{
     read_stable_version, stable_app_path, sweep_stale_swap_temps, unique_stable_temp_path,
     update_current_link, verify_file_checksum, write_stable_version, SwapLock,
 };
-use crate::entities::{get_platform_binary, FileInfo};
+use crate::entities::{get_platform_binary, get_platform_launcher, FileInfo};
 use crate::http;
 use crate::messages::messages;
 use crate::provider::ReleaseProvider;
@@ -20,11 +20,18 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_millis(300);
 
-const LAUNCHER_MAPPINGS: &[(&str, &str)] = &[
-    ("bsl-analyzer", "bsl-analyzer-linux-amd64"),
-    ("bsl-analyzer.exe", "bsl-analyzer-windows-amd64.exe"),
-    ("bsl-analyzer-mac", "bsl-analyzer-darwin-arm64"),
-];
+/// Launcher file names that may sit next to the running launcher, and the release
+/// artifact each one holds. The bare name is the artifact of the *running* platform:
+/// every installer writes the native launcher under it, so reading it as the Linux
+/// artifact would replace a macOS launcher with an ELF binary. The suffixed names stay
+/// fixed so a directory can still keep launchers for several platforms side by side.
+fn launcher_mappings() -> [(&'static str, &'static str); 3] {
+    [
+        ("bsl-analyzer", get_platform_launcher()),
+        ("bsl-analyzer.exe", "bsl-analyzer-windows-amd64.exe"),
+        ("bsl-analyzer-mac", "bsl-analyzer-darwin-arm64"),
+    ]
+}
 
 fn create_http_client() -> Result<reqwest::blocking::Client> {
     http::build_client(|builder| builder.connect_timeout(CONNECT_TIMEOUT).timeout(READ_TIMEOUT))
@@ -268,14 +275,14 @@ pub fn self_update_launcher(provider: &dyn ReleaseProvider) -> Result<()> {
     let download_client = create_download_client()?;
     let mut updated_count = 0;
 
-    for (local_name, remote_name) in LAUNCHER_MAPPINGS {
+    for (local_name, remote_name) in launcher_mappings() {
         let local_path = launcher_dir.join(local_name);
 
         if !local_path.exists() {
             continue;
         }
 
-        let file_info = match manifest.files.get(*remote_name) {
+        let file_info = match manifest.files.get(remote_name) {
             Some(info) => info,
             None => {
                 eprintln!("  {} -> {} (not in manifest, skipped)", local_name, remote_name);
@@ -624,6 +631,29 @@ mod tests {
     use std::path::Path;
     use std::thread::sleep;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn bare_launcher_name_maps_to_the_running_platform() {
+        let mappings = launcher_mappings();
+        let (_, remote) =
+            mappings.iter().find(|(local, _)| *local == "bsl-analyzer").expect("bare name mapped");
+
+        // Self-update replaces the file in place, so a foreign artifact here would hand
+        // the host a binary it cannot execute.
+        assert_eq!(*remote, get_platform_launcher());
+    }
+
+    #[test]
+    fn suffixed_launcher_names_stay_pinned_to_their_platform() {
+        let mappings = launcher_mappings();
+        for (local, remote) in mappings.iter().filter(|(local, _)| *local != "bsl-analyzer") {
+            match *local {
+                "bsl-analyzer.exe" => assert_eq!(*remote, "bsl-analyzer-windows-amd64.exe"),
+                "bsl-analyzer-mac" => assert_eq!(*remote, "bsl-analyzer-darwin-arm64"),
+                other => panic!("unexpected launcher name {other}"),
+            }
+        }
+    }
 
     struct TestDir {
         path: PathBuf,
