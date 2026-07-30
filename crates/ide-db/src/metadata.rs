@@ -1753,7 +1753,8 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         return match parts[parts.len() - 1] {
             "ObjectModule.bsl" => Some(bsl_metadata::ModuleType::ObjectModule),
             "ManagerModule.bsl" => Some(bsl_metadata::ModuleType::ManagerModule),
-            "RecordSetModule.bsl" => Some(bsl_metadata::ModuleType::RecordSetModule),
+            // No record set here: every collection that owns one is a register, and
+            // every register spelling is recognised above — the `ё` variants too.
             _ => None,
         };
     }
@@ -1776,18 +1777,23 @@ enum ModuleCollection {
 }
 
 fn module_collection(segment: &str) -> Option<ModuleCollection> {
-    match segment {
-        "HTTPServices" => Some(ModuleCollection::HttpServices),
-        "WebServices" => Some(ModuleCollection::WebServices),
-        "IntegrationServices" => Some(ModuleCollection::IntegrationServices),
-        "CommonCommands" | "ОбщиеКоманды" => Some(ModuleCollection::CommonCommands),
-        "Commands" => Some(ModuleCollection::Commands),
+    // A DIRECTORY name, not a BSL identifier: a dump that writes `РегистрыРасчёта`
+    // names the same collection as one that writes `РегистрыРасчета`, while the two
+    // BSL globals are not interchangeable. So the `ё` fold lives here and never in
+    // `MdoType::from_plural`, which also answers about names written in code.
+    let folded = segment.fold_lower().replace('ё', "е");
+    match folded.as_str() {
+        "httpservices" => Some(ModuleCollection::HttpServices),
+        "webservices" => Some(ModuleCollection::WebServices),
+        "integrationservices" => Some(ModuleCollection::IntegrationServices),
+        "commoncommands" | "общиекоманды" => Some(ModuleCollection::CommonCommands),
+        "commands" => Some(ModuleCollection::Commands),
         // Common modules answer to both spellings, as the module index does — an
         // English-only branch left the Russian directory without a module type at
         // all, though `MdoType::from_plural` has always known it.
-        _ => match bsl_metadata::MdoType::from_plural(segment) {
+        _ => match bsl_metadata::MdoType::from_plural(&folded) {
             Some(bsl_metadata::MdoType::CommonModule) => Some(ModuleCollection::CommonModules),
-            _ => mdo_type_from_plural(segment).map(ModuleCollection::Mdo),
+            _ => mdo_type_from_plural(&folded).map(ModuleCollection::Mdo),
         },
     }
 }
@@ -2833,12 +2839,32 @@ mod tests {
         );
 
         // Модуль набора записей есть только у регистров — тот же список, по
-        // которому владельца ищет `build_module_metadata`.
+        // которому владельца ищет `build_module_metadata`. Правило одно для обеих
+        // веток: и для распознанной коллекции, и для неизвестной.
         assert_eq!(
             get_module_type_from_uri("InformationRegisters/Р/Ext/RecordSetModule.bsl"),
             Some(bsl_metadata::ModuleType::RecordSetModule)
         );
         assert_eq!(get_module_type_from_uri("Catalogs/Товары/Ext/RecordSetModule.bsl"), None);
+        assert_eq!(get_module_type_from_uri("SettingsStorages/Х/Ext/RecordSetModule.bsl"), None);
+
+        // Каталог выгрузки — не имя из кода: написание через `ё` называет ту же
+        // коллекцию, поэтому регистр расчёта распознаётся в обеих записях и его
+        // набор записей не проваливается в резервную ветку.
+        for dir in ["РегистрыРасчета", "РегистрыРасчёта", "CalculationRegisters"]
+        {
+            let path = format!("src/cf/{dir}/Р/Ext/RecordSetModule.bsl");
+            assert_eq!(
+                get_module_type_from_uri(&path),
+                Some(bsl_metadata::ModuleType::RecordSetModule),
+                "{path}"
+            );
+            assert_eq!(
+                parse_module_path(&path).and_then(|i| i.mdo_type),
+                Some(bsl_metadata::MdoType::CalculationRegister),
+                "{path}"
+            );
+        }
 
         // Имя модуля команды сравнивается целиком: сосед с похожим окончанием
         // командным модулем не становится.
