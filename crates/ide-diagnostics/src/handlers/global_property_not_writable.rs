@@ -105,10 +105,13 @@ mod tests {
     /// Одно нарушение — одна диагностика. Синтаксическая проверка самоприсваивания
     /// видит только равные стороны и называет цель переменной; здесь переменной нет,
     /// поэтому точный вердикт её вытесняет.
+    ///
+    /// Спрашивать надо весь конвейер: вытеснение — свойство ИТОГОВОГО набора, и до
+    /// выхода вердикт-победитель ещё может быть отозван базовым модулем пары.
     #[test]
     fn a_refused_self_assignment_is_reported_once() {
         let code = "Процедура Тест()\n    Справочники = Справочники;\n    А = А;\nКонецПроцедуры\n";
-        let diags = crate::test_utils::check_hir_diagnostic(code);
+        let diags = crate::test_utils::check_file_diagnostics(code);
         assert_eq!(
             diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
             1,

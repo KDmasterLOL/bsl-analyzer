@@ -1710,43 +1710,6 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         }
     }
 
-    if let Some(cm_idx) = parts.iter().position(|&p| p == "CommonModules") {
-        if parts.len() >= cm_idx + 4 {
-            return Some(bsl_metadata::ModuleType::CommonModule);
-        }
-    }
-
-    if let Some(idx) = parts.iter().position(|&p| p == "HTTPServices") {
-        if parts.len() >= idx + 4 {
-            return Some(bsl_metadata::ModuleType::HTTPServiceModule);
-        }
-    }
-
-    if let Some(idx) = parts.iter().position(|&p| p == "WebServices") {
-        if parts.len() >= idx + 4 {
-            return Some(bsl_metadata::ModuleType::WebServiceModule);
-        }
-    }
-
-    if let Some(idx) = parts.iter().position(|&p| p == "IntegrationServices") {
-        if parts.len() >= idx + 4 {
-            return Some(bsl_metadata::ModuleType::IntegrationServiceModule);
-        }
-    }
-
-    if let Some(idx) = parts.iter().position(|&p| p == "CommonCommands" || p == "ОбщиеКоманды")
-    {
-        if parts.len() >= idx + 4 && parts[parts.len() - 1] == "CommandModule.bsl" {
-            return Some(bsl_metadata::ModuleType::CommandModule);
-        }
-    }
-
-    if let Some(cmd_idx) = parts.iter().position(|&p| p == "Commands") {
-        if parts.len() >= cmd_idx + 4 && parts[parts.len() - 1].ends_with("CommandModule.bsl") {
-            return Some(bsl_metadata::ModuleType::CommandModule);
-        }
-    }
-
     if let Some(idx) = parts.iter().rposition(|&p| p == "CommonForms" || p == "ОбщиеФормы")
     {
         if parts.len() == idx + 5
@@ -1768,13 +1731,26 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         }
     }
 
-    // `<Collection>/<Object>/<File>` is the shortest form the dump can take — the
-    // `Ext` level is optional, and a relative path carries no leading empty
-    // segment. The file names below occur nowhere but a dump, so the length is a
-    // shape check, not a filter.
-    if parts.len() >= 3 {
-        let module_file = parts[parts.len() - 1];
-        return match module_file {
+    // Everything else lives in a collection, and the shape of that path has exactly
+    // one specification. Deciding by "does some ancestor look like a collection"
+    // let a directory far up the path take the type, and deciding by segment count
+    // alone gave an ordinary file a module type it has no claim to.
+    if let Some(split) = bsl_metadata::module_path::split_module_path(&normalized, |segment| {
+        module_collection(segment).is_some()
+    }) {
+        if let Some(collection) = module_collection(split.collection) {
+            return collection_module_type(collection, split.module_file);
+        }
+    }
+
+    // A dump also holds collections this crate has no `MdoType` for — settings
+    // storages, filter criteria, document journals. Their object/manager modules are
+    // still object/manager modules, and the file name says so; what the unknown
+    // collection costs is the shape evidence, so the SERVICE level has to supply it.
+    // Without either the path is just a file that happens to be named `ObjectModule.bsl`.
+    let has_service_level = parts.len() >= 2 && parts[parts.len() - 2] == "Ext";
+    if has_service_level && parts.len() >= 4 {
+        return match parts[parts.len() - 1] {
             "ObjectModule.bsl" => Some(bsl_metadata::ModuleType::ObjectModule),
             "ManagerModule.bsl" => Some(bsl_metadata::ModuleType::ManagerModule),
             "RecordSetModule.bsl" => Some(bsl_metadata::ModuleType::RecordSetModule),
@@ -1783,6 +1759,60 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
     }
 
     None
+}
+
+/// A dump directory that holds modules of one kind. The module type follows from
+/// the collection and the file name TOGETHER — `Module.bsl` means a common module
+/// under `CommonModules` and an HTTP service under `HTTPServices`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleCollection {
+    Mdo(bsl_metadata::MdoType),
+    CommonModules,
+    HttpServices,
+    WebServices,
+    IntegrationServices,
+    CommonCommands,
+    Commands,
+}
+
+fn module_collection(segment: &str) -> Option<ModuleCollection> {
+    match segment {
+        "CommonModules" => Some(ModuleCollection::CommonModules),
+        "HTTPServices" => Some(ModuleCollection::HttpServices),
+        "WebServices" => Some(ModuleCollection::WebServices),
+        "IntegrationServices" => Some(ModuleCollection::IntegrationServices),
+        "CommonCommands" | "ОбщиеКоманды" => Some(ModuleCollection::CommonCommands),
+        "Commands" => Some(ModuleCollection::Commands),
+        _ => mdo_type_from_plural(segment).map(ModuleCollection::Mdo),
+    }
+}
+
+fn collection_module_type(
+    collection: ModuleCollection,
+    module_file: &str,
+) -> Option<bsl_metadata::ModuleType> {
+    use bsl_metadata::ModuleType;
+    match collection {
+        // A service collection holds one module per object, whatever the dump
+        // spells its file — the collection alone settles the type.
+        ModuleCollection::CommonModules => Some(ModuleType::CommonModule),
+        ModuleCollection::HttpServices => Some(ModuleType::HTTPServiceModule),
+        ModuleCollection::WebServices => Some(ModuleType::WebServiceModule),
+        ModuleCollection::IntegrationServices => Some(ModuleType::IntegrationServiceModule),
+        ModuleCollection::CommonCommands if module_file == "CommandModule.bsl" => {
+            Some(ModuleType::CommandModule)
+        }
+        ModuleCollection::Commands if module_file.ends_with("CommandModule.bsl") => {
+            Some(ModuleType::CommandModule)
+        }
+        ModuleCollection::CommonCommands | ModuleCollection::Commands => None,
+        ModuleCollection::Mdo(_) => match module_file {
+            "ObjectModule.bsl" => Some(ModuleType::ObjectModule),
+            "ManagerModule.bsl" => Some(ModuleType::ManagerModule),
+            "RecordSetModule.bsl" => Some(ModuleType::RecordSetModule),
+            _ => None,
+        },
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1796,28 +1826,28 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
     // Normalize Windows separators before `/`-keyed segment matching (see
     // `get_module_type_from_uri`).
     let normalized = file_uri.replace('\\', "/");
-    let parts: Vec<&str> = normalized.split('/').collect();
 
-    // Structure comes from the shared specification; the spelling table stays
-    // here, mirroring `MdoType::from_plural` plus the `CommonModules` directory.
+    // Only the collections this function promises an owner for: an mdo object, or a
+    // common module. The service collections (`HTTPServices`, …) have an owner of
+    // their own kind and their callers resolve it elsewhere.
     let split = bsl_metadata::module_path::split_module_path(&normalized, |segment| {
-        mdo_type_from_plural(segment).is_some() || segment == "CommonModules"
+        matches!(
+            module_collection(segment),
+            Some(ModuleCollection::Mdo(_) | ModuleCollection::CommonModules)
+        )
     })?;
-    let type_plural = split.collection;
-    let name = split.object_name.to_string();
+    let collection = module_collection(split.collection)?;
 
-    let mdo_type = mdo_type_from_plural(type_plural);
-
-    let module_file = parts[parts.len() - 1];
-    let module_type = match module_file {
-        "ObjectModule.bsl" => bsl_metadata::ModuleType::ObjectModule,
-        "ManagerModule.bsl" => bsl_metadata::ModuleType::ManagerModule,
-        "RecordSetModule.bsl" => bsl_metadata::ModuleType::RecordSetModule,
-        "Module.bsl" if type_plural == "CommonModules" => bsl_metadata::ModuleType::CommonModule,
-        _ => bsl_metadata::ModuleType::Unknown,
+    let mdo_type = match collection {
+        ModuleCollection::Mdo(mdo) => Some(mdo),
+        _ => None,
     };
+    // The module type comes from the same table `get_module_type_from_uri` reads, so
+    // the two answers about one path cannot drift apart.
+    let module_type = collection_module_type(collection, split.module_file)
+        .unwrap_or(bsl_metadata::ModuleType::Unknown);
 
-    Some(ModulePathInfo { mdo_type, name: Some(name), module_type })
+    Some(ModulePathInfo { mdo_type, name: Some(split.object_name.to_string()), module_type })
 }
 
 /// The directory segment naming a manager-backed collection (`Constants`,
@@ -2639,6 +2669,63 @@ mod tests {
         assert_eq!(info.mdo_type, Some(bsl_metadata::MdoType::Catalog));
         assert_eq!(info.name.as_deref(), Some("Справочник1"));
         assert_eq!(info.module_type, bsl_metadata::ModuleType::ObjectModule);
+    }
+
+    /// Два ответа об одном пути обязаны совпадать. Раньше это были два независимых
+    /// обхода, и расходились они в обе стороны: общий модуль без `Ext` разбирался,
+    /// но тип не получал, а обычный файл вне выгрузки тип получал ни за что.
+    #[test]
+    fn the_two_answers_about_one_path_agree() {
+        for path in [
+            "CommonModules/Общий/Module.bsl",
+            "/CommonModules/Общий/Ext/Module.bsl",
+            "Catalogs/Товары/ObjectModule.bsl",
+            "src/cf/Catalogs/Товары/Ext/ManagerModule.bsl",
+            "src/cf/InformationRegisters/Р/Ext/RecordSetModule.bsl",
+            r"C:\src\cf\Documents\ПКО\Ext\ObjectModule.bsl",
+            "/home/Documents/Catalogs/Товары/ManagerModule.bsl",
+        ] {
+            let info = parse_module_path(path).unwrap_or_else(|| panic!("{path} must parse"));
+            assert_ne!(info.module_type, bsl_metadata::ModuleType::Unknown, "{path}");
+            assert_eq!(
+                get_module_type_from_uri(path),
+                Some(info.module_type),
+                "the two classifiers disagree on {path}"
+            );
+        }
+
+        // Ни один из ответов не выдаётся файлу вне выгрузки: имя файла само по себе
+        // формы не доказывает.
+        for path in ["tmp/generated/ObjectModule.bsl", "ObjectModule.bsl", "a/ManagerModule.bsl"] {
+            assert!(parse_module_path(path).is_none(), "{path}");
+            assert_eq!(get_module_type_from_uri(path), None, "{path}");
+        }
+
+        // Коллекция, которой нет в `MdoType`, всё ещё держит модули своего вида —
+        // форму в этом случае доказывает служебный уровень.
+        assert_eq!(
+            get_module_type_from_uri("src/cf/SettingsStorages/Х/Ext/ManagerModule.bsl"),
+            Some(bsl_metadata::ModuleType::ManagerModule),
+            "an unknown collection still holds a manager module"
+        );
+        assert!(parse_module_path("src/cf/SettingsStorages/Х/Ext/ManagerModule.bsl").is_none());
+
+        // Служебные коллекции классифицируются, но владельца этой формы не имеют.
+        for (path, expected) in [
+            ("src/cf/HTTPServices/API/Ext/Module.bsl", bsl_metadata::ModuleType::HTTPServiceModule),
+            ("src/cf/WebServices/В/Ext/Module.bsl", bsl_metadata::ModuleType::WebServiceModule),
+            (
+                "src/cf/Catalogs/Товары/Commands/К/Ext/CommandModule.bsl",
+                bsl_metadata::ModuleType::CommandModule,
+            ),
+            (
+                "src/cf/CommonCommands/К/Ext/CommandModule.bsl",
+                bsl_metadata::ModuleType::CommandModule,
+            ),
+        ] {
+            assert_eq!(get_module_type_from_uri(path), Some(expected), "{path}");
+            assert!(parse_module_path(path).is_none(), "{path} has no mdo owner");
+        }
     }
 
     /// Кратчайшая форма: относительный путь без служебного `Ext` и без префикса.

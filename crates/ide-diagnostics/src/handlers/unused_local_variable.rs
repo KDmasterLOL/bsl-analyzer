@@ -596,11 +596,9 @@ mod tests {
         );
     }
 
-    /// Владельца имени может дать только базовый модуль пары расширения. Тогда
-    /// вердикт о локали меняется после weaving, и диагностика обязана считаться
-    /// заново: standalone-проход видит имя коллекции и локали не находит.
-    #[test]
-    fn a_base_module_owner_is_seen_through_the_extension_merge() {
+    /// Диагностики модуля расширения, спаренного с базовым: обе стороны лежат по
+    /// одному пути в своих корнях, поэтому слияние расширения включается целиком.
+    fn extension_pair_diagnostics(base_text: &str, ext_text: &str) -> Vec<crate::Diagnostic> {
         use crate::DiagnosticsConfig;
         use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
         use ide_db::RootDatabaseImpl;
@@ -629,20 +627,25 @@ mod tests {
         db.set_file_source_root(main_file, SourceRootId(0));
         db.set_file_source_root(ext_file, SourceRootId(0));
 
-        db.set_file_text(
-            main_file,
-            "Процедура Справочники() Экспорт\nКонецПроцедуры\n\nПроцедура Цель() Экспорт\nКонецПроцедуры\n",
-        );
-        db.set_file_text(
-            ext_file,
-            "&Вместо(\"Цель\")\nПроцедура Расш_Цель()\n\tСправочники = 1;\nКонецПроцедуры\n",
-        );
+        db.set_file_text(main_file, base_text);
+        db.set_file_text(ext_file, ext_text);
         assert!(
             ide_db::weaving_target(&db, ext_file).is_some(),
             "fixture must actually pair the extension to its base"
         );
 
-        let diags = crate::file_diagnostics(&db, ext_file, &DiagnosticsConfig::all_enabled());
+        crate::file_diagnostics(&db, ext_file, &DiagnosticsConfig::all_enabled())
+    }
+
+    /// Владельца имени может дать только базовый модуль пары расширения. Тогда
+    /// вердикт о локали меняется после weaving, и диагностика обязана считаться
+    /// заново: standalone-проход видит имя коллекции и локали не находит.
+    #[test]
+    fn a_base_module_owner_is_seen_through_the_extension_merge() {
+        let diags = extension_pair_diagnostics(
+            "Процедура Справочники() Экспорт\nКонецПроцедуры\n\nПроцедура Цель() Экспорт\nКонецПроцедуры\n",
+            "&Вместо(\"Цель\")\nПроцедура Расш_Цель()\n\tСправочники = 1;\nКонецПроцедуры\n",
+        );
         assert_eq!(
             diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
             1,
@@ -652,6 +655,43 @@ mod tests {
             diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
             0,
             "and it is therefore not a write to the collection:\n{diags:#?}"
+        );
+    }
+
+    /// Код `#Вставка` принадлежит effective-проходу, и мёртвая запись внутри него
+    /// обязана дожить до конца конвейера — обычная, ничего не знающая об именах
+    /// коллекций.
+    #[test]
+    fn a_dead_store_inside_a_change_and_validate_insert_survives() {
+        let diags = extension_pair_diagnostics(
+            "Процедура Цель() Экспорт\nКонецПроцедуры\n",
+            "&ИзменениеИКонтроль(\"Цель\")\nПроцедура Цель()\n#Вставка\n\tМертвая = 1;\n#КонецВставки\nКонецПроцедуры\n",
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).count(),
+            1,
+            "the insert's own dead store belongs to the extension author:\n{diags:#?}"
+        );
+    }
+
+    /// Синтаксическую находку вытесняет только тот вердикт, который дожил до конца.
+    /// Базовый модуль отменяет `GlobalPropertyNotWritable`, и вытесненная им
+    /// `SelfAssign` обязана вернуться.
+    #[test]
+    fn a_superseded_self_assign_returns_when_the_base_cancels_the_verdict() {
+        let diags = extension_pair_diagnostics(
+            "Процедура Справочники() Экспорт\nКонецПроцедуры\n\nПроцедура Цель() Экспорт\nКонецПроцедуры\n",
+            "&Вместо(\"Цель\")\nПроцедура Расш_Цель()\n\tСправочники = Справочники;\nКонецПроцедуры\n",
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::GlobalPropertyNotWritable).count(),
+            0,
+            "the base method owns the name:\n{diags:#?}"
+        );
+        assert_eq!(
+            diags.iter().filter(|d| d.code == DiagnosticCode::SelfAssign).count(),
+            1,
+            "nothing supersedes the self-assignment any more:\n{diags:#?}"
         );
     }
 

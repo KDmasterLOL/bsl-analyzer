@@ -66,6 +66,14 @@ use runner::{
     collect_syntax_diagnostics,
 };
 
+/// Every collector's findings for one file, ordered and deduplicated — but NOT yet
+/// the file's final answer.
+///
+/// Two later stages can still remove findings from this list, and both are owned by
+/// [`apply_extension_merge`]: a paired base module can overturn the base-sensitive
+/// layer wholesale, and one finding can supersede another. Applying supersession here
+/// would be irreversible in exactly the case where the merge revises the winner — the
+/// loser is already gone and nothing can bring it back — so the pipeline exit does it.
 pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut result = Vec::new();
 
@@ -147,11 +155,10 @@ pub fn apply_extension_merge<'db>(
     // Ordinary module (and any extension file with no resolvable base): byte-identical to the
     // standalone pass, minus any in-code suppression directives.
     if weaving.is_none() && effective.is_none() {
-        let mut changed = suppression::apply(db, file_id, config, &mut standalone);
-        changed |= scope_gate::apply(db, file_set, file_id, config, &mut standalone);
-        if changed {
-            normalize_diagnostics(&mut standalone);
-        }
+        suppression::apply(db, file_id, config, &mut standalone);
+        scope_gate::apply(db, file_set, file_id, config, &mut standalone);
+        supersede_dominated(&mut standalone);
+        normalize_diagnostics(&mut standalone);
         return standalone;
     }
 
@@ -160,19 +167,19 @@ pub fn apply_extension_merge<'db>(
     // owned by the effective pass (remapped to `#Вставка`), so excluded from the weaving pass.
     let cav_bodies = effective::cav_body_ranges(&root);
 
-    // Strip the standalone INFERENCE-origin diagnostics by IDENTITY, recomputed on the same
+    // Strip the standalone BASE-SENSITIVE diagnostics by IDENTITY, recomputed on the same
     // provider the caller used. Removing by identity — not by `DiagnosticCode` — is essential:
     // some codes (e.g. `RedundantAccessToObject`, emitted both by the syntactic `ЭтотОбъект.X`
     // lowering check AND by the inference two-level check) also reach this list from non-
-    // inference collectors, and those must survive. The base-aware passes below republish only
-    // the inference layer.
+    // base-sensitive collectors, and those must survive. The base-aware passes below republish
+    // exactly the layer stripped here.
     let std_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set);
     let std_ctx = DiagnosticsContext::new(config, file_id, &std_provider);
-    let mut std_inference =
-        safe_collect("merge:standalone_inference", || collect_inference_diagnostics(&std_ctx));
-    standalone.retain(|d| match std_inference.iter().position(|s| s == d) {
+    let mut std_base_sensitive =
+        safe_collect("merge:standalone_base_sensitive", || collect_base_sensitive(&std_ctx));
+    standalone.retain(|d| match std_base_sensitive.iter().position(|s| s == d) {
         Some(pos) => {
-            std_inference.swap_remove(pos);
+            std_base_sensitive.swap_remove(pos);
             false
         }
         None => true,
@@ -184,37 +191,16 @@ pub fn apply_extension_merge<'db>(
     // resolution sites (resolver `base_fallback` + the bare-call site), so every difference is
     // a legitimate base-sibling resolution and its downstream type cascade, never a spurious
     // one. Adopt it everywhere except change-and-validate bodies (the effective pass owns
-    // those). Only the inference collector runs (reads `infer` + `module_bodies`, both
+    // those). Only base-sensitive collectors run (they read `infer` + `module_bodies`, both
     // ext-native here → one coherent source map).
     if let Some(wid) = weaving {
         let w_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set)
             .with_weaving(wid, file_id);
         let w_ctx = DiagnosticsContext::new(config, file_id, &w_provider);
-        let mut w_inference =
-            safe_collect("merge:weaving_inference", || collect_inference_diagnostics(&w_ctx));
-        w_inference.retain(|d| !effective::range_inside_any(d.range, &cav_bodies));
-        standalone.extend(w_inference);
-
-        // The dead-store check is not an inference diagnostic, yet it asks inference
-        // one question the base changes the answer to: whether a write to a metadata
-        // collection name declares a local at all, or is refused as a write to the
-        // Global context. A same-named base sibling owns the name and makes it a real
-        // local, so the base-blind verdict is replaced here — by identity, exactly as
-        // the inference layer above.
-        let mut std_dead_store = safe_collect("merge:standalone_unused_local", || {
-            collect_dead_store_diagnostics(&std_ctx)
-        });
-        standalone.retain(|d| match std_dead_store.iter().position(|s| s == d) {
-            Some(pos) => {
-                std_dead_store.swap_remove(pos);
-                false
-            }
-            None => true,
-        });
-        let mut w_dead_store =
-            safe_collect("merge:weaving_unused_local", || collect_dead_store_diagnostics(&w_ctx));
-        w_dead_store.retain(|d| !effective::range_inside_any(d.range, &cav_bodies));
-        standalone.extend(w_dead_store);
+        let mut w_base_sensitive =
+            safe_collect("merge:weaving_base_sensitive", || collect_base_sensitive(&w_ctx));
+        w_base_sensitive.retain(|d| !effective::range_inside_any(d.range, &cav_bodies));
+        standalone.extend(w_base_sensitive);
 
         // Structural applicability check: every `&Вместо`/`&Перед`/`&После` interceptor must
         // declare the same signature as the base method it weaves onto. Independent of the
@@ -237,20 +223,31 @@ pub fn apply_extension_merge<'db>(
         let eff_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set)
             .with_effective(eid, file_id);
         let eff_ctx = DiagnosticsContext::new(config, file_id, &eff_provider);
-        let eff_inference =
-            safe_collect("merge:effective_inference", || collect_inference_diagnostics(&eff_ctx));
-        standalone.extend(effective::remap_inserted(eff_inference, &effmod.segments));
+        let eff_base_sensitive =
+            safe_collect("merge:effective_base_sensitive", || collect_base_sensitive(&eff_ctx));
+        standalone.extend(effective::remap_inserted(eff_base_sensitive, &effmod.segments));
     }
 
     suppression::apply(db, file_id, config, &mut standalone);
     scope_gate::apply(db, file_set, file_id, config, &mut standalone);
+    supersede_dominated(&mut standalone);
     normalize_diagnostics(&mut standalone);
     standalone
 }
 
-/// The one non-inference collector whose verdict a paired base module can change.
-fn collect_dead_store_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    handlers::unused_local_variable::check(ctx)
+/// The layer a paired base module can overturn, and therefore the layer every
+/// base-aware pass recomputes in full.
+///
+/// Inference is the obvious member. The dead-store check joins it not because it is
+/// an inference diagnostic, but because it asks inference the one question the base
+/// changes the answer to: whether a write to a metadata-collection name declares a
+/// local at all, or is refused as a write to the Global context. A collector that
+/// starts consulting `ctx.infer()` belongs here — one that does not must stay out,
+/// or the merge would strip a finding no base-aware pass republishes.
+fn collect_base_sensitive(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let mut result = collect_inference_diagnostics(ctx);
+    result.extend(handlers::unused_local_variable::check(ctx));
+    result
 }
 
 fn safe_collect(name: &str, f: impl FnOnce() -> Vec<Diagnostic>) -> Vec<Diagnostic> {
@@ -301,6 +298,24 @@ fn safe_collect(name: &str, f: impl FnOnce() -> Vec<Diagnostic>) -> Vec<Diagnost
 const SUPERSEDED_ON_THE_SAME_STATEMENT: &[(DiagnosticCode, DiagnosticCode)] =
     &[(DiagnosticCode::SelfAssign, DiagnosticCode::GlobalPropertyNotWritable)];
 
+/// Drop findings that a more precise finding on the same statement supersedes.
+///
+/// Runs at the pipeline exit and nowhere else: the winner may be a base-sensitive
+/// diagnostic that a paired base module later withdraws, and a loser dropped before
+/// that withdrawal can never be recovered — nothing recomputes the syntactic layer.
+fn supersede_dominated(diagnostics: &mut Vec<Diagnostic>) {
+    for (superseded, by) in SUPERSEDED_ON_THE_SAME_STATEMENT {
+        let winners: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == *by).map(|d| d.range).collect();
+        if winners.is_empty() {
+            continue;
+        }
+        diagnostics.retain(|d| {
+            d.code != *superseded || !winners.iter().any(|w| d.range.contains_range(*w))
+        });
+    }
+}
+
 fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
     let dedupe_codes = [DiagnosticCode::UnreachableCode];
 
@@ -325,16 +340,6 @@ fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
             }
         }
         keep.extend(deduped);
-    }
-
-    for (superseded, by) in SUPERSEDED_ON_THE_SAME_STATEMENT {
-        let winners: Vec<_> = keep.iter().filter(|d| d.code == *by).map(|d| d.range).collect();
-        if winners.is_empty() {
-            continue;
-        }
-        keep.retain(|d| {
-            d.code != *superseded || !winners.iter().any(|w| d.range.contains_range(*w))
-        });
     }
 
     keep.sort_by(|a, b| {
@@ -404,6 +409,7 @@ mod normalize_tests {
             diag(DiagnosticCode::SelfAssign, 40, 50, "elsewhere"),
         ];
 
+        supersede_dominated(&mut diagnostics);
         normalize_diagnostics(&mut diagnostics);
 
         let keys: Vec<_> =
