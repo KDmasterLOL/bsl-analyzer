@@ -56,6 +56,7 @@ pub enum SourceSetArgsError {
     DuplicateExtensionPath { first: String, second: String, path: PathBuf },
     MalformedDependsOn { value: String },
     UnknownDependsOnOwner { name: String },
+    UnknownDependsOnTarget { owner: String, name: String },
     EmptyDependsOnTarget { value: String },
 }
 
@@ -85,6 +86,10 @@ impl fmt::Display for SourceSetArgsError {
             Self::UnknownDependsOnOwner { name } => write!(
                 f,
                 "--extension-depends-on {name}=...: {name} is not declared by any --extension NAME=PATH"
+            ),
+            Self::UnknownDependsOnTarget { owner, name } => write!(
+                f,
+                "--extension-depends-on {owner}={name}: {name} is not declared by any --extension NAME=PATH"
             ),
             Self::EmptyDependsOnTarget { value } => {
                 write!(f, "--extension-depends-on {value}: a dependency name is empty")
@@ -198,6 +203,19 @@ impl SourceSetArgs {
             let Some(&index) = named.get(&fold_lower_per_char(&owner)) else {
                 return Err(SourceSetArgsError::UnknownDependsOnOwner { name: owner });
             };
+            // Targets are checked too, not just the owner. The topology would
+            // happily resolve a target against the name a bare entry derives
+            // from its directory, which is exactly the binding this flag must
+            // not create: that name is incidental and collides with any other
+            // directory spelled the same.
+            for target in &targets {
+                if !named.contains_key(&fold_lower_per_char(target)) {
+                    return Err(SourceSetArgsError::UnknownDependsOnTarget {
+                        owner,
+                        name: target.clone(),
+                    });
+                }
+            }
             match &mut decls[index] {
                 ExtensionDecl::Structured(decl) => decl.depends_on.extend(targets),
                 // Unreachable: `named` only ever holds indices of structured
@@ -246,13 +264,20 @@ impl SourceSetArgs {
     }
 }
 
-/// `NAME=PATH` splits on the first `=`; anything else is a bare path. A path
-/// containing `=` therefore needs the named form to be unambiguous, which is
-/// also the form that gives it a stable name.
+/// `NAME=PATH` splits on the first `=`; anything else is a bare path.
+///
+/// A glob makes the value a bare path regardless of any `=` in it: the named
+/// form rejects globs outright, so reading `vendor=1/*` as a name would leave a
+/// directory called `vendor=1` with no spelling that works at all.
+///
+/// The name is trimmed and the path is not. A name is an identifier, where
+/// surrounding blanks cannot be meaningful; a path is a filesystem path, where
+/// they can — trimming it would quietly analyze a different directory than the
+/// one that was passed.
 fn split_extension_value(value: &str) -> Result<(Option<String>, String), SourceSetArgsError> {
     match value.split_once('=') {
-        Some((name, path)) => {
-            let (name, path) = (name.trim(), path.trim());
+        Some((name, path)) if !value.contains('*') => {
+            let name = name.trim();
             if name.is_empty() {
                 return Err(SourceSetArgsError::EmptyExtensionName { value: value.to_string() });
             }
@@ -261,12 +286,11 @@ fn split_extension_value(value: &str) -> Result<(Option<String>, String), Source
             }
             Ok((Some(name.to_string()), path.to_string()))
         }
-        None => {
-            let path = value.trim();
-            if path.is_empty() {
+        _ => {
+            if value.is_empty() {
                 return Err(SourceSetArgsError::EmptyExtensionPath { value: value.to_string() });
             }
-            Ok((None, path.to_string()))
+            Ok((None, value.to_string()))
         }
     }
 }
@@ -477,6 +501,68 @@ mod tests {
             depends_on(&repeated.extensions.unwrap(), "T"),
             vec!["A", "B"],
             "repeats must accumulate rather than the last flag winning"
+        );
+    }
+
+    #[test]
+    fn dependency_on_a_bare_path_entry_is_refused() {
+        let dir = tempdir().unwrap();
+        extension_dir(dir.path(), "t");
+        extension_dir(dir.path(), "legacy");
+
+        // The topology would resolve `legacy` against the name that bare entry
+        // derives from its directory. That name is incidental, so binding to it
+        // is exactly what this flag must not do.
+        let err = args(&[
+            "--extension",
+            "T=t",
+            "--extension",
+            "legacy",
+            "--extension-depends-on",
+            "T=legacy",
+        ])
+        .resolve(dir.path())
+        .unwrap_err();
+
+        assert!(matches!(err, SourceSetArgsError::UnknownDependsOnTarget { .. }), "got {err}");
+    }
+
+    #[test]
+    fn a_glob_keeps_the_bare_form_even_with_an_equals_sign() {
+        let dir = tempdir().unwrap();
+        extension_dir(dir.path(), "vendor=1/ext");
+
+        // Read as a name, `vendor=1/*` would become a named entry with a glob —
+        // which the model rejects outright, leaving that directory with no
+        // spelling that works.
+        let resolved = args(&["--extension", "vendor=1/*"]).resolve(dir.path()).unwrap();
+
+        assert_eq!(
+            resolved.extensions.unwrap(),
+            vec![ExtensionDecl::Path("vendor=1/*".to_string())]
+        );
+    }
+
+    #[test]
+    fn surrounding_blanks_are_kept_in_paths_and_dropped_in_names() {
+        let dir = tempdir().unwrap();
+        extension_dir(dir.path(), " ext ");
+
+        let resolved =
+            args(&["--extension", " ext ", "--extension", " Named = ext "]).resolve(dir.path());
+
+        // The two spell the same directory, so the duplicate barrier fires —
+        // proving the path kept its blanks while the name lost them.
+        match resolved.unwrap_err() {
+            SourceSetArgsError::DuplicateExtensionPath { .. } => {}
+            other => panic!("got {other}"),
+        }
+
+        let single = args(&["--extension", " ext "]).resolve(dir.path()).unwrap();
+        assert_eq!(
+            single.extensions.unwrap(),
+            vec![ExtensionDecl::Path(" ext ".to_string())],
+            "a trimmed path would name a directory that was never passed"
         );
     }
 
