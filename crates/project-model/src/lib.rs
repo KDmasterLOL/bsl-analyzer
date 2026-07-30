@@ -462,6 +462,47 @@ pub struct StructuredExtensionDecl {
     pub depends_on: Vec<String>,
 }
 
+/// Source-set fields supplied outside the config file — today, by CLI flags.
+///
+/// Applied as a mutation of [`ProjectConfig`] rather than passed to a `Project`
+/// constructor, because the config is read by more than the constructors: the
+/// analyze path resolves `configuration_path` and loads metadata from the raw
+/// config before building the project, and that path feeds the interned
+/// configuration input used by diagnostics. An override living inside the
+/// constructor would leave those reads on the file-declared source set.
+///
+/// Fields override independently: a field that is set replaces the config's
+/// field outright, a field left unset keeps whatever the config declared. Paths
+/// are strings for the same reason the config stores them as strings — the
+/// whole model is string-based, so anything else would convert at every
+/// boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceSetOverride {
+    /// Replaces [`ProjectConfig::configuration_root`].
+    pub configuration_root: Option<String>,
+    /// Replaces [`ProjectConfig::extensions`], including the tri-state:
+    /// `Some(vec![])` is an explicit "no extensions", distinct from leaving the
+    /// field unset and inheriting discovery.
+    pub extensions: Option<Vec<ExtensionDecl>>,
+}
+
+impl SourceSetOverride {
+    /// True when nothing is overridden, i.e. applying this is a no-op.
+    pub fn is_empty(&self) -> bool {
+        self.configuration_root.is_none() && self.extensions.is_none()
+    }
+
+    /// Overwrites the config's source-set fields with the ones set here.
+    pub fn apply_to(&self, config: &mut ProjectConfig) {
+        if let Some(ref root) = self.configuration_root {
+            config.configuration_root = Some(root.clone());
+        }
+        if let Some(ref extensions) = self.extensions {
+            config.extensions = Some(extensions.clone());
+        }
+    }
+}
+
 impl From<&str> for ExtensionDecl {
     fn from(path: &str) -> Self {
         ExtensionDecl::Path(path.to_string())
@@ -1796,7 +1837,7 @@ mod tests {
         FeaturesConfig, PostgresAccessMode, Project, ProjectConfig, ProjectError,
         ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
         SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
-        StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
+        SourceSetOverride, StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
     };
     use chrono::{Duration, TimeZone, Utc};
     use std::fs;
@@ -2504,6 +2545,162 @@ extensions = [{ name = "T" }]
         let config = ProjectConfig { extensions: Some(vec![]), ..Default::default() };
         let resolved = Project::resolve_extensions(root, &config).unwrap();
         assert!(resolved.is_empty(), "explicit empty list must disable auto-discovery");
+    }
+
+    #[test]
+    fn override_replaces_extensions_and_keeps_unset_root() {
+        let mut config = ProjectConfig {
+            configuration_root: Some("src/cf".to_string()),
+            extensions: Some(vec!["src/cfe/FromConfig".into()]),
+            ..Default::default()
+        };
+        let over = SourceSetOverride {
+            extensions: Some(vec![structured("Flag", "vendor/flag", &[])]),
+            ..Default::default()
+        };
+
+        over.apply_to(&mut config);
+
+        assert_eq!(config.configuration_root.as_deref(), Some("src/cf"), "root untouched");
+        assert_eq!(
+            config.extensions,
+            Some(vec![structured("Flag", "vendor/flag", &[])]),
+            "list replaced outright, not merged"
+        );
+    }
+
+    #[test]
+    fn override_replaces_root_and_keeps_unset_extensions() {
+        let mut config = ProjectConfig {
+            configuration_root: Some("src/cf".to_string()),
+            extensions: Some(vec!["src/cfe/FromConfig".into()]),
+            ..Default::default()
+        };
+        let over =
+            SourceSetOverride { configuration_root: Some("other/cf".into()), ..Default::default() };
+
+        over.apply_to(&mut config);
+
+        assert_eq!(config.configuration_root.as_deref(), Some("other/cf"));
+        assert_eq!(config.extensions, Some(vec!["src/cfe/FromConfig".into()]));
+    }
+
+    #[test]
+    fn empty_override_changes_nothing() {
+        let original = ProjectConfig {
+            configuration_root: Some("src/cf".to_string()),
+            extensions: Some(vec!["src/cfe/FromConfig".into()]),
+            ..Default::default()
+        };
+        let mut config = original.clone();
+        let over = SourceSetOverride::default();
+        assert!(over.is_empty());
+
+        over.apply_to(&mut config);
+
+        assert_eq!(config.configuration_root, original.configuration_root);
+        assert_eq!(config.extensions, original.extensions);
+    }
+
+    #[test]
+    fn override_empty_list_opts_out_of_a_configured_list() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/FromConfig");
+
+        let mut config = ProjectConfig {
+            extensions: Some(vec!["src/cfe/FromConfig".into()]),
+            ..Default::default()
+        };
+        SourceSetOverride { extensions: Some(vec![]), ..Default::default() }.apply_to(&mut config);
+
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
+        assert!(resolved.is_empty(), "explicit empty override must drop the configured list");
+    }
+
+    #[test]
+    fn override_empty_list_opts_out_of_auto_discovery() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/Discovered");
+
+        // Unset in the config would auto-discover `src/cfe/*`; the override must
+        // reach the same opt-out the config expresses as `extensions = []`.
+        let mut config = ProjectConfig::default();
+        SourceSetOverride { extensions: Some(vec![]), ..Default::default() }.apply_to(&mut config);
+
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
+        assert!(resolved.is_empty(), "explicit empty override must disable auto-discovery");
+    }
+
+    #[test]
+    fn override_list_beats_a_configured_opt_out() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "vendor/flag");
+
+        let mut config = ProjectConfig { extensions: Some(vec![]), ..Default::default() };
+        SourceSetOverride {
+            extensions: Some(vec![structured("Flag", "vendor/flag", &[])]),
+            ..Default::default()
+        }
+        .apply_to(&mut config);
+
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0, "Flag");
+    }
+
+    #[test]
+    fn same_source_set_from_config_and_from_override_share_a_fingerprint() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cf");
+        touch_extension(root, "ext");
+
+        let from_config = ProjectConfig {
+            configuration_root: Some("src/cf".to_string()),
+            extensions: Some(vec!["ext".into()]),
+            ..Default::default()
+        };
+
+        // The flag spelling of the same set: a named entry whose derived name
+        // matches the directory the bare path resolves to.
+        let mut from_override = ProjectConfig::default();
+        SourceSetOverride {
+            configuration_root: Some("src/cf".into()),
+            extensions: Some(vec![structured("ext", "ext", &[])]),
+        }
+        .apply_to(&mut from_override);
+
+        let a = Project::with_config(root, from_config).unwrap();
+        let b = Project::with_config(root, from_override).unwrap();
+
+        assert_eq!(
+            a.extension_topology().fingerprint(),
+            b.extension_topology().fingerprint(),
+            "identical sets must share project identity regardless of how they were declared"
+        );
+    }
+
+    #[test]
+    fn override_root_reaches_configuration_path() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Negative control: without the override the config declares no root.
+        let bare = ProjectConfig::default();
+        assert_eq!(bare.configuration_path(root), None);
+
+        let mut config = ProjectConfig::default();
+        SourceSetOverride { configuration_root: Some("base".into()), ..Default::default() }
+            .apply_to(&mut config);
+
+        assert_eq!(
+            config.configuration_path(root),
+            Some(root.join("base")),
+            "the override must be visible to the config reads that happen before Project is built"
+        );
     }
 
     #[test]
