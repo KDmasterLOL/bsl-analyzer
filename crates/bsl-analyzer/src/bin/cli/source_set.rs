@@ -266,9 +266,14 @@ impl SourceSetArgs {
 
 /// `NAME=PATH` splits on the first `=`; anything else is a bare path.
 ///
-/// A glob makes the value a bare path regardless of any `=` in it: the named
-/// form rejects globs outright, so reading `vendor=1/*` as a name would leave a
-/// directory called `vendor=1` with no spelling that works at all.
+/// The split is unconditional, which costs one case: a directory whose own name
+/// contains `=` cannot be given in the bare form, and combined with a glob it
+/// is unreachable. That is deliberate. The two readings of `Named=cfe/*` — a
+/// named entry with a glob, or a bare path under a directory called `Named=cfe`
+/// — are textually identical, and deciding by whether a `*` is present picks
+/// the bare one for `Named=cfe/*` too, which then matches nothing and drops the
+/// extension without a word. A rare directory name that fails loudly beats a
+/// common spelling that silently analyzes a different source set.
 ///
 /// The name is trimmed and the path is not. A name is an identifier, where
 /// surrounding blanks cannot be meaningful; a path is a filesystem path, where
@@ -276,7 +281,7 @@ impl SourceSetArgs {
 /// one that was passed.
 fn split_extension_value(value: &str) -> Result<(Option<String>, String), SourceSetArgsError> {
     match value.split_once('=') {
-        Some((name, path)) if !value.contains('*') => {
+        Some((name, path)) => {
             let name = name.trim();
             if name.is_empty() {
                 return Err(SourceSetArgsError::EmptyExtensionName { value: value.to_string() });
@@ -528,18 +533,23 @@ mod tests {
     }
 
     #[test]
-    fn a_glob_keeps_the_bare_form_even_with_an_equals_sign() {
+    fn a_named_entry_with_a_glob_stays_the_strict_shape() {
         let dir = tempdir().unwrap();
-        extension_dir(dir.path(), "vendor=1/ext");
+        extension_dir(dir.path(), "cfe/E");
 
-        // Read as a name, `vendor=1/*` would become a named entry with a glob —
-        // which the model rejects outright, leaving that directory with no
-        // spelling that works.
-        let resolved = args(&["--extension", "vendor=1/*"]).resolve(dir.path()).unwrap();
+        // The model refuses globs in a named entry, loudly. Re-reading the value
+        // as a bare path to dodge that would produce a pattern matching nothing
+        // and drop the extension in silence.
+        let resolved = args(&["--extension", "Named=cfe/*"]).resolve(dir.path()).unwrap();
 
         assert_eq!(
             resolved.extensions.unwrap(),
-            vec![ExtensionDecl::Path("vendor=1/*".to_string())]
+            vec![ExtensionDecl::Structured(StructuredExtensionDecl {
+                name: "Named".to_string(),
+                path: "cfe/*".to_string(),
+                depends_on: Vec::new(),
+            })],
+            "must reach the model as a named entry, which then rejects the glob"
         );
     }
 
