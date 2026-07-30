@@ -148,25 +148,25 @@ function Get-GitHubAssetInfo {
     # GitHub releases carry no manifest; checksums.txt is the counterpart the launcher
     # reads too.
     $checksums = $release.assets | Where-Object { $_.name -eq 'checksums.txt' } | Select-Object -First 1
+    if (-not $checksums) {
+        throw "Release $ReleaseVersion publishes no checksums.txt, refusing to install unverified"
+    }
+
+    $content = (Invoke-WebRequest -UseBasicParsing -Uri $checksums.browser_download_url).Content
+    # Served as application/octet-stream, so Content is a byte array, not a string.
+    $text = if ($content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($content) } else { [string] $content }
+
     $sha256 = ''
-    if ($checksums) {
-        $content = (Invoke-WebRequest -UseBasicParsing -Uri $checksums.browser_download_url).Content
-        # Served as application/octet-stream, so Content is a byte array, not a string.
-        $text = if ($content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($content) } else { [string] $content }
-
-        foreach ($line in ($text -split "`n")) {
-            $parts = $line.Trim() -split '\s+', 2
-            if ($parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $AssetName) {
-                $sha256 = $parts[0]
-                break
-            }
+    foreach ($line in ($text -split "`n")) {
+        $parts = $line.Trim() -split '\s+', 2
+        if ($parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $AssetName) {
+            $sha256 = $parts[0]
+            break
         }
+    }
 
-        # A published checksum list that does not cover the asset means the release is
-        # inconsistent; degrading to an unverified install would hide that.
-        if (-not $sha256) {
-            throw "checksums.txt of release $ReleaseVersion has no entry for $AssetName"
-        }
+    if (-not $sha256) {
+        throw "checksums.txt of release $ReleaseVersion has no entry for $AssetName"
     }
 
     return [pscustomobject]@{
@@ -191,8 +191,10 @@ function Get-InstalledVersion {
         return $null
     }
 
-    $match = [regex]::Match(($output -join ' '), '\d+\.\d+\.\d+')
-    if ($match.Success) { return $match.Value }
+    # The whole trailing token, so a prerelease suffix survives: matching only three
+    # numeric parts would read 0.3.0-beta.1 as 0.3.0 and reinstall it on every run.
+    $reported = ($output -join ' ') -split '\s+' | Where-Object { $_ } | Select-Object -Last 1
+    if ($reported -match '^\d+\.\d+\.\d+') { return $reported }
     return $null
 }
 
@@ -201,6 +203,7 @@ function Install-Binary {
 
     # A running LSP or MCP server holds the target open: Windows refuses to overwrite it
     # but does allow renaming it away, so the new binary can take its place immediately.
+    $retired = $null
     if (Test-Path -LiteralPath $Target) {
         $retired = "$Target.old-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
         try {
@@ -208,15 +211,32 @@ function Install-Binary {
         } catch {
             throw "Cannot replace $Target - stop running bsl-analyzer processes and retry: $($_.Exception.Message)"
         }
+    }
 
+    # The renamed copy is the only working install until the new file lands, so a failed
+    # move has to put it back instead of leaving the machine with no binary at all.
+    try {
+        Move-Item -LiteralPath $Source -Destination $Target -Force
+    } catch {
+        $failure = $_
+        if ($retired) {
+            try {
+                Move-Item -LiteralPath $retired -Destination $Target -Force
+                Write-Warn 'Install failed, restored the previous binary'
+            } catch {
+                Write-Warn "Install failed and the previous binary could not be restored, it is left as $retired"
+            }
+        }
+        throw $failure
+    }
+
+    if ($retired -and (Test-Path -LiteralPath $retired)) {
         try {
             Remove-Item -LiteralPath $retired -Force
         } catch {
             Write-Warn "Previous binary is still in use, left as $retired"
         }
     }
-
-    Move-Item -LiteralPath $Source -Destination $Target -Force
 }
 
 function Get-UserPath {
@@ -291,6 +311,19 @@ function Add-ToUserPath {
     return $true
 }
 
+function Update-Path {
+    param([string] $Directory)
+
+    if ($NoPathUpdate) {
+        Write-Info "PATH left untouched, run the binary as $(Join-Path $Directory $BinaryName)"
+        return
+    }
+
+    if (Add-ToUserPath -Directory $Directory) {
+        Write-Ok "Added $Directory to the user PATH, restart open terminals to pick it up"
+    }
+}
+
 function Invoke-Install {
     if ($Help) {
         Show-Usage
@@ -321,6 +354,8 @@ function Invoke-Install {
     $installed = Get-InstalledVersion -Path $target
     if ($installed -eq $Version) {
         Write-Ok "bsl-analyzer $Version is already installed"
+        # A rerun still has to finish what an interrupted or -NoPathUpdate run left undone.
+        Update-Path -Directory $InstallDir
         return
     }
     if ($installed) {
@@ -337,16 +372,14 @@ function Invoke-Install {
         Write-Info "Downloading $AssetName ($([math]::Round($info.size / 1MB, 1)) MiB)..."
         Invoke-WebRequest -UseBasicParsing -Uri $info.url -OutFile $staged
 
-        if ($info.sha256) {
-            Write-Info 'Verifying checksum...'
-            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $staged).Hash
-            if ($actual -ine $info.sha256) {
-                throw "Checksum mismatch! Expected: $($info.sha256) Got: $actual"
-            }
-            Write-Ok 'Checksum verified'
-        } else {
-            Write-Warn 'Release publishes no checksum, skipping verification'
+        # Unconditional: both sources are contracted to yield a checksum, so an empty one
+        # is a defect to surface rather than a reason to install something unverified.
+        Write-Info 'Verifying checksum...'
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $staged).Hash
+        if ($actual -ine $info.sha256) {
+            throw "Checksum mismatch! Expected: $($info.sha256) Got: $actual"
         }
+        Write-Ok 'Checksum verified'
 
         # Clears the mark-of-the-web SmartScreen would otherwise prompt on.
         Unblock-File -LiteralPath $staged
@@ -360,11 +393,7 @@ function Invoke-Install {
 
     Write-Ok "Installed bsl-analyzer $Version to $target"
 
-    if ($NoPathUpdate) {
-        Write-Info "PATH left untouched, run the binary as $target"
-    } elseif (Add-ToUserPath -Directory $InstallDir) {
-        Write-Ok "Added $InstallDir to the user PATH, restart open terminals to pick it up"
-    }
+    Update-Path -Directory $InstallDir
 
     $confirmed = Get-InstalledVersion -Path $target
     if ($confirmed) {

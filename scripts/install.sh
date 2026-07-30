@@ -221,7 +221,9 @@ main() {
         local current
         # --launcher-version answers from the launcher itself; plain --version would make
         # it fetch the whole app binary just to report a number.
-        current=$("$existing" --launcher-version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+        # The whole trailing token, so a prerelease suffix survives: matching only three
+        # numeric parts would read 0.3.0-beta.1 as 0.3.0 and reinstall it on every run.
+        current=$("$existing" --launcher-version 2>/dev/null | awk 'NR==1{print $NF}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
         if [ "$current" = "$VERSION" ]; then
             ok "bsl-analyzer ${VERSION} is already installed"
             check_path
