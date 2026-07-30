@@ -1753,9 +1753,10 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         return match parts[parts.len() - 1] {
             "ObjectModule.bsl" => Some(bsl_metadata::ModuleType::ObjectModule),
             "ManagerModule.bsl" => Some(bsl_metadata::ModuleType::ManagerModule),
-            // No record set: its owners are enumerable — four registers in
-            // `MdoType` and four collections named above — so a path that reached
-            // this branch is not one of them.
+            // A record set too: four of its eight owners — sequences,
+            // recalculations, an external data source's tables and cubes — are not
+            // in `MdoType`, and this branch is where their paths land.
+            "RecordSetModule.bsl" => Some(bsl_metadata::ModuleType::RecordSetModule),
             _ => None,
         };
     }
@@ -1775,11 +1776,6 @@ enum ModuleCollection {
     IntegrationServices,
     CommonCommands,
     Commands,
-    /// A collection outside `MdoType` whose objects own a record set: sequences,
-    /// recalculations, and an external data source's tables and cubes. The platform
-    /// gives `МодульНабораЗаписей` to eight kinds; the other four are the registers,
-    /// which `MdoType` knows.
-    RecordSetOwner,
 }
 
 fn module_collection(segment: &str) -> Option<ModuleCollection> {
@@ -1794,14 +1790,6 @@ fn module_collection(segment: &str) -> Option<ModuleCollection> {
         "integrationservices" => Some(ModuleCollection::IntegrationServices),
         "commoncommands" | "общиекоманды" => Some(ModuleCollection::CommonCommands),
         "commands" => Some(ModuleCollection::Commands),
-        "sequences"
-        | "последовательности"
-        | "recalculations"
-        | "перерасчеты"
-        | "tables"
-        | "таблицы"
-        | "cubes"
-        | "кубы" => Some(ModuleCollection::RecordSetOwner),
         // Common modules answer to both spellings, as the module index does — an
         // English-only branch left the Russian directory without a module type at all.
         _ => match bsl_metadata::module_path::collection_directory(segment) {
@@ -1845,12 +1833,6 @@ fn collection_module_type(
         {
             Some(ModuleType::ValueManagerModule)
         }
-        ModuleCollection::RecordSetOwner => match module_file {
-            "RecordSetModule.bsl" => Some(ModuleType::RecordSetModule),
-            "ManagerModule.bsl" => Some(ModuleType::ManagerModule),
-            "ObjectModule.bsl" => Some(ModuleType::ObjectModule),
-            _ => None,
-        },
         ModuleCollection::Mdo(mdo) => match module_file {
             "ObjectModule.bsl" => Some(ModuleType::ObjectModule),
             "ManagerModule.bsl" => Some(ModuleType::ManagerModule),
@@ -2610,15 +2592,15 @@ mod tests {
         assert_eq!(get_module_type_from_uri("Catalogs/Товары/Ext/RecordSetModule.bsl"), None);
 
         // Но набор записей есть не только у регистров: платформа даёт его восьми
-        // видам. Четыре из них — последовательности, перерасчёты, таблицы и кубы
-        // внешних источников — в `MdoType` отсутствуют, поэтому названы отдельно;
-        // владельцы перечислимы, и коллекция вне этого списка набора записей не
-        // имеет.
+        // видам, и четыре из них — последовательности, перерасчёты, таблицы и кубы
+        // внешних источников — в `MdoType` отсутствуют. Про такую коллекцию
+        // известна только форма пути, и ею же приходится обходиться: любое
+        // написание, любая вложенность.
         for path in [
             "Sequences/Очередность/Ext/RecordSetModule.bsl",
             "Последовательности/Очередность/Ext/RecordSetModule.bsl",
             "CalculationRegisters/Р/Recalculations/П/Ext/RecordSetModule.bsl",
-            "РегистрыРасчета/Р/Перерасчеты/П/Ext/RecordSetModule.bsl",
+            "РегистрыРасчёта/Р/Перерасчёты/П/Ext/RecordSetModule.bsl",
             "ExternalDataSources/И/Tables/Т/Ext/RecordSetModule.bsl",
             "ExternalDataSources/И/Cubes/К/Ext/RecordSetModule.bsl",
         ] {
@@ -2628,8 +2610,17 @@ mod tests {
                 "{path}"
             );
         }
-        assert_eq!(get_module_type_from_uri("SettingsStorages/Х/Ext/RecordSetModule.bsl"), None);
-        assert_eq!(get_module_type_from_uri("FilterCriteria/Ф/Ext/RecordSetModule.bsl"), None);
+
+        // Оборотная сторона той же неопределённости, названная прямо: `Ext` плюс имя
+        // файла — это всё свидетельство, поэтому нераспознанная коллекция получит
+        // тип и там, где владельцем не является. Цена ошибок несимметрична: лишний
+        // тип у пути, которого в выгрузке не бывает, безвреден, а потеря типа у
+        // настоящего модуля тиха и уже случалась трижды.
+        assert_eq!(
+            get_module_type_from_uri("SettingsStorages/Х/Ext/RecordSetModule.bsl"),
+            Some(bsl_metadata::ModuleType::RecordSetModule),
+            "declared limitation: shape is the only evidence for an unknown collection"
+        );
 
         // Каталог выгрузки — не имя из кода: написание через `ё` называет ту же
         // коллекцию, поэтому регистр расчёта распознаётся в обеих записях и его
