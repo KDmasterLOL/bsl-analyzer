@@ -248,6 +248,18 @@ pub enum InferenceDiagnostic {
         args: Vec<bool>,
     },
 
+    /// A manager-module call missing a required parameter. Mirrors
+    /// `MissedRequiredParameterCommonModule`: inference decides that the chain IS a
+    /// manager call (which the ownership verdict settles), the adapter reads the
+    /// signature and names what is missing.
+    MissedRequiredParameterManagerModule {
+        expr: ExprId,
+        callee: Name,
+        mdo_type: Name,
+        mdo_name: Name,
+        args: Vec<bool>,
+    },
+
     /// `Справочники.Товары.Метод()` written INSIDE the manager module of `Товары`:
     /// the object is already the module's own, so the chain is a detour. Decided here
     /// and not in lowering, because it takes the ownership verdict — a module variable
@@ -805,6 +817,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
             InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
             InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
+            InferenceDiagnostic::MissedRequiredParameterManagerModule { expr, .. } => *expr,
             InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
             InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
             InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
@@ -2107,36 +2120,54 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    /// Report `Справочники.Товары.Метод()` written inside the manager module of
-    /// `Товары` — but only for the chain literally spelled that way.
+    /// The plural as the SOURCE spells it, for a receiver that is literally
+    /// `<Path>.<Field>` and whose root types as a metadata collection.
     ///
-    /// The receiver must be a `<Path>.<Field>` whose root types as a metadata
-    /// collection: that root type IS the ownership verdict, already applied by
-    /// `infer_path_name`, so a module variable or a local of the same name never
-    /// reaches here. The two-step form (`М = Справочники.Товары; М.Метод()`) is not
-    /// this defect — nothing is redundant in the call itself — and the plural name is
-    /// taken from the source spelling, because that is what the author would delete.
-    fn report_redundant_three_level_access(
+    /// That root type is the ownership verdict, already applied by `infer_path_name`:
+    /// a module variable, a local or a same-named method never types as a collection,
+    /// so they never reach here. The two-step form (`М = Справочники.Товары;
+    /// М.Метод()`) returns `None` — nothing in that call is spelled redundantly, and
+    /// there is no plural in it to name.
+    fn spelled_out_collection_root(&self, receiver: ExprId) -> Option<Name> {
+        let Expr::Field { base: root, .. } = self.body.expr(receiver) else { return None };
+        let root_id = ExprId::from_idx(*root);
+        let Expr::Path(plural) = self.body.expr(root_id) else { return None };
+        let root_ty = self.expr_types.get(&root_id).copied().unwrap_or(self.db.unknown());
+        matches!(self.db.lookup_type(root_ty), TypeKind::ManagerCollection(_))
+            .then(|| plural.clone())
+    }
+
+    /// The two verdicts a spelled-out manager chain carries: the object may be the
+    /// enclosing module's own (`Справочники.Товары.Метод()` inside the manager module
+    /// of `Товары` is a detour), and the call may omit required parameters.
+    ///
+    /// Lowering decided both from three strings, and both need the ownership verdict,
+    /// which lowering does not have — that is why they live here now. Whether either
+    /// APPLIES is still the adapter's call: it reads the module's metadata and the
+    /// callee's signature and returns nothing when they do not fit. Emitting before
+    /// the method is resolved keeps that division exactly where it was.
+    fn report_spelled_out_chain_diagnostics(
         &mut self,
         call_expr: ExprId,
         receiver: ExprId,
         mdo_name: &Name,
+        method_name: &Name,
+        args: &[ExprId],
     ) {
-        let Expr::Field { base: root, .. } = self.body.expr(receiver) else { return };
-        let root_id = ExprId::from_idx(*root);
-        let Expr::Path(plural) = self.body.expr(root_id) else { return };
-        let plural = plural.clone();
-        if !matches!(
-            self.db
-                .lookup_type(self.expr_types.get(&root_id).copied().unwrap_or(self.db.unknown())),
-            TypeKind::ManagerCollection(_)
-        ) {
-            return;
-        }
+        let Some(plural) = self.spelled_out_collection_root(receiver) else { return };
         self.push_inference_diagnostic(InferenceDiagnostic::RedundantAccessToObjectThreeLevel {
             expr: call_expr,
+            mdo_type: plural.clone(),
+            mdo_name: mdo_name.clone(),
+        });
+        let arg_presence: Vec<bool> =
+            args.iter().map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing)).collect();
+        self.push_inference_diagnostic(InferenceDiagnostic::MissedRequiredParameterManagerModule {
+            expr: call_expr,
+            callee: method_name.clone(),
             mdo_type: plural,
             mdo_name: mdo_name.clone(),
+            args: arg_presence,
         });
     }
 
@@ -2312,6 +2343,24 @@ impl<'db> InferenceContext<'db> {
                     &resolver,
                 ) {
                     Ok(resolution) => {
+                        // The chain resolved, so the signature is knowable: name what the
+                        // call omits. Only for the spelled-out chain — for a receiver held
+                        // in a variable the two-level rule already covers the call.
+                        if let Some(plural) = self.spelled_out_collection_root(base_id) {
+                            let arg_presence: Vec<bool> = args
+                                .iter()
+                                .map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing))
+                                .collect();
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::MissedRequiredParameterManagerModule {
+                                    expr: call_expr,
+                                    callee: method_name.clone(),
+                                    mdo_type: plural,
+                                    mdo_name: mdo_name.clone(),
+                                    args: arg_presence,
+                                },
+                            );
+                        }
                         let receiver_name = receiver_display_name(self.db, receiver_ty)
                             .unwrap_or_else(|| mdo_name.clone());
                         if !resolution.is_export {
@@ -2358,7 +2407,13 @@ impl<'db> InferenceContext<'db> {
             if let TypeKind::ObjectManager(facet) = manager_receiver_kind {
                 let mdo_type = facet.mdo;
                 let mdo_name = hir_def::Name::new(&facet.name);
-                self.report_redundant_three_level_access(call_expr, base_id, &mdo_name);
+                self.report_spelled_out_chain_diagnostics(
+                    call_expr,
+                    base_id,
+                    &mdo_name,
+                    &method_name,
+                    args,
+                );
                 let resolver = self.get_resolver();
                 match crate::method_resolution::resolve_aliased_manager_call(
                     self.db,

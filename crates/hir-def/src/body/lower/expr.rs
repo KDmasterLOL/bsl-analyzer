@@ -892,15 +892,6 @@ fn record_qualified_call_facts(
             }
         }
         QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
-            ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
-                callee: field_name.as_str().to_string(),
-                module: None,
-                mdo_type: Some(mdo_type.clone()),
-                mdo_name: Some(mdo_name.clone()),
-                args: arg_presence,
-                range: call_node.text_range(),
-            });
-
             if let Some(manager_type) = ManagerType::from_name(&mdo_type) {
                 ctx.external_refs.push(ExternalRef::ManagerAccess {
                     manager_type,
@@ -1130,11 +1121,12 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
             .last()
             .map(|tok| tok.text().to_string())?;
 
-        let key = NormName::intern(&mdo_type);
-        if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
-            return None;
-        }
-
+        // No ownership check here. What this branch still feeds is dependency
+        // discovery, which runs BEFORE inference and is allowed to over-approximate:
+        // one extra edge costs one extra invalidation, a missing edge costs a wrong
+        // answer. The judgement that a local or a module variable holds the name
+        // belongs to inference, which has the resolver — and the guard here was
+        // incomplete anyway, seeing only declarations of the body.
         bsl_metadata::MdoType::from_plural(&mdo_type)?;
 
         tracing::debug!(

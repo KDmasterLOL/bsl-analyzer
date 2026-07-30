@@ -7,8 +7,8 @@ use ide_db::base_db::SourceDatabase;
 mod support;
 
 use support::{
-    mismatched_arg_counts, redundant_three_level, setup, setup_with_designer_config,
-    unresolved_fields, unresolved_kinds,
+    mismatched_arg_counts, missed_manager_params, redundant_three_level, setup,
+    setup_with_designer_config, unresolved_fields, unresolved_kinds,
 };
 
 const MANAGER_FIXTURE: &str = r#"
@@ -442,5 +442,55 @@ fn a_collection_root_yields_the_redundancy_verdict() {
         redundant_three_level(&db, file_id),
         vec![("Справочники".to_string(), "Товары".to_string())],
         "the chain is spelled out, and the plural comes from the source"
+    );
+}
+
+/// Вторая диагностика, переехавшая из лоуэринга: какие обязательные параметры
+/// менеджерного вызова пропущены. Инференс решает, что цепочка ЕСТЬ менеджерный
+/// вызов, адаптер читает сигнатуру и называет пропущенное.
+#[test]
+fn a_manager_call_reports_its_missing_parameters() {
+    let fixture = r#"
+//- /Documents/ПКО/Ext/ManagerModule.bsl
+Функция ПолучитьСсылку(Код, Имя) Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Результат = Документы.ПКО.ПолучитьСсылку();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        missed_manager_params(&db, file_id),
+        vec![("ПолучитьСсылку".to_string(), "Документы".to_string(), "ПКО".to_string())],
+        "the chain resolved, so the signature is knowable"
+    );
+}
+
+/// А удерживаемый корень вердикта не получает: `Перем Справочники` делает цепочку
+/// обращением к переменной, и лоуэринг этого не различал — его гард видел только
+/// объявления тела.
+#[test]
+fn a_held_root_reports_no_missing_parameters() {
+    let fixture = r#"
+//- /Catalogs/Товары/Ext/ManagerModule.bsl
+Функция Найти(Код) Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Перем Справочники;
+
+Процедура Тест()
+    Результат = Справочники.Товары.Найти();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        missed_manager_params(&db, file_id).is_empty(),
+        "got {:?}",
+        missed_manager_params(&db, file_id)
     );
 }

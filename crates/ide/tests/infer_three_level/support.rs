@@ -110,6 +110,30 @@ pub(super) fn redundant_three_level(
         .collect()
 }
 
+/// Пропущенные обязательные параметры менеджерного вызова: `(метод, plural, объект)`.
+pub(super) fn missed_manager_params(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+) -> Vec<(String, String, String)> {
+    db.infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            InferenceDiagnostic::MissedRequiredParameterManagerModule {
+                callee,
+                mdo_type,
+                mdo_name,
+                ..
+            } => Some((
+                callee.as_str().to_string(),
+                mdo_type.as_str().to_string(),
+                mdo_name.as_str().to_string(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn mismatched_arg_counts(
     db: &RootDatabaseImpl,
     file_id: FileId,

@@ -1078,6 +1078,31 @@ mod tests {
         }
     }
 
+    /// Обнаружение зависимостей над-приближает СОЗНАТЕЛЬНО: даже когда имя корня
+    /// занято локалью, ребро строится. Лишнее ребро стоит одной лишней инвалидации,
+    /// пропущенное — неверного ответа, поэтому пропуск здесь дефект, а лишнее нет.
+    /// Вердикт о владении принимает инференс, у которого есть резолвер.
+    #[test]
+    fn a_shadowed_root_still_yields_a_dependency_edge() {
+        let code = "Процедура Тест()\n    Перем Справочники;\n    \
+                    Справочники.Объект1.Метод();\nКонецПроцедуры";
+        let parse = parser::parse(code);
+        let method = parse
+            .syntax_node()
+            .descendants()
+            .find(|node| node.kind() == syntax::SyntaxKind::PROCEDURE_DEF)
+            .expect("fixture declares a procedure");
+        let lowered = lower_method_with_externals(&method, false, None);
+        assert!(
+            lowered.external_refs.iter().any(|r| matches!(
+                r,
+                ExternalRef::ManagerAccess { object_name, .. } if object_name.as_str() == "Объект1"
+            )),
+            "dependency discovery must not lose the edge; got {:?}",
+            lowered.external_refs
+        );
+    }
+
     #[test]
     fn manager_type_to_mdo_type_round_trips() {
         let all = [

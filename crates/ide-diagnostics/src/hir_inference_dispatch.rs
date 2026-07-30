@@ -92,6 +92,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
         InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
         InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
+        InferenceDiagnostic::MissedRequiredParameterManagerModule { expr, .. } => *expr,
         InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
         InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
         InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
@@ -174,6 +175,21 @@ fn dispatch_inference_diagnostic(
             let kind = RedundantAccessKind::TwoLevel { module: module.as_str().to_string() };
             handlers::redundant_access_to_object::from_hir(&kind, range, ctx)
         }
+        InferenceDiagnostic::MissedRequiredParameterManagerModule {
+            callee,
+            mdo_type,
+            mdo_name,
+            args,
+            ..
+        } => handlers::missed_required_parameter::from_hir(
+            callee.as_str(),
+            None,
+            Some(mdo_type.as_str()),
+            Some(mdo_name.as_str()),
+            args,
+            range,
+            ctx,
+        ),
         InferenceDiagnostic::RedundantAccessToObjectThreeLevel { mdo_type, mdo_name, .. } => {
             let kind = RedundantAccessKind::ThreeLevel {
                 mdo_type: mdo_type.as_str().to_string(),
