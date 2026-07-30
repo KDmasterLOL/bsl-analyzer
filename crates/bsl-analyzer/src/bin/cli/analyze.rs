@@ -104,6 +104,7 @@ pub fn analyze(
     only_diagnostic: Option<String>,
     diff_filter_path: Option<PathBuf>,
     ignored_authors: Vec<String>,
+    source_set: super::source_set::SourceSetArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     analyze_salsa(
         source_dir,
@@ -117,6 +118,7 @@ pub fn analyze(
         only_diagnostic,
         ScopeCliArgs { incremental, changed_files, git_diff, diff_filter: diff_filter_path },
         ignored_authors,
+        source_set,
     )
 }
 
@@ -218,6 +220,7 @@ fn analyze_salsa(
     only_diagnostic: Option<String>,
     scope_args: ScopeCliArgs,
     ignored_authors: Vec<String>,
+    source_set: super::source_set::SourceSetArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use std::{
         panic::{catch_unwind, AssertUnwindSafe},
@@ -270,11 +273,16 @@ fn analyze_salsa(
     let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
 
     tracing::info!("Loading project configuration");
-    let proj_config = if let Some(ref cfg) = config_path {
+    let mut proj_config = if let Some(ref cfg) = config_path {
         project_model::ProjectConfig::load_from_file(cfg)?
     } else {
         project_model::ProjectConfig::load(&source_dir)?.unwrap_or_default()
     };
+
+    // Applied before anything reads the config: `configuration_path` and
+    // `load_metadata` below run on this value, and the path the first produces
+    // becomes the interned configuration input the diagnostics resolve through.
+    source_set.resolve(&source_dir)?.apply_to(&mut proj_config);
 
     let scope = build_scope(&source_dir, &scope_args, proj_config.analysis.diff_base.as_deref())?;
     let author_filter =

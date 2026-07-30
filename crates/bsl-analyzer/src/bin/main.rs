@@ -128,11 +128,17 @@ enum Commands {
 
         #[arg(long = "ignored-author", alias = "ignored-authors", value_delimiter = ',')]
         ignored_authors: Vec<String>,
+
+        #[command(flatten)]
+        source_set: cli::source_set::SourceSetArgs,
     },
 
     CheckConfig {
         #[arg(short, long)]
         config: std::path::PathBuf,
+
+        #[command(flatten)]
+        source_set: cli::source_set::SourceSetArgs,
     },
 
     /// Print the machine-readable contract of this build: CLI commands and flags, MCP
@@ -314,6 +320,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             only_diagnostic,
             diff_filter,
             ignored_authors,
+            source_set,
         }) => analyze(
             source_dir,
             workspace_dir,
@@ -329,8 +336,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             only_diagnostic,
             diff_filter,
             ignored_authors,
+            source_set,
         ),
-        Some(Commands::CheckConfig { config }) => check_config(config),
+        Some(Commands::CheckConfig { config, source_set }) => check_config(config, source_set),
         Some(Commands::Contract) => {
             println!("{}", serde_json::to_string_pretty(&mcp_server::contract::document())?);
             Ok(())
@@ -468,11 +476,15 @@ mod contract_surface {
               analyze
                 changed-files !git-diff
                 config (-c) [configuration]
+                configuration-root
                 diff-filter
+                extension !no-extensions
+                extension-depends-on
                 format = console | jsonl
                 git-diff !changed-files
                 ignored-author [ignored-authors]
                 incremental
+                no-extensions !extension
                 only-diagnostic
                 output-dir (-o) [outputDir]
                 quiet (-q) [silent]
@@ -482,6 +494,10 @@ mod contract_surface {
                 workspace-dir (-w) [workspaceDir]
               check-config
                 config (-c)
+                configuration-root
+                extension !no-extensions
+                extension-depends-on
+                no-extensions !extension
               contract
               format
                 check !write

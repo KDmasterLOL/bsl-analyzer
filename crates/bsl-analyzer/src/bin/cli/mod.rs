@@ -12,3 +12,4 @@ pub mod mcp;
 pub mod rules;
 pub mod search_baseline;
 pub mod smoke;
+pub mod source_set;

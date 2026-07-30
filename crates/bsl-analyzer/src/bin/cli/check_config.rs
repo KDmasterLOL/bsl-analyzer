@@ -1,9 +1,16 @@
 use std::{error::Error, fmt::Write as _, io};
 
-pub fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send + Sync>> {
+use super::source_set::{
+    configuration_root_provider, extensions_provider, SourceProvider, SourceSetArgs,
+};
+
+pub fn check_config(
+    config: std::path::PathBuf,
+    source_set: SourceSetArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing::info!("Checking configuration: {:?}", config);
 
-    let project_config = project_model::ProjectConfig::load_from_file(&config).map_err(|e| {
+    let mut project_config = project_model::ProjectConfig::load_from_file(&config).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -13,14 +20,26 @@ pub fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Se
             ),
         )
     })?;
-    let diagnostics_config = diagnostics_config_from_project(&project_config)?;
-    let diagnostics =
-        mcp_server::resolve_project_baseline_diagnostics(config.parent(), &project_config);
+    // Relative flag paths resolve against this command's project root — the
+    // config file's directory — exactly as the paths inside that file do.
     let project_root = match config.parent() {
         Some(parent) if parent.as_os_str().is_empty() => std::path::Path::new("."),
         Some(parent) => parent,
         None => std::path::Path::new("."),
     };
+    let providers = SourceProviders {
+        configuration_root: configuration_root_provider(
+            &source_set,
+            project_config.configuration_root.as_deref(),
+            project_root,
+        ),
+        extensions: extensions_provider(&source_set, project_config.extensions.as_ref()),
+    };
+    source_set.resolve(project_root)?.apply_to(&mut project_config);
+
+    let diagnostics_config = diagnostics_config_from_project(&project_config)?;
+    let diagnostics =
+        mcp_server::resolve_project_baseline_diagnostics(config.parent(), &project_config);
     let project = project_model::Project::with_config(project_root, project_config.clone());
     let report = build_check_config_report(
         &config,
@@ -28,6 +47,7 @@ pub fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Se
         &project,
         &diagnostics_config,
         &diagnostics,
+        &providers,
     );
 
     print!("{report}");
@@ -79,12 +99,21 @@ fn baseline_diagnostics_have_issues(
     baseline_diagnostics.workspace.issue.is_some() || baseline_diagnostics.reference.issue.is_some()
 }
 
+/// Where each resolved source-set field came from. Reported per field: the root
+/// and the extension list are decided independently, so one label for both
+/// would misname the origin whenever only one of them is overridden.
+struct SourceProviders {
+    configuration_root: SourceProvider,
+    extensions: SourceProvider,
+}
+
 fn build_check_config_report(
     config_path: &std::path::Path,
     project_config: &project_model::ProjectConfig,
     project: &Result<project_model::Project, project_model::ProjectError>,
     diagnostics_config: &ide::DiagnosticsConfig,
     baseline_diagnostics: &mcp_server::BaselineConfigDiagnostics,
+    providers: &SourceProviders,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(
@@ -109,11 +138,28 @@ fn build_check_config_report(
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "Project:");
+    let declared_root = project_config.configuration_root.as_deref();
+    let used_root = match providers.configuration_root {
+        SourceProvider::AutoDiscovery => None,
+        _ => declared_root,
+    };
     let _ = writeln!(
         out,
-        "  Source root: {}",
-        project_config.configuration_root.as_deref().unwrap_or("auto-discovery")
+        "  Source root: {} [from: {}]",
+        used_root.unwrap_or("auto-discovery"),
+        providers.configuration_root.label(config_path)
     );
+    // A declared root without a `Configuration.xml` does not decide anything —
+    // the model warns and searches instead. Saying so beats printing the value
+    // next to a provider that contradicts it.
+    if used_root.is_none() {
+        if let Some(ignored) = declared_root {
+            let _ = writeln!(
+                out,
+                "               (declared \"{ignored}\" ignored: no Configuration.xml there)"
+            );
+        }
+    }
     let _ = writeln!(
         out,
         "  Extensions:  {}",
@@ -138,6 +184,7 @@ fn build_check_config_report(
                 .join(", "),
         }
     );
+    let _ = writeln!(out, "  Extensions from: {}", providers.extensions.label(config_path));
     let _ =
         writeln!(out, "  Language:    {}", project_config.language.as_deref().unwrap_or("default"));
     let _ = writeln!(
@@ -290,7 +337,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{build_check_config_report, check_config, diagnostics_config_from_project};
+    use super::{
+        build_check_config_report, check_config, diagnostics_config_from_project, SourceProvider,
+        SourceProviders, SourceSetArgs,
+    };
 
     #[test]
     fn check_config_accepts_toml_project_config() {
@@ -330,7 +380,7 @@ select_branch = "develop"
         )
         .unwrap();
 
-        check_config(config).unwrap();
+        check_config(config, SourceSetArgs::default()).unwrap();
     }
 
     #[test]
@@ -372,7 +422,7 @@ select_branch = "develop"
         )
         .unwrap();
 
-        check_config(config).unwrap();
+        check_config(config, SourceSetArgs::default()).unwrap();
     }
 
     #[test]
@@ -381,7 +431,7 @@ select_branch = "develop"
         let config = dir.path().join("bsl-analyzer.toml");
         fs::write(&config, "invalid {{{ toml").unwrap();
 
-        let error = check_config(config).unwrap_err();
+        let error = check_config(config, SourceSetArgs::default()).unwrap_err();
 
         assert!(error.to_string().contains("failed to parse configuration file"));
     }
@@ -399,7 +449,7 @@ backend = "postgres"
         )
         .unwrap();
 
-        let error = check_config(config).unwrap_err();
+        let error = check_config(config, SourceSetArgs::default()).unwrap_err();
 
         assert!(error.to_string().contains("search baseline diagnostics reported errors"));
     }
@@ -469,6 +519,10 @@ backend = "postgres"
             &project,
             &diag_config,
             &baseline,
+            &SourceProviders {
+                configuration_root: SourceProvider::ConfigFile,
+                extensions: SourceProvider::ConfigFile,
+            },
         );
 
         assert!(report.contains("Configuration is invalid."));
