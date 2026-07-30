@@ -26,7 +26,6 @@ use crate::builtin;
 use crate::db::HirDatabase;
 use crate::lower::TyLoweringContext;
 use crate::method_resolution;
-use crate::platform_manager_lookup::{resolve_platform_manager_method, PlatformMethodResolution};
 
 static DEPRECATED_PLATFORM_MEMBER_OWNERS: Lazy<FxHashSet<String>> = Lazy::new(|| {
     let mut owners = FxHashSet::default();
@@ -2187,62 +2186,27 @@ impl<'db> InferenceContext<'db> {
 
     fn infer_call(&mut self, call_expr: ExprId, callee: ExprId, args: &[ExprId]) -> TypeId {
         let callee_expr = self.body.expr(callee);
-        if let Expr::QualifiedPath(qualified_path) = callee_expr {
-            match qualified_path.segments().len() {
-                3 => {
-                    let mdo_type_plural = qualified_path.segments()[0].clone();
-                    let mdo_name = qualified_path.segments()[1].clone();
-                    let method_name = qualified_path.segments()[2].clone();
-                    // Lowering folds the whole chain into one node, so the root
-                    // never reaches `infer_path_name` and never meets the
-                    // barrier that keeps a held name from denoting a platform
-                    // global. It is applied here instead, on the only entry
-                    // where the root is spelled out in source: the other caller
-                    // synthesises the plural from the enclosing manager module,
-                    // where no such spelling exists to be shadowed.
-                    if self.manager_collection_shadowed(&mdo_type_plural) {
-                        for arg in args {
-                            self.infer_expr(*arg);
-                        }
-                        return self.db.unknown();
-                    }
-                    return self.infer_three_level_call(
-                        &mdo_type_plural,
-                        &mdo_name,
-                        &method_name,
-                        args,
-                        callee,
-                    );
-                }
-                other => {
-                    debug_assert!(
-                        false,
-                        "unexpected QualifiedPath segment count {other} in infer_call",
-                    );
-                    tracing::debug!(
-                        segments = other,
-                        ?qualified_path,
-                        "QualifiedPath with unexpected segment count reached infer_call; \
-                         falling through to Ty::Unknown"
-                    );
-                }
-            }
-        }
-
         if let Expr::Field { base, field } = callee_expr {
             let base_id = ExprId::from_idx(*base);
             let method_name = field.clone();
 
-            let receiver_ty = self.infer_expr(base_id);
+            let mut receiver_ty = self.infer_expr(base_id);
 
             if self.is_unknown(receiver_ty) {
                 let base_expr = self.body.expr(base_id).clone();
                 if let Expr::Path(path_name) = base_expr {
-                    if let Some(return_ty) =
-                        self.dispatch_bare_ident_field_call(&path_name, &method_name, args, callee)
-                    {
-                        self.expr_types.insert(callee, self.db.unknown());
-                        return return_ty;
+                    match self.dispatch_bare_ident_field_call(
+                        &path_name,
+                        &method_name,
+                        args,
+                        callee,
+                    ) {
+                        BareReceiverDispatch::Resolved(return_ty) => {
+                            self.expr_types.insert(callee, self.db.unknown());
+                            return return_ty;
+                        }
+                        BareReceiverDispatch::Receiver(ty) => receiver_ty = ty,
+                        BareReceiverDispatch::Unhandled => {}
                     }
                 }
             }
@@ -2925,23 +2889,23 @@ impl<'db> InferenceContext<'db> {
         method_name: &Name,
         args: &[ExprId],
         call_expr: ExprId,
-    ) -> Option<TypeId> {
+    ) -> BareReceiverDispatch {
         use hir_def::resolver::Resolution;
 
         let resolver = self.get_resolver();
 
         match resolver.resolve_name(self.db, module_name) {
             Some(Resolution::Local(_) | Resolution::Variable(_) | Resolution::Method(_)) => {
-                return None;
+                return BareReceiverDispatch::Unhandled;
             }
             Some(Resolution::Builtin(_)) | None => {}
         }
 
         if self.body_declares_binding(module_name) {
-            return None;
+            return BareReceiverDispatch::Unhandled;
         }
         if self.assigned_var_names.contains(&NormName::intern(module_name.as_str())) {
-            return None;
+            return BareReceiverDispatch::Unhandled;
         }
 
         // A form attribute shadows module and global names for a bare receiver.
@@ -2953,7 +2917,7 @@ impl<'db> InferenceContext<'db> {
             for arg in args {
                 self.infer_expr(*arg);
             }
-            return Some(self.db.unknown());
+            return BareReceiverDispatch::Resolved(self.db.unknown());
         }
 
         if resolver.user_common_module_exists(self.db, module_name) {
@@ -2976,7 +2940,7 @@ impl<'db> InferenceContext<'db> {
                 },
             );
 
-            return Some(self.infer_qualified_call(
+            return BareReceiverDispatch::Resolved(self.infer_qualified_call(
                 module_name,
                 method_name,
                 args,
@@ -2986,11 +2950,10 @@ impl<'db> InferenceContext<'db> {
         }
 
         // A manager module that calls one of its own methods through the object's
-        // own name (`ОбъектМетаданных.Метод()` for objects accessed without a
-        // collection prefix, e.g. data processors and reports) is a redundant
-        // self-qualified access — the method is reachable directly. The handler
-        // confirms the name is this module's own and that the metadata kind is one
-        // accessed without a collection prefix.
+        // own name (`ОбъектМетаданных.Метод()`) is a redundant self-qualified
+        // access — the method is reachable directly. The name denotes this
+        // module's own manager, so the call itself is an ordinary manager-member
+        // call: hand the receiver type back and let the one route judge it.
         if let Some((mdo_type, self_name)) =
             crate::this_object::resolve_this_manager_owner(self.db, &resolver)
         {
@@ -3001,22 +2964,14 @@ impl<'db> InferenceContext<'db> {
                         module: module_name.clone(),
                     },
                 );
-                // Resolve the call as the equivalent collection-qualified call so the
-                // method is still validated (a misspelled self-method keeps its
-                // unresolved-call diagnostic) and the return type stays precise.
-                if let Some(plural) = mdo_type.russian_plural() {
-                    return Some(self.infer_three_level_call(
-                        &Name::new(plural),
-                        &self_name,
-                        method_name,
-                        args,
-                        call_expr,
-                    ));
-                }
-                for arg in args {
-                    self.infer_expr(*arg);
-                }
-                return Some(self.db.unknown());
+                // The same type the collection-qualified chain produces for its
+                // middle segment (`promote_collection_member`), so both spellings
+                // resolve through one member lookup rather than two.
+                return BareReceiverDispatch::Receiver(self.db.object_manager(
+                    mdo_type,
+                    self_name.as_str().to_string(),
+                    &RootConfigCtx,
+                ));
             }
         }
 
@@ -3034,7 +2989,7 @@ impl<'db> InferenceContext<'db> {
                 }
                 self.check_member_env(call_expr, method_name, env, EnvMemberKind::Method);
                 self.expr_types.insert(call_expr, self.db.unknown());
-                return Some(return_ty);
+                return BareReceiverDispatch::Resolved(return_ty);
             }
             crate::platform_global_lookup::PlatformGlobalLookup::KnownContainerMissingMember => {
                 for arg in args {
@@ -3046,7 +3001,7 @@ impl<'db> InferenceContext<'db> {
                     method_name: method_name.clone(),
                     kind: UnresolvedMethodKind::MethodNotFound,
                 });
-                return Some(self.db.unknown());
+                return BareReceiverDispatch::Resolved(self.db.unknown());
             }
             crate::platform_global_lookup::PlatformGlobalLookup::NotAContainer => {}
         }
@@ -3060,101 +3015,7 @@ impl<'db> InferenceContext<'db> {
             method_name: method_name.clone(),
             kind: UnresolvedMethodKind::ReceiverNotResolved,
         });
-        Some(self.db.unknown())
-    }
-
-    fn infer_three_level_call(
-        &mut self,
-        mdo_type_plural: &Name,
-        mdo_name: &Name,
-        method_name: &Name,
-        args: &[ExprId],
-        call_expr: ExprId,
-    ) -> TypeId {
-        for arg in args {
-            self.infer_expr(*arg);
-        }
-
-        let mdo_type_opt = bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str());
-
-        // The call is lowered as one QualifiedPath, so the collection root
-        // (`Справочники`, `Перечисления`, …) never passes through
-        // `infer_path_name`; its availability is checked here instead. The
-        // verdict does not depend on whether the method resolves — the root
-        // itself is what the restricted environments lack.
-        if let Some(mdo_type) = mdo_type_opt {
-            self.check_manager_collection_env(call_expr, mdo_type_plural, mdo_type);
-        }
-
-        let resolver = self.get_resolver();
-        let receiver_name =
-            Name::new(&format!("{}.{}", mdo_type_plural.as_str(), mdo_name.as_str()));
-
-        match method_resolution::resolve_three_level_call(
-            self.db,
-            mdo_type_plural,
-            mdo_name,
-            method_name,
-            &resolver,
-        ) {
-            Ok(resolution) => {
-                if !resolution.is_export {
-                    self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
-                        expr: call_expr,
-                        receiver_name: receiver_name.clone(),
-                        method_name: method_name.clone(),
-                        kind: UnresolvedMethodKind::MethodNotExport,
-                    });
-                }
-
-                let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
-                    self.db,
-                    method_name,
-                    resolution.method_id,
-                    resolution.return_type,
-                ) else {
-                    return self.db.unknown();
-                };
-                self.record_candidate_call_arg_binding(call_expr, args, candidates)
-            }
-            Err(UnresolvedMethodKind::MethodNotFound) => {
-                let plat_res: Option<PlatformMethodResolution> = mdo_type_opt
-                    .filter(|mdo_type| self.mdo_declared(*mdo_type, mdo_name))
-                    .and_then(|mdo_type| {
-                        resolve_platform_manager_method(self.db, mdo_type, mdo_name, method_name)
-                    });
-                if let Some(res) = plat_res {
-                    let mut candidates = res.candidates;
-                    if mdo_type_opt == Some(bsl_metadata::MdoType::Constant) {
-                        self.refine_constant_candidates(mdo_name, method_name, &mut candidates);
-                    }
-                    return self.record_candidate_call_arg_binding(call_expr, args, candidates);
-                }
-
-                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
-                    expr: call_expr,
-                    receiver_name,
-                    method_name: method_name.clone(),
-                    kind: UnresolvedMethodKind::MethodNotFound,
-                });
-                self.db.unknown()
-            }
-            Err(kind) => {
-                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
-                    expr: call_expr,
-                    receiver_name,
-                    method_name: method_name.clone(),
-                    kind,
-                });
-                self.db.unknown()
-            }
-        }
-    }
-
-    fn mdo_declared(&self, mdo_type: bsl_metadata::MdoType, mdo_name: &Name) -> bool {
-        let needle = mdo_name.as_str();
-        self.db.resolve_metadata_object(self.context_file_id, mdo_type, needle).is_some()
-            || self.db.resolve_register(self.context_file_id, mdo_type, needle).is_some()
+        BareReceiverDispatch::Resolved(self.db.unknown())
     }
 
     fn resolve_constant_value_type(&self, mdo_name: &Name) -> Option<TypeId> {
@@ -3236,6 +3097,18 @@ fn const_eval_literal_index(expr: &Expr) -> Option<usize> {
 /// Spellings that denote the module's own object or form, both languages.
 fn is_self_name(name_lower: &str) -> bool {
     matches!(name_lower, "этотобъект" | "thisobject" | "этаформа" | "thisform")
+}
+
+/// Что дал разбор голого имени в позиции получателя вызова.
+enum BareReceiverDispatch {
+    /// Имя не принадлежит ни одной поверхности разбора: получатель остаётся
+    /// неизвестным, вызов разбирается дальше как есть.
+    Unhandled,
+    /// Вызов разобран здесь целиком, вместе со своими диагностиками.
+    Resolved(TypeId),
+    /// Имя обозначает тип, и вызов на нём — обычный вызов члена: судит его
+    /// общий маршрут, а не отдельная ветка.
+    Receiver(TypeId),
 }
 
 fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<hir_def::Name> {

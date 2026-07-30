@@ -148,3 +148,17 @@ pub(super) fn mismatched_arg_counts(
         })
         .collect()
 }
+
+/// Имена получателей из вердиктов об избыточном двухзвенном обращении.
+pub(super) fn redundant_two_level(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String> {
+    db.infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            InferenceDiagnostic::RedundantAccessToObjectTwoLevel { module, .. } => {
+                Some(module.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}

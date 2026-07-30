@@ -7,8 +7,8 @@ use ide_db::base_db::SourceDatabase;
 mod support;
 
 use support::{
-    mismatched_arg_counts, missed_manager_params, redundant_three_level, setup,
-    setup_with_designer_config, unresolved_fields, unresolved_kinds,
+    mismatched_arg_counts, missed_manager_params, redundant_three_level, redundant_two_level,
+    setup, setup_with_designer_config, unresolved_fields, unresolved_kinds,
 };
 
 const MANAGER_FIXTURE: &str = r#"
@@ -211,6 +211,81 @@ fn self_qualified_call_in_constant_manager_still_checks_the_method() {
         vec![UnresolvedMethodKind::MethodNotFound],
         "constants own a manager module like any other manager-backed kind — the \
          self-qualified call must be checked the same way"
+    );
+}
+
+/// Самоквалифицированный вызов даёт тот же результат, что и обращение через
+/// коллекцию: тип возврата метода, вердикт о неэкспортном методе, вердикт об
+/// избыточности получателя. Три свойства закреплены отдельно, потому что каждое
+/// приходит своим путём и молчание любого из них — потеря.
+#[test]
+fn a_self_qualified_call_keeps_the_return_type_of_its_method() {
+    let fixture = r#"
+//- /Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl
+Функция Собрать() Экспорт
+    Возврат "готово";
+КонецФункции
+
+Процедура Тест()
+    Р = ТестовыйОтчёт.Собрать();
+КонецПроцедуры
+"#;
+    let (db, file_id) =
+        setup_with_designer_config(fixture, "/Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl");
+    let ty = db.infer(file_id).var_types.get("р").copied();
+    let shape = ty.map(|ty| format!("{:?}", db.lookup_type(ty)));
+    assert_eq!(
+        ty,
+        Some(db.string(None, false)),
+        "the method's return type must survive the call; got {shape:?}"
+    );
+    assert!(
+        unresolved_kinds(&db, file_id).is_empty(),
+        "the method exists and is exported; got {:?}",
+        unresolved_kinds(&db, file_id)
+    );
+}
+
+#[test]
+fn a_self_qualified_call_to_a_non_exported_method_reports_it() {
+    let fixture = r#"
+//- /Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl
+Функция Собрать()
+    Возврат "готово";
+КонецФункции
+
+Процедура Тест()
+    Р = ТестовыйОтчёт.Собрать();
+КонецПроцедуры
+"#;
+    let (db, file_id) =
+        setup_with_designer_config(fixture, "/Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl");
+    assert_eq!(
+        unresolved_kinds(&db, file_id),
+        vec![UnresolvedMethodKind::MethodNotExport],
+        "reachable through the manager only if exported — the same rule as for the \
+         collection-qualified form"
+    );
+}
+
+#[test]
+fn a_self_qualified_call_stays_a_redundant_access() {
+    let fixture = r#"
+//- /Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl
+Функция Собрать() Экспорт
+    Возврат "готово";
+КонецФункции
+
+Процедура Тест()
+    Р = ТестовыйОтчёт.Собрать();
+КонецПроцедуры
+"#;
+    let (db, file_id) =
+        setup_with_designer_config(fixture, "/Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl");
+    assert_eq!(
+        redundant_two_level(&db, file_id),
+        vec!["ТестовыйОтчёт".to_string()],
+        "the method is reachable directly from its own module — the receiver is redundant"
     );
 }
 
