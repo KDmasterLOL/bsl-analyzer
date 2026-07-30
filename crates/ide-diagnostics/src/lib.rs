@@ -155,9 +155,9 @@ pub fn apply_extension_merge<'db>(
     // Ordinary module (and any extension file with no resolvable base): byte-identical to the
     // standalone pass, minus any in-code suppression directives.
     if weaving.is_none() && effective.is_none() {
+        supersede_dominated(&mut standalone);
         suppression::apply(db, file_id, config, &mut standalone);
         scope_gate::apply(db, file_set, file_id, config, &mut standalone);
-        supersede_dominated(&mut standalone);
         normalize_diagnostics(&mut standalone);
         return standalone;
     }
@@ -228,9 +228,9 @@ pub fn apply_extension_merge<'db>(
         standalone.extend(effective::remap_inserted(eff_base_sensitive, &effmod.segments));
     }
 
+    supersede_dominated(&mut standalone);
     suppression::apply(db, file_id, config, &mut standalone);
     scope_gate::apply(db, file_set, file_id, config, &mut standalone);
-    supersede_dominated(&mut standalone);
     normalize_diagnostics(&mut standalone);
     standalone
 }

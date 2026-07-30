@@ -126,6 +126,26 @@ mod tests {
         );
     }
 
+    /// Подавление скрывает готовый итог, а не участвует в выборе победителя:
+    /// заглушив точную диагностику, пользователь не должен получить взамен ту,
+    /// которую она вытеснила как неверную.
+    #[test]
+    fn suppressing_the_winner_does_not_resurrect_the_loser() {
+        let code = "Процедура Тест()\n    // bsl-analyzer:disable-next-line \
+                    GlobalPropertyNotWritable\n    Справочники = Справочники;\nКонецПроцедуры\n";
+        let diags = crate::test_utils::check_file_diagnostics(code);
+        let pair: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.code,
+                    DiagnosticCode::GlobalPropertyNotWritable | DiagnosticCode::SelfAssign
+                )
+            })
+            .collect();
+        assert!(pair.is_empty(), "suppression hides the pair, it does not swap it:\n{pair:#?}");
+    }
+
     #[test]
     fn repeated_assignment_is_flagged_once_per_statement() {
         let code = r#"
