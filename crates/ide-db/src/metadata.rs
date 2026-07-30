@@ -2004,16 +2004,18 @@ pub(crate) fn find_common_module_by_path(
     // module's metadata stayed `None` and every metadata diagnostic over it was silent.
     // Resolve by the name segment instead, the way the service matchers above already do.
     //
-    // The segment after `CommonModules/` is the module's directory name, which 1C keeps
-    // identical to the metadata `<Name>` (the designer enforces it) — so `find_common_module`
-    // (keyed on the parsed name) resolves it. `rposition` takes the module-level
-    // `CommonModules`, not an accidental one in the workspace prefix above the config root.
+    // The object segment is the module's directory name, which 1C keeps identical to
+    // the metadata `<Name>` (the designer enforces it) — so `find_common_module`
+    // (keyed on the parsed name) resolves it. The segment comes from the shared path
+    // specification and nowhere else: a scan of its own would have to repeat both the
+    // accepted spellings of the directory and the rule that keeps an ancestor
+    // directory from passing for the collection.
     let file_str = file_path.to_string_lossy().replace('\\', "/");
-    let parts: Vec<&str> = file_str.split('/').collect();
-    let cm_idx = parts.iter().rposition(|&p| p == "CommonModules")?;
-    let name = parts.get(cm_idx + 1)?;
+    let split = bsl_metadata::module_path::split_module_path(&file_str, |segment| {
+        matches!(module_collection(segment), Some(ModuleCollection::CommonModules))
+    })?;
 
-    configuration.find_common_module(name).cloned()
+    configuration.find_common_module(split.object_name).cloned()
 }
 
 pub(crate) fn load_form_from_path(file_path: &Path) -> Option<Arc<bsl_metadata::Form>> {
@@ -2068,9 +2070,13 @@ pub fn build_module_metadata(
                     common_module = Some(Arc::new(cm));
                 }
             }
+            // A constant's value-manager module has the same owner as its manager
+            // module: classifying it without loading that owner would leave the
+            // diagnostics it was classified FOR without the metadata they read.
             bsl_metadata::ModuleType::ManagerModule
             | bsl_metadata::ModuleType::ObjectModule
-            | bsl_metadata::ModuleType::RecordSetModule => {
+            | bsl_metadata::ModuleType::RecordSetModule
+            | bsl_metadata::ModuleType::ValueManagerModule => {
                 if let Some(ref info) = path_info {
                     if let (Some(mdo_type), Some(ref name)) = (info.mdo_type, &info.name) {
                         if matches!(
@@ -2254,6 +2260,44 @@ mod tests {
             path_input: ConfigurationPathInput<'db>,
         ) -> Arc<Configuration> {
             load_configuration(self, path_input)
+        }
+    }
+
+    /// Классификация без загрузки владельца бесполезна: диагностики, ради которых
+    /// тип и понадобился, читают метаданные константы.
+    #[test]
+    fn value_manager_module_loads_its_constant() {
+        let mut config = bsl_metadata::Configuration::new("Test");
+        config.add_metadata_object(bsl_metadata::MetadataObject::new(
+            bsl_metadata::MdoType::Constant,
+            "СтрокаКонст",
+        ));
+
+        let metadata = build_module_metadata(
+            std::path::Path::new("Constants/СтрокаКонст/Ext/ValueManagerModule.bsl"),
+            Some(&config),
+        );
+
+        assert_eq!(metadata.module_type, bsl_metadata::ModuleType::ValueManagerModule);
+        assert!(metadata.mdo.is_some(), "the constant owns this module");
+    }
+
+    /// То же и для русского написания каталога общих модулей: тип есть, а поиск
+    /// владельца шёл своим обходом и знал только английское имя.
+    #[test]
+    fn a_russian_common_module_directory_loads_its_metadata() {
+        let root = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer"
+        ));
+        let config = bsl_metadata::load_from_directory(&root).expect("fixture must load");
+
+        for dir in ["CommonModules", "ОбщиеМодули"] {
+            let path = root.join(dir).join("КлиентскийОбщийМодуль/Ext/Module.bsl");
+            let metadata = build_module_metadata(&path, Some(&config));
+            assert_eq!(metadata.module_type, bsl_metadata::ModuleType::CommonModule, "{dir}");
+            assert!(metadata.common_module.is_some(), "{dir}: module metadata");
+            assert!(metadata.execution_context.is_some(), "{dir}: execution context");
         }
     }
 
