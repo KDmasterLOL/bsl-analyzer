@@ -12,6 +12,7 @@ use crate::cache::{
     update_current_link, verify_file_checksum, write_stable_version, SwapLock,
 };
 use crate::entities::{get_platform_binary, FileInfo};
+use crate::http;
 use crate::messages::messages;
 use crate::provider::ReleaseProvider;
 
@@ -26,18 +27,11 @@ const LAUNCHER_MAPPINGS: &[(&str, &str)] = &[
 ];
 
 fn create_http_client() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(READ_TIMEOUT)
-        .build()
-        .context("Failed to create HTTP client")
+    http::build_client(|builder| builder.connect_timeout(CONNECT_TIMEOUT).timeout(READ_TIMEOUT))
 }
 
 fn create_download_client() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()
-        .context("Failed to create HTTP client")
+    http::build_client(|builder| builder.connect_timeout(CONNECT_TIMEOUT))
 }
 
 fn fetch_version_verbose(
@@ -59,10 +53,9 @@ fn fetch_version_verbose(
 }
 
 fn try_fetch_latest_version_fast(provider: &dyn ReleaseProvider) -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(UPDATE_CHECK_TIMEOUT)
-        .timeout(UPDATE_CHECK_TIMEOUT)
-        .build()?;
+    let client = http::build_client(|builder| {
+        builder.connect_timeout(UPDATE_CHECK_TIMEOUT).timeout(UPDATE_CHECK_TIMEOUT)
+    })?;
     provider.fetch_latest_version(&client)
 }
 

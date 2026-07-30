@@ -389,6 +389,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sys-locale",
+ "webpki-root-certs",
  "windows-sys 0.61.2",
  "winresource",
 ]

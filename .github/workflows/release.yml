@@ -121,14 +121,15 @@ jobs:
           name: binaries-linux-amd64
           path: artifacts
 
-      # Только сам анализатор: лаунчер поднимает HTTP-клиент даже на --help и в
-      # образе без ca-certificates падает независимо от версий glibc, а с сетью
-      # полез бы за релизом, которого в момент сборки тега ещё нет.
+      # Лаунчер проверяем через --launcher-version: остальные его команды полезли
+      # бы за релизом, которого в момент сборки тега ещё нет, а сети здесь нет.
       - name: Run on Debian 12
         run: |
-          chmod +x artifacts/bsl-analyzer-app-linux-amd64
+          chmod +x artifacts/bsl-analyzer-app-linux-amd64 artifacts/bsl-analyzer-linux-amd64
           docker run --rm --network none -v "$PWD/artifacts:/a:ro" debian:12 \
             /a/bsl-analyzer-app-linux-amd64 --version
+          docker run --rm --network none -v "$PWD/artifacts:/a:ro" debian:12 \
+            /a/bsl-analyzer-linux-amd64 --launcher-version
 
   release:
     name: Create Release
