@@ -310,7 +310,6 @@ function Add-ToUserPath {
     }
 
     Publish-EnvironmentChange
-    $env:Path = "$env:Path;$Directory"
     return $true
 }
 
@@ -322,7 +321,23 @@ function Update-Path {
         return
     }
 
-    if (Add-ToUserPath -Directory $Directory) {
+    if ($Directory.Contains(';')) {
+        # ';' separates PATH entries and no escaping of it is honoured by every consumer.
+        Write-Warn "Install directory contains ';' and cannot be put in PATH, add it by hand: $Directory"
+        return
+    }
+
+    $added = Add-ToUserPath -Directory $Directory
+
+    # A session started earlier keeps its own copy of PATH and WM_SETTINGCHANGE does not
+    # reach it, so sync it here even when the registry already had the entry — otherwise
+    # the command suggested below is not runnable in this very terminal.
+    $normalized = $Directory.TrimEnd('\')
+    if (-not (($env:Path -split ';') | Where-Object { $_.TrimEnd('\') -ieq $normalized })) {
+        $env:Path = "$env:Path;$Directory"
+    }
+
+    if ($added) {
         Write-Ok "Added $Directory to the user PATH, restart open terminals to pick it up"
     }
 }
@@ -358,27 +373,25 @@ function Invoke-Install {
     Write-Info "Version: $Version"
 
     $target = Join-Path $InstallDir $BinaryName
-    $installed = Get-InstalledVersion -Path $target
-    # -ceq: SemVer prerelease identifiers and release tags are case-sensitive, while the
-    # ordinary PowerShell operators are not, so 0.3.0-RC.1 would pass for 0.3.0-rc.1.
-    if ($installed -ceq $Version) {
+    $info = Get-AssetInfo -ReleaseVersion $Version
+
+    # Identity by content, not by version number: the release source is compiled into the
+    # launcher, so a GitHub and a release-server build share a version yet differ, and
+    # skipping on the number alone would silently keep the other source's binary.
+    if ((Test-Path -LiteralPath $target) -and
+        ((Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash -ieq $info.sha256)) {
         Write-Ok "bsl-analyzer $Version is already installed"
         # A rerun still has to finish what an interrupted or -NoPathUpdate run left undone.
         Update-Path -Directory $InstallDir
         return
     }
+
+    $installed = Get-InstalledVersion -Path $target
     if ($installed) {
         Write-Info "Upgrading from $installed to $Version"
     }
 
-    $info = Get-AssetInfo -ReleaseVersion $Version
-
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-
-    # An upgrade performed while the server was running had to leave the old binary
-    # behind; sweep those once nothing holds them any more, or they pile up per upgrade.
-    Get-ChildItem -Path $InstallDir -Filter "$BinaryName.old-*" -File -ErrorAction SilentlyContinue |
-        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 
     # Staged inside the install directory so the final move stays on one volume.
     $staged = "$target.new-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -406,6 +419,11 @@ function Invoke-Install {
     }
 
     Write-Ok "Installed bsl-analyzer $Version to $target"
+
+    # Only now: until the new binary is in place a retired copy is the sole recoverable
+    # one, and an install that died between the rename and the move leaves exactly that.
+    Get-ChildItem -Path $InstallDir -Filter "$BinaryName.old-*" -File -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 
     Update-Path -Directory $InstallDir
 
