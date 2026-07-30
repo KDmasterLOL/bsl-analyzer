@@ -58,9 +58,16 @@ pub struct McpServeArgs {
     /// never served any traffic gives up after a short orphan grace
     /// (`BSL_MCP_ORPHAN_GRACE_SECS`, default 30s). `http` serves multiple clients over
     /// Streamable HTTP on the required `--port`. `daemon` *is* the broker backend and is
-    /// launched internally by a broker proxy; it is not meant to be run directly.
+    /// launched internally by a broker proxy. `broker-required` connects only to the
+    /// already-running daemon named by `--backend-pid`: it never launches or falls back
+    /// to direct stdio.
     #[arg(long = "mode", value_enum, default_value = "stdio")]
     mode: McpServeMode,
+
+    /// PID of the daemon explicitly launched by a supervisor. Required only for
+    /// `--mode broker-required`; the connected socket peer must match it.
+    #[arg(long, required_if_eq("mode", "broker-required"))]
+    backend_pid: Option<u32>,
 
     /// IP address for HTTP binding (default: 127.0.0.1).
     #[arg(long)]
@@ -174,6 +181,7 @@ impl McpCommand {
 pub enum McpServeMode {
     Stdio,
     Broker,
+    BrokerRequired,
     Daemon,
     Http,
 }
@@ -300,6 +308,9 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
         McpServeMode::Broker => {
             run_mcp_broker(profile, &args, source_dir, workspace_cache, &password)
         }
+        McpServeMode::BrokerRequired => {
+            run_mcp_broker_required(profile, &args, source_dir, workspace_cache)
+        }
         McpServeMode::Daemon => run_mcp_daemon(
             profile,
             source_dir,
@@ -372,6 +383,18 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "--allowed-host is only valid with --mode http",
+            ));
+        }
+        if !matches!(args.mode, McpServeMode::BrokerRequired) && args.backend_pid.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--backend-pid is only valid with --mode broker-required",
+            ));
+        }
+        if matches!(args.mode, McpServeMode::BrokerRequired) && args.backend_pid == Some(0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--backend-pid must be greater than zero",
             ));
         }
         return Ok(None);
@@ -601,6 +624,40 @@ fn run_mcp_broker(
             )
         }
     }
+}
+
+/// Required broker proxy for supervisor-owned lifecycle. It neither constructs a
+/// daemon command nor has a direct-stdio fallback.
+fn run_mcp_broker_required(
+    profile: mcp_server::McpProfile,
+    args: &McpServeArgs,
+    source_dir: Option<PathBuf>,
+    workspace_cache: Option<mcp_server::WorkspaceCacheLayout>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let source_dir = require_workspace_broker(profile, source_dir)?;
+    let workspace_cache = workspace_cache.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "required workspace broker requires a cache layout",
+        )
+    })?;
+    let expected_pid = args.backend_pid.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "--mode broker-required requires --backend-pid")
+    })?;
+    let key = mcp_server::broker::BackendKey::new(
+        &source_dir,
+        workspace_cache.root(),
+        profile,
+        mcp_server::broker::embedding_config_fingerprint(),
+        mcp_server::broker::workspace_topology_fingerprint(&source_dir),
+    );
+
+    tracing::info!(?source_dir, expected_pid, "Starting required MCP broker proxy");
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let result = rt.block_on(mcp_server::broker::proxy::connect_required(key, expected_pid));
+    drop(rt);
+    result?;
+    Ok(())
 }
 
 /// The shared backend: build the resident state once and serve every connecting
@@ -1368,6 +1425,46 @@ mod tests {
     }
 
     #[test]
+    fn required_broker_cli_requires_the_supervised_backend_pid() {
+        let missing = ServeCli::try_parse_from([
+            "serve",
+            "--profile",
+            "workspace",
+            "--source-dir",
+            ".",
+            "--mode",
+            "broker-required",
+        ])
+        .expect_err("required broker without a supervised PID must fail");
+        assert_eq!(missing.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(missing.to_string().contains("--backend-pid"));
+
+        let cli = ServeCli::try_parse_from([
+            "serve",
+            "--profile",
+            "workspace",
+            "--source-dir",
+            ".",
+            "--mode",
+            "broker-required",
+            "--backend-pid",
+            "42",
+        ])
+        .expect("required broker with a supervised PID");
+        assert!(matches!(cli.args.mode, McpServeMode::BrokerRequired));
+        assert_eq!(cli.args.backend_pid, Some(42));
+    }
+
+    #[test]
+    fn backend_pid_is_rejected_outside_required_broker_mode() {
+        let mut args = serve_args(McpServeMode::Broker, None);
+        args.backend_pid = Some(42);
+
+        let error = validate_serve_args(&args).expect_err("ordinary broker must reject peer pin");
+        assert!(error.to_string().contains("--backend-pid"));
+    }
+
+    #[test]
     fn http_only_options_are_rejected_in_existing_modes() {
         for mode in [McpServeMode::Stdio, McpServeMode::Broker, McpServeMode::Daemon] {
             let mut args = serve_args(mode, None);
@@ -1587,6 +1684,7 @@ mod tests {
             source_dir: Some(std::path::PathBuf::from(".")),
             cache_dir: None,
             mode,
+            backend_pid: None,
             host: None,
             port,
             allowed_hosts: Vec::new(),

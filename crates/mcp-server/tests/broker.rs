@@ -53,6 +53,48 @@ async fn connect_within(key: &BackendKey, budget: Duration) -> TokioStream {
     }
 }
 
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn required_broker_fails_when_the_supervised_backend_is_absent() {
+    let src = TempDir::new().unwrap();
+    let key = key_for(&src);
+
+    let error = broker::proxy::connect_existing(&key, std::process::id())
+        .await
+        .expect_err("required mode must not launch or fall back when no backend exists");
+
+    assert!(error.to_string().contains("unavailable"), "{error}");
+    assert!(connect(&key).await.is_err(), "required connect must not auto-launch a daemon");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(any(unix, windows))]
+async fn required_broker_connects_only_to_the_supervised_daemon_pid() {
+    let src = TempDir::new().unwrap();
+    let key = key_for(&src);
+    let backend = tokio::spawn(broker::daemon::run(
+        || Ok(reference_server()),
+        key_for(&src),
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+    ));
+    let _ = connect_within(&key, Duration::from_secs(10)).await;
+
+    let wrong_pid = std::process::id().checked_add(1).unwrap();
+    let mismatch = broker::proxy::connect_existing(&key, wrong_pid)
+        .await
+        .expect_err("a live but different backend PID must be rejected");
+    assert!(mismatch.to_string().contains("identity"), "{mismatch}");
+
+    let stream = broker::proxy::connect_existing(&key, std::process::id())
+        .await
+        .expect("the exact supervised daemon PID is trusted");
+    let client = ().serve(stream).await.expect("supervised daemon serves MCP");
+    assert!(client.peer_info().is_some(), "session saw the supervised backend");
+    client.cancel().await.ok();
+    backend.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg(any(unix, windows))]
 async fn backend_survives_client_disconnect_and_stays_reusable() {
