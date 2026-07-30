@@ -2120,21 +2120,34 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    /// The plural as the SOURCE spells it, for a receiver that is literally
-    /// `<Path>.<Field>` and whose root types as a metadata collection.
+    /// The plural as the SOURCE spells it, for a receiver literally written
+    /// `<Collection>.<Object>` — or `None` when the chain is not spelled that way.
     ///
-    /// That root type is the ownership verdict, already applied by `infer_path_name`:
-    /// a module variable, a local or a same-named method never types as a collection,
-    /// so they never reach here. The two-step form (`М = Справочники.Товары;
-    /// М.Метод()`) returns `None` — nothing in that call is spelled redundantly, and
-    /// there is no plural in it to name.
-    fn spelled_out_collection_root(&self, receiver: ExprId) -> Option<Name> {
+    /// Two conditions, and both are needed. The root name must be a spelling of the
+    /// very collection the receiver resolved to: a variable can HOLD a collection
+    /// (`Catalogs = Документы`), and then the spelling names one kind while the type is
+    /// another — taking the plural from the source and the object from the type would
+    /// have the adapter check a signature of a different metadata object entirely.
+    /// And the name must not be held by a declared owner, which is the same verdict
+    /// every other surface asks (`manager_collection_shadowed`): a local named
+    /// `Документы` owns its name, so nothing about it is a global collection.
+    ///
+    /// The two-step form (`М = Справочники.Товары; М.Метод()`) fails the first
+    /// condition and gets no verdict — nothing in that call is spelled redundantly,
+    /// and there is no plural in it to name.
+    fn spelled_out_collection_root(
+        &mut self,
+        receiver: ExprId,
+        resolved_mdo: bsl_metadata::MdoType,
+    ) -> Option<Name> {
         let Expr::Field { base: root, .. } = self.body.expr(receiver) else { return None };
         let root_id = ExprId::from_idx(*root);
         let Expr::Path(plural) = self.body.expr(root_id) else { return None };
-        let root_ty = self.expr_types.get(&root_id).copied().unwrap_or(self.db.unknown());
-        matches!(self.db.lookup_type(root_ty), TypeKind::ManagerCollection(_))
-            .then(|| plural.clone())
+        let plural = plural.clone();
+        if bsl_metadata::MdoType::from_plural(plural.as_str()) != Some(resolved_mdo) {
+            return None;
+        }
+        (!self.manager_collection_shadowed(&plural)).then_some(plural)
     }
 
     /// The two verdicts a spelled-out manager chain carries: the object may be the
@@ -2150,11 +2163,12 @@ impl<'db> InferenceContext<'db> {
         &mut self,
         call_expr: ExprId,
         receiver: ExprId,
+        resolved_mdo: bsl_metadata::MdoType,
         mdo_name: &Name,
         method_name: &Name,
         args: &[ExprId],
     ) {
-        let Some(plural) = self.spelled_out_collection_root(receiver) else { return };
+        let Some(plural) = self.spelled_out_collection_root(receiver, resolved_mdo) else { return };
         self.push_inference_diagnostic(InferenceDiagnostic::RedundantAccessToObjectThreeLevel {
             expr: call_expr,
             mdo_type: plural.clone(),
@@ -2343,24 +2357,6 @@ impl<'db> InferenceContext<'db> {
                     &resolver,
                 ) {
                     Ok(resolution) => {
-                        // The chain resolved, so the signature is knowable: name what the
-                        // call omits. Only for the spelled-out chain — for a receiver held
-                        // in a variable the two-level rule already covers the call.
-                        if let Some(plural) = self.spelled_out_collection_root(base_id) {
-                            let arg_presence: Vec<bool> = args
-                                .iter()
-                                .map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing))
-                                .collect();
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::MissedRequiredParameterManagerModule {
-                                    expr: call_expr,
-                                    callee: method_name.clone(),
-                                    mdo_type: plural,
-                                    mdo_name: mdo_name.clone(),
-                                    args: arg_presence,
-                                },
-                            );
-                        }
                         let receiver_name = receiver_display_name(self.db, receiver_ty)
                             .unwrap_or_else(|| mdo_name.clone());
                         if !resolution.is_export {
@@ -2410,6 +2406,7 @@ impl<'db> InferenceContext<'db> {
                 self.report_spelled_out_chain_diagnostics(
                     call_expr,
                     base_id,
+                    mdo_type,
                     &mdo_name,
                     &method_name,
                     args,

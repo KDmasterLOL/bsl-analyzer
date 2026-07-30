@@ -494,3 +494,38 @@ fn a_held_root_reports_no_missing_parameters() {
         missed_manager_params(&db, file_id)
     );
 }
+
+/// Локаль, которой присвоена коллекция, корнем цепочки не является: имя принадлежит
+/// ей, а не глобальному свойству. Брать plural из НАПИСАНИЯ, а объект из
+/// разрешённого типа — значит смешивать два источника: `Catalogs = Документы`
+/// давало вердикт про справочник `Товары`, тогда как вызывался метод документа.
+#[test]
+fn a_local_holding_a_collection_is_not_a_spelled_out_root() {
+    let fixture = r#"
+//- /Catalogs/Товары/Ext/ManagerModule.bsl
+Процедура Метод(Обязательный) Экспорт
+КонецПроцедуры
+
+//- /Documents/Товары/Ext/ManagerModule.bsl
+Процедура Метод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Перем Catalogs;
+    Catalogs = Документы;
+    Catalogs.Товары.Метод();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        missed_manager_params(&db, file_id).is_empty(),
+        "the name belongs to the local: {:?}",
+        missed_manager_params(&db, file_id)
+    );
+    assert!(
+        redundant_three_level(&db, file_id).is_empty(),
+        "and nothing is redundant either: {:?}",
+        redundant_three_level(&db, file_id)
+    );
+}
