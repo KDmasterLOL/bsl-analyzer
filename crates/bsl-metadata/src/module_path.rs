@@ -65,7 +65,9 @@ pub fn collection_directory(segment: &str) -> Option<MdoType> {
         ("планывидоврасчёта", "планывидоврасчета"),
     ];
 
-    let composed = segment.replace("е\u{0308}", "ё").fold_lower();
+    // Case first, composition second: a decomposed CAPITAL `Ё` only looks like the
+    // lowercase sequence after folding, and composing before that misses it.
+    let composed = segment.fold_lower().replace("е\u{0308}", "ё");
     let canonical = YO_SPELLINGS
         .iter()
         .find(|(yo, _)| *yo == composed)
@@ -223,9 +225,12 @@ mod tests {
             ("РегистрыРасчёта", MdoType::CalculationRegister),
             ("РегистрыРасчета", MdoType::CalculationRegister),
             ("ПланыВидовРасчёта", MdoType::ChartOfCalculationTypes),
-            // `ё`, разложенная файловой системой на `е` и надстрочный знак.
+            // `ё`, разложенная файловой системой на `е` и надстрочный знак, —
+            // в том числе заглавная, которая до приведения регистра выглядит иначе.
             ("РегистрыРасче\u{0308}та", MdoType::CalculationRegister),
             ("Отче\u{0308}ты", MdoType::Report),
+            ("ОТЧЕ\u{0308}ТЫ", MdoType::Report),
+            ("Планывидоврасче\u{0308}та", MdoType::ChartOfCalculationTypes),
         ] {
             assert_eq!(collection_directory(segment), Some(expected), "{segment}");
         }
