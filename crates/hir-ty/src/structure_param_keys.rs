@@ -143,6 +143,11 @@ pub(crate) struct Forwarder<'a> {
     /// Names (lowercased) that are body bindings or assignment targets — a same-named method is
     /// shadowed and must not be resolved as a callee (mirrors the inference dispatch guard).
     shadowing_locals: FxHashSet<String>,
+    /// Names (lowercased) that are DECLARED bindings: parameters, `Перем`, loop variables.
+    /// The narrower question, and the right one for a metadata-collection root: assigning to
+    /// such a name is a refused write to a Global-context property, not a declaration, so it
+    /// must not turn a manager chain into something else.
+    declared_bindings: FxHashSet<String>,
     /// Lazily-built lowercased method-name → `MethodId` of the visible global common modules.
     global_methods: OnceCell<FxHashMap<String, MethodId>>,
     /// Produces a callee's summary — the memoised query (construction site) or recursive
@@ -158,10 +163,11 @@ impl<'a> Forwarder<'a> {
         body: &Body,
         summarize: &'a dyn Fn(MethodId) -> Arc<StructureParamSummary>,
     ) -> Self {
-        let mut shadowing_locals = FxHashSet::default();
+        let mut declared_bindings = FxHashSet::default();
         for (_, binding) in body.bindings_iter() {
-            shadowing_locals.insert(binding.name.as_str().fold_lower());
+            declared_bindings.insert(binding.name.as_str().fold_lower());
         }
+        let mut shadowing_locals = declared_bindings.clone();
         for (_, stmt) in body.stmts_iter() {
             if let Stmt::Assign { target, .. } = stmt {
                 if let Expr::Path(name) = body.expr_idx(*target) {
@@ -169,7 +175,15 @@ impl<'a> Forwarder<'a> {
                 }
             }
         }
-        Self { db, resolver, module, shadowing_locals, global_methods: OnceCell::new(), summarize }
+        Self {
+            db,
+            resolver,
+            module,
+            shadowing_locals,
+            declared_bindings,
+            global_methods: OnceCell::new(),
+            summarize,
+        }
     }
 
     /// Fold a single call's callee summary into the tracked roots it is passed (whole). A no-op
@@ -238,19 +252,49 @@ impl<'a> Forwarder<'a> {
                 }
                 self.global_methods().get(&lower).copied()
             }
-            Expr::Field { base, field } => {
-                let Expr::Path(module_name) = body.expr_idx(*base) else { return None };
-                self.resolver
+            Expr::Field { base, field } => match body.expr_idx(*base) {
+                Expr::Path(module_name) => self
+                    .resolver
                     .resolve_qualified_method(self.db, module_name, field)
                     .ok()
-                    .map(|r| r.method_id)
-            }
-            Expr::QualifiedPath(qname) => match qname.segments() {
-                [mdo_type, mdo_name, method_name] => self
-                    .resolver
-                    .resolve_three_level_method(self.db, mdo_type, mdo_name, method_name)
-                    .ok()
                     .map(|r| r.method_id),
+                // `Справочники.Товары.Метод(С)` — three-level, in the Expr language of the
+                // source since the fold was removed. This pass deliberately stays on syntax
+                // (materialising signatures through inference is what it must avoid), so the
+                // root-ownership question is answered here with the one fact it has: a
+                // DECLARED binding of that name means the chain is not a manager call.
+                //
+                // Assignment targets are deliberately not consulted: writing to a metadata
+                // collection name declares nothing — the platform refuses the write — and
+                // treating it as a declaration would make the same name a collection for
+                // inference and a local for completion.
+                //
+                // The two conditions below are exactly the two of
+                // `Infer::manager_collection_shadowed` — a body binding, or a claim on the
+                // bare name from anywhere else (module variable, module method, object or
+                // form member, common module). Asking the SAME predicate is the point: a
+                // second copy of the verdict is what made the layers disagree, and the
+                // predicate itself needs no inference, only the resolver.
+                Expr::Field { base: root, field: mdo_name } => {
+                    let Expr::Path(plural) = body.expr_idx(*root) else { return None };
+                    if self.declared_bindings.contains(&plural.as_str().fold_lower()) {
+                        return None;
+                    }
+                    if crate::platform_global_lookup::bare_global_name_claim(
+                        self.db,
+                        self.resolver,
+                        None,
+                        plural,
+                    )
+                    .is_some()
+                    {
+                        return None;
+                    }
+                    self.resolver
+                        .resolve_three_level_method(self.db, plural, mdo_name, field)
+                        .ok()
+                        .map(|r| r.method_id)
+                }
                 _ => None,
             },
             _ => None,

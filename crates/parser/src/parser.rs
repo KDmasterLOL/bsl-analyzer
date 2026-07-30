@@ -426,6 +426,18 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Skips trivia that cannot end a line. Unlike [`Parser::skip_trivia`], this
+    /// stops at a newline and at a comment (which runs to the end of its line),
+    /// so a caller stays on the line it started on.
+    pub fn skip_blanks(&mut self) {
+        while let Some(kind) = self.current() {
+            match kind {
+                TokenKind::Whitespace | TokenKind::Bom => self.bump(),
+                _ => break,
+            }
+        }
+    }
+
     pub fn skip_trivia_crossing_newline(&mut self) -> bool {
         let mut crossed_newline = false;
         while let Some(kind) = self.current() {

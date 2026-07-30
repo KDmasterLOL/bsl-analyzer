@@ -61,7 +61,8 @@ fn promote_collection_member(
 ) -> Option<ManagerMemberInfo> {
     let needle = mdo_name.as_str();
     let exists = resolver.resolve_metadata_object(kind, needle).is_some()
-        || resolver.resolve_register(kind, needle).is_some();
+        || resolver.resolve_register(kind, needle).is_some()
+        || resolver.manager_module_without_config(kind, needle);
 
     exists.then(|| ManagerMemberInfo {
         ty: db.object_manager(kind, mdo_name.as_str().to_string(), &RootConfigCtx),

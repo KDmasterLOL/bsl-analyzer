@@ -9,6 +9,8 @@ Repeated regions make navigation harder and often mean that related code was spl
 
 The diagnostic also treats standard Russian and English region names as the same logical section. For example, `#Область ПрограммныйИнтерфейс` and `#Region Public` are considered duplicates.
 
+Name case is irrelevant: BSL identifiers are case-insensitive, so `#Область Расчёты` and `#Область РАСЧЁТЫ` are one section.
+
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 

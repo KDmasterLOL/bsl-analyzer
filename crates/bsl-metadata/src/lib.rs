@@ -13,6 +13,7 @@ pub mod integration_service;
 pub mod loader;
 pub mod metadata_object;
 pub mod metadata_resolver;
+pub mod module_path;
 pub mod register;
 pub mod role;
 pub mod scheduled_job;

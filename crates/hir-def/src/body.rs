@@ -213,7 +213,7 @@ fn expr_contains(body: &Body, root: ExprIdx, target: ExprIdx) -> bool {
         return true;
     }
     match body.expr_idx(root) {
-        Expr::Missing | Expr::Path(_) | Expr::QualifiedPath(_) | Expr::Literal(_) => false,
+        Expr::Missing | Expr::Path(_) | Expr::Literal(_) => false,
         Expr::BinaryOp { lhs, rhs, .. } => {
             expr_contains(body, *lhs, target) || expr_contains(body, *rhs, target)
         }
@@ -350,7 +350,6 @@ pub(crate) fn body_heap(body: &Body) -> usize {
         bytes += match expr {
             Expr::Literal(Literal::String(s)) | Expr::Literal(Literal::Date(s)) => s.capacity(),
             Expr::Path(name) => name_bytes(name),
-            Expr::QualifiedPath(_) => size_of::<crate::path::QualifiedName>(),
             Expr::Field { field, .. } => name_bytes(field),
             Expr::MethodCall { method, args, .. } => {
                 name_bytes(method) + vec_bytes::<ExprIdx>(args.len())
@@ -1047,6 +1046,61 @@ mod tests {
     use crate::hir::{Binding, Expr, Literal, Stmt};
     use crate::Name;
     use ordered_float::NotNan;
+
+    #[test]
+    fn every_manager_type_yields_a_manager_access_ref() {
+        // Dependency discovery must over-approximate: a missing `ManagerAccess`
+        // silently drops a file dependency, which no diagnostic or edge comparison
+        // would surface.
+        for &mdo in bsl_metadata::MdoType::all() {
+            let Some(manager_type) = ManagerType::from_mdo_type(mdo) else {
+                continue;
+            };
+            let plural = mdo.russian_plural().expect("manager-backed kinds name a collection");
+            let code = format!("Процедура Тест()\n    {plural}.Объект1.Метод();\nКонецПроцедуры");
+            let parse = parser::parse(&code);
+            let method = parse
+                .syntax_node()
+                .descendants()
+                .find(|node| node.kind() == syntax::SyntaxKind::PROCEDURE_DEF)
+                .expect("fixture declares a procedure");
+            let lowered = lower_method_with_externals(&method, false, None);
+            assert!(
+                lowered.external_refs.iter().any(|r| matches!(
+                    r,
+                    ExternalRef::ManagerAccess { manager_type: found, object_name, .. }
+                        if *found == manager_type && object_name.as_str() == "Объект1"
+                )),
+                "{manager_type:?} ({plural}) must produce a ManagerAccess ref; got {:?}",
+                lowered.external_refs
+            );
+        }
+    }
+
+    /// Обнаружение зависимостей над-приближает СОЗНАТЕЛЬНО: даже когда имя корня
+    /// занято локалью, ребро строится. Лишнее ребро стоит одной лишней инвалидации,
+    /// пропущенное — неверного ответа, поэтому пропуск здесь дефект, а лишнее нет.
+    /// Вердикт о владении принимает инференс, у которого есть резолвер.
+    #[test]
+    fn a_shadowed_root_still_yields_a_dependency_edge() {
+        let code = "Процедура Тест()\n    Перем Справочники;\n    \
+                    Справочники.Объект1.Метод();\nКонецПроцедуры";
+        let parse = parser::parse(code);
+        let method = parse
+            .syntax_node()
+            .descendants()
+            .find(|node| node.kind() == syntax::SyntaxKind::PROCEDURE_DEF)
+            .expect("fixture declares a procedure");
+        let lowered = lower_method_with_externals(&method, false, None);
+        assert!(
+            lowered.external_refs.iter().any(|r| matches!(
+                r,
+                ExternalRef::ManagerAccess { object_name, .. } if object_name.as_str() == "Объект1"
+            )),
+            "dependency discovery must not lose the edge; got {:?}",
+            lowered.external_refs
+        );
+    }
 
     #[test]
     fn manager_type_to_mdo_type_round_trips() {

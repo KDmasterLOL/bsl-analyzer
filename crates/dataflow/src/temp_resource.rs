@@ -218,7 +218,7 @@ fn walk_expr<F: FnMut(ExprIdx)>(body: &Body, expr_idx: ExprIdx, f: &mut F) {
             }
         }
         Expr::Await { expr } => walk_expr(body, *expr, f),
-        Expr::Path(_) | Expr::Literal(_) | Expr::QualifiedPath(_) | Expr::Missing => {}
+        Expr::Path(_) | Expr::Literal(_) | Expr::Missing => {}
     }
 }
 

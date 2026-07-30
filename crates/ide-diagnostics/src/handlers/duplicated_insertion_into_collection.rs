@@ -363,11 +363,7 @@ impl<'a> InsertionTracker<'a> {
                 }
             }
 
-            Expr::UnaryOp { .. }
-            | Expr::Ternary { .. }
-            | Expr::Array(_)
-            | Expr::Await { .. }
-            | Expr::QualifiedPath(_) => {
+            Expr::UnaryOp { .. } | Expr::Ternary { .. } | Expr::Array(_) | Expr::Await { .. } => {
                 hasher.write_u8(expr_tag::MISSING);
             }
         }

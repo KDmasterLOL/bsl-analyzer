@@ -151,7 +151,9 @@ pub fn source_file(p: &mut Parser) {
 pub(super) fn preprocessor_region(p: &mut Parser) {
     let m = p.start();
     p.bump();
-    p.skip_trivia();
+    // The name sits on the directive's own line; reaching past the newline would
+    // steal the next statement's identifier and leave that statement headless.
+    p.skip_blanks();
 
     if p.at(TokenKind::Ident) {
         p.bump();

@@ -131,7 +131,6 @@ fn check_body(
                 let callee_expr = body.expr_idx(*callee);
                 let method_name = match callee_expr {
                     Expr::Field { field, .. } => Some(field),
-                    Expr::QualifiedPath(path) => Some(path.last()),
                     _ => None,
                 };
                 if let Some(field) = method_name {

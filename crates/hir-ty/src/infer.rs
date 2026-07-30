@@ -26,7 +26,6 @@ use crate::builtin;
 use crate::db::HirDatabase;
 use crate::lower::TyLoweringContext;
 use crate::method_resolution;
-use crate::platform_manager_lookup::{resolve_platform_manager_method, PlatformMethodResolution};
 
 static DEPRECATED_PLATFORM_MEMBER_OWNERS: Lazy<FxHashSet<String>> = Lazy::new(|| {
     let mut owners = FxHashSet::default();
@@ -221,6 +220,14 @@ pub enum InferenceDiagnostic {
         field_name: Name,
     },
 
+    /// Assignment to a bare Global-context property (`Справочники = …`). The
+    /// platform refuses the write and declares no local, so the statement has no
+    /// effect a reader could rely on — and the name keeps denoting the global.
+    GlobalPropertyNotWritable {
+        lhs: ExprId,
+        name: Name,
+    },
+
     DeprecatedPlatformMember {
         expr: ExprId,
         type_name: Name,
@@ -238,6 +245,29 @@ pub enum InferenceDiagnostic {
         callee: Name,
         module: Name,
         args: Vec<bool>,
+    },
+
+    /// A manager-module call missing a required parameter. Mirrors
+    /// `MissedRequiredParameterCommonModule`: inference decides that the chain IS a
+    /// manager call (which the ownership verdict settles), the adapter reads the
+    /// signature and names what is missing.
+    MissedRequiredParameterManagerModule {
+        expr: ExprId,
+        callee: Name,
+        mdo_type: Name,
+        mdo_name: Name,
+        args: Vec<bool>,
+    },
+
+    /// `Справочники.Товары.Метод()` written INSIDE the manager module of `Товары`:
+    /// the object is already the module's own, so the chain is a detour. Decided here
+    /// and not in lowering, because it takes the ownership verdict — a module variable
+    /// named `Справочники` makes the same three tokens something else entirely, and
+    /// lowering cannot know that.
+    RedundantAccessToObjectThreeLevel {
+        expr: ExprId,
+        mdo_type: Name,
+        mdo_name: Name,
     },
 
     /// A resolved platform member is not available in some of the execution
@@ -359,13 +389,6 @@ pub struct InferenceContext<'db> {
     implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
 
     assigned_var_names: rustc_hash::FxHashSet<NormName>,
-
-    /// Names assigned anywhere in this body, computed on first demand.
-    /// Unlike `assigned_var_names`, which grows as the statement walk
-    /// progresses, this set is body-wide: a BSL implicit local shadows a
-    /// global in the whole procedure, including reads that precede its
-    /// first assignment.
-    body_assigned_names: Option<rustc_hash::FxHashSet<NormName>>,
 
     /// Memoised `bare_global_name_claim` verdicts. That lookup reaches past the
     /// body into the module and the workspace while the body itself does not
@@ -612,7 +635,6 @@ impl<'db> InferenceContext<'db> {
             var_types: FxHashMap::default(),
             implicit_locals: FxHashMap::default(),
             assigned_var_names: rustc_hash::FxHashSet::default(),
-            body_assigned_names: None,
             shadowed_root_names: FxHashMap::default(),
             binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
@@ -790,9 +812,12 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
             InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
             InferenceDiagnostic::ReadOnlyPropertyAssignment { lhs, .. } => *lhs,
+            InferenceDiagnostic::GlobalPropertyNotWritable { lhs, .. } => *lhs,
             InferenceDiagnostic::DeprecatedPlatformMember { expr, .. } => *expr,
             InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
             InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
+            InferenceDiagnostic::MissedRequiredParameterManagerModule { expr, .. } => *expr,
+            InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
             InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
             InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
         };
@@ -845,39 +870,23 @@ impl<'db> InferenceContext<'db> {
         });
     }
 
-    fn body_assigned_names(&mut self) -> &rustc_hash::FxHashSet<NormName> {
-        if self.body_assigned_names.is_none() {
-            let mut names = rustc_hash::FxHashSet::default();
-            for (_, stmt) in self.body.stmts_iter() {
-                if let Stmt::Assign { target, .. } = stmt {
-                    if let Expr::Path(name) = self.body.expr(ExprId::from_idx(*target)) {
-                        names.insert(NormName::intern(name.as_str()));
-                    }
-                }
-            }
-            self.body_assigned_names = Some(names);
-        }
-        self.body_assigned_names.as_ref().expect("filled above")
-    }
-
     /// True when a bare manager-collection name is shadowed by a user symbol
-    /// and thus does not denote the platform global: a body binding or typed
-    /// local/parameter, an assignment anywhere in the body, a module-level
-    /// variable or method, a form attribute or form-self property, an
-    /// implicit `ЭтотОбъект`/record-set member, or a workspace common module.
-    /// Shadowing is judged body-wide and preprocessor-blind, like every other
+    /// and thus does not denote the platform global: a body binding (`Перем`,
+    /// parameter, loop variable), a module-level variable or method, a form
+    /// attribute or form-self property, an implicit `ЭтотОбъект`/record-set
+    /// member, or a workspace common module.
+    ///
+    /// A plain assignment does NOT shadow. `Справочники = Новый Структура` does
+    /// not declare a local: the name belongs to a Global-context property, and
+    /// the platform refuses the write rather than creating a variable, so the
+    /// name keeps denoting the collection throughout the body. Only a DECLARED
+    /// owner takes it. Shadowing is preprocessor-blind, like every other
     /// shadowing decision in inference.
     fn manager_collection_shadowed(&mut self, name: &Name) -> bool {
         let key = NormName::intern(name.as_str());
-        if self.body_declares_binding(name)
-            || self.var_types.contains_key(&key)
-            || self.body_assigned_names().contains(&key)
-        {
+        if self.body_declares_binding(name) {
             return true;
         }
-        // Only the out-of-body half is memoised: the body checks above read
-        // state that grows as the walk proceeds (`var_types` gains loop
-        // variables), so their verdict is not stable across the run.
         if let Some(cached) = self.shadowed_root_names.get(&key) {
             return *cached;
         }
@@ -1294,9 +1303,9 @@ impl<'db> InferenceContext<'db> {
         let stmts: Vec<StmtIdx> = self.body.body_stmts_typed().to_vec();
         self.infer_stmts(&stmts);
 
-        // Exprs the statement walk never reached are lowering leftovers — e.g.
-        // the original callee chain a qualified-call rewrite replaced. They
-        // are still typed here for the IDE layer (hover/goto resolve through
+        // Not every expr belongs to a statement: a parameter's default value
+        // hangs off its binding, so the statement walk never reaches it. Such
+        // exprs are typed here for the IDE layer (hover/goto resolve through
         // the source map), but they carry no execution context: statement-level
         // `#Если` narrowing never saw them, so an environment verdict from
         // this sweep would double or contradict the one issued during the
@@ -1350,6 +1359,9 @@ impl<'db> InferenceContext<'db> {
                         } else {
                             crate::form_self::resolve_form_self_property(self.db, &resolver, name)
                         };
+                        let unheld_collection = bsl_metadata::MdoType::from_plural(name.as_str())
+                            .filter(|mdo| mdo.manager_type_prefix().is_some())
+                            .filter(|_| !self.manager_collection_shadowed(name));
                         match form_self_resolution {
                             Some(prop) => {
                                 if prop.is_readonly {
@@ -1366,6 +1378,25 @@ impl<'db> InferenceContext<'db> {
                                 }
                             }
                             None if existing_module_variable => {}
+                            // Writing to an unheld metadata-collection name targets a
+                            // Global-context property, which the platform refuses — no
+                            // local is declared. Type the target as the collection and
+                            // stop: the availability check belongs to READING a member,
+                            // and the illegal write is a different defect, not yet
+                            // reported.
+                            None if unheld_collection.is_some() => {
+                                self.push_inference_diagnostic(
+                                    InferenceDiagnostic::GlobalPropertyNotWritable {
+                                        lhs: target_id,
+                                        name: name.clone(),
+                                    },
+                                );
+                                let collection = self
+                                    .db
+                                    .manager_collection(unheld_collection.expect("just checked"));
+                                self.expr_types.insert(target_id, collection);
+                                infer_target = false;
+                            }
                             None => {
                                 let key = name.as_str().fold_lower();
                                 let norm_key = NormName::intern(name.as_str());
@@ -1597,8 +1628,6 @@ impl<'db> InferenceContext<'db> {
 
             Expr::Path(name) => self.infer_path_name(name, expr_id),
 
-            Expr::QualifiedPath(_path) => self.db.unknown(),
-
             Expr::BinaryOp { lhs, rhs, op } => {
                 self.infer_binary_op(ExprId::from_idx(*lhs), ExprId::from_idx(*rhs), *op)
             }
@@ -1620,7 +1649,7 @@ impl<'db> InferenceContext<'db> {
             Expr::Call { callee, args } => {
                 let converted_args: Vec<ExprId> =
                     args.iter().map(|&arg| ExprId::from_idx(arg)).collect();
-                self.infer_call(ExprId::from_idx(*callee), &converted_args)
+                self.infer_call(expr_id, ExprId::from_idx(*callee), &converted_args)
             }
 
             Expr::MethodCall { receiver, method, args } => {
@@ -1683,7 +1712,23 @@ impl<'db> InferenceContext<'db> {
                     info.ty
                 } else {
                     let base_kind = self.db.lookup_type(base_ty);
-                    if matches!(base_kind, TypeKind::MetadataRef(_) | TypeKind::ThisObject { .. }) {
+                    // A metadata collection is as closed a receiver as an object: its
+                    // members are exactly the configuration's objects of that kind, so a
+                    // miss is a real defect and not an unknown shape. Reporting it here is
+                    // what keeps `Справочники.НетТакого.Метод()` from going silent now that
+                    // the chain is no longer folded into one node.
+                    //
+                    // A name the author has not finished writing (`Справочники.`) is not a
+                    // miss: lowering keeps the incomplete field as the missing placeholder,
+                    // and accusing the configuration on every keystroke would be noise.
+                    if !field.is_missing()
+                        && matches!(
+                            base_kind,
+                            TypeKind::MetadataRef(_)
+                                | TypeKind::ThisObject { .. }
+                                | TypeKind::ManagerCollection(_)
+                        )
+                    {
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedField {
                             expr: expr_id,
                             receiver_ty: base_ty,
@@ -1966,13 +2011,18 @@ impl<'db> InferenceContext<'db> {
         // name rules them all out. Declared bindings, module variables/methods,
         // form and `ЭтотОбъект` members have already returned above; what remains
         // is an implicit local written earlier in this body and a workspace common
-        // module. Re-typing a held name as the same-named global would contradict
-        // `manager_collection_shadowed`, which the availability diagnostic uses to
-        // stay silent on exactly these reads.
-        let user_holds_name = workspace_owns_common_module
-            || self.assigned_var_names.contains(&NormName::intern(name.as_str()));
+        // module.
+        let assigned_in_body = self.assigned_var_names.contains(&NormName::intern(name.as_str()));
+        let user_holds_name = workspace_owns_common_module || assigned_in_body;
 
-        if !user_holds_name {
+        // Metadata collections are the exception, and it is not a stylistic one: a
+        // collection name is a Global-context PROPERTY, and assigning to it does not
+        // declare a local — the platform refuses the write ("property is not
+        // writable") — so the name keeps denoting the collection throughout the body.
+        // Only a declared owner takes it, and every declared owner has returned
+        // above. `manager_collection_shadowed` judges the same way, so this typing
+        // and the availability diagnostic stay in agreement.
+        if !workspace_owns_common_module {
             if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(name.as_str()) {
                 if mdo_type.manager_type_prefix().is_some() {
                     trace!("resolved {} as manager collection {:?}", name, mdo_type);
@@ -2067,64 +2117,94 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    fn infer_call(&mut self, callee: ExprId, args: &[ExprId]) -> TypeId {
-        let callee_expr = self.body.expr(callee);
-        if let Expr::QualifiedPath(qualified_path) = callee_expr {
-            match qualified_path.segments().len() {
-                3 => {
-                    let mdo_type_plural = qualified_path.segments()[0].clone();
-                    let mdo_name = qualified_path.segments()[1].clone();
-                    let method_name = qualified_path.segments()[2].clone();
-                    // Lowering folds the whole chain into one node, so the root
-                    // never reaches `infer_path_name` and never meets the
-                    // barrier that keeps a held name from denoting a platform
-                    // global. It is applied here instead, on the only entry
-                    // where the root is spelled out in source: the other caller
-                    // synthesises the plural from the enclosing manager module,
-                    // where no such spelling exists to be shadowed.
-                    if self.manager_collection_shadowed(&mdo_type_plural) {
-                        for arg in args {
-                            self.infer_expr(*arg);
-                        }
-                        return self.db.unknown();
-                    }
-                    return self.infer_three_level_call(
-                        &mdo_type_plural,
-                        &mdo_name,
-                        &method_name,
-                        args,
-                        callee,
-                    );
-                }
-                other => {
-                    debug_assert!(
-                        false,
-                        "unexpected QualifiedPath segment count {other} in infer_call",
-                    );
-                    tracing::debug!(
-                        segments = other,
-                        ?qualified_path,
-                        "QualifiedPath with unexpected segment count reached infer_call; \
-                         falling through to Ty::Unknown"
-                    );
-                }
-            }
+    /// The plural as the SOURCE spells it, for a receiver literally written
+    /// `<Collection>.<Object>` — or `None` when the chain is not spelled that way.
+    ///
+    /// Two conditions, and both are needed. The root name must be a spelling of the
+    /// very collection the receiver resolved to: a variable can HOLD a collection
+    /// (`Catalogs = Документы`), and then the spelling names one kind while the type is
+    /// another — taking the plural from the source and the object from the type would
+    /// have the adapter check a signature of a different metadata object entirely.
+    /// And the name must not be held by a declared owner, which is the same verdict
+    /// every other surface asks (`manager_collection_shadowed`): a local named
+    /// `Документы` owns its name, so nothing about it is a global collection.
+    ///
+    /// The two-step form (`М = Справочники.Товары; М.Метод()`) fails the first
+    /// condition and gets no verdict — nothing in that call is spelled redundantly,
+    /// and there is no plural in it to name.
+    fn spelled_out_collection_root(
+        &mut self,
+        receiver: ExprId,
+        resolved_mdo: bsl_metadata::MdoType,
+    ) -> Option<Name> {
+        let Expr::Field { base: root, .. } = self.body.expr(receiver) else { return None };
+        let root_id = ExprId::from_idx(*root);
+        let Expr::Path(plural) = self.body.expr(root_id) else { return None };
+        let plural = plural.clone();
+        if bsl_metadata::MdoType::from_plural(plural.as_str()) != Some(resolved_mdo) {
+            return None;
         }
+        (!self.manager_collection_shadowed(&plural)).then_some(plural)
+    }
 
+    /// The two verdicts a spelled-out manager chain carries: the object may be the
+    /// enclosing module's own (`Справочники.Товары.Метод()` inside the manager module
+    /// of `Товары` is a detour), and the call may omit required parameters.
+    ///
+    /// Lowering decided both from three strings, and both need the ownership verdict,
+    /// which lowering does not have — that is why they live here now. Whether either
+    /// APPLIES is still the adapter's call: it reads the module's metadata and the
+    /// callee's signature and returns nothing when they do not fit. Emitting before
+    /// the method is resolved keeps that division exactly where it was.
+    fn report_spelled_out_chain_diagnostics(
+        &mut self,
+        call_expr: ExprId,
+        receiver: ExprId,
+        resolved_mdo: bsl_metadata::MdoType,
+        mdo_name: &Name,
+        method_name: &Name,
+        args: &[ExprId],
+    ) {
+        let Some(plural) = self.spelled_out_collection_root(receiver, resolved_mdo) else { return };
+        self.push_inference_diagnostic(InferenceDiagnostic::RedundantAccessToObjectThreeLevel {
+            expr: call_expr,
+            mdo_type: plural.clone(),
+            mdo_name: mdo_name.clone(),
+        });
+        let arg_presence: Vec<bool> =
+            args.iter().map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing)).collect();
+        self.push_inference_diagnostic(InferenceDiagnostic::MissedRequiredParameterManagerModule {
+            expr: call_expr,
+            callee: method_name.clone(),
+            mdo_type: plural,
+            mdo_name: mdo_name.clone(),
+            args: arg_presence,
+        });
+    }
+
+    fn infer_call(&mut self, call_expr: ExprId, callee: ExprId, args: &[ExprId]) -> TypeId {
+        let callee_expr = self.body.expr(callee);
         if let Expr::Field { base, field } = callee_expr {
             let base_id = ExprId::from_idx(*base);
             let method_name = field.clone();
 
-            let receiver_ty = self.infer_expr(base_id);
+            let mut receiver_ty = self.infer_expr(base_id);
 
             if self.is_unknown(receiver_ty) {
                 let base_expr = self.body.expr(base_id).clone();
                 if let Expr::Path(path_name) = base_expr {
-                    if let Some(return_ty) =
-                        self.dispatch_bare_ident_field_call(&path_name, &method_name, args, callee)
-                    {
-                        self.expr_types.insert(callee, self.db.unknown());
-                        return return_ty;
+                    match self.dispatch_bare_ident_field_call(
+                        &path_name,
+                        &method_name,
+                        args,
+                        callee,
+                    ) {
+                        BareReceiverDispatch::Resolved(return_ty) => {
+                            self.expr_types.insert(callee, self.db.unknown());
+                            return return_ty;
+                        }
+                        BareReceiverDispatch::Receiver(ty) => receiver_ty = ty,
+                        BareReceiverDispatch::Unhandled => {}
                     }
                 }
             }
@@ -2285,6 +2365,14 @@ impl<'db> InferenceContext<'db> {
             if let TypeKind::ObjectManager(facet) = manager_receiver_kind {
                 let mdo_type = facet.mdo;
                 let mdo_name = hir_def::Name::new(&facet.name);
+                self.report_spelled_out_chain_diagnostics(
+                    call_expr,
+                    base_id,
+                    mdo_type,
+                    &mdo_name,
+                    &method_name,
+                    args,
+                );
                 let resolver = self.get_resolver();
                 match crate::method_resolution::resolve_aliased_manager_call(
                     self.db,
@@ -2799,23 +2887,23 @@ impl<'db> InferenceContext<'db> {
         method_name: &Name,
         args: &[ExprId],
         call_expr: ExprId,
-    ) -> Option<TypeId> {
+    ) -> BareReceiverDispatch {
         use hir_def::resolver::Resolution;
 
         let resolver = self.get_resolver();
 
         match resolver.resolve_name(self.db, module_name) {
             Some(Resolution::Local(_) | Resolution::Variable(_) | Resolution::Method(_)) => {
-                return None;
+                return BareReceiverDispatch::Unhandled;
             }
             Some(Resolution::Builtin(_)) | None => {}
         }
 
         if self.body_declares_binding(module_name) {
-            return None;
+            return BareReceiverDispatch::Unhandled;
         }
         if self.assigned_var_names.contains(&NormName::intern(module_name.as_str())) {
-            return None;
+            return BareReceiverDispatch::Unhandled;
         }
 
         // A form attribute shadows module and global names for a bare receiver.
@@ -2827,7 +2915,7 @@ impl<'db> InferenceContext<'db> {
             for arg in args {
                 self.infer_expr(*arg);
             }
-            return Some(self.db.unknown());
+            return BareReceiverDispatch::Resolved(self.db.unknown());
         }
 
         if resolver.user_common_module_exists(self.db, module_name) {
@@ -2850,7 +2938,7 @@ impl<'db> InferenceContext<'db> {
                 },
             );
 
-            return Some(self.infer_qualified_call(
+            return BareReceiverDispatch::Resolved(self.infer_qualified_call(
                 module_name,
                 method_name,
                 args,
@@ -2860,11 +2948,10 @@ impl<'db> InferenceContext<'db> {
         }
 
         // A manager module that calls one of its own methods through the object's
-        // own name (`ОбъектМетаданных.Метод()` for objects accessed without a
-        // collection prefix, e.g. data processors and reports) is a redundant
-        // self-qualified access — the method is reachable directly. The handler
-        // confirms the name is this module's own and that the metadata kind is one
-        // accessed without a collection prefix.
+        // own name (`ОбъектМетаданных.Метод()`) is a redundant self-qualified
+        // access — the method is reachable directly. The name denotes this
+        // module's own manager, so the call itself is an ordinary manager-member
+        // call: hand the receiver type back and let the one route judge it.
         if let Some((mdo_type, self_name)) =
             crate::this_object::resolve_this_manager_owner(self.db, &resolver)
         {
@@ -2875,22 +2962,14 @@ impl<'db> InferenceContext<'db> {
                         module: module_name.clone(),
                     },
                 );
-                // Resolve the call as the equivalent collection-qualified call so the
-                // method is still validated (a misspelled self-method keeps its
-                // unresolved-call diagnostic) and the return type stays precise.
-                if let Some(plural) = mdo_type_to_plural(mdo_type) {
-                    return Some(self.infer_three_level_call(
-                        &Name::new(plural),
-                        &self_name,
-                        method_name,
-                        args,
-                        call_expr,
-                    ));
-                }
-                for arg in args {
-                    self.infer_expr(*arg);
-                }
-                return Some(self.db.unknown());
+                // The same type the collection-qualified chain produces for its
+                // middle segment (`promote_collection_member`), so both spellings
+                // resolve through one member lookup rather than two.
+                return BareReceiverDispatch::Receiver(self.db.object_manager(
+                    mdo_type,
+                    self_name.as_str().to_string(),
+                    &RootConfigCtx,
+                ));
             }
         }
 
@@ -2908,7 +2987,7 @@ impl<'db> InferenceContext<'db> {
                 }
                 self.check_member_env(call_expr, method_name, env, EnvMemberKind::Method);
                 self.expr_types.insert(call_expr, self.db.unknown());
-                return Some(return_ty);
+                return BareReceiverDispatch::Resolved(return_ty);
             }
             crate::platform_global_lookup::PlatformGlobalLookup::KnownContainerMissingMember => {
                 for arg in args {
@@ -2920,7 +2999,7 @@ impl<'db> InferenceContext<'db> {
                     method_name: method_name.clone(),
                     kind: UnresolvedMethodKind::MethodNotFound,
                 });
-                return Some(self.db.unknown());
+                return BareReceiverDispatch::Resolved(self.db.unknown());
             }
             crate::platform_global_lookup::PlatformGlobalLookup::NotAContainer => {}
         }
@@ -2934,101 +3013,7 @@ impl<'db> InferenceContext<'db> {
             method_name: method_name.clone(),
             kind: UnresolvedMethodKind::ReceiverNotResolved,
         });
-        Some(self.db.unknown())
-    }
-
-    fn infer_three_level_call(
-        &mut self,
-        mdo_type_plural: &Name,
-        mdo_name: &Name,
-        method_name: &Name,
-        args: &[ExprId],
-        call_expr: ExprId,
-    ) -> TypeId {
-        for arg in args {
-            self.infer_expr(*arg);
-        }
-
-        let mdo_type_opt = bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str());
-
-        // The call is lowered as one QualifiedPath, so the collection root
-        // (`Справочники`, `Перечисления`, …) never passes through
-        // `infer_path_name`; its availability is checked here instead. The
-        // verdict does not depend on whether the method resolves — the root
-        // itself is what the restricted environments lack.
-        if let Some(mdo_type) = mdo_type_opt {
-            self.check_manager_collection_env(call_expr, mdo_type_plural, mdo_type);
-        }
-
-        let resolver = self.get_resolver();
-        let receiver_name =
-            Name::new(&format!("{}.{}", mdo_type_plural.as_str(), mdo_name.as_str()));
-
-        match method_resolution::resolve_three_level_call(
-            self.db,
-            mdo_type_plural,
-            mdo_name,
-            method_name,
-            &resolver,
-        ) {
-            Ok(resolution) => {
-                if !resolution.is_export {
-                    self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
-                        expr: call_expr,
-                        receiver_name: receiver_name.clone(),
-                        method_name: method_name.clone(),
-                        kind: UnresolvedMethodKind::MethodNotExport,
-                    });
-                }
-
-                let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
-                    self.db,
-                    method_name,
-                    resolution.method_id,
-                    resolution.return_type,
-                ) else {
-                    return self.db.unknown();
-                };
-                self.record_candidate_call_arg_binding(call_expr, args, candidates)
-            }
-            Err(UnresolvedMethodKind::MethodNotFound) => {
-                let plat_res: Option<PlatformMethodResolution> = mdo_type_opt
-                    .filter(|mdo_type| self.mdo_declared(*mdo_type, mdo_name))
-                    .and_then(|mdo_type| {
-                        resolve_platform_manager_method(self.db, mdo_type, mdo_name, method_name)
-                    });
-                if let Some(res) = plat_res {
-                    let mut candidates = res.candidates;
-                    if mdo_type_opt == Some(bsl_metadata::MdoType::Constant) {
-                        self.refine_constant_candidates(mdo_name, method_name, &mut candidates);
-                    }
-                    return self.record_candidate_call_arg_binding(call_expr, args, candidates);
-                }
-
-                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
-                    expr: call_expr,
-                    receiver_name,
-                    method_name: method_name.clone(),
-                    kind: UnresolvedMethodKind::MethodNotFound,
-                });
-                self.db.unknown()
-            }
-            Err(kind) => {
-                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
-                    expr: call_expr,
-                    receiver_name,
-                    method_name: method_name.clone(),
-                    kind,
-                });
-                self.db.unknown()
-            }
-        }
-    }
-
-    fn mdo_declared(&self, mdo_type: bsl_metadata::MdoType, mdo_name: &Name) -> bool {
-        let needle = mdo_name.as_str();
-        self.db.resolve_metadata_object(self.context_file_id, mdo_type, needle).is_some()
-            || self.db.resolve_register(self.context_file_id, mdo_type, needle).is_some()
+        BareReceiverDispatch::Resolved(self.db.unknown())
     }
 
     fn resolve_constant_value_type(&self, mdo_name: &Name) -> Option<TypeId> {
@@ -3112,6 +3097,18 @@ fn is_self_name(name_lower: &str) -> bool {
     matches!(name_lower, "этотобъект" | "thisobject" | "этаформа" | "thisform")
 }
 
+/// Что дал разбор голого имени в позиции получателя вызова.
+enum BareReceiverDispatch {
+    /// Имя не принадлежит ни одной поверхности разбора: получатель остаётся
+    /// неизвестным, вызов разбирается дальше как есть.
+    Unhandled,
+    /// Вызов разобран здесь целиком, вместе со своими диагностиками.
+    Resolved(TypeId),
+    /// Имя обозначает тип, и вызов на нём — обычный вызов члена: судит его
+    /// общий маршрут, а не отдельная ветка.
+    Receiver(TypeId),
+}
+
 fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<hir_def::Name> {
     match db.lookup_type(receiver_ty) {
         TypeKind::MetadataRef(facet) => {
@@ -3119,42 +3116,20 @@ fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<h
             Some(hir_def::Name::new(&format!("{}.{}", plural, facet.name.as_str())))
         }
         TypeKind::ThisObject { owner, .. } | TypeKind::ThisManager { owner, .. } => {
-            let plural = mdo_type_to_plural(owner.mdo_type)?;
+            let plural = owner.mdo_type.russian_plural()?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, owner.name.as_str())))
         }
         TypeKind::ObjectManager(facet) => {
-            let plural = mdo_type_to_plural(facet.mdo)?;
+            let plural = facet.mdo.russian_plural()?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, facet.name.as_str())))
         }
         TypeKind::FormData { kind: FormDataFacet::Collection, underlying: Some(underlying) } => {
-            let plural = mdo_type_to_plural(underlying.mdo_type)?;
+            let plural = underlying.mdo_type.russian_plural()?;
             let name = &underlying.name;
             Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
         }
         _ => None,
     }
-}
-
-fn mdo_type_to_plural(mdo_type: bsl_metadata::MdoType) -> Option<&'static str> {
-    use bsl_metadata::MdoType;
-    Some(match mdo_type {
-        MdoType::Document => "Документы",
-        MdoType::Catalog => "Справочники",
-        MdoType::InformationRegister => "РегистрыСведений",
-        MdoType::AccumulationRegister => "РегистрыНакопления",
-        MdoType::AccountingRegister => "РегистрыБухгалтерии",
-        MdoType::CalculationRegister => "РегистрыРасчета",
-        MdoType::ChartOfCharacteristicTypes => "ПланыВидовХарактеристик",
-        MdoType::ChartOfAccounts => "ПланыСчетов",
-        MdoType::ChartOfCalculationTypes => "ПланыВидовРасчета",
-        MdoType::BusinessProcess => "БизнесПроцессы",
-        MdoType::Task => "Задачи",
-        MdoType::Enum => "Перечисления",
-        MdoType::ExchangePlan => "ПланыОбмена",
-        MdoType::DataProcessor => "Обработки",
-        MdoType::Report => "Отчеты",
-        _ => return None,
-    })
 }
 
 fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
@@ -3203,7 +3178,7 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         | MetadataKind::RegisterAttribute { .. }
         | MetadataKind::RegisterFilter { .. } => return None,
     };
-    mdo_type_to_plural(mdo)
+    mdo.russian_plural()
 }
 
 #[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap, returns(clone))]

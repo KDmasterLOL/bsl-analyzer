@@ -89,7 +89,7 @@ fn implicit_local_assignment_shadows_builtin_in_value_position() {
 /// as the global contradicts the availability diagnostic, which already treats
 /// such a name as owned by the local.
 #[test]
-fn implicit_local_of_unknown_type_claims_manager_collection_name() {
+fn assignment_does_not_claim_a_manager_collection_name() {
     let fixture = r#"//- /test.bsl
 Функция Тест()
     Справочники = НеизвестнаяФункция();
@@ -98,10 +98,13 @@ fn implicit_local_of_unknown_type_claims_manager_collection_name() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
+    // The assignment writes to a Global-context property and declares no local, so
+    // the later read is still the collection. `GlobalPropertyNotWritable` reports
+    // the illegal write.
     assert_eq!(
         var_type(&db, file_id, "рез"),
-        None,
-        "a local owning the name must not be re-typed as the manager collection"
+        Some(db.manager_collection(bsl_metadata::MdoType::Catalog)),
+        "the name still denotes the manager collection"
     );
 }
 

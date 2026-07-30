@@ -414,40 +414,43 @@ mod tests {
         );
     }
 
-    /// Локальная переменная, названная как коллекция, затеняет глобальное
-    /// свойство — обращение к ней не ограничено средами.
+    /// Присваивание коллекции локаль НЕ объявляет: имя принадлежит свойству
+    /// глобального контекста, и платформа отвергает запись, а не создаёт
+    /// переменную. Поэтому обращение остаётся обращением к коллекции и
+    /// ограничение по средам к нему применяется — до присваивания и после.
     #[test]
-    fn local_named_like_collection_not_flagged() {
-        let fixture = r#"
+    fn assignment_does_not_silence_collection_env() {
+        for (label, fixture) in [
+            (
+                "assignment before the read",
+                r#"
 //- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
 &НаКлиенте
 Процедура Установить(Данные)
     Перечисления = Данные.Коллекция;
     ЭтоДействие = Перечисления.ВидыТочекМаршрута.Действие;
 КонецПроцедуры
-"#;
-        let diags = env_diags(fixture);
-        assert!(diags.is_empty(), "a local shadows the global collection, got: {diags:?}");
-    }
-
-    /// Затенение действует на всё тело: неявная локаль существует с любого
-    /// присваивания, в том числе стоящего ПОСЛЕ обращения.
-    #[test]
-    fn late_assignment_shadows_collection() {
-        let fixture = r#"
+"#,
+            ),
+            (
+                "assignment after the read",
+                r#"
 //- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
 &НаКлиенте
 Процедура Установить(Данные)
     ЭтоДействие = Перечисления.ВидыТочекМаршрута.Действие;
     Перечисления = Данные.Коллекция;
 КонецПроцедуры
-"#;
-        let diags = env_diags(fixture);
-        assert!(diags.is_empty(), "shadowing is body-wide, not order-dependent, got: {diags:?}");
+"#,
+            ),
+        ] {
+            let diags = env_diags(fixture);
+            assert_eq!(diags.len(), 1, "{label}: the read is still the collection, got: {diags:?}");
+        }
     }
 
-    /// Модульная переменная затеняет коллекцию и для вызывной формы,
-    /// пониженной в QualifiedPath.
+    /// Модульная переменная забирает имя коллекции и в вызывной форме цепочки,
+    /// а не только там, где корень читают отдельно.
     #[test]
     fn module_var_shadows_three_level_root() {
         let fixture = r#"
@@ -533,12 +536,12 @@ mod tests {
         assert!(diags.is_empty(), "a form attribute shadows the global, got: {diags:?}");
     }
 
-    /// Сознательное ограничение: затенение не учитывает ветки препроцессора.
-    /// Присваивание в серверной ветке `#Иначе` глушит проверку и в клиентской
-    /// ветке того же тела — пропуск (FN), а не ложное срабатывание, в
-    /// согласии с branch-blind моделью затенения во всём выводе типов.
+    /// Присваивание в серверной ветке `#Иначе` больше не глушит проверку в
+    /// клиентской ветке — не потому, что затенение стало учитывать ветки, а
+    /// потому что присваивание коллекции не объявляет локаль вовсе, так что
+    /// вопрос о ветках не возникает. Прежний осознанный FN закрылся сам.
     #[test]
-    fn cross_branch_assignment_shadows_conservatively() {
+    fn cross_branch_assignment_does_not_silence_the_client_branch() {
         let fixture = r#"
 //- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
 &НаКлиентеНаСервере
@@ -551,9 +554,10 @@ mod tests {
 КонецПроцедуры
 "#;
         let diags = env_diags(fixture);
-        assert!(
-            diags.is_empty(),
-            "body-wide shadowing deliberately ignores preprocessor branches, got: {diags:?}"
+        assert_eq!(
+            diags.len(),
+            1,
+            "an assignment declares no local, so the client-branch read stays checked, got: {diags:?}"
         );
     }
 
@@ -614,8 +618,8 @@ mod tests {
         );
     }
 
-    /// Вызывная форма `Справочники.Товары.НайтиПоКоду()` лочится единым
-    /// QualifiedPath — корень цепочки проверяется и на этом пути.
+    /// Корень цепочки проверяется и в вызывной форме
+    /// `Справочники.Товары.НайтиПоКоду()`, а не только в форме чтения.
     #[test]
     fn three_level_manager_call_flagged_on_client() {
         let fixture_server = r#"
@@ -644,9 +648,8 @@ mod tests {
         );
     }
 
-    /// Сужение `#Если Сервер` действует и на вызывную форму: остатки
-    /// исходной цепочки callee, осиротевшие после переписывания в
-    /// QualifiedPath, не должны голосовать мимо сужения.
+    /// Сужение `#Если Сервер` действует и на вызывную форму цепочки: под
+    /// серверным guard'ом обращение к коллекции с клиента не нарушение.
     #[test]
     fn three_level_call_under_server_guard_not_flagged() {
         let fixture = r#"

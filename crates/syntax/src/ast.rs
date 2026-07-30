@@ -760,37 +760,36 @@ impl AstNode for PreRegionDir {
 }
 
 impl PreRegionDir {
+    /// The directive keyword token. Its kind already carries the start/end
+    /// distinction: the lexer matches every spelling 1C accepts — either
+    /// language, any case, with or without blanks after `#`. Re-deriving the
+    /// kind from the node text would put that knowledge in a second place.
+    pub fn marker(&self) -> Option<SyntaxToken> {
+        self.0.children_with_tokens().filter_map(|element| element.into_token()).find(|token| {
+            matches!(token.kind(), SyntaxKind::PRE_REGION | SyntaxKind::PRE_END_REGION)
+        })
+    }
+
+    /// The region name, or `None` when the directive closes a region or carries
+    /// no name at all.
     pub fn name(&self) -> Option<String> {
-        let text = self.0.text().to_string();
-
-        let first_line = text.lines().next().unwrap_or(&text);
-
-        if let Some(stripped) =
-            first_line.strip_prefix("#Область").or_else(|| first_line.strip_prefix("#область"))
-        {
-            Some(stripped.trim().to_string())
-        } else {
-            first_line
-                .strip_prefix("#Region")
-                .or_else(|| first_line.strip_prefix("#region"))
-                .map(|stripped| stripped.trim().to_string())
+        if !self.is_start() {
+            return None;
         }
+
+        self.0
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| token.kind() == SyntaxKind::IDENT)
+            .map(|token| token.text().to_string())
     }
 
     pub fn is_start(&self) -> bool {
-        let text = self.0.text().to_string();
-        text.starts_with("#Область")
-            || text.starts_with("#область")
-            || text.starts_with("#Region")
-            || text.starts_with("#region")
+        self.marker().is_some_and(|token| token.kind() == SyntaxKind::PRE_REGION)
     }
 
     pub fn is_end(&self) -> bool {
-        let text = self.0.text().to_string();
-        text.starts_with("#КонецОбласти")
-            || text.starts_with("#конецобласти")
-            || text.starts_with("#EndRegion")
-            || text.starts_with("#endregion")
+        self.marker().is_some_and(|token| token.kind() == SyntaxKind::PRE_END_REGION)
     }
 }
 

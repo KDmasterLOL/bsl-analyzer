@@ -304,6 +304,30 @@ impl ModulePathType {
         })
     }
 
+    fn from_mdo(mdo: MdoType) -> Option<Self> {
+        Some(match mdo {
+            MdoType::CommonModule => ModulePathType::CommonModule,
+            MdoType::Document => ModulePathType::Document,
+            MdoType::Catalog => ModulePathType::Catalog,
+            MdoType::DataProcessor => ModulePathType::DataProcessor,
+            MdoType::Report => ModulePathType::Report,
+            MdoType::InformationRegister => ModulePathType::InformationRegister,
+            MdoType::AccumulationRegister => ModulePathType::AccumulationRegister,
+            MdoType::AccountingRegister => ModulePathType::AccountingRegister,
+            MdoType::CalculationRegister => ModulePathType::CalculationRegister,
+            MdoType::ChartOfCharacteristicTypes => ModulePathType::ChartOfCharacteristicTypes,
+            MdoType::ChartOfAccounts => ModulePathType::ChartOfAccounts,
+            MdoType::ChartOfCalculationTypes => ModulePathType::ChartOfCalculationTypes,
+            MdoType::BusinessProcess => ModulePathType::BusinessProcess,
+            MdoType::Task => ModulePathType::Task,
+            MdoType::Enum => ModulePathType::Enum,
+            MdoType::ExchangePlan => ModulePathType::ExchangePlan,
+            MdoType::ExternalDataSource => ModulePathType::ExternalDataSource,
+            MdoType::Constant => ModulePathType::Constant,
+            _ => return None,
+        })
+    }
+
     fn to_mdo_type(self) -> Option<MdoType> {
         Some(match self {
             ModulePathType::CommonModule => return None,
@@ -336,44 +360,13 @@ enum ModuleFileKind {
     RecordSet,
 }
 
+/// Which directory spellings name a collection is decided once, in
+/// `bsl_metadata::module_path::collection_directory`: a dump written with `Ё`
+/// names the same collection as one written with `Е`, and the metadata builder in
+/// `ide-db` must agree with this index about that, or a module gets metadata here
+/// and no index entry there.
 fn module_path_type_from_segment(segment: &str) -> Option<ModulePathType> {
-    match segment.fold_lower().as_str() {
-        "commonmodules" | "общиемодули" => Some(ModulePathType::CommonModule),
-        "documents" | "документы" => Some(ModulePathType::Document),
-        "catalogs" | "справочники" => Some(ModulePathType::Catalog),
-        "dataprocessors" | "обработки" => Some(ModulePathType::DataProcessor),
-        "reports" | "отчёты" | "отчеты" => Some(ModulePathType::Report),
-        "informationregisters" | "регистрысведений" => {
-            Some(ModulePathType::InformationRegister)
-        }
-        "accumulationregisters" | "регистрынакопления" => {
-            Some(ModulePathType::AccumulationRegister)
-        }
-        "accountingregisters" | "регистрыбухгалтерии" => {
-            Some(ModulePathType::AccountingRegister)
-        }
-        "calculationregisters" | "регистрырасчёта" | "регистрырасчета" => {
-            Some(ModulePathType::CalculationRegister)
-        }
-        "chartsofcharacteristictypes" | "планывидовхарактеристик" => {
-            Some(ModulePathType::ChartOfCharacteristicTypes)
-        }
-        "chartsofaccounts" | "планысчетов" => Some(ModulePathType::ChartOfAccounts),
-        "chartsofcalculationtypes" | "планывидоврасчёта" | "планывидоврасчета" => {
-            Some(ModulePathType::ChartOfCalculationTypes)
-        }
-        "businessprocesses" | "бизнеспроцессы" => {
-            Some(ModulePathType::BusinessProcess)
-        }
-        "tasks" | "задачи" => Some(ModulePathType::Task),
-        "enums" | "перечисления" => Some(ModulePathType::Enum),
-        "exchangeplans" | "планыобмена" => Some(ModulePathType::ExchangePlan),
-        "externaldatasources" | "внешниеисточникиданных" => {
-            Some(ModulePathType::ExternalDataSource)
-        }
-        "constants" | "константы" => Some(ModulePathType::Constant),
-        _ => None,
-    }
+    ModulePathType::from_mdo(bsl_metadata::module_path::collection_directory(segment)?)
 }
 
 /// A durable, path-derived identity for a form module. A managed form module lives
@@ -413,39 +406,32 @@ pub fn parse_form_module_path(path: &str) -> Option<FormKey> {
 
 fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKind)> {
     let parts: Vec<&str> = path.split('/').collect();
-
-    if parts.len() < 4 {
-        return None;
-    }
-
     let path_lower = path.fold_lower();
     let is_manager_module =
         parts.last().is_some_and(|file_name| file_name.eq_ignore_ascii_case("ManagerModule.bsl"));
 
-    for (i, part) in parts.iter().enumerate().rev() {
-        let module_type = module_path_type_from_segment(part);
+    // Structure comes from the shared specification; the spelling table stays
+    // here, because this index accepts `Ё` variants the metadata builder does not.
+    let split = bsl_metadata::module_path::split_module_path(path, |segment| {
+        module_path_type_from_segment(segment).is_some()
+    })?;
+    let mod_type = module_path_type_from_segment(split.collection)?;
+    let name = split.object_name.to_string();
 
-        if let Some(mod_type) = module_type {
-            if i + 1 < parts.len() {
-                let name = parts[i + 1].to_string();
-
-                if mod_type == ModulePathType::CommonModule {
-                    if path_lower.ends_with("module.bsl")
-                        && !path_lower.ends_with("managermodule.bsl")
-                        && !path_lower.ends_with("objectmodule.bsl")
-                        && !path_lower.ends_with("recordsetmodule.bsl")
-                    {
-                        return Some((mod_type, name, ModuleFileKind::Common));
-                    }
-                } else if is_manager_module {
-                    return Some((mod_type, name, ModuleFileKind::Manager));
-                } else if path_lower.ends_with("objectmodule.bsl") {
-                    return Some((mod_type, name, ModuleFileKind::Object));
-                } else if path_lower.ends_with("recordsetmodule.bsl") {
-                    return Some((mod_type, name, ModuleFileKind::RecordSet));
-                }
-            }
+    if mod_type == ModulePathType::CommonModule {
+        if path_lower.ends_with("module.bsl")
+            && !path_lower.ends_with("managermodule.bsl")
+            && !path_lower.ends_with("objectmodule.bsl")
+            && !path_lower.ends_with("recordsetmodule.bsl")
+        {
+            return Some((mod_type, name, ModuleFileKind::Common));
         }
+    } else if is_manager_module {
+        return Some((mod_type, name, ModuleFileKind::Manager));
+    } else if path_lower.ends_with("objectmodule.bsl") {
+        return Some((mod_type, name, ModuleFileKind::Object));
+    } else if path_lower.ends_with("recordsetmodule.bsl") {
+        return Some((mod_type, name, ModuleFileKind::RecordSet));
     }
 
     None
@@ -453,6 +439,56 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
 
 #[cfg(test)]
 mod tests {
+    /// Имя объекта может совпадать с именем коллекции. Тип берётся по позиции в
+    /// жёсткой форме `<Коллекция>/<Имя>/Ext/<Модуль>.bsl`, иначе обход с конца
+    /// принимает имя объекта за тип и индексирует модуль под именем `Ext`.
+    #[test]
+    fn object_named_like_a_collection_is_indexed_under_its_own_name() {
+        for (path, expected_type, expected_name) in [
+            ("/Documents/Constants/Ext/ManagerModule.bsl", ModulePathType::Document, "Constants"),
+            ("/Documents/Documents/Ext/ManagerModule.bsl", ModulePathType::Document, "Documents"),
+            (
+                "/Catalogs/Перечисления/Ext/ObjectModule.bsl",
+                ModulePathType::Catalog,
+                "Перечисления",
+            ),
+            // Каталог-предок может называться как коллекция.
+            ("/Documents/Catalogs/Товары/ManagerModule.bsl", ModulePathType::Catalog, "Товары"),
+            (
+                "/home/Documents/Catalogs/Товары/ManagerModule.bsl",
+                ModulePathType::Catalog,
+                "Товары",
+            ),
+            // Сегмент `Ext` не обязателен.
+            (
+                "/CommonModules/ПервыйОбщийМодуль/Module.bsl",
+                ModulePathType::CommonModule,
+                "ПервыйОбщийМодуль",
+            ),
+            ("/Catalogs/Constants/ManagerModule.bsl", ModulePathType::Catalog, "Constants"),
+            // Написание каталога через `ё` называет ту же коллекцию, и решает это
+            // одна таблица на оба слоя — иначе модуль попадает в индекс здесь и
+            // остаётся без метаданных там (или наоборот).
+            ("Отчёты/Продажи/Ext/ManagerModule.bsl", ModulePathType::Report, "Продажи"),
+            ("Отчеты/Продажи/Ext/ManagerModule.bsl", ModulePathType::Report, "Продажи"),
+            (
+                "РегистрыРасчёта/Начисления/Ext/RecordSetModule.bsl",
+                ModulePathType::CalculationRegister,
+                "Начисления",
+            ),
+            // Кратчайшая форма: относительный путь без служебного уровня.
+            ("Documents/ПКО/ManagerModule.bsl", ModulePathType::Document, "ПКО"),
+            ("CommonModules/Общий/Module.bsl", ModulePathType::CommonModule, "Общий"),
+            // Контроль: обычное имя работало и раньше.
+            ("/Documents/ПКО/Ext/ManagerModule.bsl", ModulePathType::Document, "ПКО"),
+        ] {
+            let (mod_type, name, _kind) =
+                super::parse_module_path(path).unwrap_or_else(|| panic!("{path} must parse"));
+            assert_eq!(mod_type, expected_type, "{path}");
+            assert_eq!(name, expected_name, "{path}");
+        }
+    }
+
     use super::*;
 
     #[test]

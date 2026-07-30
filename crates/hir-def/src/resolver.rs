@@ -632,57 +632,7 @@ impl Resolver {
             QualifiedMethodError::NotFound
         })?;
 
-        let current_module_id = self.module_id().ok_or_else(|| {
-            tracing::warn!("resolve_aliased_manager_method called without module scope");
-            QualifiedMethodError::NotFound
-        })?;
-
-        let current_file_id = current_module_id.file_id;
-        if db.file_has_visible_config(current_file_id)
-            && !Self::mdo_visible(db, current_file_id, mdo_type, mdo_name)
-        {
-            tracing::debug!(
-                "resolve_aliased_manager_method: {:?} '{}' not declared in any visible config",
-                mdo_type,
-                mdo_name
-            );
-            return Err(QualifiedMethodError::NotVisibleInConfigs);
-        }
-
-        let source_root_id = db.file_source_root_input(current_file_id).source_root_id(db);
-        let module_index = db.module_index(source_root_id);
-
-        let target_file_id =
-            module_index.resolve_manager(manager_type, mdo_name).ok_or_else(|| {
-                tracing::debug!("Manager module not found: {:?} / {}", manager_type, mdo_name);
-                QualifiedMethodError::NotFound
-            })?;
-
-        let target_module_id = crate::ModuleId::new(target_file_id);
-        let symbol_tree = db.symbol_tree_ref(target_module_id);
-
-        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
-            tracing::debug!(
-                "Manager module '{:?}/{}' found but method '{}' NOT found",
-                manager_type,
-                mdo_name,
-                method_name
-            );
-            QualifiedMethodError::NotFound
-        })?;
-
-        tracing::info!(
-            "SUCCESS - aliased manager method '{}' in '{:?}/{}' (is_export={})",
-            method_name,
-            manager_type,
-            mdo_name,
-            method_symbol.is_export
-        );
-
-        Ok(QualifiedMethodResolution {
-            method_id: method_symbol.id,
-            is_export: method_symbol.is_export,
-        })
+        self.resolve_manager_method(db, manager_type, mdo_name, method_name)
     }
 
     pub fn resolve_object_module_method(

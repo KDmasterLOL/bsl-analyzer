@@ -71,13 +71,17 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
 
         (Expr::Literal(l_lit), Expr::Literal(r_lit)) => l_lit == r_lit,
 
-        (Expr::Path(l_name), Expr::Path(r_name)) => l_name == r_name,
+        // BSL names are case-insensitive, so `Справочники` and `сПРАВОЧНИКИ` are the
+        // same receiver. Comparing them exactly hid duplicate chains written in
+        // different case — and now that a three-level chain lowers to `Field`/`Path`
+        // instead of one folded node, it would hide those too.
+        (Expr::Path(l_name), Expr::Path(r_name)) => l_name.eq_ignore_case(r_name),
 
         (
             Expr::Field { base: l_base, field: l_field },
             Expr::Field { base: r_base, field: r_field },
         ) => {
-            l_field == r_field
+            l_field.eq_ignore_case(r_field)
                 && are_exprs_semantically_equal(
                     ExprId::from_idx(*l_base),
                     ExprId::from_idx(*r_base),
@@ -157,6 +161,9 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
     }
 }
 
+/// A DISPLAY rendering of an expression, keeping the case the author wrote — it goes
+/// into diagnostic messages. Callers that need an identity key fold it themselves
+/// (`operand_str.fold_lower()`); folding here would lowercase the message instead.
 fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
     let expr = body.expr(expr_id);
     match expr {
@@ -233,9 +240,6 @@ fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
                 .collect::<Vec<_>>()
                 .join(",");
             format!("new({}({}))", type_str.fold_lower(), args_str)
-        }
-        Expr::QualifiedPath(qname) => {
-            qname.segments().iter().map(|s| s.as_str().fold_lower()).collect::<Vec<_>>().join(".")
         }
         Expr::MethodCall { receiver, method, args } => {
             let receiver_str = expr_to_string(ExprId::from_idx(*receiver), body);
@@ -690,6 +694,28 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
+    }
+
+    /// Регистр в BSL не значим, поэтому две записи одного имени — одно выражение.
+    /// Цепочка проверяется отдельно от голого имени: её сравнение идёт по звеньям
+    /// (`Field` над `Path`), и свёртка регистра нужна на каждом звене.
+    #[test]
+    fn a_chain_written_in_another_case_is_the_same_expression() {
+        // Сравнение сторон оператора идёт через `are_exprs_semantically_equal` —
+        // маршрут, отличный от свёртки строкового ключа у цепочки `И`, поэтому
+        // проверять регистр надо именно на нём.
+        let code = "Функция Тест()\n    \
+                    Возврат Справочники.Товары.Найти() = сПРАВОЧНИКИ.тОВАРЫ.нАЙТИ();\n\
+                    КонецФункции\n";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "same expression on both sides: {diagnostics:#?}");
+
+        // Контроль: РАЗНЫЕ имена по-прежнему разные, иначе проверка выше зелена сама
+        // по себе.
+        let distinct = "Функция Тест()\n    \
+                        Возврат Справочники.Товары.Найти() = Справочники.Услуги.Найти();\n\
+                        КонецФункции\n";
+        assert!(check_ast_diagnostic(distinct, check).is_empty());
     }
 
     #[test]

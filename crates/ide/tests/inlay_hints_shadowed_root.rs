@@ -53,14 +53,15 @@ fn unheld_manager_chain_labels_its_argument() {
 }
 
 #[test]
-fn local_holding_manager_root_gets_no_hint() {
+fn assignment_to_the_root_still_labels_the_argument() {
     let labels = hint_labels(
         "Функция Тест()\n    Справочники = НеизвестнаяФункция();\n    \
          Справочники.Справочник1.НайтиПоКоду(\"К\");\nКонецФункции\n",
     );
     assert!(
-        labels.is_empty(),
-        "a local holds the root — the manager method's parameters must not label it: {labels:?}"
+        !labels.is_empty(),
+        "an assignment declares no local, so the manager method's parameters still label \
+         the call: {labels:?}"
     );
 }
 
@@ -88,9 +89,9 @@ fn hints_agree_with_signature_help_on_a_held_root() {
     let help = analysis.signature_help(file_id, arg_offset);
     let hints = analysis.inlay_hints(file_id, range);
 
-    assert!(help.is_none(), "precondition: signature help declines a held root");
+    assert!(help.is_some(), "precondition: an assignment does not hold the root");
     assert!(
-        hints.is_empty(),
-        "signature help named nothing here, so hints must name nothing either: {hints:?}"
+        !hints.is_empty(),
+        "signature help resolved here, so hints must label the call too: {hints:?}"
     );
 }

@@ -450,7 +450,7 @@ fn walk_expr_for_calls(body: &Body, expr_idx: hir_def::hir::ExprIdx, out: &mut V
             }
         }
         Expr::Await { expr } => walk_expr_for_calls(body, *expr, out),
-        Expr::Missing | Expr::Literal(_) | Expr::Path(_) | Expr::QualifiedPath(_) => {}
+        Expr::Missing | Expr::Literal(_) | Expr::Path(_) => {}
     }
 }
 

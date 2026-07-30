@@ -54,31 +54,6 @@ pub fn resolve_qualified_call(
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
-pub fn resolve_three_level_call(
-    db: &dyn HirDatabase,
-    mdo_type_plural: &Name,
-    mdo_name: &Name,
-    method_name: &Name,
-    resolver: &Resolver,
-) -> Result<MethodResolution, UnresolvedMethodKind> {
-    let resolution = resolver
-        .resolve_three_level_method(db, mdo_type_plural, mdo_name, method_name)
-        .map_err(|e| match e {
-            QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
-                UnresolvedMethodKind::MethodNotFound
-            }
-        })?;
-
-    let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
-    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
-        "method_id returned by Resolver must exist in symbol_tree — \
-         symbol_tree / Resolver are out of sync",
-    );
-
-    let signature = materialise_signature_enriched(db, resolution.method_id, method_symbol);
-    Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
-}
-
 fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::MdoType> {
     use bsl_metadata::MdoType;
     use hir_def::ty::MetadataKind;

@@ -78,6 +78,62 @@ pub(super) fn unresolved_kinds(
         .collect()
 }
 
+/// Имена полей, по которым инференс не нашёл члена. Промах по СРЕДНЕМУ звену
+/// трёхзвенной цепочки — это именно промах поля коллекции, а не метода.
+pub(super) fn unresolved_fields(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String> {
+    db.infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            InferenceDiagnostic::UnresolvedField { field_name, .. } => {
+                Some(field_name.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Пары «plural, объект» из вердиктов об избыточном обращении к объекту.
+pub(super) fn redundant_three_level(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+) -> Vec<(String, String)> {
+    db.infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            InferenceDiagnostic::RedundantAccessToObjectThreeLevel {
+                mdo_type, mdo_name, ..
+            } => Some((mdo_type.as_str().to_string(), mdo_name.as_str().to_string())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Пропущенные обязательные параметры менеджерного вызова: `(метод, plural, объект)`.
+pub(super) fn missed_manager_params(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+) -> Vec<(String, String, String)> {
+    db.infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            InferenceDiagnostic::MissedRequiredParameterManagerModule {
+                callee,
+                mdo_type,
+                mdo_name,
+                ..
+            } => Some((
+                callee.as_str().to_string(),
+                mdo_type.as_str().to_string(),
+                mdo_name.as_str().to_string(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn mismatched_arg_counts(
     db: &RootDatabaseImpl,
     file_id: FileId,
@@ -88,6 +144,20 @@ pub(super) fn mismatched_arg_counts(
             InferenceDiagnostic::MismatchedArgCount {
                 required_count, total_count, found, ..
             } => Some((*required_count, *total_count, *found)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Имена получателей из вердиктов об избыточном двухзвенном обращении.
+pub(super) fn redundant_two_level(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String> {
+    db.infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            InferenceDiagnostic::RedundantAccessToObjectTwoLevel { module, .. } => {
+                Some(module.as_str().to_string())
+            }
             _ => None,
         })
         .collect()

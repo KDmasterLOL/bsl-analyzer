@@ -85,11 +85,11 @@ pub fn manager_collection_env(mdo_type: bsl_metadata::MdoType) -> EnvFlags {
 pub struct BodyShadowScope<'a> {
     pub body: &'a Body,
     pub source_map: &'a BodySourceMap,
-    /// Reads are judged positionally, matching sequential inference: an
-    /// assignment claims the name only for reads after it has COMPLETED —
-    /// inside its own right-hand side the name still denotes the previous
-    /// owner (`Справочники = Справочники.Х`). A declared binding claims the
-    /// whole body.
+    /// Where the read sits, used to pick the owner's value rather than to decide
+    /// ownership: the reaching write is the textually-last assignment COMPLETED
+    /// before this offset, matching sequential inference. Ownership itself is
+    /// body-wide and comes from a declaration, so a read before the first write
+    /// still belongs to the declared owner — it simply has no reaching value.
     pub read_offset: TextSize,
 }
 
@@ -106,11 +106,16 @@ pub struct BareGlobalClaim {
     pub reaching_value: Option<ExprId>,
 }
 
-/// The user symbol claiming a bare global name, if any: a body local (written
-/// or declared), a module-level variable or method, a form attribute or
-/// form-self property, an implicit `ЭтотОбъект`/record-set member, or a
-/// workspace common module. `None` means the name denotes the platform
-/// global.
+/// The user symbol claiming a bare global name, if any: a declared body binding
+/// (`Перем`, parameter, loop variable), a module-level variable or method, a
+/// form attribute or form-self property, an implicit `ЭтотОбъект`/record-set
+/// member, or a workspace common module. `None` means the name denotes the
+/// platform global.
+///
+/// A bare assignment is NOT an owner. `Справочники = Новый Структура` does not
+/// declare a local: the name belongs to a Global-context property, and the
+/// platform refuses the write rather than creating a variable. So the name keeps
+/// denoting the global both before and after such an assignment.
 ///
 /// The shared predicate behind both the availability diagnostic and
 /// completion's availability gate — the two must judge shadowing identically.
@@ -155,6 +160,18 @@ pub fn bare_global_name_claim(
         scope.body.bindings_iter().any(|(_, b)| NormName::intern(b.name.as_str()) == key);
     if !body_declares && write_owner_claim() {
         return Some(BareGlobalClaim { reaching_value: None });
+    }
+    // For a metadata-collection name an assignment alone claims nothing: the name
+    // is a Global-context PROPERTY, and assigning to it does not declare a local —
+    // the platform refuses the write ("property is not writable") — so the name
+    // keeps denoting the collection. Only a declared binding or an out-of-body
+    // owner takes it; the positional search below then merely supplies that
+    // owner's value at the read. Other globals keep the older rule until the
+    // platform's verdict on them is measured the same way.
+    let names_a_collection = bsl_metadata::MdoType::from_plural(name.as_str())
+        .is_some_and(|mdo| mdo.manager_type_prefix().is_some());
+    if names_a_collection && !body_declares && !read_only_claim() {
+        return None;
     }
     let mut reaching: Option<(TextSize, ExprId)> = None;
     for (_, stmt) in scope.body.stmts_iter() {

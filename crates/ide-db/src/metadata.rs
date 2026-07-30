@@ -1710,43 +1710,6 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         }
     }
 
-    if let Some(cm_idx) = parts.iter().position(|&p| p == "CommonModules") {
-        if parts.len() >= cm_idx + 4 {
-            return Some(bsl_metadata::ModuleType::CommonModule);
-        }
-    }
-
-    if let Some(idx) = parts.iter().position(|&p| p == "HTTPServices") {
-        if parts.len() >= idx + 4 {
-            return Some(bsl_metadata::ModuleType::HTTPServiceModule);
-        }
-    }
-
-    if let Some(idx) = parts.iter().position(|&p| p == "WebServices") {
-        if parts.len() >= idx + 4 {
-            return Some(bsl_metadata::ModuleType::WebServiceModule);
-        }
-    }
-
-    if let Some(idx) = parts.iter().position(|&p| p == "IntegrationServices") {
-        if parts.len() >= idx + 4 {
-            return Some(bsl_metadata::ModuleType::IntegrationServiceModule);
-        }
-    }
-
-    if let Some(idx) = parts.iter().position(|&p| p == "CommonCommands" || p == "ОбщиеКоманды")
-    {
-        if parts.len() >= idx + 4 && parts[parts.len() - 1] == "CommandModule.bsl" {
-            return Some(bsl_metadata::ModuleType::CommandModule);
-        }
-    }
-
-    if let Some(cmd_idx) = parts.iter().position(|&p| p == "Commands") {
-        if parts.len() >= cmd_idx + 4 && parts[parts.len() - 1].ends_with("CommandModule.bsl") {
-            return Some(bsl_metadata::ModuleType::CommandModule);
-        }
-    }
-
     if let Some(idx) = parts.iter().rposition(|&p| p == "CommonForms" || p == "ОбщиеФормы")
     {
         if parts.len() == idx + 5
@@ -1768,17 +1731,123 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         }
     }
 
-    if parts.len() >= 4 {
-        let module_file = parts[parts.len() - 1];
-        return match module_file {
+    // Everything else lives in a collection, and the shape of that path has exactly
+    // one specification. Deciding by "does some ancestor look like a collection"
+    // let a directory far up the path take the type, and deciding by segment count
+    // alone gave an ordinary file a module type it has no claim to.
+    if let Some(split) = bsl_metadata::module_path::split_module_path(&normalized, |segment| {
+        module_collection(segment).is_some()
+    }) {
+        if let Some(collection) = module_collection(split.collection) {
+            return collection_module_type(collection, split.module_file);
+        }
+    }
+
+    // A dump also holds collections this crate has no `MdoType` for — settings
+    // storages, filter criteria, document journals. Their object/manager modules are
+    // still object/manager modules, and the file name says so; what the unknown
+    // collection costs is the shape evidence, so the SERVICE level has to supply it.
+    // Without either the path is just a file that happens to be named `ObjectModule.bsl`.
+    let has_service_level = parts.len() >= 2 && parts[parts.len() - 2].eq_ignore_ascii_case("Ext");
+    if has_service_level && parts.len() >= 4 {
+        return match parts[parts.len() - 1] {
             "ObjectModule.bsl" => Some(bsl_metadata::ModuleType::ObjectModule),
             "ManagerModule.bsl" => Some(bsl_metadata::ModuleType::ManagerModule),
+            // A record set too: four of its eight owners — sequences,
+            // recalculations, an external data source's tables and cubes — are not
+            // in `MdoType`, and this branch is where their paths land.
             "RecordSetModule.bsl" => Some(bsl_metadata::ModuleType::RecordSetModule),
             _ => None,
         };
     }
 
     None
+}
+
+/// A dump directory that holds modules of one kind. The module type follows from
+/// the collection and the file name TOGETHER — `Module.bsl` means a common module
+/// under `CommonModules` and an HTTP service under `HTTPServices`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleCollection {
+    Mdo(bsl_metadata::MdoType),
+    CommonModules,
+    HttpServices,
+    WebServices,
+    IntegrationServices,
+    CommonCommands,
+    Commands,
+}
+
+fn module_collection(segment: &str) -> Option<ModuleCollection> {
+    // Which spellings name a collection is decided once, in
+    // `bsl_metadata::module_path::collection_directory` — a directory name is not a
+    // name written in code, and the two layers that read paths must not answer that
+    // question apart.
+    let folded = segment.fold_lower();
+    match folded.as_str() {
+        "httpservices" => Some(ModuleCollection::HttpServices),
+        "webservices" => Some(ModuleCollection::WebServices),
+        "integrationservices" => Some(ModuleCollection::IntegrationServices),
+        "commoncommands" | "общиекоманды" => Some(ModuleCollection::CommonCommands),
+        "commands" => Some(ModuleCollection::Commands),
+        // Common modules answer to both spellings, as the module index does — an
+        // English-only branch left the Russian directory without a module type at all.
+        _ => match bsl_metadata::module_path::collection_directory(segment) {
+            Some(bsl_metadata::MdoType::CommonModule) => Some(ModuleCollection::CommonModules),
+            Some(mdo) if mdo.manager_type_prefix().is_some() => Some(ModuleCollection::Mdo(mdo)),
+            _ => None,
+        },
+    }
+}
+
+fn collection_module_type(
+    collection: ModuleCollection,
+    module_file: &str,
+) -> Option<bsl_metadata::ModuleType> {
+    use bsl_metadata::ModuleType;
+    // A collection holds one kind of object, but not one FILE: the dump puts a
+    // command module next to an object module. The file name has to be named
+    // explicitly everywhere, or a sibling `.bsl` inherits a type it has no claim to.
+    match collection {
+        ModuleCollection::CommonModules if module_file == "Module.bsl" => {
+            Some(ModuleType::CommonModule)
+        }
+        ModuleCollection::HttpServices if module_file == "Module.bsl" => {
+            Some(ModuleType::HTTPServiceModule)
+        }
+        ModuleCollection::WebServices if module_file == "Module.bsl" => {
+            Some(ModuleType::WebServiceModule)
+        }
+        ModuleCollection::IntegrationServices if module_file == "Module.bsl" => {
+            Some(ModuleType::IntegrationServiceModule)
+        }
+        ModuleCollection::CommonCommands if module_file == "CommandModule.bsl" => {
+            Some(ModuleType::CommandModule)
+        }
+        ModuleCollection::Commands if module_file == "CommandModule.bsl" => {
+            Some(ModuleType::CommandModule)
+        }
+        // A constant owns a module no other collection has.
+        ModuleCollection::Mdo(bsl_metadata::MdoType::Constant)
+            if module_file == "ValueManagerModule.bsl" =>
+        {
+            Some(ModuleType::ValueManagerModule)
+        }
+        ModuleCollection::Mdo(mdo) => match module_file {
+            "ObjectModule.bsl" => Some(ModuleType::ObjectModule),
+            "ManagerModule.bsl" => Some(ModuleType::ManagerModule),
+            // A record set belongs to a register and to nothing else — the same
+            // list `build_module_metadata` uses to load a register owner.
+            "RecordSetModule.bsl" if mdo.is_register() => Some(ModuleType::RecordSetModule),
+            _ => None,
+        },
+        ModuleCollection::CommonModules
+        | ModuleCollection::HttpServices
+        | ModuleCollection::WebServices
+        | ModuleCollection::IntegrationServices
+        | ModuleCollection::CommonCommands
+        | ModuleCollection::Commands => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1792,70 +1861,28 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
     // Normalize Windows separators before `/`-keyed segment matching (see
     // `get_module_type_from_uri`).
     let normalized = file_uri.replace('\\', "/");
-    let parts: Vec<&str> = normalized.split('/').collect();
 
-    if parts.len() < 4 {
-        return None;
-    }
+    // Only the collections this function promises an owner for: an mdo object, or a
+    // common module. The service collections (`HTTPServices`, …) have an owner of
+    // their own kind and their callers resolve it elsewhere.
+    let split = bsl_metadata::module_path::split_module_path(&normalized, |segment| {
+        matches!(
+            module_collection(segment),
+            Some(ModuleCollection::Mdo(_) | ModuleCollection::CommonModules)
+        )
+    })?;
+    let collection = module_collection(split.collection)?;
 
-    let type_idx =
-        parts.iter().rposition(|&p| mdo_type_from_plural(p).is_some() || p == "CommonModules")?;
-
-    if parts.len() < type_idx + 4 {
-        return None;
-    }
-
-    let type_plural = parts[type_idx];
-    let name = parts[type_idx + 1].to_string();
-
-    let mdo_type = mdo_type_from_plural(type_plural);
-
-    let module_file = parts[parts.len() - 1];
-    let module_type = match module_file {
-        "ObjectModule.bsl" => bsl_metadata::ModuleType::ObjectModule,
-        "ManagerModule.bsl" => bsl_metadata::ModuleType::ManagerModule,
-        "RecordSetModule.bsl" => bsl_metadata::ModuleType::RecordSetModule,
-        "Module.bsl" if type_plural == "CommonModules" => bsl_metadata::ModuleType::CommonModule,
-        _ => bsl_metadata::ModuleType::Unknown,
-    };
-
-    Some(ModulePathInfo { mdo_type, name: Some(name), module_type })
-}
-
-fn mdo_type_from_plural(type_plural: &str) -> Option<bsl_metadata::MdoType> {
-    match type_plural {
-        "Catalogs" | "Справочники" => Some(bsl_metadata::MdoType::Catalog),
-        "Documents" | "Документы" => Some(bsl_metadata::MdoType::Document),
-        "BusinessProcesses" | "БизнесПроцессы" => {
-            Some(bsl_metadata::MdoType::BusinessProcess)
-        }
-        "Tasks" | "Задачи" => Some(bsl_metadata::MdoType::Task),
-        "ExchangePlans" | "ПланыОбмена" => Some(bsl_metadata::MdoType::ExchangePlan),
-        "ChartsOfAccounts" | "ПланыСчетов" => {
-            Some(bsl_metadata::MdoType::ChartOfAccounts)
-        }
-        "ChartsOfCalculationTypes" | "ПланыВидовРасчета" => {
-            Some(bsl_metadata::MdoType::ChartOfCalculationTypes)
-        }
-        "ChartsOfCharacteristicTypes" | "ПланыВидовХарактеристик" => {
-            Some(bsl_metadata::MdoType::ChartOfCharacteristicTypes)
-        }
-        "InformationRegisters" | "РегистрыСведений" => {
-            Some(bsl_metadata::MdoType::InformationRegister)
-        }
-        "AccumulationRegisters" | "РегистрыНакопления" => {
-            Some(bsl_metadata::MdoType::AccumulationRegister)
-        }
-        "AccountingRegisters" | "РегистрыБухгалтерии" => {
-            Some(bsl_metadata::MdoType::AccountingRegister)
-        }
-        "CalculationRegisters" | "РегистрыРасчета" => {
-            Some(bsl_metadata::MdoType::CalculationRegister)
-        }
-        "DataProcessors" | "Обработки" => Some(bsl_metadata::MdoType::DataProcessor),
-        "Reports" | "Отчеты" => Some(bsl_metadata::MdoType::Report),
+    let mdo_type = match collection {
+        ModuleCollection::Mdo(mdo) => Some(mdo),
         _ => None,
-    }
+    };
+    // The module type comes from the same table `get_module_type_from_uri` reads, so
+    // the two answers about one path cannot drift apart.
+    let module_type = collection_module_type(collection, split.module_file)
+        .unwrap_or(bsl_metadata::ModuleType::Unknown);
+
+    Some(ModulePathInfo { mdo_type, name: Some(split.object_name.to_string()), module_type })
 }
 
 pub fn find_metadata_object<DB: MetadataDb>(
@@ -1892,81 +1919,6 @@ pub fn find_metadata_object<DB: MetadataDb>(
     }
 }
 
-pub fn find_common_module<DB: MetadataDb>(
-    db: &DB,
-    path_input: ConfigurationPathInput,
-    name: &str,
-) -> Option<bsl_metadata::CommonModule> {
-    let config = db.load_configuration(path_input);
-    config.find_common_module(name).cloned()
-}
-
-pub fn get_module_owner<DB: MetadataDb>(
-    db: &DB,
-    path_input: ConfigurationPathInput,
-    file_uri: &str,
-) -> Option<ModuleOwner> {
-    let _span = tracing::debug_span!("get_module_owner", file_uri).entered();
-
-    // Normalize Windows separators before `/`-keyed segment matching (see
-    // `get_module_type_from_uri`).
-    let normalized = file_uri.replace('\\', "/");
-    let parts: Vec<&str> = normalized.split('/').collect();
-
-    if parts.len() < 3 {
-        tracing::debug!("URI too short, expected at least 3 parts");
-        return None;
-    }
-
-    let type_plural = parts[0];
-    let name = parts[1];
-
-    if type_plural == "CommonModules" {
-        return find_common_module(db, path_input, name).map(ModuleOwner::CommonModule);
-    }
-
-    let mdo_type = match type_plural {
-        "Catalogs" | "Справочники" => bsl_metadata::MdoType::Catalog,
-        "Documents" | "Документы" => bsl_metadata::MdoType::Document,
-        "InformationRegisters" | "РегистрыСведений" => {
-            bsl_metadata::MdoType::InformationRegister
-        }
-        "AccumulationRegisters" | "РегистрыНакопления" => {
-            bsl_metadata::MdoType::AccumulationRegister
-        }
-        "AccountingRegisters" | "РегистрыБухгалтерии" => {
-            bsl_metadata::MdoType::AccountingRegister
-        }
-        "CalculationRegisters" | "РегистрыРасчета" => {
-            bsl_metadata::MdoType::CalculationRegister
-        }
-        _ => {
-            tracing::debug!(?type_plural, "Unknown metadata type");
-            return None;
-        }
-    };
-
-    find_metadata_object(db, path_input, mdo_type, name).map(ModuleOwner::MetadataObject)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ModuleOwner {
-    CommonModule(bsl_metadata::CommonModule),
-    MetadataObject(bsl_metadata::MetadataObject),
-}
-
-impl ModuleOwner {
-    pub fn name(&self) -> &str {
-        match self {
-            ModuleOwner::CommonModule(m) => {
-                use bsl_metadata::traits::MdObject;
-                m.name()
-            }
-            ModuleOwner::MetadataObject(m) => &m.name,
-        }
-    }
-}
-
 pub(crate) fn find_common_module_by_path(
     configuration: &bsl_metadata::Configuration,
     file_path: &Path,
@@ -1977,16 +1929,18 @@ pub(crate) fn find_common_module_by_path(
     // module's metadata stayed `None` and every metadata diagnostic over it was silent.
     // Resolve by the name segment instead, the way the service matchers above already do.
     //
-    // The segment after `CommonModules/` is the module's directory name, which 1C keeps
-    // identical to the metadata `<Name>` (the designer enforces it) — so `find_common_module`
-    // (keyed on the parsed name) resolves it. `rposition` takes the module-level
-    // `CommonModules`, not an accidental one in the workspace prefix above the config root.
+    // The object segment is the module's directory name, which 1C keeps identical to
+    // the metadata `<Name>` (the designer enforces it) — so `find_common_module`
+    // (keyed on the parsed name) resolves it. The segment comes from the shared path
+    // specification and nowhere else: a scan of its own would have to repeat both the
+    // accepted spellings of the directory and the rule that keeps an ancestor
+    // directory from passing for the collection.
     let file_str = file_path.to_string_lossy().replace('\\', "/");
-    let parts: Vec<&str> = file_str.split('/').collect();
-    let cm_idx = parts.iter().rposition(|&p| p == "CommonModules")?;
-    let name = parts.get(cm_idx + 1)?;
+    let split = bsl_metadata::module_path::split_module_path(&file_str, |segment| {
+        matches!(module_collection(segment), Some(ModuleCollection::CommonModules))
+    })?;
 
-    configuration.find_common_module(name).cloned()
+    configuration.find_common_module(split.object_name).cloned()
 }
 
 pub(crate) fn load_form_from_path(file_path: &Path) -> Option<Arc<bsl_metadata::Form>> {
@@ -2041,18 +1995,16 @@ pub fn build_module_metadata(
                     common_module = Some(Arc::new(cm));
                 }
             }
+            // A constant's value-manager module has the same owner as its manager
+            // module: classifying it without loading that owner would leave the
+            // diagnostics it was classified FOR without the metadata they read.
             bsl_metadata::ModuleType::ManagerModule
             | bsl_metadata::ModuleType::ObjectModule
-            | bsl_metadata::ModuleType::RecordSetModule => {
+            | bsl_metadata::ModuleType::RecordSetModule
+            | bsl_metadata::ModuleType::ValueManagerModule => {
                 if let Some(ref info) = path_info {
                     if let (Some(mdo_type), Some(ref name)) = (info.mdo_type, &info.name) {
-                        if matches!(
-                            mdo_type,
-                            bsl_metadata::MdoType::InformationRegister
-                                | bsl_metadata::MdoType::AccumulationRegister
-                                | bsl_metadata::MdoType::AccountingRegister
-                                | bsl_metadata::MdoType::CalculationRegister
-                        ) {
+                        if mdo_type.is_register() {
                             if let Some(reg) = config.find_register_by_type_and_name(mdo_type, name)
                             {
                                 register = Some(Arc::new(reg.clone()));
@@ -2098,17 +2050,23 @@ pub fn build_module_metadata(
     }
 }
 
+/// The object segment of a service module path, taken from the shared
+/// specification — the same one the module type comes from. A scan of its own put
+/// the owner and the type on different rules, and the first ancestor directory
+/// that happened to be named like the collection took the lookup with it.
+fn service_object_name(file_str: &str, collection: ModuleCollection) -> Option<&str> {
+    let split = bsl_metadata::module_path::split_module_path(file_str, |segment| {
+        module_collection(segment) == Some(collection)
+    })?;
+    Some(split.object_name)
+}
+
 pub(crate) fn find_http_service_by_path(
     configuration: &bsl_metadata::Configuration,
     file_path: &Path,
 ) -> Option<Arc<bsl_metadata::HTTPService>> {
     let file_str = file_path.to_string_lossy().replace('\\', "/");
-
-    let parts: Vec<&str> = file_str.split('/').collect();
-
-    let http_idx = parts.iter().position(|&p| p == "HTTPServices")?;
-
-    let name = parts.get(http_idx + 1)?;
+    let name = service_object_name(&file_str, ModuleCollection::HttpServices)?;
 
     configuration.find_http_service(name).map(|hs| Arc::new(hs.clone()))
 }
@@ -2118,12 +2076,7 @@ pub(crate) fn find_web_service_by_path(
     file_path: &Path,
 ) -> Option<Arc<bsl_metadata::WebService>> {
     let file_str = file_path.to_string_lossy().replace('\\', "/");
-
-    let parts: Vec<&str> = file_str.split('/').collect();
-
-    let ws_idx = parts.iter().position(|&p| p == "WebServices")?;
-
-    let name = parts.get(ws_idx + 1)?;
+    let name = service_object_name(&file_str, ModuleCollection::WebServices)?;
 
     configuration.find_web_service(name).map(|ws| Arc::new(ws.clone()))
 }
@@ -2133,18 +2086,66 @@ pub(crate) fn find_integration_service_by_path(
     file_path: &Path,
 ) -> Option<Arc<bsl_metadata::IntegrationService>> {
     let file_str = file_path.to_string_lossy().replace('\\', "/");
-
-    let parts: Vec<&str> = file_str.split('/').collect();
-
-    let is_idx = parts.iter().position(|&p| p == "IntegrationServices")?;
-
-    let name = parts.get(is_idx + 1)?;
+    let name = service_object_name(&file_str, ModuleCollection::IntegrationServices)?;
 
     configuration.find_integration_service(name).map(|svc| Arc::new(svc.clone()))
 }
 
 #[cfg(test)]
 mod tests {
+    /// Имя объекта может совпадать с именем коллекции (`Справочник.Константы`).
+    /// Форма пути жёсткая — `<Коллекция>/<Имя>/Ext/<Модуль>.bsl`, поэтому тип
+    /// берётся по позиции, а не поиском последнего похожего сегмента: иначе имя
+    /// объекта выигрывает у настоящего типа и путь не разбирается вовсе.
+    #[test]
+    fn object_named_like_a_collection_still_parses() {
+        for (path, expected_type, expected_name) in [
+            (
+                "Catalogs/Constants/Ext/ManagerModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Constants",
+            ),
+            (
+                "Catalogs/Documents/Ext/ManagerModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Documents",
+            ),
+            (
+                "Справочники/Константы/Ext/ManagerModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Константы",
+            ),
+            (
+                "src/cf/Documents/Enums/Ext/ObjectModule.bsl",
+                bsl_metadata::MdoType::Document,
+                "Enums",
+            ),
+            // Каталог-предок может называться как коллекция (типичный случай —
+            // `C:\Users\...\Documents`), и у пути без `Ext` он стоит ровно там, где
+            // при наличии `Ext` стоит настоящая коллекция.
+            (
+                "/home/Documents/Catalogs/Товары/ManagerModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Товары",
+            ),
+            (
+                r"C:\Users\Alice\Documents\Catalogs\Товары\ManagerModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Товары",
+            ),
+            // Сегмент `Ext` не обязателен — так выглядят фикстуры и часть выгрузок.
+            ("/Catalogs/Constants/ManagerModule.bsl", bsl_metadata::MdoType::Catalog, "Constants"),
+            ("/Documents/Enums/ObjectModule.bsl", bsl_metadata::MdoType::Document, "Enums"),
+            // Контроль: обычное имя разбирался и раньше.
+            ("Catalogs/Товары/Ext/ManagerModule.bsl", bsl_metadata::MdoType::Catalog, "Товары"),
+        ] {
+            let info =
+                super::parse_module_path(path).unwrap_or_else(|| panic!("{path} must parse"));
+            assert_eq!(info.mdo_type, Some(expected_type), "{path}");
+            assert_eq!(info.name.as_deref(), Some(expected_name), "{path}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -2174,6 +2175,77 @@ mod tests {
             path_input: ConfigurationPathInput<'db>,
         ) -> Arc<Configuration> {
             load_configuration(self, path_input)
+        }
+    }
+
+    /// Владелец сервисного модуля ищется по той же форме пути, что и тип. Иначе
+    /// каталог-предок с именем коллекции уводит поиск на чужое имя, и модуль
+    /// остаётся с типом, но без метаданных.
+    #[test]
+    fn a_service_module_owner_follows_the_same_path_shape() {
+        let root = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer"
+        ));
+        let config = bsl_metadata::load_from_directory(&root).expect("fixture must load");
+
+        let http = build_module_metadata(
+            std::path::Path::new("/tmp/HTTPServices/work/HTTPServices/HTTPСервис1/Ext/Module.bsl"),
+            Some(&config),
+        );
+        assert_eq!(http.module_type, bsl_metadata::ModuleType::HTTPServiceModule);
+        assert!(http.http_service.is_some(), "the service next to the module owns it");
+
+        let web = build_module_metadata(
+            std::path::Path::new("/tmp/WebServices/work/WebServices/WebСервис1/Ext/Module.bsl"),
+            Some(&config),
+        );
+        assert_eq!(web.module_type, bsl_metadata::ModuleType::WebServiceModule);
+        assert!(web.web_service.is_some());
+
+        // Контроль: обычный путь без каталога-двойника работал и раньше.
+        let plain = build_module_metadata(
+            &root.join("HTTPServices/HTTPСервис1/Ext/Module.bsl"),
+            Some(&config),
+        );
+        assert!(plain.http_service.is_some());
+    }
+
+    /// Классификация без загрузки владельца бесполезна: диагностики, ради которых
+    /// тип и понадобился, читают метаданные константы.
+    #[test]
+    fn value_manager_module_loads_its_constant() {
+        let mut config = bsl_metadata::Configuration::new("Test");
+        config.add_metadata_object(bsl_metadata::MetadataObject::new(
+            bsl_metadata::MdoType::Constant,
+            "СтрокаКонст",
+        ));
+
+        let metadata = build_module_metadata(
+            std::path::Path::new("Constants/СтрокаКонст/Ext/ValueManagerModule.bsl"),
+            Some(&config),
+        );
+
+        assert_eq!(metadata.module_type, bsl_metadata::ModuleType::ValueManagerModule);
+        assert!(metadata.mdo.is_some(), "the constant owns this module");
+    }
+
+    /// То же и для русского написания каталога общих модулей: тип есть, а поиск
+    /// владельца шёл своим обходом и знал только английское имя.
+    #[test]
+    fn a_russian_common_module_directory_loads_its_metadata() {
+        let root = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer"
+        ));
+        let config = bsl_metadata::load_from_directory(&root).expect("fixture must load");
+
+        for dir in ["CommonModules", "ОбщиеМодули"] {
+            let path = root.join(dir).join("КлиентскийОбщийМодуль/Ext/Module.bsl");
+            let metadata = build_module_metadata(&path, Some(&config));
+            assert_eq!(metadata.module_type, bsl_metadata::ModuleType::CommonModule, "{dir}");
+            assert!(metadata.common_module.is_some(), "{dir}: module metadata");
+            assert!(metadata.execution_context.is_some(), "{dir}: execution context");
         }
     }
 
@@ -2257,179 +2329,6 @@ mod tests {
         let not_found =
             find_metadata_object(&db, path_input, bsl_metadata::MdoType::Catalog, "NonExistent");
         assert!(not_found.is_none(), "Should not find non-existent object");
-    }
-
-    #[test]
-    fn test_find_common_module() {
-        let db = TestDatabase::default();
-
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path, 0);
-
-        let module = find_common_module(&db, path_input, "ГлобальныйСерверныйМодуль");
-        assert!(module.is_some(), "Should find ГлобальныйСерверныйМодуль");
-
-        use bsl_metadata::traits::MdObject;
-        assert_eq!(module.unwrap().name(), "ГлобальныйСерверныйМодуль");
-
-        let not_found = find_common_module(&db, path_input, "NonExistent");
-        assert!(not_found.is_none(), "Should not find non-existent module");
-    }
-
-    #[test]
-    fn test_get_module_owner_common_module() {
-        let db = TestDatabase::default();
-
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path, 0);
-
-        let owner = get_module_owner(
-            &db,
-            path_input,
-            "CommonModules/ГлобальныйСерверныйМодуль/Ext/Module.bsl",
-        );
-
-        assert!(owner.is_some(), "Should find module owner");
-        let owner = owner.unwrap();
-
-        match &owner {
-            ModuleOwner::CommonModule(m) => {
-                use bsl_metadata::traits::MdObject;
-                assert_eq!(m.name(), "ГлобальныйСерверныйМодуль");
-            }
-            _ => panic!("Should be CommonModule"),
-        }
-
-        assert_eq!(owner.name(), "ГлобальныйСерверныйМодуль");
-    }
-
-    #[test]
-    fn test_get_module_owner_catalog_english() {
-        let db = TestDatabase::default();
-
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path, 0);
-
-        let owner = get_module_owner(&db, path_input, "Catalogs/Справочник1/Ext/ObjectModule.bsl");
-
-        assert!(owner.is_some(), "Should find catalog owner");
-        let owner = owner.unwrap();
-
-        match &owner {
-            ModuleOwner::MetadataObject(m) => {
-                assert_eq!(m.name, "Справочник1");
-                assert_eq!(m.mdo_type, bsl_metadata::MdoType::Catalog);
-            }
-            _ => panic!("Should be MetadataObject"),
-        }
-
-        assert_eq!(owner.name(), "Справочник1");
-    }
-
-    #[test]
-    fn test_get_module_owner_windows_backslash_uri() {
-        let db = TestDatabase::default();
-
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path, 0);
-
-        let owner = get_module_owner(&db, path_input, r"Catalogs\Справочник1\Ext\ObjectModule.bsl");
-
-        assert_eq!(
-            owner.map(|o| o.name().to_string()),
-            Some("Справочник1".to_string()),
-            "backslash-separated URI must resolve the same owner as a forward-slash URI"
-        );
-    }
-
-    #[test]
-    fn test_get_module_owner_catalog_russian() {
-        let db = TestDatabase::default();
-
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path, 0);
-
-        let owner =
-            get_module_owner(&db, path_input, "Справочники/Справочник1/Ext/ManagerModule.bsl");
-
-        assert!(owner.is_some(), "Should find catalog owner with Russian plural");
-        assert_eq!(owner.unwrap().name(), "Справочник1");
-    }
-
-    #[test]
-    fn test_get_module_owner_register() {
-        let db = TestDatabase::default();
-
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path, 0);
-
-        let owner = get_module_owner(
-            &db,
-            path_input,
-            "InformationRegisters/РегистрСведений1/Ext/ManagerModule.bsl",
-        );
-
-        assert!(owner.is_some(), "Should find register owner");
-        let owner = owner.unwrap();
-
-        match &owner {
-            ModuleOwner::MetadataObject(m) => {
-                assert_eq!(m.name, "РегистрСведений1");
-                assert_eq!(m.mdo_type, bsl_metadata::MdoType::InformationRegister);
-            }
-            _ => panic!("Should be MetadataObject"),
-        }
-    }
-
-    #[test]
-    fn test_get_module_owner_invalid_uri() {
-        let db = TestDatabase::default();
-
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path, 0);
-
-        let owner = get_module_owner(&db, path_input, "CommonModules/Module.bsl");
-        assert!(owner.is_none(), "Should return None for URI too short");
-
-        let owner = get_module_owner(&db, path_input, "UnknownType/Object/Ext/Module.bsl");
-        assert!(owner.is_none(), "Should return None for unknown type");
-
-        let owner = get_module_owner(&db, path_input, "Catalogs/NonExistent/Ext/ObjectModule.bsl");
-        assert!(owner.is_none(), "Should return None for non-existent object");
-    }
-
-    #[test]
-    fn test_module_owner_clone_and_eq() {
-        let db = TestDatabase::default();
-
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path, 0);
-
-        let owner1 = get_module_owner(
-            &db,
-            path_input,
-            "CommonModules/ГлобальныйСерверныйМодуль/Ext/Module.bsl",
-        );
-        let owner2 = get_module_owner(
-            &db,
-            path_input,
-            "CommonModules/ГлобальныйСерверныйМодуль/Ext/Module.bsl",
-        );
-
-        assert!(owner1.is_some() && owner2.is_some());
-
-        let owner1_clone = owner1.clone();
-        assert_eq!(owner1, owner1_clone, "Cloned owner should be equal");
-
-        assert_eq!(owner1, owner2, "Same module owner should be equal");
     }
 
     #[test]
@@ -2614,6 +2513,207 @@ mod tests {
         assert_eq!(info.mdo_type, Some(bsl_metadata::MdoType::Catalog));
         assert_eq!(info.name.as_deref(), Some("Справочник1"));
         assert_eq!(info.module_type, bsl_metadata::ModuleType::ObjectModule);
+    }
+
+    /// Два ответа об одном пути обязаны совпадать. Раньше это были два независимых
+    /// обхода, и расходились они в обе стороны: общий модуль без `Ext` разбирался,
+    /// но тип не получал, а обычный файл вне выгрузки тип получал ни за что.
+    #[test]
+    fn the_two_answers_about_one_path_agree() {
+        for path in [
+            "CommonModules/Общий/Module.bsl",
+            "/CommonModules/Общий/Ext/Module.bsl",
+            "Catalogs/Товары/ObjectModule.bsl",
+            "src/cf/Catalogs/Товары/Ext/ManagerModule.bsl",
+            "src/cf/InformationRegisters/Р/Ext/RecordSetModule.bsl",
+            r"C:\src\cf\Documents\ПКО\Ext\ObjectModule.bsl",
+            "/home/Documents/Catalogs/Товары/ManagerModule.bsl",
+        ] {
+            let info = parse_module_path(path).unwrap_or_else(|| panic!("{path} must parse"));
+            assert_ne!(info.module_type, bsl_metadata::ModuleType::Unknown, "{path}");
+            assert_eq!(
+                get_module_type_from_uri(path),
+                Some(info.module_type),
+                "the two classifiers disagree on {path}"
+            );
+        }
+
+        // Ни один из ответов не выдаётся файлу вне выгрузки: имя файла само по себе
+        // формы не доказывает.
+        for path in ["tmp/generated/ObjectModule.bsl", "ObjectModule.bsl", "a/ManagerModule.bsl"] {
+            assert!(parse_module_path(path).is_none(), "{path}");
+            assert_eq!(get_module_type_from_uri(path), None, "{path}");
+        }
+
+        // Имя файла обязано подходить коллекции: сосед по каталогу чужой тип не
+        // наследует.
+        for path in [
+            "CommonModules/Общий/ObjectModule.bsl",
+            "HTTPServices/API/ManagerModule.bsl",
+            "WebServices/В/RecordSetModule.bsl",
+            "IntegrationServices/И/ObjectModule.bsl",
+            "Catalogs/Товары/Ext/ValueManagerModule.bsl",
+        ] {
+            assert_eq!(get_module_type_from_uri(path), None, "{path}");
+        }
+
+        // Обе записи каталога общих модулей, как в индексе модулей.
+        for path in ["ОбщиеМодули/Общий/Ext/Module.bsl", "CommonModules/Общий/Ext/Module.bsl"]
+        {
+            assert_eq!(
+                get_module_type_from_uri(path),
+                Some(bsl_metadata::ModuleType::CommonModule),
+                "{path}"
+            );
+            assert_eq!(
+                parse_module_path(path).unwrap().module_type,
+                bsl_metadata::ModuleType::CommonModule,
+                "{path}"
+            );
+        }
+
+        // Модуль менеджера значения есть только у константы, и тип у него свой.
+        assert_eq!(
+            get_module_type_from_uri("Constants/Условие/Ext/ValueManagerModule.bsl"),
+            Some(bsl_metadata::ModuleType::ValueManagerModule)
+        );
+        assert_eq!(
+            parse_module_path("Constants/Условие/Ext/ValueManagerModule.bsl").unwrap().module_type,
+            bsl_metadata::ModuleType::ValueManagerModule
+        );
+
+        // Модуль набора записей есть только у регистров — тот же список, по
+        // которому владельца ищет `build_module_metadata`. Правило одно для обеих
+        // веток: и для распознанной коллекции, и для неизвестной.
+        assert_eq!(
+            get_module_type_from_uri("InformationRegisters/Р/Ext/RecordSetModule.bsl"),
+            Some(bsl_metadata::ModuleType::RecordSetModule)
+        );
+        assert_eq!(get_module_type_from_uri("Catalogs/Товары/Ext/RecordSetModule.bsl"), None);
+
+        // Но набор записей есть не только у регистров: платформа даёт его восьми
+        // видам, и четыре из них — последовательности, перерасчёты, таблицы и кубы
+        // внешних источников — в `MdoType` отсутствуют. Про такую коллекцию
+        // известна только форма пути, и ею же приходится обходиться: любое
+        // написание, любая вложенность.
+        for path in [
+            "Sequences/Очередность/Ext/RecordSetModule.bsl",
+            "Последовательности/Очередность/Ext/RecordSetModule.bsl",
+            "CalculationRegisters/Р/Recalculations/П/Ext/RecordSetModule.bsl",
+            "РегистрыРасчёта/Р/Перерасчёты/П/Ext/RecordSetModule.bsl",
+            "ExternalDataSources/И/Tables/Т/Ext/RecordSetModule.bsl",
+            "ExternalDataSources/И/Cubes/К/Ext/RecordSetModule.bsl",
+        ] {
+            assert_eq!(
+                get_module_type_from_uri(path),
+                Some(bsl_metadata::ModuleType::RecordSetModule),
+                "{path}"
+            );
+        }
+
+        // Оборотная сторона той же неопределённости, названная прямо: `Ext` плюс имя
+        // файла — это всё свидетельство, поэтому нераспознанная коллекция получит
+        // тип и там, где владельцем не является. Цена ошибок несимметрична: лишний
+        // тип у пути, которого в выгрузке не бывает, безвреден, а потеря типа у
+        // настоящего модуля тиха и уже случалась трижды.
+        assert_eq!(
+            get_module_type_from_uri("SettingsStorages/Х/Ext/RecordSetModule.bsl"),
+            Some(bsl_metadata::ModuleType::RecordSetModule),
+            "declared limitation: shape is the only evidence for an unknown collection"
+        );
+
+        // Каталог выгрузки — не имя из кода: написание через `ё` называет ту же
+        // коллекцию, поэтому регистр расчёта распознаётся в обеих записях и его
+        // набор записей не проваливается в резервную ветку.
+        for dir in ["РегистрыРасчета", "РегистрыРасчёта", "CalculationRegisters"]
+        {
+            let path = format!("src/cf/{dir}/Р/Ext/RecordSetModule.bsl");
+            assert_eq!(
+                get_module_type_from_uri(&path),
+                Some(bsl_metadata::ModuleType::RecordSetModule),
+                "{path}"
+            );
+            assert_eq!(
+                parse_module_path(&path).and_then(|i| i.mdo_type),
+                Some(bsl_metadata::MdoType::CalculationRegister),
+                "{path}"
+            );
+        }
+
+        // Имя модуля команды сравнивается целиком: сосед с похожим окончанием
+        // командным модулем не становится.
+        assert_eq!(
+            get_module_type_from_uri("Catalogs/Товары/Commands/К/Ext/CommandModule.bsl"),
+            Some(bsl_metadata::ModuleType::CommandModule)
+        );
+        assert_eq!(
+            get_module_type_from_uri("Catalogs/Товары/Commands/К/Ext/NotACommandModule.bsl"),
+            None
+        );
+
+        // Коллекция, которой нет в `MdoType`, всё ещё держит модули своего вида —
+        // форму в этом случае доказывает служебный уровень, и его написание
+        // спецификация сверяет без учёта регистра.
+        for path in [
+            "src/cf/SettingsStorages/Х/Ext/ManagerModule.bsl",
+            "src/cf/SettingsStorages/Х/ext/ManagerModule.bsl",
+        ] {
+            assert_eq!(
+                get_module_type_from_uri(path),
+                Some(bsl_metadata::ModuleType::ManagerModule),
+                "{path}: an unknown collection still holds a manager module"
+            );
+        }
+        assert_eq!(
+            get_module_type_from_uri("src/cf/SettingsStorages/Х/Ext/ManagerModule.bsl"),
+            Some(bsl_metadata::ModuleType::ManagerModule),
+            "an unknown collection still holds a manager module"
+        );
+        assert!(parse_module_path("src/cf/SettingsStorages/Х/Ext/ManagerModule.bsl").is_none());
+
+        // Служебные коллекции классифицируются, но владельца этой формы не имеют.
+        for (path, expected) in [
+            ("src/cf/HTTPServices/API/Ext/Module.bsl", bsl_metadata::ModuleType::HTTPServiceModule),
+            ("src/cf/WebServices/В/Ext/Module.bsl", bsl_metadata::ModuleType::WebServiceModule),
+            (
+                "src/cf/Catalogs/Товары/Commands/К/Ext/CommandModule.bsl",
+                bsl_metadata::ModuleType::CommandModule,
+            ),
+            (
+                "src/cf/CommonCommands/К/Ext/CommandModule.bsl",
+                bsl_metadata::ModuleType::CommandModule,
+            ),
+        ] {
+            assert_eq!(get_module_type_from_uri(path), Some(expected), "{path}");
+            assert!(parse_module_path(path).is_none(), "{path} has no mdo owner");
+        }
+    }
+
+    /// Кратчайшая форма: относительный путь без служебного `Ext` и без префикса.
+    /// Спецификация пути объявляет её допустимой, и отдельная проверка минимальной
+    /// длины у вызывающего отсекала её до разбора.
+    #[test]
+    fn test_parse_module_path_relative_without_service_level() {
+        for (path, expected_type, expected_name, expected_module) in [
+            (
+                "Catalogs/Товары/ObjectModule.bsl",
+                bsl_metadata::MdoType::Catalog,
+                "Товары",
+                bsl_metadata::ModuleType::ObjectModule,
+            ),
+            (
+                "Documents/ПКО/ManagerModule.bsl",
+                bsl_metadata::MdoType::Document,
+                "ПКО",
+                bsl_metadata::ModuleType::ManagerModule,
+            ),
+        ] {
+            let info = parse_module_path(path).unwrap_or_else(|| panic!("{path} must parse"));
+            assert_eq!(info.mdo_type, Some(expected_type), "{path}");
+            assert_eq!(info.name.as_deref(), Some(expected_name), "{path}");
+            assert_eq!(info.module_type, expected_module, "{path}");
+            assert_eq!(get_module_type_from_uri(path), Some(expected_module), "{path}");
+        }
     }
 
     #[test]
