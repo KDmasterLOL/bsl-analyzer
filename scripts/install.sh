@@ -109,13 +109,16 @@ download_file() {
     fi
 }
 
+# Fed through stdin on purpose: given a file name, GNU coreutils switches to escaped
+# output and prefixes the digest line with a backslash, which would then be read as part
+# of the hash for any path containing a backslash or a newline.
 file_sha256() {
     local file="$1"
 
     if check_command sha256sum; then
-        sha256sum "$file" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]'
+        sha256sum < "$file" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]'
     elif check_command shasum; then
-        shasum -a 256 "$file" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]'
+        shasum -a 256 < "$file" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]'
     fi
 }
 
@@ -279,7 +282,9 @@ main() {
     trap 'rm -rf "$TMP_DIR"' EXIT
 
     local expected
-    expected=$(expected_checksum "$VERSION" "$file_name")
+    # A manifest without a matching entry leaves grep with status 1, and under
+    # `set -e` that would end the script before the refusal below is ever printed.
+    expected=$(expected_checksum "$VERSION" "$file_name" || true)
     if [ -z "$expected" ]; then
         error "Release ${VERSION} publishes no checksum for ${file_name}, refusing to install unverified"
         exit 1
@@ -288,8 +293,10 @@ main() {
     # Identity by content, not by version number: the release source is compiled into the
     # launcher, so a GitHub and a release-server build share a version yet differ, and
     # skipping on the number alone would silently keep the other source's binary.
+    # -x as well: a hash describes content only, and an install that lost its execute
+    # bit is still broken, so reporting it as done would leave the command unusable.
     local existing="${INSTALL_DIR}/${BINARY_NAME}"
-    if [ -f "$existing" ] && [ "$(file_sha256 "$existing")" = "$expected" ]; then
+    if [ -f "$existing" ] && [ -x "$existing" ] && [ "$(file_sha256 "$existing")" = "$expected" ]; then
         ok "bsl-analyzer ${VERSION} is already installed"
         check_path
         exit 0
