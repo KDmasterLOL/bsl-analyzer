@@ -14,10 +14,18 @@ jobs:
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
+    # Пустая строка для не-linux платформ = джоба идёт прямо на раннере.
+    container: ${{ matrix.container }}
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
+            # Планку GLIBC_* задаёт glibc сборочной машины, а не код: на
+            # ubuntu-latest бинарник требует 2.38/2.39 и не запускается на
+            # Debian 12, Ubuntu 22.04, RHEL 9. Сборка в jammy опускает порог
+            # до GLIBC_2.34 — нижней возможной границы для glibc с влитым
+            # libpthread.
+            container: ubuntu:22.04
             target: x86_64-unknown-linux-gnu
             platform: linux-amd64
             ext: ""
@@ -32,6 +40,22 @@ jobs:
             platform: darwin-arm64
             ext: ""
     steps:
+      # Строго до checkout: в голом образе нет ни git, ни curl, без них
+      # checkout уходит на скачивание тарболом, а rustup не ставится вовсе.
+      - name: Install build deps (linux container)
+        if: matrix.container != ''
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates clang cmake curl g++-12 gcc-12 git \
+            libclang-dev libssl-dev perl pkg-config python3
+          # gcc-11 из jammy не знает target-атрибут avx512fp16 и валит SIMD-ядра
+          # numkong. Версия компилятора на порог glibc не влияет.
+          echo "CC=gcc-12" >> "$GITHUB_ENV"
+          echo "CXX=g++-12" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -45,6 +69,25 @@ jobs:
         env:
           CXXFLAGS: ${{ matrix.cxxflags || '' }}
           RUSTFLAGS: ${{ matrix.rustflags || '' }}
+
+      - name: Verify glibc floor
+        if: matrix.container != ''
+        run: |
+          for name in bsl-analyzer bsl-analyzer-app; do
+            bin=target/${{ matrix.target }}/release/$name
+            max=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+            # Пустой результат — это отказ objdump или неверный путь, а не
+            # статический бинарник: иначе гейт проходил бы вхолостую.
+            if [ -z "$max" ]; then
+              echo "::error::не удалось прочитать версии GLIBC из $bin"
+              exit 1
+            fi
+            echo "$name требует не выше: $max"
+            if [ "$(printf '%s\nGLIBC_2.34\n' "$max" | sort -uV | tail -1)" != "GLIBC_2.34" ]; then
+              echo "::error::$name: порог glibc поднялся до $max — не запустится на Debian 12"
+              exit 1
+            fi
+          done
 
       - name: Package (unix)
         if: runner.os != 'Windows'
@@ -65,9 +108,31 @@ jobs:
           name: binaries-${{ matrix.platform }}
           path: artifacts/
 
+  # objdump видит только glibc, а барьеров два: libstdc++ из Debian 12 не отдаёт
+  # CXXABI_1.3.15, который приезжает из C++-зависимостей. Оба ловит запуск на
+  # целевом дистрибутиве.
+  verify-linux-compat:
+    name: Smoke on Debian 12
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: binaries-linux-amd64
+          path: artifacts
+
+      # Только сам анализатор: лаунчер поднимает HTTP-клиент даже на --help и в
+      # образе без ca-certificates падает независимо от версий glibc, а с сетью
+      # полез бы за релизом, которого в момент сборки тега ещё нет.
+      - name: Run on Debian 12
+        run: |
+          chmod +x artifacts/bsl-analyzer-app-linux-amd64
+          docker run --rm --network none -v "$PWD/artifacts:/a:ro" debian:12 \
+            /a/bsl-analyzer-app-linux-amd64 --version
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, verify-linux-compat]
     runs-on: ubuntu-latest
     permissions:
       contents: write      # publish the GitHub Release
