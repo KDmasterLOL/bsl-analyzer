@@ -1000,3 +1000,41 @@ mod keyword_member_names {
         assert!(has_proc, "the following Процедура must be recovered as a declaration, not eaten");
     }
 }
+
+mod region_directive_bounds {
+    use super::*;
+
+    fn region_dir_texts(input: &str) -> Vec<String> {
+        parse(input)
+            .syntax_node()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::PRE_REGION_DIR)
+            .map(|n| n.text().to_string())
+            .collect()
+    }
+
+    /// A region name lives on the directive's own line. Reaching past the newline
+    /// steals the next statement's identifier, leaving that statement headless.
+    #[test]
+    fn nameless_region_does_not_swallow_the_next_line() {
+        let texts = region_dir_texts("#Область\nИмя = 1;\n#КонецОбласти\n");
+        assert_eq!(texts[0], "#Область", "directive must end at its own line");
+
+        assert_clean_parse(
+            "#Область Р\nИмя = 1;\n#КонецОбласти\n",
+            "a named region followed by an assignment must parse cleanly",
+        );
+    }
+
+    #[test]
+    fn nameless_region_does_not_swallow_across_a_comment() {
+        let texts = region_dir_texts("#Область\n// хвост\nИмя = 1;\n");
+        assert_eq!(texts[0], "#Область");
+    }
+
+    #[test]
+    fn name_is_still_taken_from_the_directive_line() {
+        assert_eq!(region_dir_texts("#Область Р\n")[0], "#Область Р");
+        assert_eq!(region_dir_texts("#Область   Р\n")[0], "#Область   Р");
+    }
+}

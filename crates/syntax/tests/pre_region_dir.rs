@@ -16,6 +16,15 @@ fn single(code: &str) -> PreRegionDir {
     dirs.pop().unwrap()
 }
 
+#[track_caller]
+fn first(code: &str) -> PreRegionDir {
+    parser::parse(code)
+        .syntax_node()
+        .descendants()
+        .find_map(PreRegionDir::cast)
+        .unwrap_or_else(|| panic!("no region directive in {code:?}"))
+}
+
 #[test]
 fn start_marker_recognized_in_any_case() {
     for code in [
@@ -82,6 +91,14 @@ fn end_marker_has_no_name() {
 #[test]
 fn start_marker_without_name_has_no_name() {
     assert_eq!(single("#Область\n").name(), None);
+}
+
+/// A region name sits on the directive's own line. An identifier on the next
+/// line belongs to the code, not to the directive.
+#[test]
+fn name_does_not_reach_the_next_line() {
+    assert_eq!(first("#Область\nИмя = 1;\n#КонецОбласти\n").name(), None);
+    assert_eq!(first("#Область\n// хвост\nИмя = 1;\n").name(), None);
 }
 
 #[test]
