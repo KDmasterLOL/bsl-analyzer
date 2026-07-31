@@ -1900,6 +1900,26 @@ impl RootDatabaseImpl {
         Some(PathBuf::from(vfs_path.as_path()))
     }
 
+    /// The whole-config load key for `file_path`: the root attributed from disk,
+    /// carried at the revision of the declared root the file sits under.
+    ///
+    /// Shared by the lazy read and the pre-pool warm-up on purpose. The two parts
+    /// come from different places — the path from the filesystem walk, the
+    /// revision from the declared-root prefix — so a warm-up building the key its
+    /// own way would memoise under a key the readers never ask for, and warm
+    /// nothing.
+    pub(crate) fn configuration_input_for_path<'db>(
+        &'db self,
+        file_path: &Path,
+    ) -> Option<metadata::ConfigurationPathInput<'db>> {
+        let config_root = self.find_configuration_root(file_path)?;
+        Some(metadata::intern_configuration_path(
+            self,
+            &config_root.to_string_lossy(),
+            self.config_root_revision_for_path(file_path),
+        ))
+    }
+
     pub(crate) fn find_configuration_root(&self, file_path: &Path) -> Option<PathBuf> {
         let mut current = file_path.parent()?;
 
@@ -2161,18 +2181,28 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
     }
 
     fn warm_config_roots(&self, modules: &[ModuleId]) {
-        // One representative per root: `module_metadata` reaches the whole-config
-        // load through the same attribution the parallel jobs will use, so a
-        // second module of an already-warmed root would only re-hit the memo.
+        // Load each root through its own key rather than through
+        // `module_metadata`: that query returns early for service modules whose
+        // service resolves out of the DECLARED roots, so a representative can
+        // report success without its attributed root ever being read — and the
+        // dedup below would then skip every remaining module of that root.
+        //
+        // Deduped on the interned key, not the root path: two files of one root
+        // under different declared roots carry different revisions, and it is
+        // the key that the loader memoises.
         let mut warmed = rustc_hash::FxHashSet::default();
         for module in modules {
             let Some(path) = vfs_helpers::get_file_path(self, module.file_id) else {
                 continue;
             };
-            let Some(root) = self.find_configuration_root(&path) else {
+            let Some(path_input) = self.configuration_input_for_path(&path) else {
                 continue;
             };
-            if warmed.insert(root) {
+            if warmed.insert(path_input) {
+                let _ = metadata::MetadataDb::load_configuration(self, path_input);
+                // The per-file memos a batch also parks on (the extension merge
+                // above all) hang off `module_metadata`, so one representative
+                // still pays for them here rather than inside the pool.
                 let _ = hir::DefDatabase::module_metadata(self, *module);
             }
         }
@@ -2493,12 +2523,7 @@ impl hir::HirDatabase for RootDatabaseImpl {
 impl RootDatabase for RootDatabaseImpl {
     fn get_configuration(&self, file_id: FileId) -> Option<Arc<bsl_metadata::Configuration>> {
         let file_path = vfs_helpers::get_file_path(self, file_id)?;
-        let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
-        let path_input = metadata::intern_configuration_path(
-            self,
-            &config_root.to_string_lossy(),
-            self.config_root_revision_for_path(&file_path),
-        );
+        let path_input = self.configuration_input_for_path(&file_path)?;
         Some(self.load_configuration(path_input))
     }
 

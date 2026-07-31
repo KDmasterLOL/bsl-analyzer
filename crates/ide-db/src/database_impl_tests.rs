@@ -5265,3 +5265,70 @@ fn salsa_event_window_resets_and_reports_full_key_set() {
         parse_row.name
     );
 }
+
+/// A root counts as warmed only once its own configuration is loaded.
+///
+/// Going through `module_metadata` does not establish that: for a service module
+/// whose service resolves out of the DECLARED roots the query returns before it
+/// ever reads the attributed root, and the per-root dedup would then skip that
+/// root's remaining modules — leaving the whole-config load to happen lazily
+/// inside the build's worker pool, which is what the warm-up exists to prevent.
+#[test]
+fn warming_loads_the_attributed_root_of_a_service_module() {
+    use hir::ConfigsDatabase as _;
+
+    fn http_service_xml(name: &str) -> String {
+        format!(
+            concat!(
+                "<MetaDataObject>",
+                "<HTTPService uuid=\"00000000-0000-0000-0000-000000000040\">",
+                "<Properties><Name>{}</Name><RootURL>http</RootURL></Properties>",
+                "</HTTPService></MetaDataObject>"
+            ),
+            name
+        )
+    }
+
+    let ws =
+        std::env::temp_dir().join(format!("bsl_warm_roots_{}_{}", std::process::id(), line!()));
+    let deep = ws.join("deep");
+
+    // The SAME service name in both configurations: the declared root's copy is
+    // what the early return finds, standing in for the nested root that still
+    // has to be loaded.
+    for root in [&ws, &deep] {
+        std::fs::create_dir_all(root.join("HTTPServices/Сервис/Ext")).unwrap();
+        std::fs::write(root.join("HTTPServices/Сервис.xml"), http_service_xml("Сервис")).unwrap();
+        std::fs::write(root.join("HTTPServices/Сервис/Ext/Module.bsl"), "").unwrap();
+    }
+    // `CommonModules/` is what stops the attribution walk at `deep` — the nested
+    // directory is a configuration root that nothing declared.
+    std::fs::create_dir_all(deep.join("CommonModules/Модуль/Ext")).unwrap();
+    std::fs::write(deep.join("CommonModules/Модуль/Ext/Module.bsl"), "").unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    let cache = Arc::new(crate::GraphConfigCache::default());
+    db.set_graph_config_cache(Arc::clone(&cache));
+
+    let service_file = FileId(0);
+    let module_file = FileId(1);
+    let mut file_set = FileSet::new();
+    let path_of = |p: std::path::PathBuf| VfsPath::new(p.to_string_lossy().into_owned());
+    file_set.insert(service_file, path_of(deep.join("HTTPServices/Сервис/Ext/Module.bsl")));
+    file_set.insert(module_file, path_of(deep.join("CommonModules/Модуль/Ext/Module.bsl")));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(service_file, SourceRootId(1));
+    db.set_file_source_root(module_file, SourceRootId(1));
+    db.set_all_config_paths(vec![(None, ws.clone())]);
+
+    // The service module first, so it is the representative the dedup keeps.
+    db.warm_config_roots(&[ModuleId::new(service_file), ModuleId::new(module_file)]);
+
+    assert!(
+        cache.contains_key(&ws),
+        "sanity: the declared root is loaded, so the early return has something to find"
+    );
+    assert!(cache.contains_key(&deep), "the attributed root must be loaded by the warm-up");
+
+    std::fs::remove_dir_all(&ws).ok();
+}
