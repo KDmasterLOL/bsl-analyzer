@@ -509,8 +509,12 @@ mod contract_surface {
               mcp
                 serve
                   allowed-host
+                  configuration-root
+                  extension !no-extensions
+                  extension-depends-on
                   host
                   mode = stdio | broker | daemon | http
+                  no-extensions !extension
                   onec-password
                   onec-url
                   onec-user

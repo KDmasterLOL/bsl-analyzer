@@ -117,6 +117,37 @@ impl fmt::Debug for SourceSetArgsError {
 impl Error for SourceSetArgsError {}
 
 impl SourceSetArgs {
+    /// True when no source-set flag was given, i.e. the config file and its own
+    /// discovery decide everything.
+    pub fn is_empty(&self) -> bool {
+        self.configuration_root.is_none()
+            && self.extensions.is_empty()
+            && self.extension_depends_on.is_empty()
+            && !self.no_extensions
+    }
+
+    /// Re-emits the flags as argv, for handing this process's source set to a
+    /// child that must resolve the same project.
+    pub fn to_args(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(ref root) = self.configuration_root {
+            out.push("--configuration-root".to_owned());
+            out.push(root.clone());
+        }
+        for value in &self.extensions {
+            out.push("--extension".to_owned());
+            out.push(value.clone());
+        }
+        for value in &self.extension_depends_on {
+            out.push("--extension-depends-on".to_owned());
+            out.push(value.clone());
+        }
+        if self.no_extensions {
+            out.push("--no-extensions".to_owned());
+        }
+        out
+    }
+
     /// Whether `--extension` or `--no-extensions` claimed the extension list.
     /// `--extension-depends-on` alone cannot: it only annotates entries the
     /// same invocation declared.

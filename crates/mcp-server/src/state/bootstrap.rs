@@ -52,7 +52,7 @@ impl SharedState {
     /// daemon must not come up analyzing a differently-shaped project than the
     /// one configured.
     pub fn workspace(source_dir: PathBuf) -> Result<Self, project_model::ProjectError> {
-        let project = project_model::Project::new(&source_dir)?;
+        let project = crate::project::at(&source_dir)?;
         let config_path = project.source_path();
         let source_root = config_path.to_path_buf();
 
@@ -662,7 +662,7 @@ impl SharedState {
 
         // The daemon only reaches this after `workspace()` validated the project;
         // a config broken by a mid-session edit keeps search down, loudly.
-        let project = match project_model::Project::new(workspace_root) {
+        let project = match crate::project::at(workspace_root) {
             Ok(project) => project,
             Err(e) => {
                 tracing::error!(error = %e, "invalid project; workspace search stays offline");

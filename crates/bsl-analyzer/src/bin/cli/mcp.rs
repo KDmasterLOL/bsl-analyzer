@@ -77,6 +77,9 @@ pub struct McpServeArgs {
 
     #[arg(long, default_value = "")]
     onec_password: String,
+
+    #[command(flatten)]
+    source_set: super::source_set::SourceSetArgs,
 }
 
 impl McpCommand {
@@ -247,6 +250,17 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
         McpProfileCli::Reference => mcp_server::McpProfile::Reference,
     };
 
+    // Installed before any mode runs, because the broker computes its backend key
+    // from the project *before* a server exists — a source set installed later
+    // would leave that key derived from the on-disk config alone, and two
+    // clients with different sets would rendezvous on one daemon.
+    if let Some(ref source_dir) = args.source_dir {
+        let root = source_dir.canonicalize().unwrap_or_else(|_| source_dir.clone());
+        let installed =
+            mcp_server::project::set_source_set_override(args.source_set.resolve(&root)?);
+        debug_assert!(installed, "the source set must be installed exactly once per process");
+    }
+
     match resolve_serve_mode(args.mode, profile)? {
         McpServeMode::Stdio => {
             run_mcp_server(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
@@ -277,6 +291,16 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "reference profile does not accept --onec-url/--onec-user/--onec-password",
+        ));
+    }
+
+    // The reference profile has no workspace to describe, and relative flag paths
+    // would have no root to resolve against.
+    if matches!(args.runtime_profile, McpProfileCli::Reference) && !args.source_set.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reference profile does not accept source-set flags \
+             (--configuration-root/--extension/--extension-depends-on/--no-extensions)",
         ));
     }
 
@@ -423,6 +447,9 @@ fn run_mcp_broker(
         .arg(&source_dir)
         .arg("--mode")
         .arg("daemon");
+    // The daemon must resolve the same project this proxy keyed on, and its own
+    // config file cannot tell it about a source set that came from argv.
+    cmd.args(args.source_set.to_args());
     if let Some(url) = &args.onec_url {
         cmd.arg("--onec-url").arg(url);
     }
@@ -1328,6 +1355,7 @@ mod tests {
             onec_url: None,
             onec_user: String::new(),
             onec_password: String::new(),
+            source_set: Default::default(),
         }
     }
 

@@ -26,7 +26,7 @@ impl ProjectSnapshot {
     /// a config broken by a mid-session edit restricts the scan to the
     /// workspace root (loud in logs) instead of walking a wrong universe.
     pub(crate) fn load(workspace_root: &Path) -> Self {
-        match project_model::Project::new(workspace_root) {
+        match crate::project::at(workspace_root) {
             Ok(project) => Self::from_project(&project),
             Err(e) => {
                 tracing::error!(

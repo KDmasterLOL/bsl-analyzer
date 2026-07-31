@@ -284,7 +284,7 @@ pub const TOPOLOGY_FP_ENV: &str = "BSL_MCP_TOPOLOGY_FP";
 /// same `--source-dir`), so they agree by construction. An invalid or unloadable
 /// project folds as `0` on both sides — still one rendezvous, just untagged.
 pub fn workspace_topology_fingerprint(source_dir: &Path) -> u64 {
-    match project_model::Project::new(source_dir) {
+    match crate::project::at(source_dir) {
         Ok(project) => crate::graph::scan::topology_hex_u64(
             &project.extension_topology().fingerprint().to_hex(),
         ),

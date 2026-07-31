@@ -476,7 +476,7 @@ impl DiagnosticsState {
         // Load the project ONCE: the scan universe, the config roots (with their
         // dependency closures) and the `[diagnostics]` settings all derive from
         // this single snapshot, so a reload can never mix two project states.
-        let project = project_model::Project::new(root)
+        let project = crate::project::at(root)
             .map_err(|e| anyhow::anyhow!("invalid project at {}: {e}", root.display()))?;
         let snapshot = ProjectSnapshot::from_project(&project);
         let files = enumerate_bsl_files(&snapshot);

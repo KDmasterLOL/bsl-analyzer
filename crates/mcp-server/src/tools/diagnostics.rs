@@ -452,7 +452,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "7",
+        "schema_version": "8",
         "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
@@ -461,7 +461,8 @@ fn schema_json() -> Value {
             "files": "usize — resident .bsl count (present when ready)",
             "reload": "none | running | failed — background reload state",
             "elapsed_ms": "u64 — ms since the current build started (present while loading)",
-            "error": "string — failure message (present when failed)"
+            "error": "string — failure message (present when failed)",
+            "owns_caches": "bool — false when a newer daemon generation owns this workspace's derived caches; this backend still answers from what it holds but produces no new derived state"
         },
         "catalog_entry": {
             "code": "string — stable diagnostic code (e.g. CyclomaticComplexity)",
@@ -561,7 +562,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "7");
+        assert_eq!(body["schema_version"], "8");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
