@@ -95,6 +95,7 @@ fn workspace_calling_main_configuration(root: &Path) {
 struct Run {
     files: Vec<Value>,
     done: Value,
+    stderr: String,
 }
 
 impl Run {
@@ -124,6 +125,9 @@ fn analyze(source_dir: &Path, flags: &[&str]) -> Run {
         .args(["--format", "jsonl"])
         .output()
         .expect("failed to run the analyzer");
+    // Checked for every run, including the ones inspected only through stderr:
+    // the notice is printed before the walk, so a process that dies afterwards
+    // still satisfies a bare `contains` and turns its paired run into noise.
     assert!(
         output.status.success(),
         "analyze {flags:?} failed: {}",
@@ -143,6 +147,7 @@ fn analyze(source_dir: &Path, flags: &[&str]) -> Run {
             .find(|e| e["type"] == "done")
             .cloned()
             .unwrap_or_else(|| panic!("no done event; stdout: {stdout}")),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
 }
 
@@ -243,33 +248,48 @@ fn no_extensions_drops_the_configured_list() {
         opted_out.file_event(EXT_MODULE).is_none(),
         "--no-extensions must drop the list the config declared"
     );
+    // The flag drops extensions, not the analysis. Without this, a wiring bug
+    // that cleared every source root would satisfy the assertion above by
+    // analyzing nothing at all.
+    assert!(
+        opted_out.file_event(MAIN_MODULE).is_some(),
+        "--no-extensions must leave the main configuration in the analysis"
+    );
 }
 
 #[test]
 fn an_extension_taken_as_the_main_root_is_reported() {
     let dir = workspace();
     workspace_calling_main_configuration(dir.path());
+    write_configuration(
+        dir.path(),
+        DEP,
+        "Зависимость",
+        DEP_MODULE,
+        "Функция ИзЗависимости() Экспорт\n\tВозврат 2;\nКонецФункции\n",
+        true,
+    );
 
     let notice = "is a configuration extension analyzed without its main configuration";
-    let run = |flags: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
-            .arg("analyze")
-            .arg("-s")
-            .arg(dir.path())
-            .args(flags)
-            .args(["--format", "jsonl"])
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&output.stderr).into_owned()
-    };
 
-    assert!(
-        run(&["--configuration-root", EXT, "--no-extensions"]).contains(notice),
-        "an extension used as the main root must be called out"
-    );
-    assert!(
-        !run(&["--configuration-root", MAIN, "--extension", &format!("EXT={EXT}")])
-            .contains(notice),
-        "a real main configuration must stay silent, extensions declared or not"
-    );
+    // Only `--configuration-root` moves between the runs of each pair. Varying
+    // the extension flags at the same time would let an implementation keyed on
+    // `--no-extensions`, or on the list being empty, pass without ever asking
+    // what the resolved root actually is.
+    for extensions in [vec!["--no-extensions"], vec!["--extension", "DEP=a/b/dep"]] {
+        let with_root = |root: &str| {
+            let mut flags = vec!["--configuration-root", root];
+            flags.extend(extensions.iter().copied());
+            analyze(dir.path(), &flags).stderr
+        };
+
+        assert!(
+            with_root(EXT).contains(notice),
+            "an extension used as the main root must be called out (extensions: {extensions:?})"
+        );
+        assert!(
+            !with_root(MAIN).contains(notice),
+            "a real main configuration must stay silent (extensions: {extensions:?})"
+        );
+    }
 }
