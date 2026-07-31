@@ -366,57 +366,88 @@ fn an_extension_taken_as_the_main_root_is_reported() {
     }
 }
 
-/// Drives `mcp serve --mode stdio` through one JSON-RPC handshake and a single
-/// `diagnostics file` call, returning the modules that stayed unresolved.
+/// Drives `mcp serve` over stdio: handshake, wait for the resident database to
+/// be ready, then one `diagnostics file` call. Returns the modules that stayed
+/// unresolved, plus the `status` body that reported readiness.
 ///
 /// The MCP path re-derives the project from a bare workspace path in a dozen
 /// places, none of which can see argv. Nothing in the `analyze` checks above
 /// would notice one of them left on the old source, so this asks the question
 /// again on the channel an embedding host actually uses.
-fn mcp_unresolved_modules(workspace: &Path, module_file: &Path, flags: &[&str]) -> Vec<String> {
-    use std::io::Write as _;
+///
+/// Readiness is polled rather than assumed: a freshly started server answers a
+/// data action with a "still building" envelope that carries no diagnostics at
+/// all, which would read exactly like "everything resolved".
+fn mcp_probe(workspace: &Path, module_file: &Path, flags: &[&str]) -> (Vec<String>, Value) {
+    use std::io::{BufRead, BufReader, Write as _};
     use std::process::Stdio;
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
         .args(["mcp", "serve", "--profile", "workspace", "--mode", "stdio", "-s"])
         .arg(workspace)
         .args(flags)
+        // `--mode stdio` is also the *unset* value, and the workspace profile
+        // resolves that to the broker — which detaches a daemon that outlives
+        // the test and writes a cache into the temp workspace.
+        .env("BSL_MCP_BROKER", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("failed to start the MCP server");
 
-    let call = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
-            "name": "diagnostics",
-            "arguments": { "action": "file", "path": module_file.display().to_string() }
-        }
-    });
     let mut stdin = child.stdin.take().unwrap();
-    writeln!(
-        stdin,
-        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"t","version":"1"}}}}}}"#
-    )
-    .unwrap();
-    writeln!(stdin, r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#).unwrap();
-    writeln!(stdin, "{call}").unwrap();
-    drop(stdin);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut send = |value: Value| writeln!(stdin, "{value}").unwrap();
+    let mut recv = |id: i64| -> Value {
+        loop {
+            let mut line = String::new();
+            assert_ne!(stdout.read_line(&mut line).unwrap(), 0, "the server closed stdout");
+            if let Ok(message) = serde_json::from_str::<Value>(&line) {
+                if message["id"] == id {
+                    return message;
+                }
+            }
+        }
+    };
 
-    let output = child.wait_with_output().expect("the MCP server did not exit");
-    assert!(output.status.success(), "mcp serve {flags:?} failed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                   "clientInfo": {"name": "t", "version": "1"}}
+    }));
+    recv(1);
+    send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
 
-    let reply = stdout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|m| m["id"] == 2)
-        .unwrap_or_else(|| panic!("no reply to the diagnostics call; stdout: {stdout}"));
+    let call = |id: i64, arguments: Value| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": "diagnostics", "arguments": arguments}
+        })
+    };
+
+    let mut status = Value::Null;
+    for id in 10..200 {
+        send(call(id, serde_json::json!({"action": "status"})));
+        status = recv(id)["result"]["structuredContent"].clone();
+        if status["state"] == "ready" || status["state"] == "failed" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(status["state"], "ready", "the resident database never became ready: {status}");
+
+    let reply = {
+        let arguments =
+            serde_json::json!({"action": "file", "path": module_file.display().to_string()});
+        send(call(2, arguments));
+        recv(2)
+    };
     let body = reply.to_string();
     assert!(!body.contains("\"isError\":true"), "the diagnostics call failed: {body}");
+
+    drop(stdin);
+    let _ = child.wait();
 
     let mut names: Vec<String> = body
         .match_indices("разрешить модуль '")
@@ -427,7 +458,36 @@ fn mcp_unresolved_modules(workspace: &Path, module_file: &Path, flags: &[&str]) 
         .collect();
     names.sort();
     names.dedup();
-    names
+    (names, status)
+}
+
+#[test]
+fn the_mcp_status_reports_a_standalone_extension() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+    let module =
+        path(dir.path(), EXT).join("CommonModules").join(EXT_MODULE).join("Ext").join("Module.bsl");
+
+    // Pointed straight at the extension, with no main configuration behind it —
+    // the state in which this backend's findings are wrong and nothing else in
+    // the protocol says why.
+    let (_, standalone) = mcp_probe(&path(dir.path(), EXT), &module, &[]);
+    assert!(
+        standalone["standalone_extension"]
+            .as_str()
+            .is_some_and(|s| s.contains("configuration extension analyzed without")),
+        "status must carry the notice: {standalone}"
+    );
+
+    let (_, bound) = mcp_probe(
+        dir.path(),
+        &module,
+        &["--configuration-root", MAIN, "--extension", "EXT=a/b/ext"],
+    );
+    assert!(
+        bound.get("standalone_extension").is_none(),
+        "a bound main configuration must leave the field out: {bound}"
+    );
 }
 
 #[test]
@@ -438,16 +498,17 @@ fn the_source_set_reaches_the_mcp_server() {
         path(dir.path(), EXT).join("CommonModules").join(EXT_MODULE).join("Ext").join("Module.bsl");
 
     assert_eq!(
-        mcp_unresolved_modules(dir.path(), &module, &[]),
+        mcp_probe(dir.path(), &module, &[]).0,
         vec![MAIN_MODULE.to_string(), MISSING_MODULE.to_string()],
         "without a source set the main configuration's module cannot resolve"
     );
     assert_eq!(
-        mcp_unresolved_modules(
+        mcp_probe(
             dir.path(),
             &module,
             &["--configuration-root", MAIN, "--extension", "EXT=a/b/ext"]
-        ),
+        )
+        .0,
         vec![MISSING_MODULE.to_string()],
         "the source set must resolve the main configuration's module here too"
     );

@@ -96,6 +96,13 @@ impl SharedState {
     /// [`crate::workspace_lease`]). Such a backend still serves everything it holds, but it
     /// produces no new derived state — so once its last session leaves there is nothing left
     /// to stay warm for.
+    /// Set when the resolved configuration root is itself an extension analyzed
+    /// without the main configuration it extends — the state in which valid
+    /// calls into that configuration are reported as unresolved.
+    pub(crate) fn standalone_extension_notice(&self) -> Option<String> {
+        self.source_root.as_deref().and_then(project_model::standalone_extension_notice)
+    }
+
     pub(crate) fn superseded(&self) -> bool {
         !self.workspace_lease.owns_caches()
     }

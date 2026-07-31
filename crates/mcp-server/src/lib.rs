@@ -405,7 +405,11 @@ impl McpServer {
         if p.action == "status" {
             let diag = self.state.diagnostics();
             diag.ensure_loading();
-            return Ok(tools::resident::status(&diag.status_report(), !self.state.superseded()));
+            return Ok(tools::resident::status(
+                &diag.status_report(),
+                !self.state.superseded(),
+                self.state.standalone_extension_notice().as_deref(),
+            ));
         }
 
         let live = mode == "infobase" || (mode == "auto" && p.connection.is_some());
@@ -1168,7 +1172,11 @@ impl McpServer {
             "status" => {
                 let diag = self.state.diagnostics();
                 diag.ensure_loading();
-                Ok(tools::resident::status(&diag.status_report(), !self.state.superseded()))
+                Ok(tools::resident::status(
+                    &diag.status_report(),
+                    !self.state.superseded(),
+                    self.state.standalone_extension_notice().as_deref(),
+                ))
             }
             "file" => self.diagnostics_file(p).await,
             "workspace" => self.diagnostics_workspace(p, ct).await,
