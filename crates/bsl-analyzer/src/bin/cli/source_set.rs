@@ -128,19 +128,23 @@ impl SourceSetArgs {
 
     /// Re-emits the flags as argv, for handing this process's source set to a
     /// child that must resolve the same project.
+    ///
+    /// Always in the `--option=value` form. These options do not accept
+    /// hyphen-leading values as a separate argument, so a directory whose name
+    /// starts with `-` — accepted by this process only because the caller wrote
+    /// `--option=-name` — would come back to the child as a stray flag and kill
+    /// its parse. In broker mode that costs the whole launch: the proxy retries
+    /// the spawn until its timeout and then falls back to stdio.
     pub fn to_args(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(ref root) = self.configuration_root {
-            out.push("--configuration-root".to_owned());
-            out.push(root.clone());
+            out.push(format!("--configuration-root={root}"));
         }
         for value in &self.extensions {
-            out.push("--extension".to_owned());
-            out.push(value.clone());
+            out.push(format!("--extension={value}"));
         }
         for value in &self.extension_depends_on {
-            out.push("--extension-depends-on".to_owned());
-            out.push(value.clone());
+            out.push(format!("--extension-depends-on={value}"));
         }
         if self.no_extensions {
             out.push("--no-extensions".to_owned());
@@ -427,7 +431,12 @@ mod tests {
 
         let mut argv = vec!["harness"];
         argv.extend_from_slice(flags);
-        Harness::parse_from(argv).source_set
+        // `try_parse_from`, not `parse_from`: a rejected argv would otherwise
+        // exit the test process outright, turning an assertion failure into an
+        // unreadable abort.
+        Harness::try_parse_from(argv)
+            .unwrap_or_else(|e| panic!("clap rejected {flags:?}: {e}"))
+            .source_set
     }
 
     fn extension_dir(root: &Path, rel: &str) {
@@ -768,6 +777,24 @@ mod tests {
             args(&["--extension", "cfe/*", "--extension", "cfe/base"]).resolve(dir.path()).unwrap();
 
         assert_eq!(resolved.extensions.unwrap().len(), 2, "both entries reach the model");
+    }
+
+    #[test]
+    fn re_emitted_flags_survive_a_value_that_starts_with_a_hyphen() {
+        let dir = tempdir().unwrap();
+        extension_dir(dir.path(), "-cf");
+        extension_dir(dir.path(), "-ext");
+
+        // Accepted here only as `--option=-value`; re-emitted as a separate
+        // argument it would come back to the child as a stray flag, and in
+        // broker mode that costs the whole launch.
+        let parsed = args(&["--configuration-root=-cf", "--extension=-ext"]);
+        let emitted = parsed.to_args();
+        let round_tripped: Vec<&str> = emitted.iter().map(String::as_str).collect();
+        let reparsed = args(&round_tripped);
+
+        assert_eq!(reparsed.configuration_root.as_deref(), Some("-cf"));
+        assert_eq!(reparsed.extensions, vec!["-ext".to_string()]);
     }
 
     #[test]

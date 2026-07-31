@@ -99,8 +99,14 @@ impl SharedState {
     /// Set when the resolved configuration root is itself an extension analyzed
     /// without the main configuration it extends — the state in which valid
     /// calls into that configuration are reported as unresolved.
+    /// Derived from the project as it is now, not from the root captured at
+    /// bootstrap: a config edit can move the resolved root between a main
+    /// configuration and an extension, and everything else — diagnostics, graph,
+    /// drift — already rebuilds through `crate::project::at` when it does.
     pub(crate) fn standalone_extension_notice(&self) -> Option<String> {
-        self.source_root.as_deref().and_then(project_model::standalone_extension_notice)
+        let root = self.workspace_root.as_deref()?;
+        let project = crate::project::at(root).ok()?;
+        project_model::standalone_extension_notice(project.source_path())
     }
 
     pub(crate) fn superseded(&self) -> bool {
@@ -283,5 +289,53 @@ mod onec_connection_tests {
             OnecConnection::new(OnecClient::new("http://localhost/only", "", ""), false),
         );
         assert!(!state.onec_connection(None).unwrap().allow_execute());
+    }
+}
+
+#[cfg(test)]
+mod standalone_extension_tests {
+    use super::SharedState;
+
+    fn configuration(root: &std::path::Path, rel: &str, extension: bool) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        let purpose = if extension {
+            "<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>"
+        } else {
+            ""
+        };
+        std::fs::write(
+            dir.join("Configuration.xml"),
+            format!(
+                "<MetaDataObject><Configuration><Properties>{purpose}</Properties>\
+                 </Configuration></MetaDataObject>"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_notice_follows_a_config_edit_that_moves_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        configuration(root, "cf", false);
+        configuration(root, "ext", true);
+        let config = root.join("bsl-analyzer.toml");
+        std::fs::write(&config, "[source]\nroot = \"cf\"\nextensions = []\n").unwrap();
+
+        let state = SharedState::workspace(root.to_path_buf()).unwrap();
+        assert!(state.standalone_extension_notice().is_none(), "a main configuration stays silent");
+
+        // Everything else — diagnostics, graph, drift — rebuilds through
+        // `crate::project::at` after a config edit, so a notice read from the
+        // root captured at bootstrap would describe a project no longer in use.
+        std::fs::write(&config, "[source]\nroot = \"ext\"\nextensions = []\n").unwrap();
+        assert!(
+            state.standalone_extension_notice().is_some(),
+            "the root is now an extension and the notice must follow"
+        );
+
+        std::fs::write(&config, "[source]\nroot = \"cf\"\nextensions = []\n").unwrap();
+        assert!(state.standalone_extension_notice().is_none(), "and must go away again");
     }
 }
