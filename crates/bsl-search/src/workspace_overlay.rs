@@ -1339,6 +1339,18 @@ fn normalized_file_hash_for_chunks<'a>(
     hasher.finalize().as_bytes().to_vec()
 }
 
+/// Both recipes below reproduce the publisher's per-file fingerprint byte for
+/// byte, because the only thing they are ever compared against is the value a
+/// published manifest carries. A recipe of their own would mean no file in the
+/// working tree ever matches the baseline, and the whole corpus would live as
+/// an overlay delta.
+///
+/// Where the publisher folds in each document's graph context, these write its
+/// "absent" marker unconditionally. That is not an omission: the published
+/// corpus is indexed with no graph context provider at all, so a local document
+/// enriched with context describes the same text as the context-free one the
+/// snapshot holds. Hashing the enrichment here could only ever report a file
+/// whose text matches the snapshot as locally changed.
 pub(crate) fn fingerprint_content(content: &str, rel_path: &str) -> String {
     let documents = Chunker::chunk(content);
     let mut hasher = blake3::Hasher::new();
@@ -1361,6 +1373,8 @@ pub(crate) fn fingerprint_content(content: &str, rel_path: &str) -> String {
         hasher.update(content_hash.as_bytes());
         hasher.update(&[0]);
         hasher.update(chunk.text.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&[0]);
         hasher.update(&[0xff]);
     }
     hasher.finalize().to_hex().to_string()
@@ -1384,6 +1398,8 @@ pub(crate) fn fingerprint_overlay_documents(
         hasher.update(document.content_hash.as_bytes());
         hasher.update(&[0]);
         hasher.update(document.text.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&[0]);
         hasher.update(&[0xff]);
     }
     hasher.finalize().to_hex().to_string()
