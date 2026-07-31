@@ -23,6 +23,7 @@ const EXT_MODULE: &str = "МодульРасширения";
 /// A call nothing in any source set can resolve. Kept beside the call under
 /// test so that "the diagnostic disappeared" can be told apart from "the
 /// diagnostic stopped being produced at all in the flagged branch".
+const MISSING_MODULE: &str = "ЗаведомоНетТакогоМодуля";
 const MISSING_CALL: &str = "ЗаведомоНетТакогоМодуля.НетТакогоМетода();";
 
 /// A configuration root deep enough that `Project`'s own two-level search for
@@ -104,8 +105,12 @@ struct Run {
 }
 
 impl Run {
+    /// Matched on the module's own path tail rather than on the name appearing
+    /// anywhere in the absolute path: a temp directory that happens to carry the
+    /// module's name in an ancestor would otherwise pick the wrong file.
     fn file_event(&self, module: &str) -> Option<&Value> {
-        self.files.iter().find(|e| e["path"].as_str().is_some_and(|p| p.contains(module)))
+        let tail = format!("CommonModules/{module}/Ext/Module.bsl");
+        self.files.iter().find(|e| e["path"].as_str().is_some_and(|p| p.ends_with(&tail)))
     }
 
     /// The module's file event, having established that it was actually
@@ -122,18 +127,31 @@ impl Run {
         event
     }
 
-    /// How many times the code is reported for the module. Counted, not tested
-    /// for presence: the fixture keeps one deliberately unresolvable call
-    /// alongside the one under test, so "the call resolved" reads as the count
-    /// dropping to that floor rather than to zero — which is what suppressing
-    /// the diagnostic wholesale would look like.
-    fn count(&self, module: &str, code: &str) -> usize {
+    /// Messages of the given code reported for the module, in order.
+    ///
+    /// Compared as text rather than counted: the fixture keeps a deliberately
+    /// unresolvable call beside the one under test, and a count alone cannot
+    /// tell "the real call resolved" from "the two swapped places" or from the
+    /// diagnostic being suppressed wholesale.
+    fn messages(&self, module: &str, code: &str) -> Vec<String> {
         self.analyzed(module)["diagnostics"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|d| d["code"].as_str() == Some(code))
-            .count()
+            .map(|d| d["message"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// Which module names the given code complains about, sorted.
+    fn unresolved_modules(&self, module: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .messages(module, "UnresolvedMethodCall")
+            .iter()
+            .filter_map(|m| m.split('\'').nth(1).map(str::to_owned))
+            .collect();
+        names.sort();
+        names
     }
 }
 
@@ -189,17 +207,17 @@ fn binding_the_main_configuration_resolves_calls_into_it() {
     // and this assertion is what makes the paired one below mean anything.
     let standalone = analyze(dir.path(), &["--extension", &format!("EXT={EXT}")]);
     assert_eq!(
-        standalone.count(EXT_MODULE, "UnresolvedMethodCall"),
-        2,
-        "alone, neither the main configuration's method nor the missing one resolves"
+        standalone.unresolved_modules(EXT_MODULE),
+        vec![MAIN_MODULE.to_string(), MISSING_MODULE.to_string()],
+        "alone, neither the main configuration's module nor the missing one resolves"
     );
 
     let bound =
         analyze(dir.path(), &["--configuration-root", MAIN, "--extension", &format!("EXT={EXT}")]);
     assert_eq!(
-        bound.count(EXT_MODULE, "UnresolvedMethodCall"),
-        1,
-        "binding must resolve the real call and leave the unresolvable one reported"
+        bound.unresolved_modules(EXT_MODULE),
+        vec![MISSING_MODULE.to_string()],
+        "binding must resolve the main configuration's module and leave only the missing one"
     );
 }
 
@@ -236,18 +254,18 @@ fn a_declared_dependency_resolves_calls_between_extensions() {
     // Independent extensions do not see each other, so this is the control.
     let unrelated = analyze(dir.path(), &refs);
     assert_eq!(
-        unrelated.count(EXT_MODULE, "UnresolvedMethodCall"),
-        2,
-        "without a declared edge the other extension's API must stay invisible"
+        unrelated.unresolved_modules(EXT_MODULE),
+        vec![MISSING_MODULE.to_string(), DEP_MODULE.to_string()],
+        "without a declared edge the other extension's module must stay invisible"
     );
 
     let mut with_edge = refs.clone();
     with_edge.extend(["--extension-depends-on", "EXT=DEP"]);
     let dependent = analyze(dir.path(), &with_edge);
     assert_eq!(
-        dependent.count(EXT_MODULE, "UnresolvedMethodCall"),
-        1,
-        "the edge must resolve the dependency's method and leave the unresolvable one reported"
+        dependent.unresolved_modules(EXT_MODULE),
+        vec![MISSING_MODULE.to_string()],
+        "the edge must resolve the dependency's module and leave only the missing one"
     );
 }
 
@@ -281,8 +299,18 @@ fn no_extensions_drops_the_configured_list() {
 /// How many times the notice appears — the invariant is exactly one message per
 /// run, and a substring check would pass just as happily on a duplicate.
 fn notices(run: &Run) -> usize {
+    // The run's own health is asserted here as well: the notice is printed
+    // before the walk, so a per-file failure afterwards still leaves the phrase
+    // in stderr while the process exits zero — and an analysis regression for
+    // exactly the extension under test would slip through.
+    assert_eq!(run.done["failed_files"], 0, "some file failed: {}", run.done);
+    // Counted per line, because the message embeds the source path: a workspace
+    // path containing the phrase would otherwise inflate the count.
     run.stderr
-        .matches("is a configuration extension analyzed without its main configuration")
+        .lines()
+        .filter(|line| {
+            line.contains("is a configuration extension analyzed without its main configuration")
+        })
         .count()
 }
 
