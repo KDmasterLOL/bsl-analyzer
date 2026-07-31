@@ -461,6 +461,104 @@ fn mcp_probe(workspace: &Path, module_file: &Path, flags: &[&str]) -> (Vec<Strin
     (names, status)
 }
 
+/// The graph's own view of the source set: node and edge counts once its build
+/// settles.
+///
+/// Graph passes re-derive the project from a bare workspace path, separately
+/// from the resident diagnostics host. A regression that left that path on the
+/// on-disk config would keep every diagnostics check green while the graph was
+/// built over a different set of roots.
+fn mcp_graph_overview(workspace: &Path, flags: &[&str]) -> Value {
+    use std::io::{BufRead, BufReader, Write as _};
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
+        .args(["mcp", "serve", "--profile", "workspace", "--mode", "stdio", "-s"])
+        .arg(workspace)
+        .args(flags)
+        .env("BSL_MCP_BROKER", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start the MCP server");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut send = |value: Value| writeln!(stdin, "{value}").unwrap();
+    let mut recv = |id: i64| -> Value {
+        loop {
+            let mut line = String::new();
+            assert_ne!(stdout.read_line(&mut line).unwrap(), 0, "the server closed stdout");
+            if let Ok(message) = serde_json::from_str::<Value>(&line) {
+                if message["id"] == id {
+                    return message;
+                }
+            }
+        }
+    };
+
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                   "clientInfo": {"name": "t", "version": "1"}}
+    }));
+    recv(1);
+    send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let call = |id: i64, action: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": "graph", "arguments": {"action": action}}
+        })
+    };
+
+    let mut status = Value::Null;
+    for id in 10..300 {
+        send(call(id, "status"));
+        status = recv(id)["result"]["structuredContent"].clone();
+        if status["state"] == "ready" || status["state"] == "failed" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // `failed` is a real outcome here, not a flake: the builder reports it when
+    // it panicked, and an overview read past it would compare empty to empty.
+    assert_eq!(status["state"], "ready", "the graph never became ready: {status}");
+
+    send(call(2, "overview"));
+    let overview = recv(2)["result"]["structuredContent"]["result"].clone();
+
+    drop(stdin);
+    let _ = child.wait();
+    overview
+}
+
+#[test]
+fn the_source_set_reaches_the_graph() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+
+    // Both runs bind the main configuration, so the only thing moving is whether
+    // the extension is part of the set — which is exactly what the graph passes
+    // re-derive for themselves.
+    let base_only =
+        mcp_graph_overview(dir.path(), &["--configuration-root", MAIN, "--no-extensions"]);
+    assert_eq!(base_only["nodes"], 1, "only the main configuration's method: {base_only}");
+    assert_eq!(base_only["edges"], 0, "nothing calls it: {base_only}");
+
+    let with_extension = mcp_graph_overview(
+        dir.path(),
+        &["--configuration-root", MAIN, "--extension", "EXT=a/b/ext"],
+    );
+    assert_eq!(with_extension["nodes"], 2, "both methods: {with_extension}");
+    assert_eq!(
+        with_extension["edge_provenance"]["resolved"], 1,
+        "the extension's call into the main configuration must resolve into an edge: \
+         {with_extension}"
+    );
+}
+
 #[test]
 fn the_mcp_status_reports_a_standalone_extension() {
     let dir = workspace();
