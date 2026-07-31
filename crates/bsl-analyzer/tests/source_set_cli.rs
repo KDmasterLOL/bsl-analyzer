@@ -20,6 +20,11 @@ const MAIN_MODULE: &str = "БазовыйМодуль";
 const DEP_MODULE: &str = "МодульЗависимости";
 const EXT_MODULE: &str = "МодульРасширения";
 
+/// A call nothing in any source set can resolve. Kept beside the call under
+/// test so that "the diagnostic disappeared" can be told apart from "the
+/// diagnostic stopped being produced at all in the flagged branch".
+const MISSING_CALL: &str = "ЗаведомоНетТакогоМодуля.НетТакогоМетода();";
+
 /// A configuration root deep enough that `Project`'s own two-level search for
 /// `Configuration.xml` cannot find it, and not under `src/cf` or `Configuration`
 /// either. Without this the "no main configuration" run would silently acquire
@@ -86,7 +91,7 @@ fn workspace_calling_main_configuration(root: &Path) {
         "Расширение",
         EXT_MODULE,
         &format!(
-            "Процедура Вызвать() Экспорт\n\t{MAIN_MODULE}.Экспортируемая();\nКонецПроцедуры\n"
+            "Процедура Вызвать() Экспорт\n\t{MAIN_MODULE}.Экспортируемая();\n\t{MISSING_CALL}\nКонецПроцедуры\n"
         ),
         true,
     );
@@ -103,16 +108,32 @@ impl Run {
         self.files.iter().find(|e| e["path"].as_str().is_some_and(|p| p.contains(module)))
     }
 
-    /// Whether the module's own file carries the diagnostic — and, when it does
-    /// not, that the file was analyzed at all and did not fail. Absence of a
-    /// finding in a file nobody parsed is not a resolution.
-    fn has_diagnostic(&self, module: &str, code: &str) -> bool {
+    /// The module's file event, having established that it was actually
+    /// analyzed. A `file` event is emitted for files whose analysis panicked or
+    /// whose text could not be read, with the failure recorded in `error` and
+    /// `done.failed_files` and the process still exiting zero — so the event's
+    /// mere presence proves nothing.
+    fn analyzed(&self, module: &str) -> &Value {
         let event = self
             .file_event(module)
             .unwrap_or_else(|| panic!("{module} was not analyzed at all; jsonl: {:?}", self.files));
         assert_eq!(event["error"], Value::Null, "{module} failed to analyze: {event}");
         assert_eq!(self.done["failed_files"], 0, "some file failed: {}", self.done);
-        event["diagnostics"].as_array().unwrap().iter().any(|d| d["code"].as_str() == Some(code))
+        event
+    }
+
+    /// How many times the code is reported for the module. Counted, not tested
+    /// for presence: the fixture keeps one deliberately unresolvable call
+    /// alongside the one under test, so "the call resolved" reads as the count
+    /// dropping to that floor rather than to zero — which is what suppressing
+    /// the diagnostic wholesale would look like.
+    fn count(&self, module: &str, code: &str) -> usize {
+        self.analyzed(module)["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["code"].as_str() == Some(code))
+            .count()
     }
 }
 
@@ -167,16 +188,18 @@ fn binding_the_main_configuration_resolves_calls_into_it() {
     // Positive control. Without a main configuration the call cannot resolve,
     // and this assertion is what makes the paired one below mean anything.
     let standalone = analyze(dir.path(), &["--extension", &format!("EXT={EXT}")]);
-    assert!(
-        standalone.has_diagnostic(EXT_MODULE, "UnresolvedMethodCall"),
-        "the extension analyzed alone must fail to resolve the main configuration's method"
+    assert_eq!(
+        standalone.count(EXT_MODULE, "UnresolvedMethodCall"),
+        2,
+        "alone, neither the main configuration's method nor the missing one resolves"
     );
 
     let bound =
         analyze(dir.path(), &["--configuration-root", MAIN, "--extension", &format!("EXT={EXT}")]);
-    assert!(
-        !bound.has_diagnostic(EXT_MODULE, "UnresolvedMethodCall"),
-        "binding the main configuration must resolve the call"
+    assert_eq!(
+        bound.count(EXT_MODULE, "UnresolvedMethodCall"),
+        1,
+        "binding must resolve the real call and leave the unresolvable one reported"
     );
 }
 
@@ -194,7 +217,9 @@ fn a_declared_dependency_resolves_calls_between_extensions() {
     );
     std::fs::write(
         path(dir.path(), EXT).join("CommonModules").join(EXT_MODULE).join("Ext/Module.bsl"),
-        format!("Процедура Вызвать() Экспорт\n\t{DEP_MODULE}.ИзЗависимости();\nКонецПроцедуры\n"),
+        format!(
+            "Процедура Вызвать() Экспорт\n\t{DEP_MODULE}.ИзЗависимости();\n\t{MISSING_CALL}\nКонецПроцедуры\n"
+        ),
     )
     .unwrap();
 
@@ -210,17 +235,19 @@ fn a_declared_dependency_resolves_calls_between_extensions() {
 
     // Independent extensions do not see each other, so this is the control.
     let unrelated = analyze(dir.path(), &refs);
-    assert!(
-        unrelated.has_diagnostic(EXT_MODULE, "UnresolvedMethodCall"),
+    assert_eq!(
+        unrelated.count(EXT_MODULE, "UnresolvedMethodCall"),
+        2,
         "without a declared edge the other extension's API must stay invisible"
     );
 
     let mut with_edge = refs.clone();
     with_edge.extend(["--extension-depends-on", "EXT=DEP"]);
     let dependent = analyze(dir.path(), &with_edge);
-    assert!(
-        !dependent.has_diagnostic(EXT_MODULE, "UnresolvedMethodCall"),
-        "the declared edge must make the dependency's API visible"
+    assert_eq!(
+        dependent.count(EXT_MODULE, "UnresolvedMethodCall"),
+        1,
+        "the edge must resolve the dependency's method and leave the unresolvable one reported"
     );
 }
 
@@ -238,10 +265,7 @@ fn no_extensions_drops_the_configured_list() {
     // workspace analyzes it without the flag. A wiring bug that always dropped
     // configured extensions would satisfy the one-sided check.
     let configured = analyze(dir.path(), &[]);
-    assert!(
-        configured.file_event(EXT_MODULE).is_some(),
-        "the configured extension must be analyzed when the flag is absent"
-    );
+    configured.analyzed(EXT_MODULE);
 
     let opted_out = analyze(dir.path(), &["--no-extensions"]);
     assert!(
@@ -251,10 +275,7 @@ fn no_extensions_drops_the_configured_list() {
     // The flag drops extensions, not the analysis. Without this, a wiring bug
     // that cleared every source root would satisfy the assertion above by
     // analyzing nothing at all.
-    assert!(
-        opted_out.file_event(MAIN_MODULE).is_some(),
-        "--no-extensions must leave the main configuration in the analysis"
-    );
+    opted_out.analyzed(MAIN_MODULE);
 }
 
 /// How many times the notice appears — the invariant is exactly one message per
