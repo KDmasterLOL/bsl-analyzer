@@ -1352,27 +1352,50 @@ fn normalized_file_hash_for_chunks<'a>(
 /// snapshot holds. Hashing the enrichment here could only ever report a file
 /// whose text matches the snapshot as locally changed.
 pub(crate) fn fingerprint_content(content: &str, rel_path: &str) -> String {
-    let documents = Chunker::chunk(content);
+    let chunks = Chunker::chunk(content);
+    let mut documents: Vec<(u32, u32, &str, &str, String, &str)> = chunks
+        .iter()
+        .map(|chunk| {
+            let kind = match chunk.kind {
+                code_chunk::ChunkKind::ModuleHeader => "header",
+                code_chunk::ChunkKind::Procedure => "procedure",
+                code_chunk::ChunkKind::Function => "function",
+            };
+            let content_hash = blake3::hash(chunk.text.as_bytes()).to_hex().to_string();
+            (
+                chunk.line_start,
+                chunk.line_end,
+                chunk.name.as_str(),
+                kind,
+                content_hash,
+                chunk.text.as_str(),
+            )
+        })
+        .collect();
+    sort_like_the_publisher(&mut documents, |lhs, rhs| {
+        (lhs.0, lhs.1, lhs.2, lhs.3, lhs.4.as_str()).cmp(&(
+            rhs.0,
+            rhs.1,
+            rhs.2,
+            rhs.3,
+            rhs.4.as_str(),
+        ))
+    });
+
     let mut hasher = blake3::Hasher::new();
-    for chunk in &documents {
-        let kind = match chunk.kind {
-            code_chunk::ChunkKind::ModuleHeader => "header",
-            code_chunk::ChunkKind::Procedure => "procedure",
-            code_chunk::ChunkKind::Function => "function",
-        };
-        let content_hash = blake3::hash(chunk.text.as_bytes()).to_hex().to_string();
+    for (line_start, line_end, name, kind, content_hash, text) in &documents {
         hasher.update("code".as_bytes());
         hasher.update(&[0]);
         hasher.update(rel_path.as_bytes());
         hasher.update(&[0]);
-        hasher.update(chunk.name.as_bytes());
+        hasher.update(name.as_bytes());
         hasher.update(&[0]);
         hasher.update(kind.as_bytes());
-        hasher.update(&chunk.line_start.to_le_bytes());
-        hasher.update(&chunk.line_end.to_le_bytes());
+        hasher.update(&line_start.to_le_bytes());
+        hasher.update(&line_end.to_le_bytes());
         hasher.update(content_hash.as_bytes());
         hasher.update(&[0]);
-        hasher.update(chunk.text.as_bytes());
+        hasher.update(text.as_bytes());
         hasher.update(&[0]);
         hasher.update(&[0]);
         hasher.update(&[0xff]);
@@ -1380,12 +1403,40 @@ pub(crate) fn fingerprint_content(content: &str, rel_path: &str) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+/// The publisher hashes a file's chunks in sorted order, while a chunker returns
+/// them in source order. For ordinary code the two coincide — line numbers rise
+/// with position — and they part ways as soon as several chunks share a line
+/// span, as two one-line methods written on one physical line do. Ordering
+/// locally by the publisher's key is what makes the recipes agree for those
+/// files too.
+fn sort_like_the_publisher<T>(documents: &mut [T], compare: impl Fn(&T, &T) -> std::cmp::Ordering) {
+    documents.sort_by(compare);
+}
+
 pub(crate) fn fingerprint_overlay_documents(
     documents: &[IndexedDocument],
     rel_path: &str,
 ) -> String {
+    let mut ordered: Vec<&IndexedDocument> = documents.iter().collect();
+    sort_like_the_publisher(&mut ordered, |lhs, rhs| {
+        (
+            lhs.line_start,
+            lhs.line_end,
+            lhs.symbol_name.as_str(),
+            lhs.kind.as_str(),
+            lhs.content_hash.as_str(),
+        )
+            .cmp(&(
+                rhs.line_start,
+                rhs.line_end,
+                rhs.symbol_name.as_str(),
+                rhs.kind.as_str(),
+                rhs.content_hash.as_str(),
+            ))
+    });
+
     let mut hasher = blake3::Hasher::new();
-    for document in documents {
+    for document in ordered {
         hasher.update(document.collection.as_bytes());
         hasher.update(&[0]);
         hasher.update(rel_path.as_bytes());

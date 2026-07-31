@@ -3455,27 +3455,36 @@ mod tests {
         let workspace = workspace_dir.path();
         let file = workspace.join("CommonModule.bsl");
         std::fs::write(&file, "Процедура Базовая() Экспорт\nКонецПроцедуры\n").unwrap();
+        // Two methods on one physical line: their chunks share a line span, so
+        // the publisher's sort puts them in a different order than the chunker
+        // returns them. Ordinary code cannot show that — its line numbers rise
+        // with position, and both orders coincide.
+        std::fs::write(
+            workspace.join("OneLine.bsl"),
+            "Процедура Б() Экспорт КонецПроцедуры Процедура А() Экспорт КонецПроцедуры\n",
+        )
+        .unwrap();
 
         let mut publisher =
             crate::SearchEngine::fts_only(&publisher_dir.path().join("baseline.db")).unwrap();
         publisher.index_directory_fts(workspace).unwrap();
         let published = publisher.load_indexed_documents(Some("code")).unwrap();
         let groups = group_documents_by_file(&published);
-        assert_eq!(groups.len(), 1, "the fixture publishes exactly one file");
+        assert_eq!(groups.len(), 2, "the fixture publishes both files");
 
         let manifest = crate::WorkspaceBaselineManifest {
             snapshot_id: "snap-1".to_owned(),
             snapshot_fingerprint: Some("fp-1".to_owned()),
-            files: vec![crate::BaselineManifestFile {
-                collection: groups[0].collection.clone(),
-                path: groups[0].path.clone(),
-                file_fingerprint: groups[0].file_fingerprint.clone(),
-                document_count: groups[0].documents.len(),
-                file_object_id: file_object_id_for(
-                    &groups[0].collection,
-                    &groups[0].file_fingerprint,
-                ),
-            }],
+            files: groups
+                .iter()
+                .map(|group| crate::BaselineManifestFile {
+                    collection: group.collection.clone(),
+                    path: group.path.clone(),
+                    file_fingerprint: group.file_fingerprint.clone(),
+                    document_count: group.documents.len(),
+                    file_object_id: file_object_id_for(&group.collection, &group.file_fingerprint),
+                })
+                .collect(),
         };
 
         // A fresh engine per measurement, primed explicitly. `stats` alone never
