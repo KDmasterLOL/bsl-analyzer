@@ -50,13 +50,110 @@ pub(crate) const EMBED_TEXT_VERSION: i64 = 1;
 /// leaves the schema intact. A pre-versioning database (no `meta` row) is treated as
 /// already current — the additive migrations keep it compatible — so upgrading does not
 /// trigger a needless full re-index.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// The tables whose row identity is the pair `(root_id, path)` rather than the
+/// path alone, and the body each is created with.
+///
+/// One definition serves both the create path and the migration below, so the
+/// shape a fresh store is born with and the shape an upgraded one is rebuilt
+/// into cannot drift apart.
+struct RootKeyedTable {
+    name: &'static str,
+    body: &'static str,
+    suffix: &'static str,
+}
+
+const ROOT_KEYED_TABLES: &[RootKeyedTable] = &[
+    RootKeyedTable {
+        name: "files",
+        body: "
+            id         INTEGER PRIMARY KEY,
+            root_id    TEXT    NOT NULL DEFAULT '',
+            path       TEXT    NOT NULL,
+            hash       BLOB    NOT NULL,
+            indexed_at INTEGER NOT NULL,
+            collection TEXT    NOT NULL DEFAULT 'code',
+            UNIQUE (root_id, path)
+        ",
+        suffix: "",
+    },
+    RootKeyedTable {
+        name: "baseline_manifest_files",
+        body: "
+            root_id          TEXT    NOT NULL DEFAULT '',
+            collection       TEXT    NOT NULL DEFAULT 'code',
+            path             TEXT    NOT NULL,
+            file_fingerprint TEXT    NOT NULL,
+            PRIMARY KEY (collection, root_id, path)
+        ",
+        suffix: "",
+    },
+    RootKeyedTable {
+        name: "overlay_tombstones",
+        body: "
+            root_id    TEXT    NOT NULL DEFAULT '',
+            path       TEXT    NOT NULL,
+            collection TEXT    NOT NULL DEFAULT 'code',
+            deleted_at TEXT    NOT NULL,
+            UNIQUE (root_id, path)
+        ",
+        suffix: "",
+    },
+    RootKeyedTable {
+        name: "overlay_files",
+        body: "
+            id         INTEGER PRIMARY KEY,
+            root_id    TEXT    NOT NULL DEFAULT '',
+            path       TEXT    NOT NULL,
+            hash       BLOB    NOT NULL,
+            indexed_at INTEGER NOT NULL,
+            collection TEXT    NOT NULL DEFAULT 'code',
+            UNIQUE (root_id, path)
+        ",
+        suffix: "",
+    },
+    RootKeyedTable {
+        name: "overlay_fingerprint_cache",
+        body: "
+            root_id              TEXT    NOT NULL DEFAULT '',
+            path                 TEXT    NOT NULL,
+            collection           TEXT    NOT NULL DEFAULT 'code',
+            file_size            INTEGER NOT NULL,
+            file_mtime_secs      INTEGER NOT NULL,
+            file_mtime_nanos     INTEGER NOT NULL,
+            content_fingerprint  TEXT    NOT NULL,
+            manifest_snapshot_id TEXT    NOT NULL,
+            PRIMARY KEY (root_id, path)
+        ",
+        suffix: "",
+    },
+    RootKeyedTable {
+        name: "context_dirty",
+        body: "
+            root_id    TEXT    NOT NULL DEFAULT '',
+            path       TEXT    NOT NULL,
+            collection TEXT    NOT NULL DEFAULT 'code',
+            marked_at  INTEGER NOT NULL,
+            seq        INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (root_id, path, collection)
+        ",
+        suffix: " WITHOUT ROWID",
+    },
+];
+
+impl RootKeyedTable {
+    fn create_as(&self, name: &str) -> String {
+        format!("CREATE TABLE IF NOT EXISTS {name} ({}){};", self.body, self.suffix)
+    }
+}
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, SearchError> {
         let conn = Connection::open(path)?;
         let store = Self { conn, path: path.to_path_buf(), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
+        store.migrate_root_keyed_tables()?;
         store.migrate_structural_schema()?;
         store.migrate_embed_text_version()?;
         store.seed_mark_seq()?;
@@ -85,6 +182,105 @@ impl Store {
              PRAGMA busy_timeout = 30000;
              PRAGMA foreign_keys = ON;",
         )?;
+        Ok(())
+    }
+
+    /// Give the path-keyed tables their `root_id` column without losing a row.
+    ///
+    /// The identity of a row moved from `path` to `(root_id, path)`, and SQLite
+    /// cannot alter a `UNIQUE`/`PRIMARY KEY` clause in place: each table has to
+    /// be rebuilt. The ordinary route for a shape change — bump the version and
+    /// let the store be wiped — is exactly what must not happen here, because a
+    /// wipe costs a full re-index and re-embedding of a corpus that has not
+    /// changed at all. Every existing row is the configuration's, which is what
+    /// the reserved empty id means, so the default value alone carries them over.
+    ///
+    /// The entry condition is the shape of the table, not the recorded version:
+    /// a store written before versioning existed reports no version at all and
+    /// would sail past a version check into the new code with its old
+    /// constraints intact.
+    fn migrate_root_keyed_tables(&self) -> Result<(), SearchError> {
+        let pending: Vec<&RootKeyedTable> = ROOT_KEYED_TABLES
+            .iter()
+            .filter(|table| Self::table_awaits_root_id(&self.conn, table.name))
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        // Dropping `files` with foreign keys enforced would cascade its chunks
+        // away — the embeddings this migration exists to preserve. The pragma is
+        // a no-op inside a transaction, so the window is opened here and closed
+        // whatever happens, including on a failed rebuild.
+        self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        let rebuilt = self.rebuild_root_keyed_tables(&pending);
+        let restored = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
+        rebuilt?;
+        restored?;
+        Ok(())
+    }
+
+    /// Whether the table exists and still lacks `root_id`. A missing table is
+    /// not pending: it will be created in the current shape.
+    fn table_awaits_root_id(conn: &Connection, table: &str) -> bool {
+        let columns = Self::column_names(conn, table);
+        !columns.is_empty() && !columns.iter().any(|column| column == "root_id")
+    }
+
+    fn column_names(conn: &Connection, table: &str) -> Vec<String> {
+        let Ok(mut stmt) = conn.prepare("SELECT name FROM pragma_table_info(?1)") else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map(params![table], |row| row.get::<_, String>(0)) else {
+            return Vec::new();
+        };
+        rows.filter_map(Result::ok).collect()
+    }
+
+    fn rebuild_root_keyed_tables(&self, pending: &[&RootKeyedTable]) -> Result<(), SearchError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for table in pending {
+            let staging = format!("{}_root_id_migration", table.name);
+            tx.execute_batch(&table.create_as(&staging))?;
+            // The columns to carry over are read off both tables rather than
+            // written out here: a store old enough to predate one of the
+            // additive column adds would otherwise fail on a column that its
+            // copy of the table never had.
+            let carried: Vec<String> = Self::column_names(&tx, table.name)
+                .into_iter()
+                .filter(|column| Self::column_names(&tx, &staging).contains(column))
+                .collect();
+            let carried = carried.join(", ");
+            tx.execute_batch(&format!(
+                "INSERT INTO {staging} ({carried}) SELECT {carried} FROM {};
+                 DROP TABLE {};
+                 ALTER TABLE {staging} RENAME TO {};",
+                table.name, table.name, table.name
+            ))?;
+        }
+
+        // The rebuild leaves `chunks` pointing at a table that was dropped and
+        // recreated under the same name; this is where a mistake in that dance
+        // shows up, while the transaction can still be rolled back.
+        let violations: i64 =
+            tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
+        if violations != 0 {
+            return Err(SearchError::Index(format!(
+                "root_id migration left {violations} dangling foreign key reference(s)"
+            )));
+        }
+
+        // Stamped forward here, inside the same transaction, so the structural
+        // migration that runs next sees a current store and leaves it alone
+        // instead of wiping the rows just carried over. A store with no `meta`
+        // table at all is stamped by that migration instead.
+        if !Self::column_names(&tx, "meta").is_empty() {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+                params![SCHEMA_VERSION.to_string()],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -212,25 +408,25 @@ impl Store {
         let store =
             Self { conn, path: PathBuf::from(":memory:"), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
+        store.migrate_root_keyed_tables()?;
         store.migrate_structural_schema()?;
         store.seed_mark_seq()?;
         Ok(store)
     }
 
     fn create_schema(conn: &Connection) -> Result<(), SearchError> {
+        // Created first, and from the shared definitions: `chunks` and
+        // `overlay_chunks` reference them, and their shape must be the one the
+        // migration rebuilds into.
+        for table in ROOT_KEYED_TABLES {
+            conn.execute_batch(&table.create_as(table.name))?;
+        }
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS files (
-                id         INTEGER PRIMARY KEY,
-                path       TEXT    NOT NULL UNIQUE,
-                hash       BLOB   NOT NULL,
-                indexed_at INTEGER NOT NULL,
-                collection TEXT    NOT NULL DEFAULT 'code'
             );
 
             CREATE TABLE IF NOT EXISTS chunks (
@@ -276,33 +472,12 @@ impl Store {
                 fetched_at      TEXT    NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS baseline_manifest_files (
-                collection       TEXT    NOT NULL DEFAULT 'code',
-                path             TEXT    NOT NULL,
-                file_fingerprint TEXT    NOT NULL,
-                PRIMARY KEY (collection, path)
-            );
-
             -- Tombstones for deleted baseline files.
             -- When a baseline file is deleted locally, its path is recorded here
             -- so the merge layer can hide the baseline hit.
-            CREATE TABLE IF NOT EXISTS overlay_tombstones (
-                path       TEXT    NOT NULL UNIQUE,
-                collection TEXT    NOT NULL DEFAULT 'code',
-                deleted_at TEXT    NOT NULL
-            );
-
             -- Overlay files: files that are locally modified or new relative to
             -- the baseline manifest. These are separate from the main `files`
             -- table so baseline rows never appear in local storage.
-            CREATE TABLE IF NOT EXISTS overlay_files (
-                id         INTEGER PRIMARY KEY,
-                path       TEXT    NOT NULL UNIQUE,
-                hash       BLOB   NOT NULL,
-                indexed_at INTEGER NOT NULL,
-                collection TEXT    NOT NULL DEFAULT 'code'
-            );
-
             -- Overlay chunks: lexical chunks belonging to overlay files.
             CREATE TABLE IF NOT EXISTS overlay_chunks (
                 id          INTEGER PRIMARY KEY,
@@ -329,16 +504,6 @@ impl Store {
 
             -- Persisted overlay fingerprint cache: avoids re-reading and
             -- re-hashing unchanged files on MCP server restart.
-            CREATE TABLE IF NOT EXISTS overlay_fingerprint_cache (
-                path                TEXT NOT NULL PRIMARY KEY,
-                collection          TEXT NOT NULL DEFAULT 'code',
-                file_size           INTEGER NOT NULL,
-                file_mtime_secs     INTEGER NOT NULL,
-                file_mtime_nanos    INTEGER NOT NULL,
-                content_fingerprint TEXT NOT NULL,
-                manifest_snapshot_id TEXT NOT NULL
-            );
-
             -- Persisted overlay embedding cache: avoids re-embedding
             -- unchanged overlay chunks on MCP server restart. Keyed by the
             -- embedding key (hash of the embedded text), not raw chunk text.
@@ -362,13 +527,6 @@ impl Store {
             -- start-seq, so a drift that lands after the build started is never cleared
             -- against the pre-drift graph. Re-marking a row bumps its `seq`, so a clear
             -- bounded by an older start-seq skips a row a fresher drift just re-stamped.
-            CREATE TABLE IF NOT EXISTS context_dirty (
-                path       TEXT    NOT NULL,
-                collection TEXT    NOT NULL DEFAULT 'code',
-                marked_at  INTEGER NOT NULL,
-                seq        INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (path, collection)
-            ) WITHOUT ROWID;
             ",
         )?;
 
@@ -476,7 +634,7 @@ impl Store {
         self.conn.execute(
             "INSERT INTO files (path, hash, indexed_at, collection)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
             params![path, hash, now, collection],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -639,7 +797,7 @@ impl Store {
         tx.execute(
             "INSERT INTO context_dirty (path, collection, marked_at, seq)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?3, seq = ?4",
+             ON CONFLICT(root_id, path, collection) DO UPDATE SET marked_at = ?3, seq = ?4",
             params![path, collection, now, seq],
         )?;
         tx.commit()?;
@@ -664,9 +822,9 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let seq = Self::next_mark_seq(&tx)?;
         let count = tx.execute(
-            "INSERT INTO context_dirty (path, collection, marked_at, seq)
-             SELECT path, collection, ?2, ?3 FROM files WHERE collection = ?1
-             ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?2, seq = ?3",
+            "INSERT INTO context_dirty (root_id, path, collection, marked_at, seq)
+             SELECT root_id, path, collection, ?2, ?3 FROM files WHERE collection = ?1
+             ON CONFLICT(root_id, path, collection) DO UPDATE SET marked_at = ?2, seq = ?3",
             params![collection, now, seq],
         )?;
         tx.commit()?;
@@ -694,9 +852,9 @@ impl Store {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let count = self.conn.execute(
-            "INSERT INTO context_dirty (path, collection, marked_at, seq)
-             SELECT path, collection, ?2, ?3 FROM files WHERE collection = ?1
-             ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?2, seq = ?3
+            "INSERT INTO context_dirty (root_id, path, collection, marked_at, seq)
+             SELECT root_id, path, collection, ?2, ?3 FROM files WHERE collection = ?1
+             ON CONFLICT(root_id, path, collection) DO UPDATE SET marked_at = ?2, seq = ?3
              WHERE context_dirty.seq <= ?3",
             params![collection, now, stamp_seq],
         )?;
@@ -835,7 +993,7 @@ impl Store {
         tx.execute(
             "INSERT INTO files (path, hash, indexed_at, collection)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
             params![path, hash, now, collection],
         )?;
         let file_id: i64 =
@@ -914,7 +1072,7 @@ impl Store {
         tx.execute(
             "INSERT INTO files (path, hash, indexed_at, collection)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
             params![virtual_path, hash, now, collection],
         )?;
         let file_id: i64 =
@@ -971,7 +1129,7 @@ impl Store {
         tx.execute(
             "INSERT INTO files (path, hash, indexed_at, collection)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
             params![path, hash, now, collection],
         )?;
         let file_id: i64 =
@@ -1622,7 +1780,7 @@ impl Store {
         self.conn.execute(
             "INSERT INTO overlay_tombstones (path, collection, deleted_at)
              VALUES (?1, ?2, ?3)
-             ON CONFLICT(path) DO UPDATE SET collection = ?2, deleted_at = ?3",
+             ON CONFLICT(root_id, path) DO UPDATE SET collection = ?2, deleted_at = ?3",
             params![path, collection, deleted_at.to_string()],
         )?;
         Ok(())
@@ -1671,7 +1829,7 @@ impl Store {
         tx.execute(
             "INSERT INTO overlay_files (path, hash, indexed_at, collection)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
             params![path, hash, now, collection],
         )?;
         let file_id: i64 =
@@ -2050,6 +2208,389 @@ pub struct PersistedFingerprint {
 mod tests {
     use super::*;
     use code_chunk::{Chunk, ChunkKind};
+
+    /// A store in the shape the release before composite keys wrote, built with
+    /// raw SQL on purpose.
+    ///
+    /// A fixture assembled by today's `create_schema` would stop modelling the
+    /// old state the moment the schema changes, and would then keep passing
+    /// without the migration ever running. This one is frozen: it is what is
+    /// actually on disk in front of an upgrading user.
+    ///
+    /// Ids are deliberately sparse and out of order — a rebuild that renumbers
+    /// rows would still satisfy a row count.
+    fn write_pre_root_id_store(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "
+            PRAGMA journal_mode = WAL;
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+            INSERT INTO meta (key, value) VALUES ('embedding_generation', '17');
+
+            CREATE TABLE files (
+                id         INTEGER PRIMARY KEY,
+                path       TEXT    NOT NULL UNIQUE,
+                hash       BLOB    NOT NULL,
+                indexed_at INTEGER NOT NULL,
+                collection TEXT    NOT NULL DEFAULT 'code'
+            );
+            CREATE TABLE chunks (
+                id          INTEGER PRIMARY KEY,
+                file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                kind        TEXT    NOT NULL,
+                symbol_name TEXT    NOT NULL,
+                is_export   INTEGER NOT NULL DEFAULT 0,
+                annotations TEXT,
+                line_start  INTEGER NOT NULL,
+                line_end    INTEGER NOT NULL,
+                text        TEXT    NOT NULL,
+                embedding   BLOB,
+                graph_context TEXT
+            );
+            CREATE INDEX idx_chunks_file ON chunks(file_id);
+            CREATE VIRTUAL TABLE chunks_fts USING fts5(symbol_name, text, tokenize='unicode61');
+
+            CREATE TABLE baseline_manifest (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                snapshot_id TEXT NOT NULL,
+                fingerprint TEXT,
+                manifest_files INTEGER NOT NULL DEFAULT 0,
+                fetched_at TEXT NOT NULL
+            );
+            CREATE TABLE baseline_manifest_files (
+                collection       TEXT NOT NULL DEFAULT 'code',
+                path             TEXT NOT NULL,
+                file_fingerprint TEXT NOT NULL,
+                PRIMARY KEY (collection, path)
+            );
+            CREATE TABLE overlay_tombstones (
+                path       TEXT NOT NULL UNIQUE,
+                collection TEXT NOT NULL DEFAULT 'code',
+                deleted_at TEXT NOT NULL
+            );
+            CREATE TABLE overlay_files (
+                id         INTEGER PRIMARY KEY,
+                path       TEXT    NOT NULL UNIQUE,
+                hash       BLOB    NOT NULL,
+                indexed_at INTEGER NOT NULL,
+                collection TEXT    NOT NULL DEFAULT 'code'
+            );
+            CREATE TABLE overlay_chunks (
+                id          INTEGER PRIMARY KEY,
+                file_id     INTEGER NOT NULL REFERENCES overlay_files(id) ON DELETE CASCADE,
+                kind        TEXT    NOT NULL,
+                symbol_name TEXT    NOT NULL,
+                is_export   INTEGER NOT NULL DEFAULT 0,
+                annotations TEXT,
+                line_start  INTEGER NOT NULL,
+                line_end    INTEGER NOT NULL,
+                text        TEXT    NOT NULL,
+                embedding   BLOB
+            );
+            CREATE INDEX idx_overlay_chunks_file ON overlay_chunks(file_id);
+            CREATE VIRTUAL TABLE overlay_chunks_fts USING fts5(symbol_name, text, tokenize='unicode61');
+
+            CREATE TABLE overlay_fingerprint_cache (
+                path                 TEXT NOT NULL PRIMARY KEY,
+                collection           TEXT NOT NULL DEFAULT 'code',
+                file_size            INTEGER NOT NULL,
+                file_mtime_secs      INTEGER NOT NULL,
+                file_mtime_nanos     INTEGER NOT NULL,
+                content_fingerprint  TEXT NOT NULL,
+                manifest_snapshot_id TEXT NOT NULL
+            );
+            CREATE TABLE overlay_embedding_cache (
+                embedding_key TEXT NOT NULL PRIMARY KEY,
+                model_id      TEXT NOT NULL,
+                dimension     INTEGER NOT NULL,
+                embedding     BLOB NOT NULL
+            );
+            CREATE TABLE context_dirty (
+                path       TEXT    NOT NULL,
+                collection TEXT    NOT NULL DEFAULT 'code',
+                marked_at  INTEGER NOT NULL,
+                seq        INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (path, collection)
+            ) WITHOUT ROWID;
+
+            INSERT INTO files (id, path, hash, indexed_at, collection)
+                VALUES (7, 'CommonModules/A/Ext/Module.bsl', x'0a', 100, 'code'),
+                       (9, 'CommonModules/B/Ext/Module.bsl', x'0b', 100, 'code');
+            INSERT INTO chunks (id, file_id, kind, symbol_name, line_start, line_end, text, embedding)
+                VALUES (21, 7, 'procedure', 'ПерваяПроцедура', 1, 2, 'Процедура ПерваяПроцедура()', x'cafe'),
+                       (23, 9, 'procedure', 'ВтораяПроцедура', 1, 2, 'Процедура ВтораяПроцедура()', x'beef');
+            INSERT INTO chunks_fts (rowid, symbol_name, text)
+                VALUES (21, 'ПерваяПроцедура', 'Процедура ПерваяПроцедура()'),
+                       (23, 'ВтораяПроцедура', 'Процедура ВтораяПроцедура()');
+
+            INSERT INTO baseline_manifest_files (collection, path, file_fingerprint)
+                VALUES ('code', 'CommonModules/A/Ext/Module.bsl', 'fp-a');
+            INSERT INTO overlay_tombstones (path, collection, deleted_at)
+                VALUES ('CommonModules/C/Ext/Module.bsl', 'code', '2026-01-01');
+            INSERT INTO overlay_files (id, path, hash, indexed_at, collection)
+                VALUES (31, 'CommonModules/D/Ext/Module.bsl', x'0d', 100, 'code');
+            INSERT INTO overlay_chunks (id, file_id, kind, symbol_name, line_start, line_end, text)
+                VALUES (41, 31, 'procedure', 'ЧетвёртаяПроцедура', 1, 2, 'Процедура ЧетвёртаяПроцедура()');
+            INSERT INTO overlay_fingerprint_cache
+                    (path, collection, file_size, file_mtime_secs, file_mtime_nanos,
+                     content_fingerprint, manifest_snapshot_id)
+                VALUES ('CommonModules/A/Ext/Module.bsl', 'code', 10, 1, 2, 'fp-a', 'snap-1');
+            INSERT INTO context_dirty (path, collection, marked_at, seq)
+                VALUES ('CommonModules/B/Ext/Module.bsl', 'code', 5, 3);
+            ",
+        )
+        .unwrap();
+    }
+
+    /// Rows of a table, as `(root_id, path)` pairs, ordered.
+    fn keys_of(store: &Store, table: &str) -> Vec<(String, String)> {
+        let mut stmt = store
+            .conn
+            .prepare(&format!("SELECT root_id, path FROM {table} ORDER BY path"))
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    #[test]
+    fn a_store_written_before_root_ids_keeps_every_row_and_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+
+        let store = Store::open(&path).unwrap();
+
+        // Ids, not counts: a rebuild that renumbered rows would orphan every
+        // child row while leaving the counts untouched.
+        assert_eq!(
+            keys_of(&store, "files"),
+            vec![
+                (String::new(), "CommonModules/A/Ext/Module.bsl".to_owned()),
+                (String::new(), "CommonModules/B/Ext/Module.bsl".to_owned()),
+            ],
+            "configuration rows keep their meaning under the reserved empty root id"
+        );
+        let joined: Vec<(i64, String)> = store
+            .conn
+            .prepare(
+                "SELECT c.id, f.path FROM chunks c JOIN files f ON f.id = c.file_id ORDER BY c.id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            joined,
+            vec![
+                (21, "CommonModules/A/Ext/Module.bsl".to_owned()),
+                (23, "CommonModules/B/Ext/Module.bsl".to_owned()),
+            ],
+            "every chunk still finds its file"
+        );
+        let overlay_joined: Vec<(i64, String)> = store
+            .conn
+            .prepare(
+                "SELECT c.id, f.path FROM overlay_chunks c
+                 JOIN overlay_files f ON f.id = c.file_id ORDER BY c.id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            overlay_joined,
+            vec![(41, "CommonModules/D/Ext/Module.bsl".to_owned())],
+            "overlay chunks still find their file too — the overlay parent is rebuilt as well"
+        );
+
+        assert_eq!(store.embedding_generation().unwrap(), 17, "the vector generation is preserved");
+    }
+
+    /// Rebuilding a parent table drops the foreign keys and triggers that hang
+    /// off it. Row counts cannot see that: the damage only shows on the next
+    /// delete, when orphans are left behind and the vector sidecar is never
+    /// invalidated.
+    #[test]
+    fn the_migrated_store_keeps_its_cascades_and_generation_triggers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+
+        let store = Store::open(&path).unwrap();
+        let generation_before = store.embedding_generation().unwrap();
+
+        store.conn.execute("DELETE FROM files WHERE id = 7", []).unwrap();
+
+        let orphans: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks WHERE file_id = 7", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0, "deleting a file must still cascade onto its chunks");
+        assert!(
+            store.embedding_generation().unwrap() > generation_before,
+            "deleting a file must still bump the vector generation"
+        );
+
+        store.conn.execute("DELETE FROM overlay_files WHERE id = 31", []).unwrap();
+        let overlay_orphans: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM overlay_chunks WHERE file_id = 31", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(overlay_orphans, 0, "the overlay cascade survives the rebuild too");
+    }
+
+    /// Files and chunks surviving is not enough: search answers out of the FTS
+    /// projection, and its auto-rebuild only fires on a completely empty index.
+    /// A partially lost projection would leave every other invariant green and
+    /// silently shrink the warm store's results.
+    #[test]
+    fn documents_indexed_before_the_migration_are_still_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+
+        let store = Store::open(&path).unwrap();
+
+        let hits = store.text_search("ПерваяПроцедура", 10, Some("code")).unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.chunk_id).collect::<Vec<_>>(),
+            vec![21],
+            "a document stored before the migration is still searchable"
+        );
+    }
+
+    /// The point of the whole migration: the same relative path may now exist
+    /// under several roots. Checked on every rebuilt table, because a leftover
+    /// old constraint on any one of them blocks exactly one feature each.
+    #[test]
+    fn the_same_path_may_now_exist_under_two_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+        let store = Store::open(&path).unwrap();
+        let taken = "CommonModules/A/Ext/Module.bsl";
+
+        store
+            .conn
+            .execute(
+                "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+                 VALUES ('cfe/one', ?1, x'0e', 100, 'code')",
+                params![taken],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO baseline_manifest_files (root_id, collection, path, file_fingerprint)
+                 VALUES ('cfe/one', 'code', ?1, 'fp')",
+                params![taken],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO overlay_tombstones (root_id, path, collection, deleted_at)
+                 VALUES ('cfe/one', 'CommonModules/C/Ext/Module.bsl', 'code', '2026-01-01')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO overlay_files (root_id, path, hash, indexed_at, collection)
+                 VALUES ('cfe/one', 'CommonModules/D/Ext/Module.bsl', x'0f', 100, 'code')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO overlay_fingerprint_cache
+                        (root_id, path, collection, file_size, file_mtime_secs, file_mtime_nanos,
+                         content_fingerprint, manifest_snapshot_id)
+                 VALUES ('cfe/one', ?1, 'code', 10, 1, 2, 'fp', 'snap-1')",
+                params![taken],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO context_dirty (root_id, path, collection, marked_at, seq)
+                 VALUES ('cfe/one', 'CommonModules/B/Ext/Module.bsl', 'code', 5, 3)",
+                [],
+            )
+            .unwrap();
+
+        // Counted per path, not per table: the fixture does not hold the same
+        // number of rows everywhere, and a total would pass on a table that
+        // silently replaced its row instead of adding one.
+        for (table, duplicated) in [
+            ("files", taken),
+            ("baseline_manifest_files", taken),
+            ("overlay_tombstones", "CommonModules/C/Ext/Module.bsl"),
+            ("overlay_files", "CommonModules/D/Ext/Module.bsl"),
+            ("overlay_fingerprint_cache", taken),
+            ("context_dirty", "CommonModules/B/Ext/Module.bsl"),
+        ] {
+            let rows: i64 = store
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE path = ?1"),
+                    params![duplicated],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(rows, 2, "{table} must hold one row per root for the same path");
+        }
+    }
+
+    /// A fresh database takes the new shape through the ordinary create path,
+    /// which the migration never touches: "the column is missing" is true of an
+    /// absent table too, so the two cases have to be checked apart.
+    #[test]
+    fn a_fresh_store_is_created_with_root_ids() {
+        let store = Store::in_memory().unwrap();
+
+        for table in ROOT_KEYED_TABLES.iter().map(|table| table.name) {
+            let has_root_id: bool = store
+                .conn
+                .prepare(&format!(
+                    "SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'root_id'"
+                ))
+                .unwrap()
+                .query_row([], |_| Ok(true))
+                .optional()
+                .unwrap()
+                .unwrap_or(false);
+            assert!(has_root_id, "{table} must be created with a root_id");
+        }
+    }
+
+    /// The upgrade must not go through the wipe path: on a real workspace that
+    /// is hours of re-indexing and re-embedding, and the whole point of the
+    /// default value is that rows are kept.
+    #[test]
+    fn the_upgrade_never_wipes_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.file_count().unwrap(), 2);
+        assert_eq!(store.chunk_count().unwrap(), 2);
+        // Stamped forward, so a binary of the previous release rebuilds its
+        // derived cache instead of failing on an upsert whose conflict target
+        // no longer exists.
+        assert_eq!(Store::stored_schema_version(&store.conn).unwrap(), Some(SCHEMA_VERSION));
+    }
 
     fn sample_chunk(name: &str) -> Chunk {
         Chunk {

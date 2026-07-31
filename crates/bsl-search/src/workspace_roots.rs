@@ -1,0 +1,458 @@
+//! Which source root a workspace file belongs to, and under which key it is
+//! stored.
+//!
+//! A `cfe` extension repeats the configuration's directory layout, so the path
+//! relative to a root is not unique across roots: `CommonModules/M/Ext/Module.bsl`
+//! exists under the configuration and under every extension at once. Store rows
+//! are therefore keyed by the pair `(root_id, path)`, and this table is the only
+//! seam that turns an absolute path into that pair and back.
+//!
+//! The table knows nothing about configurations or extensions beyond which root
+//! is *the* configuration one; the caller builds it from the project model.
+
+use std::path::{Path, PathBuf};
+
+/// The configuration root's identity. Reserved: an extension never takes it, so
+/// rows written before roots existed — all of them the configuration's — keep
+/// their meaning under the composite key without being rewritten.
+pub const CONFIGURATION_ROOT_ID: &str = "";
+
+/// An extension root that lies inside the configuration root and is therefore
+/// not registered separately. Reported rather than swallowed: its files stay
+/// searchable as the configuration's, but their root label is the
+/// configuration's too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedRoot {
+    pub path: PathBuf,
+    pub inside: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct Root {
+    id: String,
+    /// The spelling the project declared, which is what exists on disk for a
+    /// caller that wants to read the file back.
+    declared: PathBuf,
+    /// The spelling every topology decision is made on.
+    canonical: PathBuf,
+}
+
+/// The registered source roots of one workspace.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceRoots {
+    roots: Vec<Root>,
+}
+
+impl WorkspaceRoots {
+    /// Build the table from the configuration root and the declared extension
+    /// roots, both spelled as the project declares them.
+    ///
+    /// `workspace_root` is what root ids are relative to. Extension roots that
+    /// canonically lie inside the configuration root are left out and returned
+    /// separately: those files are already reachable — and already published in
+    /// a baseline — as the configuration's, and giving them a second identity
+    /// would mean two rows for one file and a split from the published snapshot.
+    pub fn build(
+        workspace_root: &Path,
+        configuration: &Path,
+        extensions: &[PathBuf],
+    ) -> (Self, Vec<RejectedRoot>) {
+        let workspace_canonical = canonicalize(workspace_root);
+        let configuration_canonical = canonicalize(configuration);
+        let mut roots = vec![Root {
+            id: CONFIGURATION_ROOT_ID.to_owned(),
+            declared: configuration.to_path_buf(),
+            canonical: configuration_canonical.clone(),
+        }];
+        let mut rejected = Vec::new();
+
+        for extension in extensions {
+            let canonical = canonicalize(extension);
+            // Equal canonical paths are the same root, so the configuration —
+            // which owns the rows already — keeps it. Being *inside* it is the
+            // rejected case; containing it is not, and is handled by the
+            // longest-prefix rule at lookup time.
+            if canonical == configuration_canonical
+                || starts_at(&canonical, &configuration_canonical)
+            {
+                rejected.push(RejectedRoot {
+                    path: extension.clone(),
+                    inside: configuration.to_path_buf(),
+                });
+                continue;
+            }
+            // A root already registered under another spelling is one root.
+            if roots.iter().any(|root| root.canonical == canonical) {
+                continue;
+            }
+            roots.push(Root {
+                id: root_id_for(&workspace_canonical, &canonical, extension),
+                declared: extension.clone(),
+                canonical,
+            });
+        }
+
+        (Self { roots }, rejected)
+    }
+
+    /// The root a file belongs to and the key it is stored under, or `None` when
+    /// the file lies outside every root.
+    ///
+    /// Two spellings go in because the enumerator has two: `canonical` is what
+    /// the semantics rank roots by and what makes attribution independent of
+    /// which alias the walk happened to arrive through, while `walked` is the
+    /// only handle on a file the walk reached through a symlink that leaves
+    /// every root. Such a file is not dropped — the graph has always seen it —
+    /// it is keyed by the walking root instead.
+    pub fn root_of(&self, walked: &Path, canonical: &Path) -> Option<(&str, String)> {
+        self.longest_match(canonical, |root| &root.canonical)
+            .or_else(|| self.longest_match(walked, |root| &root.declared))
+    }
+
+    /// The file a stored key points at, spelled as the project declared it.
+    pub fn resolve(&self, root_id: &str, path: &str) -> Option<PathBuf> {
+        let root = self.roots.iter().find(|root| root.id == root_id)?;
+        Some(root.declared.join(path))
+    }
+
+    /// Whether a root is registered under this id.
+    pub fn contains_id(&self, root_id: &str) -> bool {
+        self.roots.iter().any(|root| root.id == root_id)
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.roots.iter().map(|root| root.id.as_str())
+    }
+
+    /// Registered roots as `(id, declared path)`, in registration order.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &Path)> {
+        self.roots.iter().map(|root| (root.id.as_str(), root.declared.as_path()))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+
+    /// The root with the longest matching prefix, under the given spelling.
+    ///
+    /// Longest rather than first: roots may nest, and the innermost one is what
+    /// the semantics call the file's owner. The configuration competes like any
+    /// other root, so an extension declared *around* it keeps only the files
+    /// outside it.
+    fn longest_match(
+        &self,
+        path: &Path,
+        spelling: impl Fn(&Root) -> &PathBuf,
+    ) -> Option<(&str, String)> {
+        self.roots
+            .iter()
+            .filter_map(|root| {
+                let rel = path.strip_prefix(spelling(root)).ok()?;
+                // `strip_prefix` compares whole components, so `cf` never
+                // swallows `cf_ext`. An empty remainder means the path *is* the
+                // root, which is not a file in it.
+                (rel.components().next().is_some())
+                    .then(|| (spelling(root).components().count(), root.id.as_str(), key_of(rel)))
+            })
+            .max_by_key(|(depth, _, _)| *depth)
+            .map(|(_, id, key)| (id, key))
+    }
+}
+
+/// The store key of a path relative to its root.
+fn key_of(rel: &Path) -> String {
+    rel.to_string_lossy().into_owned()
+}
+
+fn canonicalize(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether `path` lies strictly inside `prefix`.
+fn starts_at(path: &Path, prefix: &Path) -> bool {
+    path.strip_prefix(prefix).is_ok_and(|rest| rest.components().next().is_some())
+}
+
+/// A root's identity: its path relative to the workspace, or absolute when it
+/// lies outside.
+///
+/// Not the extension's name — several entries are allowed to share one — and
+/// not an ordinal, which would not survive a restart.
+fn root_id_for(workspace_canonical: &Path, canonical: &Path, declared: &Path) -> String {
+    let relative = canonical.strip_prefix(workspace_canonical).ok().map(key_of);
+    match relative {
+        // A root spelled `.` relative to the workspace would take the
+        // configuration's reserved empty id and overwrite its rows.
+        Some(relative) if relative.is_empty() => ".".to_owned(),
+        Some(relative) => relative,
+        None if canonical.is_absolute() => key_of(canonical),
+        // Neither under the workspace nor absolute: keep the declared spelling
+        // rather than invent one, and make sure it cannot be read as empty.
+        None => {
+            let declared = key_of(declared);
+            if declared.is_empty() || declared == "." {
+                ".".to_owned()
+            } else {
+                declared
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Roots must exist on disk for the canonical spelling to mean anything, so
+    /// every fixture builds real directories.
+    fn dirs(root: &Path, rels: &[&str]) -> Vec<PathBuf> {
+        rels.iter()
+            .map(|rel| {
+                let path = root.join(rel);
+                std::fs::create_dir_all(&path).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    /// The attribution of a file that exists only as a path: both spellings are
+    /// the same when no alias is involved.
+    fn owner<'a>(roots: &'a WorkspaceRoots, file: &Path) -> Option<(&'a str, String)> {
+        roots.root_of(file, file)
+    }
+
+    const MODULE: &str = "CommonModules/М/Ext/Module.bsl";
+
+    #[test]
+    fn each_root_keeps_its_own_copy_of_the_same_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["cf", "cfe/one", "cfe/two"]);
+        let (roots, rejected) =
+            WorkspaceRoots::build(dir.path(), &made[0], &[made[1].clone(), made[2].clone()]);
+
+        assert!(rejected.is_empty(), "roots beside the configuration are all registered");
+        for (root, expected_id) in
+            [(&made[0], CONFIGURATION_ROOT_ID), (&made[1], "cfe/one"), (&made[2], "cfe/two")]
+        {
+            assert_eq!(
+                owner(&roots, &root.join(MODULE)),
+                Some((expected_id, MODULE.to_owned())),
+                "the same relative path under {root:?} must key to its own root"
+            );
+        }
+    }
+
+    #[test]
+    fn the_innermost_root_owns_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["cf", "cfe/outer", "cfe/outer/inner"]);
+        let (roots, _) =
+            WorkspaceRoots::build(dir.path(), &made[0], &[made[1].clone(), made[2].clone()]);
+
+        assert_eq!(
+            owner(&roots, &made[2].join(MODULE)),
+            Some(("cfe/outer/inner", MODULE.to_owned())),
+            "the nested root is the owner, not the one that merely contains it"
+        );
+        assert_eq!(
+            owner(&roots, &made[1].join(MODULE)),
+            Some(("cfe/outer", MODULE.to_owned())),
+            "a file outside the nested root still belongs to the outer one"
+        );
+    }
+
+    /// Prefix matching that ignored component boundaries would hand every file
+    /// of `cf_ext` to `cf`, keyed by a path starting with `_ext/`.
+    #[test]
+    fn a_root_never_swallows_a_sibling_whose_name_starts_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["cf", "cf_ext"]);
+        let (roots, _) = WorkspaceRoots::build(dir.path(), &made[0], &[made[1].clone()]);
+
+        assert_eq!(
+            owner(&roots, &made[1].join(MODULE)),
+            Some(("cf_ext", MODULE.to_owned())),
+            "`cf` must not claim `cf_ext`"
+        );
+    }
+
+    /// Declaration order decides nothing: the roots are ranked by how deep they
+    /// reach, exactly as the semantics rank them.
+    #[test]
+    fn attribution_does_not_depend_on_declaration_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["cf", "cfe/outer", "cfe/outer/inner"]);
+        let file = made[2].join(MODULE);
+
+        let (forward, _) =
+            WorkspaceRoots::build(dir.path(), &made[0], &[made[1].clone(), made[2].clone()]);
+        let (backward, _) =
+            WorkspaceRoots::build(dir.path(), &made[0], &[made[2].clone(), made[1].clone()]);
+
+        assert_eq!(owner(&forward, &file), owner(&backward, &file));
+    }
+
+    #[test]
+    fn an_extension_inside_the_configuration_is_reported_and_left_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["cf", "cf/nested"]);
+        let (roots, rejected) = WorkspaceRoots::build(dir.path(), &made[0], &[made[1].clone()]);
+
+        assert_eq!(
+            rejected,
+            vec![RejectedRoot { path: made[1].clone(), inside: made[0].clone() }],
+            "the overlap must be named, not swallowed"
+        );
+        // Not lost: the configuration walk is recursive, so the file is still
+        // found — as the configuration's, which is what the publisher and the
+        // graph enumeration call it too.
+        assert_eq!(
+            owner(&roots, &made[1].join(MODULE)),
+            Some((CONFIGURATION_ROOT_ID, format!("nested/{MODULE}"))),
+        );
+    }
+
+    /// The other direction of the same overlap: an extension declared *around*
+    /// the configuration. Rejecting it would lose the files outside the
+    /// configuration entirely — its walk never reaches them.
+    #[test]
+    fn an_extension_around_the_configuration_keeps_what_lies_outside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["src/cf", "src/own"]);
+        let workspace = dir.path().to_path_buf();
+        let (roots, rejected) =
+            WorkspaceRoots::build(&workspace, &made[0], std::slice::from_ref(&workspace));
+
+        assert!(rejected.is_empty(), "containing the configuration is not an overlap to reject");
+        assert_eq!(
+            owner(&roots, &made[0].join(MODULE)),
+            Some((CONFIGURATION_ROOT_ID, MODULE.to_owned())),
+            "the configuration's own subtree stays its own"
+        );
+        assert_eq!(
+            owner(&roots, &made[1].join(MODULE)),
+            Some((".", format!("src/own/{MODULE}"))),
+            "everything outside it belongs to the surrounding root"
+        );
+    }
+
+    /// A root equal to the workspace must not take the configuration's reserved
+    /// id: the two would then share one key space, and the second write would
+    /// overwrite the first.
+    #[test]
+    fn a_root_spanning_the_workspace_gets_a_non_empty_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["src/cf"]);
+        let (roots, _) = WorkspaceRoots::build(dir.path(), &made[0], &[dir.path().to_path_buf()]);
+
+        let ids: Vec<&str> = roots.ids().collect();
+        assert_eq!(ids, vec![CONFIGURATION_ROOT_ID, "."]);
+    }
+
+    #[test]
+    fn a_root_equal_to_the_configuration_stays_the_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["cf"]);
+        let (roots, rejected) = WorkspaceRoots::build(dir.path(), &made[0], &[made[0].clone()]);
+
+        assert_eq!(roots.ids().collect::<Vec<_>>(), vec![CONFIGURATION_ROOT_ID]);
+        assert_eq!(rejected.len(), 1, "the duplicate root is reported");
+        assert_eq!(
+            owner(&roots, &made[0].join(MODULE)),
+            Some((CONFIGURATION_ROOT_ID, MODULE.to_owned())),
+            "one file must not produce both a configuration row and an extension row"
+        );
+    }
+
+    #[test]
+    fn a_key_resolves_back_to_the_file_it_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["cf", "cfe/one"]);
+        let (roots, _) = WorkspaceRoots::build(dir.path(), &made[0], &[made[1].clone()]);
+
+        for root in [&made[0], &made[1]] {
+            let file = root.join(MODULE);
+            let (id, key) = owner(&roots, &file).unwrap();
+            assert_eq!(roots.resolve(id, &key).as_deref(), Some(file.as_path()));
+        }
+    }
+
+    #[cfg(unix)]
+    mod aliases {
+        use super::*;
+
+        fn link(target: &Path, at: &Path) {
+            std::os::unix::fs::symlink(target, at).unwrap();
+        }
+
+        /// Reached through `one/Linked`, the file physically lives under `two`.
+        /// Ranking by the canonical spelling is what makes the answer the same
+        /// as the semantics', and the same in both declaration orders.
+        #[test]
+        fn an_alias_does_not_move_a_file_to_the_root_it_was_reached_through() {
+            let dir = tempfile::tempdir().unwrap();
+            let made = dirs(dir.path(), &["cf", "cfe/one", "cfe/two"]);
+            link(&made[2], &made[1].join("Linked"));
+
+            let (roots, _) =
+                WorkspaceRoots::build(dir.path(), &made[0], &[made[1].clone(), made[2].clone()]);
+
+            let walked = made[1].join("Linked").join(MODULE);
+            let canonical = made[2].join(MODULE);
+            assert_eq!(
+                roots.root_of(&walked, &canonical),
+                Some(("cfe/two", MODULE.to_owned())),
+                "the root the file lives in owns it, not the one that links to it"
+            );
+        }
+
+        /// A link out of every root. The graph has always followed it, so the
+        /// file must stay in the universe; with no canonical owner it is kept by
+        /// the root whose walk arrived there, keyed by the walked spelling.
+        #[test]
+        fn a_file_outside_every_root_is_kept_by_the_root_that_walked_to_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let made = dirs(dir.path(), &["cf"]);
+            std::fs::create_dir_all(outside.path().join("tree")).unwrap();
+            link(&outside.path().join("tree"), &made[0].join("Linked"));
+
+            let (roots, _) = WorkspaceRoots::build(dir.path(), &made[0], &[]);
+
+            let walked = made[0].join("Linked").join(MODULE);
+            let canonical =
+                std::fs::canonicalize(outside.path()).unwrap().join("tree").join(MODULE);
+            assert_eq!(
+                roots.root_of(&walked, &canonical),
+                Some((CONFIGURATION_ROOT_ID, format!("Linked/{MODULE}"))),
+            );
+        }
+
+        /// An extension declared through an alias that sits inside the
+        /// configuration, while the extension itself lies outside it. Deciding
+        /// on the declared spelling would reject the root and lose its files.
+        #[test]
+        fn an_extension_declared_through_an_alias_inside_the_configuration_is_registered() {
+            let dir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let made = dirs(dir.path(), &["cf"]);
+            let real = outside.path().join("ext");
+            std::fs::create_dir_all(&real).unwrap();
+            let alias = made[0].join("Linked");
+            link(&real, &alias);
+
+            let (roots, rejected) =
+                WorkspaceRoots::build(dir.path(), &made[0], std::slice::from_ref(&alias));
+
+            assert!(
+                rejected.is_empty(),
+                "only the alias is inside the configuration, not the root"
+            );
+            let file = alias.join(MODULE);
+            let canonical = std::fs::canonicalize(&real).unwrap().join(MODULE);
+            let (id, key) = roots.root_of(&file, &canonical).unwrap();
+            assert_ne!(id, CONFIGURATION_ROOT_ID, "the extension keeps its own identity");
+            assert_eq!(key, MODULE);
+        }
+    }
+}
