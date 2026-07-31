@@ -230,6 +230,7 @@ fn unique_temp(target: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_roots::CONFIGURATION_ROOT_ID;
     use code_chunk::{Chunk, ChunkKind};
 
     const DIM: usize = 8;
@@ -336,7 +337,7 @@ mod tests {
 
         // Deleting the file cascades to its chunks; `files_gen_del` advances the generation so the
         // index built over the now-deleted vectors is rejected.
-        store.remove_file("f.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "f.bsl", "code").unwrap();
         assert!(try_load(&store, &key(&store)).is_none());
     }
 

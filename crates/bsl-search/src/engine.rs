@@ -11,6 +11,7 @@ use crate::workspace_overlay::{
     lexical_hits, normalized_file_hash_for_indexed_documents, semantic_hits, BaselineHashMode,
     RefreshMode, RefreshPlan, WorkspaceOverlayCache, WorkspaceOverlayIndex, WorkspaceOverlayStats,
 };
+use crate::workspace_roots::CONFIGURATION_ROOT_ID;
 use crate::{
     semantic_key_for_indexed_document, semantic_text_for_indexed_document,
     BaselineOverlaySearchService, BaselineRef, CorpusId,
@@ -433,7 +434,7 @@ impl SearchEngine {
             let rel_path =
                 file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            if let Some(stored_hash) = self.store.file_hash(&rel_path)? {
+            if let Some(stored_hash) = self.store.file_hash(CONFIGURATION_ROOT_ID, &rel_path)? {
                 if stored_hash == hash.as_bytes() {
                     continue;
                 }
@@ -831,7 +832,7 @@ impl SearchEngine {
             let rel_path =
                 file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            let had_prior = match self.store.file_hash(&rel_path)? {
+            let had_prior = match self.store.file_hash(CONFIGURATION_ROOT_ID, &rel_path)? {
                 Some(stored_hash) => {
                     if stored_hash == hash.as_bytes() {
                         continue;
@@ -851,7 +852,7 @@ impl SearchEngine {
                 // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
                 // so only prior-stored files are touched.
                 if had_prior {
-                    self.store.remove_file(&rel_path, "code")?;
+                    self.store.remove_file(CONFIGURATION_ROOT_ID, &rel_path, "code")?;
                     indexed += 1;
                 }
                 continue;
@@ -903,7 +904,7 @@ impl SearchEngine {
             let rel_path =
                 file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            let had_prior = match self.store.file_hash(&rel_path)? {
+            let had_prior = match self.store.file_hash(CONFIGURATION_ROOT_ID, &rel_path)? {
                 Some(stored_hash) => {
                     if stored_hash == hash.as_bytes() {
                         continue;
@@ -923,7 +924,7 @@ impl SearchEngine {
                 // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
                 // so only prior-stored files are touched.
                 if had_prior {
-                    self.store.remove_file(&rel_path, "code")?;
+                    self.store.remove_file(CONFIGURATION_ROOT_ID, &rel_path, "code")?;
                     indexed += 1;
                 }
                 continue;
@@ -945,7 +946,7 @@ impl SearchEngine {
         documents: &[Document],
         progress: Option<&Arc<IndexProgress>>,
     ) -> Result<usize, SearchError> {
-        if let Some(stored_hash) = self.store.file_hash(virtual_path)? {
+        if let Some(stored_hash) = self.store.file_hash(CONFIGURATION_ROOT_ID, virtual_path)? {
             if stored_hash == version_hash {
                 info!(collection, documents = documents.len(), "documents unchanged, skipping");
                 return Ok(0);
@@ -1209,7 +1210,7 @@ impl SearchEngine {
         // Collect the chunk ids before deleting the rows so the exact vectors can be
         // evicted from the live index without a full reload.
         let chunk_ids = self.store.chunk_ids_for_file("code", &rel)?;
-        self.store.remove_file(&rel, "code")?;
+        self.store.remove_file(CONFIGURATION_ROOT_ID, &rel, "code")?;
         self.store.insert_overlay_tombstone(&rel, "code")?;
         if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
             cache.enable_watcher_mode();
@@ -1959,7 +1960,7 @@ impl SearchEngine {
         let desired_paths: HashSet<&str> = grouped.keys().map(String::as_str).collect();
         for (existing_path, _) in self.store.all_files_in_collection(collection)? {
             if !desired_paths.contains(existing_path.as_str()) {
-                self.store.remove_file(&existing_path, collection)?;
+                self.store.remove_file(CONFIGURATION_ROOT_ID, &existing_path, collection)?;
             }
         }
 
@@ -1984,7 +1985,9 @@ impl SearchEngine {
             });
 
             let file_hash = normalized_file_hash_for_indexed_documents(&file_documents);
-            if self.store.file_hash(&path)?.as_deref() == Some(file_hash.as_slice()) {
+            if self.store.file_hash(CONFIGURATION_ROOT_ID, &path)?.as_deref()
+                == Some(file_hash.as_slice())
+            {
                 continue;
             }
 
@@ -2082,7 +2085,7 @@ impl SearchEngine {
     }
 
     pub fn remove_file(&mut self, rel_path: &str, collection: &str) -> Result<(), SearchError> {
-        self.store.remove_file(rel_path, collection)?;
+        self.store.remove_file(CONFIGURATION_ROOT_ID, rel_path, collection)?;
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(())
     }

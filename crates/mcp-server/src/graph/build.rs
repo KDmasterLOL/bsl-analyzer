@@ -703,7 +703,14 @@ impl ide::FusedChunkSink for FusedChunkWriter<'_> {
             // cross-file staleness in the embedding's context rather than re-embed every caller
             // of any changed symbol — embeddings are an approximation and this self-heals on the
             // next edit of the affected file.
-            if self.engine.store().file_hash(rel).ok().flatten().as_deref() == Some(hash.as_slice())
+            if self
+                .engine
+                .store()
+                .file_hash(bsl_search::CONFIGURATION_ROOT_ID, rel)
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some(hash.as_slice())
             {
                 continue;
             }

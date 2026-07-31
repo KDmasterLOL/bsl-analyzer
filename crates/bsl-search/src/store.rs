@@ -199,6 +199,15 @@ impl Store {
     /// a store written before versioning existed reports no version at all and
     /// would sail past a version check into the new code with its old
     /// constraints intact.
+    ///
+    /// One consequence is deliberate. A daemon of the previous release keeps a
+    /// connection to this file open while it drains, and the lease does not gate
+    /// the lexical side of the index, so its upserts start failing against the
+    /// new constraint the moment this runs. That process keeps serving the index
+    /// it already holds and exits with its last session; the store itself stays
+    /// consistent and belongs to the newer daemon. Splitting the file per schema
+    /// would remove the window at the price of copying the whole store on every
+    /// upgrade.
     fn migrate_root_keyed_tables(&self) -> Result<(), SearchError> {
         let pending: Vec<&RootKeyedTable> = ROOT_KEYED_TABLES
             .iter()
@@ -610,12 +619,14 @@ impl Store {
         Ok(())
     }
 
-    pub fn file_hash(&self, path: &str) -> Result<Option<Vec<u8>>, SearchError> {
+    pub fn file_hash(&self, root_id: &str, path: &str) -> Result<Option<Vec<u8>>, SearchError> {
         let hash = self
             .conn
-            .query_row("SELECT hash FROM files WHERE path = ?1", params![path], |row| {
-                row.get::<_, Vec<u8>>(0)
-            })
+            .query_row(
+                "SELECT hash FROM files WHERE root_id = ?1 AND path = ?2",
+                params![root_id, path],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
             .optional()?;
         Ok(hash)
     }
@@ -644,20 +655,27 @@ impl Store {
     /// from `collection`, atomically. The FTS delete and the `files` delete run in one
     /// transaction so a failure between them cannot leave an orphaned FTS row or a
     /// `files` row without its FTS. The delete is scoped to `collection` so a same-named
-    /// path in another collection is never touched.
-    pub fn remove_file(&self, path: &str, collection: &str) -> Result<(), SearchError> {
+    /// path in another collection is never touched, and to `root_id` so the same
+    /// relative path under another source root — which a `cfe` extension repeats
+    /// wholesale — keeps its own row.
+    pub fn remove_file(
+        &self,
+        root_id: &str,
+        path: &str,
+        collection: &str,
+    ) -> Result<(), SearchError> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (
                  SELECT c.id FROM chunks c
                  JOIN files f ON f.id = c.file_id
-                 WHERE f.path = ?1 AND f.collection = ?2
+                 WHERE f.root_id = ?1 AND f.path = ?2 AND f.collection = ?3
              )",
-            params![path, collection],
+            params![root_id, path, collection],
         )?;
         tx.execute(
-            "DELETE FROM files WHERE path = ?1 AND collection = ?2",
-            params![path, collection],
+            "DELETE FROM files WHERE root_id = ?1 AND path = ?2 AND collection = ?3",
+            params![root_id, path, collection],
         )?;
         tx.commit()?;
         Ok(())
@@ -2207,6 +2225,7 @@ pub struct PersistedFingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_roots::CONFIGURATION_ROOT_ID;
     use code_chunk::{Chunk, ChunkKind};
 
     /// A store in the shape the release before composite keys wrote, built with
@@ -2878,7 +2897,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            store.remove_file("t.bsl", "code").is_err(),
+            store.remove_file(CONFIGURATION_ROOT_ID, "t.bsl", "code").is_err(),
             "the aborted delete surfaces an error"
         );
         // The FTS delete rolled back with the aborted files delete — nothing was lost.
@@ -2887,7 +2906,7 @@ mod tests {
 
         store.conn.execute_batch("DROP TRIGGER block_files_delete;").unwrap();
         // With the block lifted the removal now succeeds and clears both together.
-        store.remove_file("t.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "t.bsl", "code").unwrap();
         assert_eq!(store.fts_count().unwrap(), 0);
         assert_eq!(store.file_count().unwrap(), 0);
     }
@@ -2900,11 +2919,11 @@ mod tests {
         assert_eq!(store.file_count().unwrap(), 1);
 
         // A removal scoped to a different collection must not touch this file.
-        store.remove_file("only.bsl", "platform").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "only.bsl", "platform").unwrap();
         assert_eq!(store.file_count().unwrap(), 1, "a mismatched collection removes nothing");
 
         // The correctly-scoped removal clears it.
-        store.remove_file("only.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "only.bsl", "code").unwrap();
         assert_eq!(store.file_count().unwrap(), 0);
     }
 
@@ -2943,7 +2962,7 @@ mod tests {
 
         // File removal cascades to chunks; `files_gen_del` guarantees an advance regardless of
         // whether the cascade fires the chunk delete trigger.
-        store.remove_file("m.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "m.bsl", "code").unwrap();
         assert!(
             store.embedding_generation().unwrap() > g_after_update,
             "file removal (cascade delete) must advance the generation"
@@ -3117,11 +3136,11 @@ mod tests {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"content");
 
-        assert!(store.file_hash("test.bsl").unwrap().is_none());
+        assert!(store.file_hash(CONFIGURATION_ROOT_ID, "test.bsl").unwrap().is_none());
 
         store.reindex_file("test.bsl", hash.as_bytes(), &[sample_chunk("Тест")], None).unwrap();
 
-        let stored = store.file_hash("test.bsl").unwrap().unwrap();
+        let stored = store.file_hash(CONFIGURATION_ROOT_ID, "test.bsl").unwrap().unwrap();
         assert_eq!(stored, hash.as_bytes());
     }
 
@@ -3231,7 +3250,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.chunk_count().unwrap(), 2);
 
-        store.remove_file("test.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "test.bsl", "code").unwrap();
         assert_eq!(store.file_count().unwrap(), 0);
         assert_eq!(store.chunk_count().unwrap(), 0);
     }
@@ -3339,7 +3358,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 1);
 
-        store.remove_file("test.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "test.bsl", "code").unwrap();
         assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 0);
     }
 
@@ -3584,7 +3603,10 @@ mod tests {
         {
             let mut store = Store::open(&path).unwrap();
             store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
-            assert_eq!(store.file_hash("A.bsl").unwrap().unwrap(), b"realhash");
+            assert_eq!(
+                store.file_hash(CONFIGURATION_ROOT_ID, "A.bsl").unwrap().unwrap(),
+                b"realhash"
+            );
             // Simulate a database written by an older embed-text format.
             store.conn.pragma_update(None, "user_version", 0i64).unwrap();
         }
@@ -3592,13 +3614,13 @@ mod tests {
         // re-embeds the file under the current format instead of keeping a stale vector.
         let store = Store::open(&path).unwrap();
         assert!(
-            store.file_hash("A.bsl").unwrap().unwrap().is_empty(),
+            store.file_hash(CONFIGURATION_ROOT_ID, "A.bsl").unwrap().unwrap().is_empty(),
             "file hash cleared to force re-embed"
         );
 
         // A second open at the same version is a no-op (does not re-clear).
         let store = Store::open(&path).unwrap();
-        assert!(store.file_hash("A.bsl").unwrap().unwrap().is_empty());
+        assert!(store.file_hash(CONFIGURATION_ROOT_ID, "A.bsl").unwrap().unwrap().is_empty());
     }
 
     #[test]
