@@ -257,6 +257,14 @@ fn no_extensions_drops_the_configured_list() {
     );
 }
 
+/// How many times the notice appears — the invariant is exactly one message per
+/// run, and a substring check would pass just as happily on a duplicate.
+fn notices(run: &Run) -> usize {
+    run.stderr
+        .matches("is a configuration extension analyzed without its main configuration")
+        .count()
+}
+
 #[test]
 fn an_extension_taken_as_the_main_root_is_reported() {
     let dir = workspace();
@@ -270,7 +278,20 @@ fn an_extension_taken_as_the_main_root_is_reported() {
         true,
     );
 
-    let notice = "is a configuration extension analyzed without its main configuration";
+    // The case that needs no flag at all, and the one an integrator actually
+    // hits: point `-s` straight at an extension. The notice is tied to the
+    // resolved root, not to any flag, so narrowing it to the override path
+    // would leave exactly this run silent in front of its false findings.
+    assert_eq!(
+        notices(&analyze(&path(dir.path(), EXT), &[])),
+        1,
+        "an extension given directly as the source dir must be called out once"
+    );
+    assert_eq!(
+        notices(&analyze(&path(dir.path(), MAIN), &[])),
+        0,
+        "a main configuration given directly must stay silent"
+    );
 
     // Only `--configuration-root` moves between the runs of each pair. Varying
     // the extension flags at the same time would let an implementation keyed on
@@ -280,15 +301,17 @@ fn an_extension_taken_as_the_main_root_is_reported() {
         let with_root = |root: &str| {
             let mut flags = vec!["--configuration-root", root];
             flags.extend(extensions.iter().copied());
-            analyze(dir.path(), &flags).stderr
+            notices(&analyze(dir.path(), &flags))
         };
 
-        assert!(
-            with_root(EXT).contains(notice),
-            "an extension used as the main root must be called out (extensions: {extensions:?})"
+        assert_eq!(
+            with_root(EXT),
+            1,
+            "an extension used as the main root must be called out once (extensions: {extensions:?})"
         );
-        assert!(
-            !with_root(MAIN).contains(notice),
+        assert_eq!(
+            with_root(MAIN),
+            0,
             "a real main configuration must stay silent (extensions: {extensions:?})"
         );
     }
