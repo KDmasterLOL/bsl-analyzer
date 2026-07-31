@@ -1206,7 +1206,7 @@ fn open_call_hierarchy_batch(
     let _unreadable =
         ide_host_core::register_files_disk_backed(&mut db, context.source_root_id, &batch_files);
     db.set_all_config_paths(context.config_paths.clone());
-    ide::warm_batch_config_roots(&db, &batch_files, &context.config_paths);
+    ide::warm_batch_config_roots(&db, &batch_files);
     db
 }
 

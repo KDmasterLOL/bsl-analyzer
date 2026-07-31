@@ -23,6 +23,18 @@ pub trait ConfigsDatabase: DefDatabase {
     /// [`Self::configurations`].
     fn configurations_inventory(&self) -> Vec<VisibleConfig>;
 
+    /// Load, on the CALLING thread, every configuration root `modules` can reach,
+    /// so a parallel region over them never enters the internally-parallel
+    /// whole-config loader from a worker.
+    ///
+    /// A module's root is attributed from its own path on disk, which is NOT the
+    /// declared-root set of [`Self::configurations_inventory`]: a workspace whose
+    /// configuration was never discovered is itself the only declared root, while
+    /// its files attribute to whatever nested directory actually holds their
+    /// metadata. Warming the declared roots alone therefore leaves those nested
+    /// roots to be loaded lazily, from inside the pool.
+    fn warm_config_roots(&self, modules: &[crate::ModuleId]);
+
     fn merged_visible_configuration(&self, file_id: FileId) -> Option<Arc<Configuration>>;
 
     /// Resolve a single MetadataObject-family object (catalog, document, enum,

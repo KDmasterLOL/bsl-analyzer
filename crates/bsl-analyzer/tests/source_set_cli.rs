@@ -559,6 +559,24 @@ fn the_source_set_reaches_the_graph() {
     );
 }
 
+/// Two configuration directories deep enough that discovery finds neither, and
+/// no flags binding them: the workspace itself becomes the only declared root,
+/// while each module still attributes to the nested directory that holds its
+/// metadata. The build's pre-pool warm-up covers declared roots, so a second
+/// attributed root reaches the whole-config loader lazily — from inside the
+/// worker pool, where its fan-out may deadlock the build.
+///
+/// One such configuration is not enough to show this: the single module doubles
+/// as the batch representative the warm-up already touches.
+#[test]
+fn nested_configurations_under_a_bare_workspace_still_build_a_graph() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+
+    let overview = mcp_graph_overview(dir.path(), &[]);
+    assert_eq!(overview["nodes"], 2, "both nested configurations' methods: {overview}");
+}
+
 #[test]
 fn the_mcp_status_reports_a_standalone_extension() {
     let dir = workspace();

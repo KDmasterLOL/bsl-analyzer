@@ -579,8 +579,8 @@ pub fn project_method_pairs_from_intents<DB: ConfigsDatabase + Clone + Send>(
     index: &GraphIndex,
     intents: &[(ModuleId, crate::call_graph::ModuleCallSummary)],
 ) -> Vec<(ModuleId, Vec<MethodCallPair>)> {
-    let warm = intents.first().map(|&(module, _)| module);
-    parallel_per_item(pool, db, intents, warm, |db, (module, summary)| {
+    let warm: Vec<ModuleId> = intents.iter().map(|&(module, _)| module).collect();
+    parallel_per_item(pool, db, intents, &warm, |db, (module, summary)| {
         let resolved = resolve_summary_via_index(db, *module, summary, index);
         (*module, resolved_summary_method_pairs(&resolved))
     })
@@ -937,17 +937,18 @@ where
     R: Send,
     F: Fn(&DB, ModuleId) -> R + Sync + Send,
 {
-    parallel_per_item(pool, db, batch, batch.first().copied(), |db, &module| f(db, module))
+    parallel_per_item(pool, db, batch, batch, |db, &module| f(db, module))
 }
 
 /// The generic core of [`parallel_per_module`]: run `f` over arbitrary
-/// module-keyed items. `warm` must name a module of the workspace (any one) so the
-/// pre-pool warm-up can seed the configuration loader (see the comment below).
+/// module-keyed items. `warm` names the modules the items will resolve against,
+/// so the pre-pool warm-up can seed the configuration loader for every root they
+/// reach (see the comment below).
 fn parallel_per_item<DB, T, R, F>(
     pool: &rayon::ThreadPool,
     db: &DB,
     items: &[T],
-    warm: Option<ModuleId>,
+    warm: &[ModuleId],
     f: F,
 ) -> Vec<R>
 where
@@ -963,16 +964,20 @@ where
     // `load_configuration` query) fans out over its own `rayon::scope`; if it ran
     // inside a parallel job, a free worker could steal a sibling job — carrying a
     // different `db` clone — into that scope and attach a second database to a thread
-    // mid-query, which Salsa forbids. `configurations` loads EVERY config root (it
-    // iterates all config paths through the shared loader), so this single call
-    // memoises the loader for all roots — base config plus extensions. The clones
-    // share the `Zalsa`, so the per-module jobs below find the loader cached and
-    // never open a nested scope; their own per-file metadata/visibility work runs in
-    // the pool. It is the only internally parallel query the build reaches (no type
-    // inference), so this one warm-up closes the window.
-    if let Some(first) = warm {
+    // mid-query, which Salsa forbids. The clones share the `Zalsa`, so the per-module
+    // jobs below find the loader cached and never open a nested scope; their own
+    // per-file metadata/visibility work runs in the pool. It is the only internally
+    // parallel query the build reaches (no type inference), so this warm-up closes
+    // the window.
+    //
+    // Two disjoint root sets have to be covered. `configurations_inventory` loads the
+    // DECLARED roots, which is what the resolvers' visibility path reads. That leaves
+    // the roots the items' own files attribute to on disk — the same set only when
+    // discovery declared every configuration present, and short by exactly the nested
+    // ones when it did not.
+    if !warm.is_empty() {
         let _ = db.configurations_inventory();
-        let _ = db.module_metadata(first);
+        db.warm_config_roots(warm);
     }
 
     let seed = db.clone();

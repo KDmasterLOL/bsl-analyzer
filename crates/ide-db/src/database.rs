@@ -2160,6 +2160,24 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             .collect()
     }
 
+    fn warm_config_roots(&self, modules: &[ModuleId]) {
+        // One representative per root: `module_metadata` reaches the whole-config
+        // load through the same attribution the parallel jobs will use, so a
+        // second module of an already-warmed root would only re-hit the memo.
+        let mut warmed = rustc_hash::FxHashSet::default();
+        for module in modules {
+            let Some(path) = vfs_helpers::get_file_path(self, module.file_id) else {
+                continue;
+            };
+            let Some(root) = self.find_configuration_root(&path) else {
+                continue;
+            };
+            if warmed.insert(root) {
+                let _ = hir::DefDatabase::module_metadata(self, *module);
+            }
+        }
+    }
+
     fn resolve_metadata_object(
         &self,
         file_id: FileId,

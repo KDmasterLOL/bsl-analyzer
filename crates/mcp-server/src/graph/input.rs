@@ -131,7 +131,7 @@ pub(crate) fn db_for_files(
         }
     }
     db.set_workspace_configs_snapshot(configs.clone());
-    ide::warm_batch_config_roots(&db, batch_files, &configs.paths);
+    ide::warm_batch_config_roots(&db, batch_files);
     db
 }
 

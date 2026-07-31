@@ -120,7 +120,7 @@ impl CallHierarchyIndexFrozenSnapshot {
         }
 
         db.set_all_config_paths((*self.config_paths).clone());
-        ide::warm_batch_config_roots(&db, &batch_files, &self.config_paths);
+        ide::warm_batch_config_roots(&db, &batch_files);
         db
     }
 

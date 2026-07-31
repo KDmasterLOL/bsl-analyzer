@@ -13,21 +13,19 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     let path = path.as_ref();
     let _span = tracing::info_span!("load_from_directory", ?path).entered();
 
-    // This load fans out over a `rayon::scope` on the CURRENT pool. Under an
-    // exclusive-pool job (a graph-build worker) that nesting can deadlock: a
-    // worker waiting on the scope steals a sibling job whose query re-enters a
-    // memo suspended on this very thread. Report the violation loudly — the
-    // deadlock it precedes is otherwise silent.
+    // Reaching this under an exclusive-pool job means a pre-pool warm-up missed
+    // this config root: the load is about to park a build worker for a whole
+    // configuration's XML parse. `off_exclusive_pool` keeps that from
+    // deadlocking, but the miss itself stays a defect worth naming.
     if stdx::par_guard::no_nested_parallelism() {
         tracing::error!(
             ?path,
             "whole-config metadata load entered from a no-nested-parallelism job; \
-             its rayon::scope may deadlock the calling pool"
+             the pre-pool warm-up did not cover this config root"
         );
-        debug_assert!(false, "metadata loader entered under a no-nested-parallelism job");
     }
 
-    let loaded = load_all_metadata_parallel(path);
+    let loaded = off_exclusive_pool(|| load_all_metadata_parallel(path));
     let config = build_configuration(loaded);
 
     tracing::info!(
@@ -44,6 +42,25 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     );
 
     Ok(config)
+}
+
+/// Run `f` off the pool of a job that forbids nested parallelism, and directly
+/// otherwise.
+///
+/// The whole-config load fans out over a `rayon::scope` on the CURRENT pool.
+/// Under an exclusive-pool job (a graph-build worker) that nesting can deadlock:
+/// rayon keeps stealing while a worker waits on a latch, so the waiting worker
+/// can pick up a sibling job whose query re-enters a memo suspended on this very
+/// thread. Handing the work to a plain OS thread moves the fan-out to the global
+/// pool and parks the caller in `join`, which steals nothing. Installing on
+/// another rayon pool would NOT do: the caller would still wait on a latch.
+fn off_exclusive_pool<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    if !stdx::par_guard::no_nested_parallelism() {
+        return f();
+    }
+
+    std::thread::scope(|scope| scope.spawn(f).join())
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
 }
 
 struct LoadedMetadata {
@@ -1485,6 +1502,46 @@ fn load_simple_metadata_objects_parallel(dir: &Path, mdo_type: MdoType) -> Vec<M
 mod tests {
     use super::*;
     use crate::traits::Module;
+
+    /// Both polarities on purpose: a hop that never happens leaves the deadlock
+    /// in place, and one that always happens pays a thread per load on every
+    /// ordinary path.
+    #[test]
+    fn the_fan_out_leaves_the_calling_thread_only_under_the_guard() {
+        let caller = std::thread::current().id();
+
+        assert_eq!(
+            off_exclusive_pool(|| std::thread::current().id()),
+            caller,
+            "an unguarded load must stay on the calling thread"
+        );
+
+        let _guard = stdx::par_guard::enter_no_nested_parallelism();
+        assert_ne!(
+            off_exclusive_pool(|| std::thread::current().id()),
+            caller,
+            "a guarded load must not fan out on the calling pool"
+        );
+    }
+
+    /// The hop must not change what is loaded. Compared against the same
+    /// directory read without the guard rather than against a fixed count, so
+    /// the check keeps its meaning as the fixture grows.
+    #[test]
+    fn the_guarded_load_yields_the_same_configuration() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+
+        let direct = load_from_directory(path).unwrap();
+        let off_pool = {
+            let _guard = stdx::par_guard::enter_no_nested_parallelism();
+            load_from_directory(path).unwrap()
+        };
+
+        assert!(!direct.metadata_objects().is_empty(), "fixture sanity: the load is not empty");
+        assert_eq!(direct.metadata_objects(), off_pool.metadata_objects());
+        assert_eq!(direct.common_modules(), off_pool.common_modules());
+        assert_eq!(direct.registers(), off_pool.registers());
+    }
 
     #[test]
     fn parse_metadata_object_from_texts_matches_directory_load() {
