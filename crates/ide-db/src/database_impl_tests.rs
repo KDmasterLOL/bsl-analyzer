@@ -5324,11 +5324,20 @@ fn warming_loads_the_attributed_root_of_a_service_module() {
     // The service module first, so it is the representative the dedup keeps.
     db.warm_config_roots(&[ModuleId::new(service_file), ModuleId::new(module_file)]);
 
+    // Spelled through the very function the key is built with: the cache is keyed
+    // by the interned path, which on Windows is lower-cased and slash-normalized,
+    // so a raw `PathBuf` would miss there while passing here.
+    let key = |path: &std::path::Path| {
+        std::path::PathBuf::from(crate::metadata::canonicalize_configuration_path(
+            &path.to_string_lossy(),
+        ))
+    };
+
     assert!(
-        cache.contains_key(&ws),
+        cache.contains_key(&key(&ws)),
         "sanity: the declared root is loaded, so the early return has something to find"
     );
-    assert!(cache.contains_key(&deep), "the attributed root must be loaded by the warm-up");
+    assert!(cache.contains_key(&key(&deep)), "the attributed root must be loaded by the warm-up");
 
     std::fs::remove_dir_all(&ws).ok();
 }
