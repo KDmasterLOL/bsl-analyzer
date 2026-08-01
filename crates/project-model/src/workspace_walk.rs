@@ -8,7 +8,7 @@
 //! files by `(root, relative path)` while the graph keys them by canonical path, and
 //! collapsing either one here would silently lose the other's entries.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::Metadata;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -121,7 +121,7 @@ fn classify_walk_error(error: &walkdir::Error, outcome: &mut WalkOutcome) {
         outcome.unreadable += 1;
         return;
     }
-    if error.loop_ancestor().is_some() || is_symlink_cycle(error) {
+    if error.loop_ancestor().is_some() || error.path().is_some_and(links_form_a_cycle) {
         outcome.loops += 1;
     } else if error.path().is_some_and(is_dangling_link) {
         outcome.dangling += 1;
@@ -130,18 +130,35 @@ fn classify_walk_error(error: &walkdir::Error, outcome: &mut WalkOutcome) {
     }
 }
 
-/// A cycle the OS refuses to resolve, as opposed to the one `walkdir` detects itself.
-/// `loop_ancestor` is set only for a link back into a directory already on the walk's
-/// stack; a file linking to itself, or two links pointing at each other, are rejected
-/// by the kernel first and arrive as a plain IO error. Both mean the same thing to a
-/// caller — there is no unread file behind them.
-#[cfg(unix)]
-fn is_symlink_cycle(error: &walkdir::Error) -> bool {
-    error.io_error().and_then(std::io::Error::raw_os_error) == Some(libc::ELOOP)
-}
-
-#[cfg(not(unix))]
-fn is_symlink_cycle(_error: &walkdir::Error) -> bool {
+/// Whether the link chain starting at `path` comes back to a path it has already been
+/// through. `walkdir` sets `loop_ancestor` only for a link back into a directory already
+/// on its stack; a file linking to itself, or two links pointing at each other, are
+/// rejected by the kernel first and arrive as a plain IO error.
+///
+/// The errno alone cannot answer this: `ELOOP` is returned just as readily for a long
+/// but FINITE chain, and behind that one there is an unread file — calling it a benign
+/// cycle would let a caller reconcile against a list that is short. Walking the chain is
+/// the only way to tell the two apart, and it happens on the error path only.
+///
+/// A chain longer than the bound, or one whose spelling drifts (`..` segments the
+/// visited set cannot match), reads as NOT a cycle: that is the conservative answer,
+/// since it makes the caller keep its rows rather than drop them.
+fn links_form_a_cycle(path: &Path) -> bool {
+    const MAX_HOPS: usize = 256;
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_HOPS {
+        if !visited.insert(current.clone()) {
+            return true;
+        }
+        let Ok(target) = std::fs::read_link(&current) else {
+            return false;
+        };
+        current = match current.parent() {
+            Some(parent) if target.is_relative() => parent.join(target),
+            _ => target,
+        };
+    }
     false
 }
 
@@ -357,6 +374,45 @@ mod tests {
             (0, 1, 0),
             "a cycle the OS rejects before walkdir sees an ancestor is still a cycle"
         );
+        assert_eq!(walked_names(&outcome), vec!["Live.bsl"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_long_but_acyclic_link_chain_is_incomplete_coverage_not_a_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let mut target = dir.path().join("outside/Target.bsl");
+        write(&target, "");
+        for hop in (0..64).rev() {
+            let link = root.join(format!("l{hop}"));
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            target = link;
+        }
+        std::os::unix::fs::symlink(&target, root.join("Alias.bsl")).unwrap();
+
+        let outcome = walk(&root);
+
+        assert_eq!(
+            outcome.loops, 0,
+            "a chain that never returns to itself is not a cycle: there IS a file behind it"
+        );
+        assert!(outcome.unreadable > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_links_pointing_at_each_other_are_a_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("Live.bsl"), "");
+        std::os::unix::fs::symlink("B.bsl", dir.path().join("A.bsl")).unwrap();
+        std::os::unix::fs::symlink("A.bsl", dir.path().join("B.bsl")).unwrap();
+
+        let outcome = walk(dir.path());
+
+        assert_eq!(outcome.unreadable, 0, "nothing is hidden behind a pair of mutual links");
+        assert!(outcome.loops > 0);
         assert_eq!(walked_names(&outcome), vec!["Live.bsl"]);
     }
 
