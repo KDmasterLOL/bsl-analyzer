@@ -556,6 +556,7 @@ impl SearchEngine {
             match result.embeddings {
                 Ok(embeddings) => {
                     self.store.reindex_file_with_context(
+                        CONFIGURATION_ROOT_ID,
                         &result.rel_path,
                         &result.hash,
                         &result.chunks,
@@ -609,7 +610,14 @@ impl SearchEngine {
         chunks: &[crate::Chunk],
         graph_contexts: &[Option<String>],
     ) -> Result<(), SearchError> {
-        self.store.reindex_file_with_context(rel_path, hash, chunks, None, Some(graph_contexts))?;
+        self.store.reindex_file_with_context(
+            CONFIGURATION_ROOT_ID,
+            rel_path,
+            hash,
+            chunks,
+            None,
+            Some(graph_contexts),
+        )?;
         Ok(())
     }
 
@@ -867,6 +875,7 @@ impl SearchEngine {
                 .collect();
 
             self.store.reindex_file_with_context(
+                CONFIGURATION_ROOT_ID,
                 &rel_path,
                 hash.as_bytes(),
                 &chunks,
@@ -930,7 +939,13 @@ impl SearchEngine {
                 continue;
             }
 
-            self.store.reindex_file(&rel_path, hash.as_bytes(), &chunks, None)?;
+            self.store.reindex_file(
+                CONFIGURATION_ROOT_ID,
+                &rel_path,
+                hash.as_bytes(),
+                &chunks,
+                None,
+            )?;
             indexed += 1;
         }
 
@@ -1158,7 +1173,7 @@ impl SearchEngine {
         let Some(rel) = self.workspace_rel_bsl(path.as_ref()) else {
             return Ok(false);
         };
-        self.store.mark_context_dirty("code", &rel)?;
+        self.store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, &rel)?;
         Ok(true)
     }
 
@@ -1209,9 +1224,9 @@ impl SearchEngine {
         };
         // Collect the chunk ids before deleting the rows so the exact vectors can be
         // evicted from the live index without a full reload.
-        let chunk_ids = self.store.chunk_ids_for_file("code", &rel)?;
+        let chunk_ids = self.store.chunk_ids_for_file("code", CONFIGURATION_ROOT_ID, &rel)?;
         self.store.remove_file(CONFIGURATION_ROOT_ID, &rel, "code")?;
-        self.store.insert_overlay_tombstone(&rel, "code")?;
+        self.store.insert_overlay_tombstone(CONFIGURATION_ROOT_ID, &rel, "code")?;
         if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
             cache.enable_watcher_mode();
             cache.mark_dirty_path(rel.clone());
@@ -1288,7 +1303,7 @@ impl SearchEngine {
             // gone from the graph) is not an error and clears normally.
             let mut render_failed = false;
             for (id, symbol_name, kind, stored) in
-                self.store.chunks_with_context_for_file("code", &path)?
+                self.store.chunks_with_context_for_file("code", CONFIGURATION_ROOT_ID, &path)?
             {
                 match provider.try_graph_context(&path, &symbol_name, &kind) {
                     Ok(rendered) => {
@@ -1312,7 +1327,12 @@ impl SearchEngine {
             if render_failed {
                 continue;
             }
-            self.store.clear_context_dirty_bounded("code", &path, seq_bound)?;
+            self.store.clear_context_dirty_bounded(
+                "code",
+                CONFIGURATION_ROOT_ID,
+                &path,
+                seq_bound,
+            )?;
             stats.paths_cleared += 1;
         }
         Ok(stats)
@@ -2033,6 +2053,7 @@ impl SearchEngine {
             };
 
             self.store.reindex_indexed_documents_in_collection(
+                CONFIGURATION_ROOT_ID,
                 &path,
                 &file_hash,
                 collection,
@@ -2113,6 +2134,7 @@ struct FileResult {
 mod tests {
     use super::SearchEngine;
     use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+    use crate::workspace_roots::CONFIGURATION_ROOT_ID;
     use crate::{BaselineRef, CorpusId, IndexedDocument, SearchError, Snapshot};
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -2464,10 +2486,22 @@ mod tests {
         {
             let mut store = Store::open(&db_path).unwrap();
             store
-                .reindex_file("a.bsl", b"ha", &[chunk("Альфа")], Some(std::slice::from_ref(&vec_a)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "a.bsl",
+                    b"ha",
+                    &[chunk("Альфа")],
+                    Some(std::slice::from_ref(&vec_a)),
+                )
                 .unwrap();
             store
-                .reindex_file("b.bsl", b"hb", &[chunk("Бета")], Some(std::slice::from_ref(&vec_b)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "b.bsl",
+                    b"hb",
+                    &[chunk("Бета")],
+                    Some(std::slice::from_ref(&vec_b)),
+                )
                 .unwrap();
         }
 
@@ -2608,6 +2642,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[chunk("Изменённая")],
@@ -2617,6 +2652,7 @@ mod tests {
                 .unwrap();
             store
                 .reindex_file_with_context(
+                    CONFIGURATION_ROOT_ID,
                     "Stable.bsl",
                     b"h2",
                     &[chunk("Стабильная")],
@@ -2627,8 +2663,8 @@ mod tests {
         }
 
         let engine = SearchEngine::fts_only(&db_path).unwrap();
-        engine.store().mark_context_dirty("code", "Owned.bsl").unwrap();
-        engine.store().mark_context_dirty("code", "Stable.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Stable.bsl").unwrap();
         let gen_before = engine.store().embedding_generation().unwrap();
 
         let stats = engine.refresh_dirty_contexts(&Stub, i64::MAX).unwrap();
@@ -2683,6 +2719,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[Chunk {
@@ -2701,7 +2738,7 @@ mod tests {
         }
 
         let engine = SearchEngine::fts_only(&db_path).unwrap();
-        engine.store().mark_context_dirty("code", "Owned.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
 
         let stats = engine.refresh_dirty_contexts(&Failing, i64::MAX).unwrap();
         assert_eq!(stats.paths_cleared, 0, "a failed render clears no path");
@@ -2733,9 +2770,9 @@ mod tests {
 
         // A build captures its start-seq AFTER the first drift marked A, but BEFORE a second
         // drift marks B (as if B's `.xml` landed while this build was already reading disk).
-        engine.store().mark_context_dirty("code", "A.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "A.bsl").unwrap();
         let build_start_seq = engine.mark_seq_handle().load(std::sync::atomic::Ordering::SeqCst);
-        engine.store().mark_context_dirty("code", "B.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "B.bsl").unwrap();
         let next_build_seq = engine.mark_seq_handle().load(std::sync::atomic::Ordering::SeqCst);
         assert!(next_build_seq > build_start_seq, "the later mark got a higher seq");
 
@@ -2783,6 +2820,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file(
+                    CONFIGURATION_ROOT_ID,
                     "Gone.bsl",
                     b"ha",
                     &[chunk("Ушедшая")],
@@ -2791,6 +2829,7 @@ mod tests {
                 .unwrap();
             store
                 .reindex_file(
+                    CONFIGURATION_ROOT_ID,
                     "Kept.bsl",
                     b"hb",
                     &[chunk("Оставшаяся")],
@@ -2940,10 +2979,22 @@ mod tests {
         {
             let mut store = Store::open(&db_path).unwrap();
             store
-                .reindex_file("a.bsl", b"ha", &[chunk("Альфа")], Some(std::slice::from_ref(&vec_a)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "a.bsl",
+                    b"ha",
+                    &[chunk("Альфа")],
+                    Some(std::slice::from_ref(&vec_a)),
+                )
                 .unwrap();
             store
-                .reindex_file("b.bsl", b"hb", &[chunk("Бета")], Some(std::slice::from_ref(&vec_b)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "b.bsl",
+                    b"hb",
+                    &[chunk("Бета")],
+                    Some(std::slice::from_ref(&vec_b)),
+                )
                 .unwrap();
         }
 

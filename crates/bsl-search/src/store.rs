@@ -1,5 +1,6 @@
 use crate::document::Document;
 use crate::error::SearchError;
+use crate::workspace_roots::CONFIGURATION_ROOT_ID;
 use code_chunk::Chunk;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
@@ -633,6 +634,7 @@ impl Store {
 
     pub fn upsert_file(
         &self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         collection: &str,
@@ -643,10 +645,10 @@ impl Store {
             .as_secs() as i64;
 
         self.conn.execute(
-            "INSERT INTO files (path, hash, indexed_at, collection)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
-            params![path, hash, now, collection],
+            "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4, collection = ?5",
+            params![root_id, path, hash, now, collection],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -687,15 +689,16 @@ impl Store {
     pub fn chunk_ids_for_file(
         &self,
         collection: &str,
+        root_id: &str,
         path: &str,
     ) -> Result<Vec<i64>, SearchError> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id FROM chunks c
              JOIN files f ON f.id = c.file_id
-             WHERE f.path = ?1 AND f.collection = ?2",
+             WHERE f.root_id = ?1 AND f.path = ?2 AND f.collection = ?3",
         )?;
         let ids = stmt
-            .query_map(params![path, collection], |row| row.get::<_, i64>(0))?
+            .query_map(params![root_id, path, collection], |row| row.get::<_, i64>(0))?
             .collect::<Result<Vec<i64>, _>>()?;
         Ok(ids)
     }
@@ -802,7 +805,12 @@ impl Store {
     /// or reads changed), so a later reindex/embed pass re-renders it. A hint only: it
     /// carries no foreign key, and re-marking an already-dirty path is a cheap upsert that
     /// bumps the row's monotonic `seq`.
-    pub fn mark_context_dirty(&self, collection: &str, path: &str) -> Result<(), SearchError> {
+    pub fn mark_context_dirty(
+        &self,
+        collection: &str,
+        root_id: &str,
+        path: &str,
+    ) -> Result<(), SearchError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -813,10 +821,10 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let seq = Self::next_mark_seq(&tx)?;
         tx.execute(
-            "INSERT INTO context_dirty (path, collection, marked_at, seq)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(root_id, path, collection) DO UPDATE SET marked_at = ?3, seq = ?4",
-            params![path, collection, now, seq],
+            "INSERT INTO context_dirty (root_id, path, collection, marked_at, seq)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path, collection) DO UPDATE SET marked_at = ?4, seq = ?5",
+            params![root_id, path, collection, now, seq],
         )?;
         tx.commit()?;
         self.observe_mark_seq(seq);
@@ -909,10 +917,15 @@ impl Store {
     }
 
     /// Clear one path's context-dirty mark (a reindex/embed pass re-rendered it).
-    pub fn clear_context_dirty(&self, collection: &str, path: &str) -> Result<(), SearchError> {
+    pub fn clear_context_dirty(
+        &self,
+        collection: &str,
+        root_id: &str,
+        path: &str,
+    ) -> Result<(), SearchError> {
         self.conn.execute(
-            "DELETE FROM context_dirty WHERE collection = ?1 AND path = ?2",
-            params![collection, path],
+            "DELETE FROM context_dirty WHERE collection = ?1 AND root_id = ?2 AND path = ?3",
+            params![collection, root_id, path],
         )?;
         Ok(())
     }
@@ -924,12 +937,14 @@ impl Store {
     pub fn clear_context_dirty_bounded(
         &self,
         collection: &str,
+        root_id: &str,
         path: &str,
         seq_bound: i64,
     ) -> Result<(), SearchError> {
         self.conn.execute(
-            "DELETE FROM context_dirty WHERE collection = ?1 AND path = ?2 AND seq <= ?3",
-            params![collection, path, seq_bound],
+            "DELETE FROM context_dirty
+             WHERE collection = ?1 AND root_id = ?2 AND path = ?3 AND seq <= ?4",
+            params![collection, root_id, path, seq_bound],
         )?;
         Ok(())
     }
@@ -971,29 +986,45 @@ impl Store {
 
     pub fn reindex_file(
         &mut self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         chunks: &[Chunk],
         embeddings: Option<&[Vec<f32>]>,
     ) -> Result<i64, SearchError> {
-        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings, None)
+        self.reindex_file_in_collection(root_id, path, hash, "code", chunks, embeddings, None)
     }
 
     /// As [`Self::reindex_file`], but persists each chunk's graph context (parallel to
     /// `chunks`) so a later reconstruction re-embeds with the same enriched text.
     pub fn reindex_file_with_context(
         &mut self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         chunks: &[Chunk],
         embeddings: Option<&[Vec<f32>]>,
         graph_contexts: Option<&[Option<String>]>,
     ) -> Result<i64, SearchError> {
-        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings, graph_contexts)
+        self.reindex_file_in_collection(
+            root_id,
+            path,
+            hash,
+            "code",
+            chunks,
+            embeddings,
+            graph_contexts,
+        )
     }
 
+    // Every argument is a distinct input of one write — which row, what it now
+    // holds, and the optional vectors and rendered contexts that go with it.
+    // Bundling them into a context struct would only rename the same fields, so
+    // the one-over-limit arity is accepted here.
+    #[allow(clippy::too_many_arguments)]
     pub fn reindex_file_in_collection(
         &mut self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         collection: &str,
@@ -1009,13 +1040,16 @@ impl Store {
             .as_secs() as i64;
 
         tx.execute(
-            "INSERT INTO files (path, hash, indexed_at, collection)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
-            params![path, hash, now, collection],
+            "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4, collection = ?5",
+            params![root_id, path, hash, now, collection],
         )?;
-        let file_id: i64 =
-            tx.query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))?;
+        let file_id: i64 = tx.query_row(
+            "SELECT id FROM files WHERE root_id = ?1 AND path = ?2",
+            params![root_id, path],
+            |row| row.get(0),
+        )?;
 
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
@@ -1088,15 +1122,16 @@ impl Store {
             .as_secs() as i64;
 
         tx.execute(
-            "INSERT INTO files (path, hash, indexed_at, collection)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
-            params![virtual_path, hash, now, collection],
+            "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4, collection = ?5",
+            params![CONFIGURATION_ROOT_ID, virtual_path, hash, now, collection],
         )?;
-        let file_id: i64 =
-            tx.query_row("SELECT id FROM files WHERE path = ?1", params![virtual_path], |row| {
-                row.get(0)
-            })?;
+        let file_id: i64 = tx.query_row(
+            "SELECT id FROM files WHERE root_id = ?1 AND path = ?2",
+            params![CONFIGURATION_ROOT_ID, virtual_path],
+            |row| row.get(0),
+        )?;
 
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
@@ -1131,6 +1166,7 @@ impl Store {
 
     pub fn reindex_indexed_documents_in_collection(
         &mut self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         collection: &str,
@@ -1145,13 +1181,16 @@ impl Store {
             .as_secs() as i64;
 
         tx.execute(
-            "INSERT INTO files (path, hash, indexed_at, collection)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
-            params![path, hash, now, collection],
+            "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4, collection = ?5",
+            params![root_id, path, hash, now, collection],
         )?;
-        let file_id: i64 =
-            tx.query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))?;
+        let file_id: i64 = tx.query_row(
+            "SELECT id FROM files WHERE root_id = ?1 AND path = ?2",
+            params![root_id, path],
+            |row| row.get(0),
+        )?;
 
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
@@ -1491,16 +1530,17 @@ impl Store {
     pub fn chunks_with_context_for_file(
         &self,
         collection: &str,
+        root_id: &str,
         path: &str,
     ) -> Result<Vec<ChunkContextRow>, SearchError> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.symbol_name, c.kind, c.graph_context
              FROM chunks c
              JOIN files f ON f.id = c.file_id
-             WHERE f.path = ?1 AND f.collection = ?2",
+             WHERE f.root_id = ?1 AND f.path = ?2 AND f.collection = ?3",
         )?;
         let rows = stmt
-            .query_map(params![path, collection], |row| {
+            .query_map(params![root_id, path, collection], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1788,6 +1828,7 @@ impl Store {
 
     pub fn insert_overlay_tombstone(
         &self,
+        root_id: &str,
         path: &str,
         collection: &str,
     ) -> Result<(), SearchError> {
@@ -1796,16 +1837,19 @@ impl Store {
             .unwrap_or_default()
             .as_secs();
         self.conn.execute(
-            "INSERT INTO overlay_tombstones (path, collection, deleted_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(root_id, path) DO UPDATE SET collection = ?2, deleted_at = ?3",
-            params![path, collection, deleted_at.to_string()],
+            "INSERT INTO overlay_tombstones (root_id, path, collection, deleted_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(root_id, path) DO UPDATE SET collection = ?3, deleted_at = ?4",
+            params![root_id, path, collection, deleted_at.to_string()],
         )?;
         Ok(())
     }
 
-    pub fn remove_overlay_tombstone(&self, path: &str) -> Result<(), SearchError> {
-        self.conn.execute("DELETE FROM overlay_tombstones WHERE path = ?1", params![path])?;
+    pub fn remove_overlay_tombstone(&self, root_id: &str, path: &str) -> Result<(), SearchError> {
+        self.conn.execute(
+            "DELETE FROM overlay_tombstones WHERE root_id = ?1 AND path = ?2",
+            params![root_id, path],
+        )?;
         Ok(())
     }
 
@@ -1831,6 +1875,7 @@ impl Store {
 
     pub fn upsert_overlay_file_with_chunks(
         &mut self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         collection: &str,
@@ -1845,15 +1890,16 @@ impl Store {
             .as_secs() as i64;
 
         tx.execute(
-            "INSERT INTO overlay_files (path, hash, indexed_at, collection)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
-            params![path, hash, now, collection],
+            "INSERT INTO overlay_files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4, collection = ?5",
+            params![root_id, path, hash, now, collection],
         )?;
-        let file_id: i64 =
-            tx.query_row("SELECT id FROM overlay_files WHERE path = ?1", params![path], |row| {
-                row.get(0)
-            })?;
+        let file_id: i64 = tx.query_row(
+            "SELECT id FROM overlay_files WHERE root_id = ?1 AND path = ?2",
+            params![root_id, path],
+            |row| row.get(0),
+        )?;
 
         tx.execute(
             "DELETE FROM overlay_chunks_fts WHERE rowid IN (SELECT id FROM overlay_chunks WHERE file_id = ?1)",
@@ -1907,16 +1953,19 @@ impl Store {
         Ok(file_id)
     }
 
-    pub fn remove_overlay_file(&self, path: &str) -> Result<(), SearchError> {
+    pub fn remove_overlay_file(&self, root_id: &str, path: &str) -> Result<(), SearchError> {
         self.conn.execute(
             "DELETE FROM overlay_chunks_fts WHERE rowid IN (
                  SELECT c.id FROM overlay_chunks c
                  JOIN overlay_files f ON f.id = c.file_id
-                 WHERE f.path = ?1
+                 WHERE f.root_id = ?1 AND f.path = ?2
              )",
-            params![path],
+            params![root_id, path],
         )?;
-        self.conn.execute("DELETE FROM overlay_files WHERE path = ?1", params![path])?;
+        self.conn.execute(
+            "DELETE FROM overlay_files WHERE root_id = ?1 AND path = ?2",
+            params![root_id, path],
+        )?;
         Ok(())
     }
 
@@ -2628,8 +2677,15 @@ mod tests {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"test content");
 
-        let file_id =
-            store.reindex_file("test.bsl", hash.as_bytes(), &[sample_chunk("Тест")], None).unwrap();
+        let file_id = store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "test.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Тест")],
+                None,
+            )
+            .unwrap();
 
         assert!(file_id > 0);
         assert_eq!(store.file_count().unwrap(), 1);
@@ -2640,12 +2696,28 @@ mod tests {
     fn context_dirty_marks_are_recorded_cleared_and_do_not_touch_the_vector_generation() {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"body");
-        store.reindex_file("Owned.bsl", hash.as_bytes(), &[sample_chunk("П")], None).unwrap();
-        store.reindex_file("Other.bsl", hash.as_bytes(), &[sample_chunk("Д")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "Owned.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("П")],
+                None,
+            )
+            .unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "Other.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Д")],
+                None,
+            )
+            .unwrap();
 
         let generation_before = store.embedding_generation().unwrap();
 
-        store.mark_context_dirty("code", "Owned.bsl").unwrap();
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
         assert_eq!(
             store.context_dirty_paths("code").unwrap(),
             HashSet::from(["Owned.bsl".to_owned()]),
@@ -2664,7 +2736,7 @@ mod tests {
         assert!(batch_seq > 0, "the batch reports the shared mark seq it stamped");
         assert_eq!(store.context_dirty_paths("code").unwrap().len(), 2);
 
-        store.clear_context_dirty("code", "Owned.bsl").unwrap();
+        store.clear_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
         assert_eq!(
             store.context_dirty_paths("code").unwrap(),
             HashSet::from(["Other.bsl".to_owned()]),
@@ -2681,12 +2753,14 @@ mod tests {
     fn a_topology_batch_leaves_a_fresher_drift_mark_alone() {
         let mut store = Store::in_memory().unwrap();
         for path in ["Stable.bsl", "Drifted.bsl"] {
-            store.reindex_file(path, b"h", &[sample_chunk("П")], None).unwrap();
+            store
+                .reindex_file(CONFIGURATION_ROOT_ID, path, b"h", &[sample_chunk("П")], None)
+                .unwrap();
         }
 
         // A build captured its bound here; then one file drifted, stamped ABOVE it.
         let build_start_seq = store.mark_seq_handle().load(Ordering::SeqCst);
-        store.mark_context_dirty("code", "Drifted.bsl").unwrap();
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Drifted.bsl").unwrap();
 
         let marked = store.mark_collection_context_dirty_at("code", build_start_seq).unwrap();
         assert_eq!(marked, 1, "only the file with no fresher mark is stamped by the batch");
@@ -2698,8 +2772,22 @@ mod tests {
             "a drift the build does not reflect is not re-rendered against it",
         );
 
-        store.clear_context_dirty_bounded("code", "Stable.bsl", build_start_seq).unwrap();
-        store.clear_context_dirty_bounded("code", "Drifted.bsl", build_start_seq).unwrap();
+        store
+            .clear_context_dirty_bounded(
+                "code",
+                CONFIGURATION_ROOT_ID,
+                "Stable.bsl",
+                build_start_seq,
+            )
+            .unwrap();
+        store
+            .clear_context_dirty_bounded(
+                "code",
+                CONFIGURATION_ROOT_ID,
+                "Drifted.bsl",
+                build_start_seq,
+            )
+            .unwrap();
         assert_eq!(
             store.context_dirty_paths("code").unwrap(),
             HashSet::from(["Drifted.bsl".to_owned()]),
@@ -2717,26 +2805,28 @@ mod tests {
         let store = Store::in_memory().unwrap();
 
         // Mark P (seq 1), then a build captures the current start-seq (1) and reads the set.
-        store.mark_context_dirty("code", "P.bsl").unwrap();
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "P.bsl").unwrap();
         let build_start_seq = store.mark_seq_handle().load(Ordering::SeqCst);
         assert_eq!(build_start_seq, 1);
         let read_set = store.context_dirty_paths_bounded("code", build_start_seq).unwrap();
         assert!(read_set.contains("P.bsl"), "P is in the build's read set");
 
         // A fresher drift re-marks P (seq 2) while the build is processing its read set.
-        store.mark_context_dirty("code", "P.bsl").unwrap();
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "P.bsl").unwrap();
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 2);
 
         // The build clears P bounded by ITS start-seq (1); P's row now sits at seq 2, so the
         // newer mark is not lost.
-        store.clear_context_dirty_bounded("code", "P.bsl", build_start_seq).unwrap();
+        store
+            .clear_context_dirty_bounded("code", CONFIGURATION_ROOT_ID, "P.bsl", build_start_seq)
+            .unwrap();
         assert!(
             store.context_dirty_paths("code").unwrap().contains("P.bsl"),
             "the re-mark stamped after the build started survives the bounded clear",
         );
 
         // The next build (start-seq 2) does consume it.
-        store.clear_context_dirty_bounded("code", "P.bsl", 2).unwrap();
+        store.clear_context_dirty_bounded("code", CONFIGURATION_ROOT_ID, "P.bsl", 2).unwrap();
         assert!(
             !store.context_dirty_paths("code").unwrap().contains("P.bsl"),
             "a build whose start-seq covers the re-mark clears it",
@@ -2754,18 +2844,18 @@ mod tests {
         let db = dir.path().join("search.db");
         {
             let store = Store::open(&db).unwrap();
-            store.mark_context_dirty("code", "A.bsl").unwrap(); // seq 1
-            store.mark_context_dirty("code", "B.bsl").unwrap(); // seq 2
+            store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "A.bsl").unwrap(); // seq 1
+            store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "B.bsl").unwrap(); // seq 2
             assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 2);
             // Clear A: the live MAX(seq) drops to 1, but the counter must not rewind.
-            store.clear_context_dirty("code", "A.bsl").unwrap();
-            store.mark_context_dirty("code", "C.bsl").unwrap(); // seq 3, never reused
+            store.clear_context_dirty("code", CONFIGURATION_ROOT_ID, "A.bsl").unwrap();
+            store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "C.bsl").unwrap(); // seq 3, never reused
             assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 3);
         }
         // Reopen: B (seq 2) and C (seq 3) persist; the counter seeds above the max.
         let store = Store::open(&db).unwrap();
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 3);
-        store.mark_context_dirty("code", "D.bsl").unwrap(); // seq 4
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "D.bsl").unwrap(); // seq 4
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 4);
     }
 
@@ -2783,9 +2873,13 @@ mod tests {
 
         let mut seqs = Vec::new();
         for round in 0..3 {
-            first.mark_context_dirty("code", &format!("A{round}.bsl")).unwrap();
+            first
+                .mark_context_dirty("code", CONFIGURATION_ROOT_ID, &format!("A{round}.bsl"))
+                .unwrap();
             seqs.push(first.mark_seq_handle().load(Ordering::SeqCst));
-            second.mark_context_dirty("code", &format!("B{round}.bsl")).unwrap();
+            second
+                .mark_context_dirty("code", CONFIGURATION_ROOT_ID, &format!("B{round}.bsl"))
+                .unwrap();
             seqs.push(second.mark_seq_handle().load(Ordering::SeqCst));
         }
 
@@ -2809,8 +2903,8 @@ mod tests {
         let mine = Store::open(&db).unwrap();
         let other = Store::open(&db).unwrap();
 
-        mine.mark_context_dirty("code", "Mine.bsl").unwrap(); // seq 1
-        other.mark_context_dirty("code", "Theirs.bsl").unwrap(); // seq 2
+        mine.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Mine.bsl").unwrap(); // seq 1
+        other.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Theirs.bsl").unwrap(); // seq 2
 
         assert_eq!(
             mine.mark_seq_handle().load(Ordering::SeqCst),
@@ -2833,14 +2927,14 @@ mod tests {
         let db = dir.path().join("search.db");
         {
             let store = Store::open(&db).unwrap();
-            store.mark_context_dirty("code", "A.bsl").unwrap(); // seq 1
-            store.mark_context_dirty("code", "B.bsl").unwrap(); // seq 2
+            store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "A.bsl").unwrap(); // seq 1
+            store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "B.bsl").unwrap(); // seq 2
             store.conn.execute("DELETE FROM meta WHERE key = 'mark_seq'", []).unwrap();
         }
 
         let store = Store::open(&db).unwrap();
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 2);
-        store.mark_context_dirty("code", "C.bsl").unwrap();
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "C.bsl").unwrap();
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 3);
     }
 
@@ -2851,6 +2945,7 @@ mod tests {
         let vec = vec![1.0f32, 0.0, 0.0];
         store
             .reindex_file_with_context(
+                CONFIGURATION_ROOT_ID,
                 "F.bsl",
                 hash.as_bytes(),
                 &[sample_chunk("П")],
@@ -2858,7 +2953,7 @@ mod tests {
                 Some(&[Some("старый контекст".to_owned())]),
             )
             .unwrap();
-        let chunk_id = store.chunk_ids_for_file("code", "F.bsl").unwrap()[0];
+        let chunk_id = store.chunk_ids_for_file("code", CONFIGURATION_ROOT_ID, "F.bsl").unwrap()[0];
 
         let gen0 = store.embedding_generation().unwrap();
         // Rewriting only graph_context must NOT bump the vector generation — the
@@ -2882,7 +2977,15 @@ mod tests {
     fn remove_file_is_atomic_all_or_nothing() {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"body");
-        store.reindex_file("t.bsl", hash.as_bytes(), &[sample_chunk("П")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "t.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("П")],
+                None,
+            )
+            .unwrap();
         assert_eq!(store.fts_count().unwrap(), 1);
 
         // Force the second statement (the `files` delete) to abort, so the whole
@@ -2915,7 +3018,15 @@ mod tests {
     fn remove_file_is_scoped_to_the_callers_collection() {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"body");
-        store.reindex_file("only.bsl", hash.as_bytes(), &[sample_chunk("П")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "only.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("П")],
+                None,
+            )
+            .unwrap();
         assert_eq!(store.file_count().unwrap(), 1);
 
         // A removal scoped to a different collection must not touch this file.
@@ -2937,7 +3048,13 @@ mod tests {
 
         // Insert two chunks -> two INSERT trigger firings.
         store
-            .reindex_file("m.bsl", b"h0", &[sample_chunk("Один"), sample_chunk("Два")], None)
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "m.bsl",
+                b"h0",
+                &[sample_chunk("Один"), sample_chunk("Два")],
+                None,
+            )
             .unwrap();
         let g_after_insert = store.embedding_generation().unwrap();
         assert!(g_after_insert > g0, "insert must advance the generation");
@@ -2982,7 +3099,15 @@ mod tests {
         {
             let mut store = Store::open(&db_path).unwrap();
             let emb = vec![0.1_f32, 0.2, 0.3, 0.4];
-            store.reindex_file("f.bsl", b"h0", &[sample_chunk("П")], Some(&[emb])).unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "f.bsl",
+                    b"h0",
+                    &[sample_chunk("П")],
+                    Some(&[emb]),
+                )
+                .unwrap();
             let (generation, data) = store.load_all_embeddings_with_generation(DIM).unwrap();
             let index = VectorIndex::build(DIM, &data).unwrap();
             let key = crate::vector_persist::PersistKey {
@@ -3030,6 +3155,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file(
+                    CONFIGURATION_ROOT_ID,
                     "f.bsl",
                     b"h0",
                     &[sample_chunk("П")],
@@ -3071,6 +3197,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file(
+                    CONFIGURATION_ROOT_ID,
                     "f.bsl",
                     b"h0",
                     &[sample_chunk("П")],
@@ -3118,6 +3245,7 @@ mod tests {
 
         store
             .reindex_file(
+                CONFIGURATION_ROOT_ID,
                 "mod.bsl",
                 hash1.as_bytes(),
                 &[sample_chunk("Первая"), sample_chunk("Вторая")],
@@ -3126,7 +3254,15 @@ mod tests {
             .unwrap();
         assert_eq!(store.chunk_count().unwrap(), 2);
 
-        store.reindex_file("mod.bsl", hash2.as_bytes(), &[sample_chunk("Новая")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "mod.bsl",
+                hash2.as_bytes(),
+                &[sample_chunk("Новая")],
+                None,
+            )
+            .unwrap();
         assert_eq!(store.chunk_count().unwrap(), 1);
         assert_eq!(store.file_count().unwrap(), 1);
     }
@@ -3138,7 +3274,15 @@ mod tests {
 
         assert!(store.file_hash(CONFIGURATION_ROOT_ID, "test.bsl").unwrap().is_none());
 
-        store.reindex_file("test.bsl", hash.as_bytes(), &[sample_chunk("Тест")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "test.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Тест")],
+                None,
+            )
+            .unwrap();
 
         let stored = store.file_hash(CONFIGURATION_ROOT_ID, "test.bsl").unwrap().unwrap();
         assert_eq!(stored, hash.as_bytes());
@@ -3152,6 +3296,7 @@ mod tests {
 
         store
             .reindex_file(
+                CONFIGURATION_ROOT_ID,
                 "test.bsl",
                 hash.as_bytes(),
                 &[sample_chunk("Тест")],
@@ -3169,7 +3314,13 @@ mod tests {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"test");
         store
-            .reindex_file("path/to/module.bsl", hash.as_bytes(), &[sample_chunk("Метод")], None)
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "path/to/module.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Метод")],
+                None,
+            )
             .unwrap();
 
         assert_eq!(store.chunk_count().unwrap(), 1);
@@ -3191,6 +3342,7 @@ mod tests {
         let hash = blake3::hash(b"test");
         store
             .reindex_file(
+                CONFIGURATION_ROOT_ID,
                 "path/to/module.bsl",
                 hash.as_bytes(),
                 &[sample_chunk("Альфа"), sample_chunk("Бета"), sample_chunk("Гамма")],
@@ -3242,6 +3394,7 @@ mod tests {
         let hash = blake3::hash(b"test");
         store
             .reindex_file(
+                CONFIGURATION_ROOT_ID,
                 "test.bsl",
                 hash.as_bytes(),
                 &[sample_chunk("А"), sample_chunk("Б")],
@@ -3261,6 +3414,7 @@ mod tests {
         let hash = blake3::hash(b"test");
         store
             .reindex_file(
+                CONFIGURATION_ROOT_ID,
                 "test.bsl",
                 hash.as_bytes(),
                 &[sample_chunk("ОбработкаПроведения"), sample_chunk("ПриСозданииНаСервере")],
@@ -3284,7 +3438,9 @@ mod tests {
         chunk.text =
             "Процедура Тест()\n    СообщитьПользователю(\"Привет\");\nКонецПроцедуры".to_owned();
 
-        store.reindex_file("test.bsl", hash.as_bytes(), &[chunk], None).unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "test.bsl", hash.as_bytes(), &[chunk], None)
+            .unwrap();
 
         let results = store.text_search("СообщитьПользователю", 10, None).unwrap();
         assert_eq!(results.len(), 1);
@@ -3304,8 +3460,8 @@ mod tests {
             "Процедура Отправщик()\n    ВызватьHTTПМетод(); // отправка запроса\nКонецПроцедуры"
                 .to_owned();
 
-        store.reindex_file("a.bsl", b"h0", &[only_id], None).unwrap();
-        store.reindex_file("b.bsl", b"h1", &[full], None).unwrap();
+        store.reindex_file(CONFIGURATION_ROOT_ID, "a.bsl", b"h0", &[only_id], None).unwrap();
+        store.reindex_file(CONFIGURATION_ROOT_ID, "b.bsl", b"h1", &[full], None).unwrap();
 
         let results = store.text_search("ВызватьHTTПМетод отправка запроса", 10, None).unwrap();
         assert_eq!(results.len(), 2, "OR semantics must surface a chunk matching any term");
@@ -3317,7 +3473,7 @@ mod tests {
         let mut chunk = sample_chunk("Отправщик");
         chunk.text =
             "Процедура Отправщик()\n    КоннекторHTTP.ВызватьМетод();\nКонецПроцедуры".to_owned();
-        store.reindex_file("a.bsl", b"h0", &[chunk], None).unwrap();
+        store.reindex_file(CONFIGURATION_ROOT_ID, "a.bsl", b"h0", &[chunk], None).unwrap();
 
         // The dotted call is one quoted token; unicode61 makes it an adjacency phrase that still
         // matches the same dotted call in the body.
@@ -3328,7 +3484,9 @@ mod tests {
     #[test]
     fn fts_punctuation_only_query_is_empty_not_error() {
         let mut store = Store::in_memory().unwrap();
-        store.reindex_file("a.bsl", b"h0", &[sample_chunk("Метод")], None).unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "a.bsl", b"h0", &[sample_chunk("Метод")], None)
+            .unwrap();
         // No usable term -> empty result, never an FTS5 syntax error.
         assert!(store.text_search("()", 10, None).unwrap().is_empty());
         assert!(store.text_search("   ", 10, None).unwrap().is_empty());
@@ -3340,10 +3498,26 @@ mod tests {
         let hash1 = blake3::hash(b"v1");
         let hash2 = blake3::hash(b"v2");
 
-        store.reindex_file("test.bsl", hash1.as_bytes(), &[sample_chunk("Старая")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "test.bsl",
+                hash1.as_bytes(),
+                &[sample_chunk("Старая")],
+                None,
+            )
+            .unwrap();
         assert_eq!(store.text_search("Старая", 10, None).unwrap().len(), 1);
 
-        store.reindex_file("test.bsl", hash2.as_bytes(), &[sample_chunk("Новая")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "test.bsl",
+                hash2.as_bytes(),
+                &[sample_chunk("Новая")],
+                None,
+            )
+            .unwrap();
 
         assert_eq!(store.text_search("Старая", 10, None).unwrap().len(), 0);
         assert_eq!(store.text_search("Новая", 10, None).unwrap().len(), 1);
@@ -3354,7 +3528,13 @@ mod tests {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"test");
         store
-            .reindex_file("test.bsl", hash.as_bytes(), &[sample_chunk("Удаляемая")], None)
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "test.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Удаляемая")],
+                None,
+            )
             .unwrap();
         assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 1);
 
@@ -3366,7 +3546,7 @@ mod tests {
     fn load_indexed_documents_filters_by_collection() {
         let mut store = Store::in_memory().unwrap();
         let code = crate::Chunker::chunk("Процедура Код()\nКонецПроцедуры");
-        store.reindex_file("A.bsl", b"hash-a", &code, None).unwrap();
+        store.reindex_file(CONFIGURATION_ROOT_ID, "A.bsl", b"hash-a", &code, None).unwrap();
         store
             .reindex_documents(
                 "platform",
@@ -3480,15 +3660,15 @@ mod tests {
         let store = Store::in_memory().unwrap();
         assert!(store.overlay_tombstone_paths("code").unwrap().is_empty());
 
-        store.insert_overlay_tombstone("src/A.bsl", "code").unwrap();
-        store.insert_overlay_tombstone("src/B.bsl", "code").unwrap();
+        store.insert_overlay_tombstone(CONFIGURATION_ROOT_ID, "src/A.bsl", "code").unwrap();
+        store.insert_overlay_tombstone(CONFIGURATION_ROOT_ID, "src/B.bsl", "code").unwrap();
 
         let paths = store.overlay_tombstone_paths("code").unwrap();
         assert_eq!(paths.len(), 2);
         assert!(paths.contains("src/A.bsl"));
         assert!(paths.contains("src/B.bsl"));
 
-        store.remove_overlay_tombstone("src/A.bsl").unwrap();
+        store.remove_overlay_tombstone(CONFIGURATION_ROOT_ID, "src/A.bsl").unwrap();
         let paths = store.overlay_tombstone_paths("code").unwrap();
         assert_eq!(paths.len(), 1);
         assert!(paths.contains("src/B.bsl"));
@@ -3505,6 +3685,7 @@ mod tests {
 
         store
             .upsert_overlay_file_with_chunks(
+                CONFIGURATION_ROOT_ID,
                 "src/Overlay.bsl",
                 hash.as_bytes(),
                 "code",
@@ -3519,7 +3700,7 @@ mod tests {
         let results = store.overlay_text_search("OverlayProc", 10, Some("code")).unwrap();
         assert_eq!(results.len(), 1);
 
-        store.remove_overlay_file("src/Overlay.bsl").unwrap();
+        store.remove_overlay_file(CONFIGURATION_ROOT_ID, "src/Overlay.bsl").unwrap();
         assert_eq!(store.overlay_file_count("code").unwrap(), 0);
         assert_eq!(store.overlay_chunk_count("code").unwrap(), 0);
         assert_eq!(store.overlay_text_search("OverlayProc", 10, Some("code")).unwrap().len(), 0);
@@ -3531,6 +3712,7 @@ mod tests {
         let hash = blake3::hash(b"overlay");
         store
             .upsert_overlay_file_with_chunks(
+                CONFIGURATION_ROOT_ID,
                 "src/A.bsl",
                 hash.as_bytes(),
                 "code",
@@ -3538,7 +3720,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        store.insert_overlay_tombstone("src/B.bsl", "code").unwrap();
+        store.insert_overlay_tombstone(CONFIGURATION_ROOT_ID, "src/B.bsl", "code").unwrap();
 
         store.clear_overlay_state("code").unwrap();
         assert_eq!(store.overlay_file_count("code").unwrap(), 0);
@@ -3553,6 +3735,7 @@ mod tests {
         let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
         store
             .upsert_overlay_file_with_chunks(
+                CONFIGURATION_ROOT_ID,
                 "src/Emb.bsl",
                 hash.as_bytes(),
                 "code",
@@ -3571,6 +3754,7 @@ mod tests {
         let mut store = Store::in_memory().unwrap();
         store
             .reindex_file_with_context(
+                CONFIGURATION_ROOT_ID,
                 "A.bsl",
                 b"h",
                 &[sample_chunk("Делать")],
@@ -3586,7 +3770,9 @@ mod tests {
         );
 
         // A chunk indexed without context round-trips as `None`.
-        store.reindex_file("B.bsl", b"h2", &[sample_chunk("Плейн")], None).unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "B.bsl", b"h2", &[sample_chunk("Плейн")], None)
+            .unwrap();
         let b = store
             .load_indexed_documents(Some("code"))
             .unwrap()
@@ -3602,7 +3788,15 @@ mod tests {
         let path = dir.path().join("s.db");
         {
             let mut store = Store::open(&path).unwrap();
-            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "A.bsl",
+                    b"realhash",
+                    &[sample_chunk("Делать")],
+                    None,
+                )
+                .unwrap();
             assert_eq!(
                 store.file_hash(CONFIGURATION_ROOT_ID, "A.bsl").unwrap().unwrap(),
                 b"realhash"
@@ -3638,7 +3832,15 @@ mod tests {
         let path = dir.path().join("s.db");
         {
             let mut store = Store::open(&path).unwrap();
-            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "A.bsl",
+                    b"realhash",
+                    &[sample_chunk("Делать")],
+                    None,
+                )
+                .unwrap();
             assert_eq!(store.file_count().unwrap(), 1);
             assert_eq!(store.chunk_count().unwrap(), 1);
             // Simulate a database written under an older structural schema.
@@ -3664,7 +3866,15 @@ mod tests {
         let path = dir.path().join("s.db");
         {
             let mut store = Store::open(&path).unwrap();
-            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "A.bsl",
+                    b"realhash",
+                    &[sample_chunk("Делать")],
+                    None,
+                )
+                .unwrap();
             // Simulate a database created before schema versioning existed.
             store.conn.execute("DELETE FROM meta WHERE key = 'schema_version'", []).unwrap();
         }

@@ -694,6 +694,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[Chunk {
@@ -771,6 +772,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[Chunk {
@@ -840,6 +842,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     module_rel,
                     b"h1",
                     &[Chunk {
@@ -953,6 +956,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     module_rel,
                     b"h1",
                     &[Chunk {
@@ -1081,6 +1085,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     module_rel,
                     b"h1",
                     &[Chunk {
@@ -1097,7 +1102,9 @@ mod tests {
                 )
                 .unwrap();
             // A mark left pending before any wired bound exists (seq 1).
-            store.mark_context_dirty("code", module_rel).unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, module_rel)
+                .unwrap();
         }
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(&workspace);
@@ -1171,6 +1178,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     module_rel,
                     b"h1",
                     &[Chunk {
@@ -1186,7 +1194,9 @@ mod tests {
                     Some(&[Some("СТАРЫЙ контекст".to_owned())]),
                 )
                 .unwrap();
-            store.mark_context_dirty("code", module_rel).unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, module_rel)
+                .unwrap();
         }
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(&workspace);
@@ -1284,6 +1294,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     leftover_rel,
                     b"h1",
                     &[Chunk {
@@ -1300,7 +1311,9 @@ mod tests {
                 )
                 .unwrap();
             // The leftover mark a prior run left pending (seq 1).
-            store.mark_context_dirty("code", leftover_rel).unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, leftover_rel)
+                .unwrap();
         }
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(&workspace);
@@ -1392,6 +1405,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     leftover_rel,
                     b"h1",
                     &[Chunk {
@@ -1407,7 +1421,9 @@ mod tests {
                     Some(&[Some("СТАРЫЙ контекст".to_owned())]),
                 )
                 .unwrap();
-            store.mark_context_dirty("code", leftover_rel).unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, leftover_rel)
+                .unwrap();
         }
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(&workspace);
@@ -1508,6 +1524,7 @@ mod tests {
             let mut store = Store::open(db).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "A.bsl",
                     b"ha",
                     &[Chunk {
@@ -1573,6 +1590,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "A.bsl",
                     b"ha",
                     &[chunk("Альфа")],
@@ -1608,6 +1626,7 @@ mod tests {
                     let mut store = Store::open(db).unwrap();
                     store
                         .reindex_file_with_context(
+                            bsl_search::CONFIGURATION_ROOT_ID,
                             "B.bsl",
                             b"hb",
                             &[Chunk {
@@ -1689,6 +1708,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[Chunk {

@@ -65,6 +65,7 @@ mod tests {
     use super::LocalStoreBaselineAdapter;
     use crate::baseline_runtime::BaselineOverlaySearchService;
     use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+    use crate::workspace_roots::CONFIGURATION_ROOT_ID;
     use crate::{
         BaselineRef, Chunker, CorpusId, DocumentPath, InMemoryResolvedViewResolver, SearchOverlay,
         Store,
@@ -76,7 +77,15 @@ mod tests {
         let content = "Процедура Исходная()\nКонецПроцедуры";
         let chunks = Chunker::chunk(content);
         let hash = blake3::hash(content.as_bytes());
-        store.reindex_file("CommonModules/A.bsl", hash.as_bytes(), &chunks, None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "CommonModules/A.bsl",
+                hash.as_bytes(),
+                &chunks,
+                None,
+            )
+            .unwrap();
 
         let adapter = LocalStoreBaselineAdapter::workspace_code(&store);
         let baseline =
@@ -94,7 +103,15 @@ mod tests {
         let content = "Процедура Исходная()\nКонецПроцедуры";
         let chunks = Chunker::chunk(content);
         let hash = blake3::hash(content.as_bytes());
-        store.reindex_file("CommonModules/A.bsl", hash.as_bytes(), &chunks, None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "CommonModules/A.bsl",
+                hash.as_bytes(),
+                &chunks,
+                None,
+            )
+            .unwrap();
 
         let adapter = LocalStoreBaselineAdapter::workspace_code(&store);
         let service = BaselineOverlaySearchService::new(

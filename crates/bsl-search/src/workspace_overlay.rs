@@ -1632,6 +1632,7 @@ mod tests {
         WorkspaceOverlayCache, WorkspaceOverlayStats, MAX_DIRTY_REFRESH_FAILURES,
     };
     use crate::store::Store;
+    use crate::workspace_roots::CONFIGURATION_ROOT_ID;
     use std::collections::HashMap;
     use std::fs;
     use tempfile::tempdir;
@@ -1992,8 +1993,12 @@ mod tests {
         let chunks_b = crate::Chunker::chunk(&fs::read_to_string(&file_b).unwrap());
         let hash_a = blake3::hash(fs::read(&file_a).unwrap().as_slice());
         let hash_b = blake3::hash(fs::read(&file_b).unwrap().as_slice());
-        store.reindex_file("A.bsl", hash_a.as_bytes(), &chunks_a, None).unwrap();
-        store.reindex_file("B.bsl", hash_b.as_bytes(), &chunks_b, None).unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "A.bsl", hash_a.as_bytes(), &chunks_a, None)
+            .unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "B.bsl", hash_b.as_bytes(), &chunks_b, None)
+            .unwrap();
 
         fs::write(&file_a, "Процедура НовоеИмя()\nКонецПроцедуры").unwrap();
         fs::remove_file(&file_b).unwrap();
@@ -2065,8 +2070,12 @@ mod tests {
         let chunks_b = crate::Chunker::chunk(&fs::read_to_string(&file_b).unwrap());
         let hash_a = blake3::hash(fs::read(&file_a).unwrap().as_slice());
         let hash_b = blake3::hash(fs::read(&file_b).unwrap().as_slice());
-        store.reindex_file("A.bsl", hash_a.as_bytes(), &chunks_a, None).unwrap();
-        store.reindex_file("B.bsl", hash_b.as_bytes(), &chunks_b, None).unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "A.bsl", hash_a.as_bytes(), &chunks_a, None)
+            .unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "B.bsl", hash_b.as_bytes(), &chunks_b, None)
+            .unwrap();
 
         fs::write(&file_a, "Процедура Измененная()\nКонецПроцедуры").unwrap();
         fs::remove_file(&file_b).unwrap();
@@ -2100,7 +2109,7 @@ mod tests {
         let mut store = Store::open(&db_path).unwrap();
         let chunks = crate::Chunker::chunk(&fs::read_to_string(&file).unwrap());
         let hash = blake3::hash(fs::read(&file).unwrap().as_slice());
-        store.reindex_file("A.bsl", hash.as_bytes(), &chunks, None).unwrap();
+        store.reindex_file(CONFIGURATION_ROOT_ID, "A.bsl", hash.as_bytes(), &chunks, None).unwrap();
 
         let mut cache = WorkspaceOverlayCache::default();
         cache.enable_watcher_mode();

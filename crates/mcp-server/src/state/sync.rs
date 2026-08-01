@@ -1243,6 +1243,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "Gone.bsl",
                     b"ha",
                     &[Chunk {
