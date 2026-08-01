@@ -17,14 +17,25 @@ use std::path::{Path, PathBuf};
 /// their meaning under the composite key without being rewritten.
 pub const CONFIGURATION_ROOT_ID: &str = "";
 
-/// An extension root that lies inside the configuration root and is therefore
-/// not registered separately. Reported rather than swallowed: its files stay
-/// searchable as the configuration's, but their root label is the
-/// configuration's too.
+/// A declared root that did not become a registered one. Reported rather than
+/// swallowed: the caller has to be able to say which root it dropped and why,
+/// because in both cases some files end up labelled differently than declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedRoot {
     pub path: PathBuf,
-    pub inside: PathBuf,
+    pub reason: Rejection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rejection {
+    /// Canonically inside the configuration root. Its files stay searchable as
+    /// the configuration's, but their root label is the configuration's too.
+    InsideConfiguration { root: PathBuf },
+    /// Its identifier is already taken by another root, so registering it would
+    /// give two different directories one key space and let the second overwrite
+    /// the first. Reachable because the identifier is a lossy string: two paths
+    /// that differ only in bytes no `str` can hold render identically.
+    IdentifierTaken { id: String },
 }
 
 /// The identity of an indexed file: the root it belongs to and its path relative
@@ -111,7 +122,7 @@ impl WorkspaceRoots {
             {
                 rejected.push(RejectedRoot {
                     path: extension.clone(),
-                    inside: configuration.to_path_buf(),
+                    reason: Rejection::InsideConfiguration { root: configuration.to_path_buf() },
                 });
                 continue;
             }
@@ -119,11 +130,18 @@ impl WorkspaceRoots {
             if roots.iter().any(|root| root.canonical == canonical) {
                 continue;
             }
-            roots.push(Root {
-                id: root_id_for(&workspace_canonical, &canonical, extension),
-                declared: extension.clone(),
-                canonical,
-            });
+            // The identifier is the key space of every stored row, so two roots
+            // sharing one would make the second silently overwrite the first —
+            // and `resolve` would hand back the wrong directory for both.
+            let id = root_id_for(&workspace_canonical, &canonical, extension);
+            if roots.iter().any(|root| root.id == id) {
+                rejected.push(RejectedRoot {
+                    path: extension.clone(),
+                    reason: Rejection::IdentifierTaken { id },
+                });
+                continue;
+            }
+            roots.push(Root { id, declared: extension.clone(), canonical });
         }
 
         (Self { workspace: workspace_root.to_path_buf(), roots }, rejected)
@@ -343,7 +361,10 @@ mod tests {
 
         assert_eq!(
             rejected,
-            vec![RejectedRoot { path: made[1].clone(), inside: made[0].clone() }],
+            vec![RejectedRoot {
+                path: made[1].clone(),
+                reason: Rejection::InsideConfiguration { root: made[0].clone() },
+            }],
             "the overlap must be named, not swallowed"
         );
         // Not lost: the configuration walk is recursive, so the file is still
@@ -404,6 +425,42 @@ mod tests {
             owner(&roots, &made[0].join(MODULE)),
             Some(FileKey::new(CONFIGURATION_ROOT_ID, MODULE.to_owned())),
             "one file must not produce both a configuration row and an extension row"
+        );
+    }
+
+    /// The identifier is a lossy rendering of a path, so two directories that
+    /// differ only in bytes no `str` can hold render the same. Registering both
+    /// would give one key space to two roots: the second's rows would overwrite
+    /// the first's, and `resolve` would hand back the wrong directory for either.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_whose_identifier_is_already_taken_is_rejected() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["cf"]);
+        let first = dir.path().join(OsString::from_vec(vec![b'a', 0x80]));
+        let second = dir.path().join(OsString::from_vec(vec![b'a', 0x81]));
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+
+        let (roots, rejected) =
+            WorkspaceRoots::build(dir.path(), &made[0], &[first.clone(), second.clone()]);
+
+        let ids: Vec<&str> = roots.ids().collect();
+        assert_eq!(ids.len(), 2, "the configuration and exactly one of the two: {ids:?}");
+        assert_eq!(
+            rejected,
+            vec![RejectedRoot {
+                path: second,
+                reason: Rejection::IdentifierTaken { id: ids[1].to_owned() },
+            }],
+            "the dropped root is named, not swallowed"
+        );
+        assert_eq!(
+            roots.resolve(&FileKey::new(ids[1], MODULE)).as_deref(),
+            Some(first.join(MODULE).as_path()),
+            "the surviving root keeps its own directory"
         );
     }
 

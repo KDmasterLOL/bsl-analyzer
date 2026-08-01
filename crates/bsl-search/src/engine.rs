@@ -1171,9 +1171,7 @@ impl SearchEngine {
     /// A relative path is taken as workspace-relative — that is the only reading
     /// available, and the callers that pass one have already stripped the
     /// workspace prefix themselves. The canonical spelling is what attribution
-    /// ranks roots by; for a file already deleted it cannot be taken, and the
-    /// walked spelling stands in, which is exactly why
-    /// [`WorkspaceRoots::root_of`] takes two spellings.
+    /// ranks roots by, which is why [`WorkspaceRoots::root_of`] takes two.
     fn workspace_file_key(&self, path: &Path) -> Option<FileKey> {
         let roots = self.workspace_roots.as_ref()?;
         if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
@@ -1181,8 +1179,7 @@ impl SearchEngine {
         }
         let walked =
             if path.is_absolute() { path.to_path_buf() } else { roots.workspace().join(path) };
-        let canonical = std::fs::canonicalize(&walked).unwrap_or_else(|_| walked.clone());
-        roots.root_of(&walked, &canonical)
+        roots.root_of(&walked, &canonical_spelling(&walked))
     }
 
     /// Mark one workspace `.bsl` file's stored graph context stale, so a later
@@ -2152,6 +2149,26 @@ impl SearchEngine {
     }
 }
 
+/// The canonical spelling of a path, falling back to the canonical spelling of
+/// its directory when the file itself is gone.
+///
+/// Deletion is the case this exists for: a removed file cannot be canonicalized,
+/// and dropping all the way to the walked spelling would leave attribution
+/// ranking roots by their declared paths alone. A file that lived under a root
+/// reached through an alias would then be removed under a DIFFERENT root's key —
+/// tombstone and all — while its real row stayed behind serving a dead hit.
+fn canonical_spelling(path: &Path) -> std::path::PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+            .map(|parent| parent.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
 struct FileTask {
     rel_path: String,
     hash: Vec<u8>,
@@ -2969,6 +2986,55 @@ mod tests {
         assert!(
             tombstones.contains(&FileKey::configuration("Removed.bsl")),
             "the deleted path is tombstoned so a baseline hit stays hidden: {tombstones:?}",
+        );
+    }
+
+    /// Two roots whose declared nesting is the reverse of their canonical one: an
+    /// outer root reached through an alias, and an inner root registered under the
+    /// alias's real path. A file deleted there cannot be canonicalized, and ranking
+    /// the roots by their declared spellings alone would pick the outer one — so the
+    /// removal would tombstone a key nobody ever wrote and leave the real row serving
+    /// a dead hit.
+    #[cfg(unix)]
+    #[test]
+    fn a_deletion_reached_through_an_alias_removes_the_row_the_file_lived_under() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        let outer = outside.path().join("outer");
+        let inner = outer.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        let alias = workspace.join("alias");
+        std::os::unix::fs::symlink(&outer, &alias).unwrap();
+
+        let file = inner.join("X.bsl");
+        fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, rejected) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            &[alias.clone(), inner.clone()],
+        );
+        assert!(rejected.is_empty(), "both roots register: {rejected:?}");
+        engine.set_workspace_roots(roots);
+
+        // The file is stored under the root it physically lives in, which is what
+        // the walk would have attributed it to.
+        let lived_under =
+            engine.workspace_file_key(&file).expect("a live file attributes to its own root");
+        engine.store().upsert_file(&lived_under.root_id, &lived_under.path, b"h", "code").unwrap();
+        assert_eq!(engine.file_count().unwrap(), 1);
+
+        fs::remove_file(&file).unwrap();
+        assert!(engine.remove_workspace_path(alias.join("inner/X.bsl")).unwrap());
+
+        assert_eq!(
+            engine.file_count().unwrap(),
+            0,
+            "the row of the root the file lived under is the one removed",
         );
     }
 

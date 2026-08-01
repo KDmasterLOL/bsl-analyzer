@@ -1267,11 +1267,24 @@ fn scan_one_root(roots: &WorkspaceRoots, root: &Path) -> Vec<WorkspaceFileState>
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
         .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
             let walked = entry.path();
-            let canonical = match walked.strip_prefix(root) {
-                Ok(rel) => root_canonical.join(rel),
-                Err(_) => walked.to_path_buf(),
+            // Following the link: the read below reads the target, so the target
+            // is what the fingerprint must describe. A dangling link fails here
+            // and is dropped, which is right — there is no file to index.
+            let metadata = std::fs::metadata(walked).ok()?;
+            // A symlinked FILE is still yielded (only directory links are not
+            // descended into), and it may point out of this root entirely. Its
+            // canonical spelling has to be taken for real; deriving it from the
+            // root would name a file that is not the one being read, and the
+            // point-update path — which canonicalizes in full — would then
+            // attribute the same file to a different root.
+            let canonical = if entry.path_is_symlink() {
+                std::fs::canonicalize(walked).ok()?
+            } else {
+                match walked.strip_prefix(root) {
+                    Ok(rel) => root_canonical.join(rel),
+                    Err(_) => walked.to_path_buf(),
+                }
             };
             let key = roots.root_of(walked, &canonical)?;
             Some(WorkspaceFileState {
@@ -2211,6 +2224,69 @@ mod tests {
             "the file belongs to the extension, not to the configuration the alias sits in"
         );
         assert_eq!(document.path, MODULE, "keyed relative to its own root");
+    }
+
+    /// A `.bsl` that is a symlink into another root belongs to the root it
+    /// physically lives in. Attributing it by the walked spelling would give one
+    /// file two entries and put the walk at odds with the point-update path,
+    /// which resolves the link in full.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_file_belongs_to_the_root_it_lives_in() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let target = extension.join("Target.bsl");
+        fs::write(&target, "Процедура ЖивётВРасширении()\nКонецПроцедуры").unwrap();
+        std::os::unix::fs::symlink(&target, configuration.join("Alias.bsl")).unwrap();
+
+        let (roots, _) =
+            WorkspaceRoots::build(workspace, &configuration, std::slice::from_ref(&extension));
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
+        let documents = cache.snapshot().lexical_documents;
+
+        assert_eq!(documents.len(), 1, "one file is one entry: {documents:?}");
+        assert_eq!(
+            (documents[0].root_id.as_str(), documents[0].path.as_str()),
+            ("cfe/one", "Target.bsl"),
+            "the root it lives in owns it, not the one holding the alias"
+        );
+    }
+
+    /// The fingerprint of a symlinked `.bsl` must describe the file whose bytes
+    /// are read — the target. Stat'ing the link instead reports the link's own
+    /// length and mtime, which do not move when the target is edited, so the
+    /// edit would be invisible to every later refresh.
+    #[cfg(unix)]
+    #[test]
+    fn editing_a_symlink_target_is_seen_through_the_link() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let target = outside.path().join("Настоящий.bsl");
+        fs::write(&target, "Процедура Старая()\nКонецПроцедуры").unwrap();
+        std::os::unix::fs::symlink(&target, workspace.join("Ссылка.bsl")).unwrap();
+
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let roots = single_root(workspace);
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "Старая");
+
+        fs::write(&target, "Процедура Новая()\nКонецПроцедуры").unwrap();
+        cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
+        let documents = cache.snapshot().lexical_documents;
+
+        assert_eq!(documents.len(), 1);
+        assert_eq!(
+            documents[0].symbol_name, "Новая",
+            "an edit behind the link must move the fingerprint"
+        );
     }
 
     #[test]
