@@ -203,8 +203,7 @@ impl SharedState {
                         );
                         return;
                     };
-                    let Some(workspace_root) = engine.workspace_root().map(Path::to_path_buf)
-                    else {
+                    let Some(roots) = engine.workspace_roots().cloned() else {
                         tracing::debug!("overlay warmup: no workspace root; skipping");
                         Self::set_overlay_warmup_state(
                             overlay_warmup,
@@ -244,7 +243,7 @@ impl SharedState {
                     Some((
                         engine.db_path().to_path_buf(),
                         embedder_config,
-                        workspace_root,
+                        roots,
                         warm_cache,
                         engine.graph_context_provider(),
                         dirty_before,
@@ -261,14 +260,8 @@ impl SharedState {
                 return;
             }
         };
-        let Some((
-            db_path,
-            embedder_config,
-            workspace_root,
-            warm_cache,
-            graph_provider,
-            dirty_before,
-        )) = cloned
+        let Some((db_path, embedder_config, roots, warm_cache, graph_provider, dirty_before)) =
+            cloned
         else {
             // Engine was published earlier but is gone now (e.g. shutdown raced the warmup).
             Self::set_overlay_warmup_state(
@@ -283,7 +276,7 @@ impl SharedState {
         let primed = SearchEngine::prime_workspace_overlay_standalone(
             &db_path,
             embedder_config,
-            &workspace_root,
+            &roots,
             warm_cache,
             graph_provider,
         );
@@ -898,7 +891,7 @@ mod tests {
             let guard = engine_arc.lock().unwrap();
             let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
             assert!(
-                dirty.contains(module_rel),
+                dirty.contains(&bsl_search::FileKey::configuration(module_rel)),
                 "the owned module is marked context-dirty: {dirty:?}"
             );
         }
@@ -996,7 +989,11 @@ mod tests {
         {
             let g = engine_arc.lock().unwrap();
             assert!(
-                g.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+                g.as_ref()
+                    .unwrap()
+                    .context_dirty_paths("code")
+                    .unwrap()
+                    .contains(&bsl_search::FileKey::configuration(module_rel)),
                 "the owned module is marked context-dirty",
             );
         }
@@ -1035,7 +1032,11 @@ mod tests {
         {
             let g = engine_arc.lock().unwrap();
             assert!(
-                g.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+                g.as_ref()
+                    .unwrap()
+                    .context_dirty_paths("code")
+                    .unwrap()
+                    .contains(&bsl_search::FileKey::configuration(module_rel)),
                 "a pending drift defers the refresh; the mark survives",
             );
         }
@@ -1058,7 +1059,11 @@ mod tests {
         {
             let g = engine_arc.lock().unwrap();
             assert!(
-                !g.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+                !g.as_ref()
+                    .unwrap()
+                    .context_dirty_paths("code")
+                    .unwrap()
+                    .contains(&bsl_search::FileKey::configuration(module_rel)),
                 "with no pending drift the mark is consumed",
             );
         }
@@ -1152,7 +1157,12 @@ mod tests {
 
         let guard = engine_arc.lock().unwrap();
         assert!(
-            guard.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+            guard
+                .as_ref()
+                .unwrap()
+                .context_dirty_paths("code")
+                .unwrap()
+                .contains(&bsl_search::FileKey::configuration(module_rel)),
             "an unwired build's publish (bound 0) clears no marks; the mark survives",
         );
     }
@@ -1247,7 +1257,7 @@ mod tests {
                 .unwrap()
                 .context_dirty_paths("code")
                 .unwrap()
-                .contains(module_rel),
+                .contains(&bsl_search::FileKey::configuration(module_rel)),
             "the leftover mark survives the unwired boot publish",
         );
 
@@ -1265,7 +1275,7 @@ mod tests {
                 .unwrap()
                 .context_dirty_paths("code")
                 .unwrap()
-                .contains(module_rel),
+                .contains(&bsl_search::FileKey::configuration(module_rel)),
             "the leftover pickup consumed the mark with the wired bound",
         );
     }
@@ -1376,9 +1386,12 @@ mod tests {
 
         let guard = engine_arc.lock().unwrap();
         let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
-        assert!(!dirty.contains(leftover_rel), "the leftover mark is consumed by the pickup");
         assert!(
-            dirty.contains(newer_rel),
+            !dirty.contains(&bsl_search::FileKey::configuration(leftover_rel)),
+            "the leftover mark is consumed by the pickup"
+        );
+        assert!(
+            dirty.contains(&bsl_search::FileKey::configuration(newer_rel)),
             "the newer mark (stamped after the captured bound) survives the pickup",
         );
     }
@@ -1478,11 +1491,11 @@ mod tests {
         let guard = engine_arc.lock().unwrap();
         let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
         assert!(
-            !dirty.contains(leftover_rel),
+            !dirty.contains(&bsl_search::FileKey::configuration(leftover_rel)),
             "the deferred pickup consumed the leftover mark with the stored bound",
         );
         assert!(
-            dirty.contains(newer_rel),
+            dirty.contains(&bsl_search::FileKey::configuration(newer_rel)),
             "the newer mark (stamped after the captured bound) survives the deferred pickup",
         );
     }

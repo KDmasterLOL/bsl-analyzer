@@ -51,6 +51,7 @@ mod tests {
     fn indexed_document_fingerprint_changes_when_content_changes() {
         let docs_a = vec![IndexedDocument {
             collection: "platform".to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: "platform://docs".to_owned(),
             symbol_name: "A".to_owned(),
             kind: "type".to_owned(),

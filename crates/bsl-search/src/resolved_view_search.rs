@@ -27,6 +27,7 @@ mod tests {
             vec![
                 IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "A.bsl".to_owned(),
                     symbol_name: "Найти".to_owned(),
                     kind: "procedure".to_owned(),
@@ -38,6 +39,7 @@ mod tests {
                 },
                 IndexedDocument {
                     collection: "platform".to_owned(),
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "platform://docs".to_owned(),
                     symbol_name: "Найти".to_owned(),
                     kind: "method".to_owned(),

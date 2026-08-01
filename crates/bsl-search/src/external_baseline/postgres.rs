@@ -13,6 +13,7 @@ use crate::ports::{
     BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotContentStore,
     SnapshotPublisher, WorkspaceBaselineManifestStore,
 };
+use crate::workspace_roots::CONFIGURATION_ROOT_ID;
 use postgres::{GenericClient, NoTls, Row, Transaction};
 use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1345,6 +1346,9 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
                 for item in items {
                     documents.push(IndexedDocument {
                         collection: file.collection.clone(),
+                        // The published corpus is built from the configuration
+                        // root alone, so its rows carry no other identity.
+                        root_id: CONFIGURATION_ROOT_ID.to_owned(),
                         path: file.path.clone(),
                         symbol_name: item.symbol_name.clone(),
                         kind: item.kind.clone(),
@@ -1455,6 +1459,7 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
             .into_iter()
             .map(|row| LexicalHit {
                 collection: row.get("collection"),
+                root_id: CONFIGURATION_ROOT_ID.to_owned(),
                 path: row.get("path"),
                 symbol_name: row.get("symbol_name"),
                 kind: row.get("kind"),
@@ -1545,6 +1550,7 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
             .into_iter()
             .map(|row| SemanticHit {
                 collection: row.get("collection"),
+                root_id: CONFIGURATION_ROOT_ID.to_owned(),
                 path: row.get("path"),
                 symbol_name: row.get("symbol_name"),
                 kind: row.get("kind"),
@@ -3419,7 +3425,13 @@ mod tests {
         // themselves are under test.
         let documents: Vec<IndexedDocument> = code_chunk::Chunker::chunk(content)
             .iter()
-            .map(|chunk| crate::document::indexed_document_for_chunk(rel_path, chunk, None))
+            .map(|chunk| {
+                crate::document::indexed_document_for_chunk(
+                    &crate::FileKey::configuration(rel_path),
+                    chunk,
+                    None,
+                )
+            })
             .collect();
         assert!(documents.len() > 1, "the fixture must exercise more than one chunk");
 
@@ -3528,6 +3540,7 @@ mod tests {
     ) -> IndexedDocument {
         IndexedDocument {
             collection: collection.to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: path.to_owned(),
             symbol_name: symbol_name.to_owned(),
             kind: "procedure".to_owned(),

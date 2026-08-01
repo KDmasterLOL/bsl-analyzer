@@ -1,6 +1,6 @@
 use crate::document::Document;
 use crate::error::SearchError;
-use crate::workspace_roots::CONFIGURATION_ROOT_ID;
+use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
 use code_chunk::Chunk;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
@@ -890,11 +890,12 @@ impl Store {
     /// The set of paths currently marked context-dirty in `collection`, regardless of
     /// mark `seq`. Used for status/assertions; the consuming refresh uses the bounded
     /// [`Self::context_dirty_paths_bounded`] variant.
-    pub fn context_dirty_paths(&self, collection: &str) -> Result<HashSet<String>, SearchError> {
-        let mut stmt = self.conn.prepare("SELECT path FROM context_dirty WHERE collection = ?1")?;
+    pub fn context_dirty_paths(&self, collection: &str) -> Result<HashSet<FileKey>, SearchError> {
+        let mut stmt =
+            self.conn.prepare("SELECT root_id, path FROM context_dirty WHERE collection = ?1")?;
         let rows = stmt
-            .query_map(params![collection], |row| row.get::<_, String>(0))?
-            .collect::<Result<HashSet<String>, _>>()?;
+            .query_map(params![collection], file_key_row)?
+            .collect::<Result<HashSet<FileKey>, _>>()?;
         Ok(rows)
     }
 
@@ -906,13 +907,13 @@ impl Store {
         &self,
         collection: &str,
         seq_bound: i64,
-    ) -> Result<HashSet<String>, SearchError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path FROM context_dirty WHERE collection = ?1 AND seq <= ?2")?;
+    ) -> Result<HashSet<FileKey>, SearchError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT root_id, path FROM context_dirty WHERE collection = ?1 AND seq <= ?2",
+        )?;
         let rows = stmt
-            .query_map(params![collection, seq_bound], |row| row.get::<_, String>(0))?
-            .collect::<Result<HashSet<String>, _>>()?;
+            .query_map(params![collection, seq_bound], file_key_row)?
+            .collect::<Result<HashSet<FileKey>, _>>()?;
         Ok(rows)
     }
 
@@ -1307,13 +1308,14 @@ impl Store {
             .conn
             .query_row(
                 "SELECT c.kind, c.symbol_name, c.line_start, c.line_end, c.text,
-                        c.annotations, c.is_export, f.path, f.collection
+                        c.annotations, c.is_export, f.path, f.collection, f.root_id
                  FROM chunks c
                  JOIN files f ON f.id = c.file_id
                  WHERE c.id = ?1",
                 params![chunk_id],
                 |row| {
                     Ok(ChunkInfo {
+                        root_id: row.get(9)?,
                         file_path: row.get(7)?,
                         collection: row.get(8)?,
                         kind: row.get(0)?,
@@ -1349,7 +1351,7 @@ impl Store {
             let placeholders = std::iter::repeat_n("?", batch.len()).collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT c.id, c.kind, c.symbol_name, c.line_start, c.line_end, c.text,
-                        c.annotations, c.is_export, f.path, f.collection
+                        c.annotations, c.is_export, f.path, f.collection, f.root_id
                  FROM chunks c
                  JOIN files f ON f.id = c.file_id
                  WHERE c.id IN ({placeholders})"
@@ -1359,6 +1361,7 @@ impl Store {
                 Ok((
                     row.get::<_, i64>(0)?,
                     ChunkInfo {
+                        root_id: row.get(10)?,
                         file_path: row.get(8)?,
                         collection: row.get(9)?,
                         kind: row.get(1)?,
@@ -1379,10 +1382,9 @@ impl Store {
         Ok(out)
     }
 
-    pub fn all_files(&self) -> Result<Vec<(String, Vec<u8>)>, SearchError> {
-        let mut stmt = self.conn.prepare("SELECT path, hash FROM files")?;
-        let rows =
-            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+    pub fn all_files(&self) -> Result<Vec<(FileKey, Vec<u8>)>, SearchError> {
+        let mut stmt = self.conn.prepare("SELECT root_id, path, hash FROM files")?;
+        let rows = stmt.query_map([], |row| Ok((file_key_row(row)?, row.get::<_, Vec<u8>>(2)?)))?;
 
         let mut result = Vec::new();
         for row in rows {
@@ -1394,10 +1396,11 @@ impl Store {
     pub fn all_files_in_collection(
         &self,
         collection: &str,
-    ) -> Result<Vec<(String, Vec<u8>)>, SearchError> {
-        let mut stmt = self.conn.prepare("SELECT path, hash FROM files WHERE collection = ?1")?;
+    ) -> Result<Vec<(FileKey, Vec<u8>)>, SearchError> {
+        let mut stmt =
+            self.conn.prepare("SELECT root_id, path, hash FROM files WHERE collection = ?1")?;
         let rows = stmt.query_map(params![collection], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((file_key_row(row)?, row.get::<_, Vec<u8>>(2)?))
         })?;
 
         let mut result = Vec::new();
@@ -1432,17 +1435,17 @@ impl Store {
     ) -> Result<Vec<crate::IndexedDocument>, SearchError> {
         let query = if collection.is_some() {
             "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text,
-                    c.graph_context
+                    c.graph_context, f.root_id
              FROM chunks c
              JOIN files f ON f.id = c.file_id
              WHERE f.collection = ?1
-             ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
+             ORDER BY f.collection, f.root_id, f.path, c.line_start, c.line_end, c.symbol_name"
         } else {
             "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text,
-                    c.graph_context
+                    c.graph_context, f.root_id
              FROM chunks c
              JOIN files f ON f.id = c.file_id
-             ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
+             ORDER BY f.collection, f.root_id, f.path, c.line_start, c.line_end, c.symbol_name"
         };
 
         let mut stmt = self.conn.prepare(query)?;
@@ -1451,6 +1454,7 @@ impl Store {
                 let text: String = row.get(6)?;
                 Ok(crate::IndexedDocument {
                     collection: row.get(0)?,
+                    root_id: row.get(8)?,
                     path: row.get(1)?,
                     symbol_name: row.get(2)?,
                     kind: row.get(3)?,
@@ -1467,6 +1471,7 @@ impl Store {
                 let text: String = row.get(6)?;
                 Ok(crate::IndexedDocument {
                     collection: row.get(0)?,
+                    root_id: row.get(8)?,
                     path: row.get(1)?,
                     symbol_name: row.get(2)?,
                     kind: row.get(3)?,
@@ -1494,11 +1499,11 @@ impl Store {
     ) -> Result<Vec<(i64, crate::IndexedDocument)>, SearchError> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id, f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end,
-                    c.text, c.graph_context
+                    c.text, c.graph_context, f.root_id
              FROM chunks c
              JOIN files f ON f.id = c.file_id
              WHERE f.collection = ?1 AND c.embedding IS NULL
-             ORDER BY f.path, c.line_start, c.line_end, c.symbol_name",
+             ORDER BY f.root_id, f.path, c.line_start, c.line_end, c.symbol_name",
         )?;
         let rows = stmt
             .query_map(params![collection], |row| {
@@ -1508,6 +1513,7 @@ impl Store {
                     id,
                     crate::IndexedDocument {
                         collection: row.get(1)?,
+                        root_id: row.get(9)?,
                         path: row.get(2)?,
                         symbol_name: row.get(3)?,
                         kind: row.get(4)?,
@@ -1734,11 +1740,22 @@ impl Store {
         tx.execute("DELETE FROM baseline_manifest_files", [])?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO baseline_manifest_files (collection, path, file_fingerprint)
-                 VALUES (?1, ?2, ?3)",
+                "INSERT INTO baseline_manifest_files
+                 (root_id, collection, path, file_fingerprint)
+                 VALUES (?1, ?2, ?3, ?4)",
             )?;
+            // A published manifest describes the configuration root and nothing
+            // else: the publisher builds its corpus from that root alone, so its
+            // paths are already spelled relative to it. Stamping the id here
+            // rather than leaning on the column default keeps that fact visible
+            // at the one place a manifest enters the store.
             for file in &manifest.files {
-                stmt.execute(params![file.collection, file.path, file.file_fingerprint])?;
+                stmt.execute(params![
+                    CONFIGURATION_ROOT_ID,
+                    file.collection,
+                    file.path,
+                    file.file_fingerprint
+                ])?;
             }
         }
         tx.commit()?;
@@ -1768,7 +1785,7 @@ impl Store {
     pub fn load_baseline_manifest_fingerprints(
         &self,
         collection: &str,
-    ) -> Result<Option<HashMap<String, String>>, SearchError> {
+    ) -> Result<Option<HashMap<FileKey, String>>, SearchError> {
         let has_manifest = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM baseline_manifest WHERE id = 1)",
             [],
@@ -1779,17 +1796,17 @@ impl Store {
         }
 
         let mut stmt = self.conn.prepare(
-            "SELECT path, file_fingerprint
+            "SELECT root_id, path, file_fingerprint
              FROM baseline_manifest_files
              WHERE collection = ?1",
         )?;
         let rows = stmt.query_map(params![collection], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((file_key_row(row)?, row.get::<_, String>(2)?))
         })?;
         let mut fingerprints = HashMap::new();
         for row in rows {
-            let (path, fingerprint) = row?;
-            fingerprints.insert(path, fingerprint);
+            let (key, fingerprint) = row?;
+            fingerprints.insert(key, fingerprint);
         }
         Ok(Some(fingerprints))
     }
@@ -1856,15 +1873,16 @@ impl Store {
     pub fn overlay_tombstone_paths(
         &self,
         collection: &str,
-    ) -> Result<HashSet<String>, SearchError> {
-        let mut stmt =
-            self.conn.prepare("SELECT path FROM overlay_tombstones WHERE collection = ?1")?;
-        let rows = stmt.query_map(params![collection], |row| row.get::<_, String>(0))?;
-        let mut paths = HashSet::new();
+    ) -> Result<HashSet<FileKey>, SearchError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT root_id, path FROM overlay_tombstones WHERE collection = ?1")?;
+        let rows = stmt.query_map(params![collection], file_key_row)?;
+        let mut keys = HashSet::new();
         for row in rows {
-            paths.insert(row?);
+            keys.insert(row?);
         }
-        Ok(paths)
+        Ok(keys)
     }
 
     pub fn clear_overlay_tombstones(&self, collection: &str) -> Result<(), SearchError> {
@@ -2015,7 +2033,7 @@ impl Store {
         let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let query = format!(
             "SELECT c.kind, c.symbol_name, c.line_start, c.line_end, c.text,
-                    c.annotations, c.is_export, f.path, f.collection
+                    c.annotations, c.is_export, f.path, f.collection, f.root_id
              FROM overlay_chunks c
              JOIN overlay_files f ON f.id = c.file_id
              WHERE c.id IN ({})",
@@ -2026,6 +2044,7 @@ impl Store {
             chunk_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
         let rows = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
             Ok(ChunkInfo {
+                root_id: row.get(9)?,
                 file_path: row.get(7)?,
                 collection: row.get(8)?,
                 kind: row.get(0)?,
@@ -2095,27 +2114,28 @@ impl Store {
     pub fn load_overlay_fingerprint_cache(
         &self,
         manifest_snapshot_id: &str,
-    ) -> Result<Option<HashMap<String, PersistedFingerprint>>, SearchError> {
+    ) -> Result<Option<HashMap<FileKey, PersistedFingerprint>>, SearchError> {
         let mut stmt = self.conn.prepare(
-            "SELECT path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint
+            "SELECT root_id, path, file_size, file_mtime_secs, file_mtime_nanos,
+                    content_fingerprint
              FROM overlay_fingerprint_cache
              WHERE manifest_snapshot_id = ?1",
         )?;
         let rows = stmt.query_map(params![manifest_snapshot_id], |row| {
             Ok((
-                row.get::<_, String>(0)?,
+                file_key_row(row)?,
                 PersistedFingerprint {
-                    file_size: row.get::<_, i64>(1)? as u64,
-                    file_mtime_secs: row.get::<_, i64>(2)?,
-                    file_mtime_nanos: row.get::<_, u32>(3)?,
-                    content_fingerprint: row.get::<_, String>(4)?,
+                    file_size: row.get::<_, i64>(2)? as u64,
+                    file_mtime_secs: row.get::<_, i64>(3)?,
+                    file_mtime_nanos: row.get::<_, u32>(4)?,
+                    content_fingerprint: row.get::<_, String>(5)?,
                 },
             ))
         })?;
         let mut map = HashMap::new();
         for row in rows {
-            let (path, entry) = row?;
-            map.insert(path, entry);
+            let (key, entry) = row?;
+            map.insert(key, entry);
         }
         if map.is_empty() {
             let any_rows: bool = self.conn.query_row(
@@ -2134,17 +2154,19 @@ impl Store {
     pub fn save_overlay_fingerprint_cache(
         &self,
         manifest_snapshot_id: &str,
-        entries: &HashMap<String, PersistedFingerprint>,
+        entries: &HashMap<FileKey, PersistedFingerprint>,
     ) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
         let mut stmt = self.conn.prepare(
             "INSERT INTO overlay_fingerprint_cache
-             (path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint, manifest_snapshot_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (root_id, path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint,
+              manifest_snapshot_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
-        for (path, entry) in entries {
+        for (key, entry) in entries {
             stmt.execute(params![
-                path,
+                key.root_id,
+                key.path,
                 entry.file_size as i64,
                 entry.file_mtime_secs,
                 entry.file_mtime_nanos,
@@ -2242,8 +2264,16 @@ pub struct TextSearchResult {
     pub rank: f64,
 }
 
+/// The identity of a row whose first two selected columns are `root_id, path`.
+/// Every listing query selects them in that order so the key is read the same
+/// way everywhere.
+fn file_key_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileKey> {
+    Ok(FileKey::new(row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+}
+
 #[derive(Debug, Clone)]
 pub struct ChunkInfo {
+    pub root_id: String,
     pub file_path: String,
     pub collection: String,
     pub kind: String,
@@ -2274,7 +2304,7 @@ pub struct PersistedFingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_roots::CONFIGURATION_ROOT_ID;
+    use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
     use code_chunk::{Chunk, ChunkKind};
 
     /// A store in the shape the release before composite keys wrote, built with
@@ -2720,7 +2750,7 @@ mod tests {
         store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
         assert_eq!(
             store.context_dirty_paths("code").unwrap(),
-            HashSet::from(["Owned.bsl".to_owned()]),
+            HashSet::from([FileKey::configuration("Owned.bsl")]),
         );
         // The side table must not fire the chunk triggers, or every metadata edit would
         // invalidate the persisted vector index for a mark that changes no embedding.
@@ -2739,7 +2769,7 @@ mod tests {
         store.clear_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
         assert_eq!(
             store.context_dirty_paths("code").unwrap(),
-            HashSet::from(["Other.bsl".to_owned()]),
+            HashSet::from([FileKey::configuration("Other.bsl")]),
         );
     }
 
@@ -2766,9 +2796,12 @@ mod tests {
         assert_eq!(marked, 1, "only the file with no fresher mark is stamped by the batch");
 
         let batch = store.context_dirty_paths_bounded("code", build_start_seq).unwrap();
-        assert!(batch.contains("Stable.bsl"), "the batch re-renders what the build reflects");
         assert!(
-            !batch.contains("Drifted.bsl"),
+            batch.contains(&FileKey::configuration("Stable.bsl")),
+            "the batch re-renders what the build reflects"
+        );
+        assert!(
+            !batch.contains(&FileKey::configuration("Drifted.bsl")),
             "a drift the build does not reflect is not re-rendered against it",
         );
 
@@ -2790,7 +2823,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.context_dirty_paths("code").unwrap(),
-            HashSet::from(["Drifted.bsl".to_owned()]),
+            HashSet::from([FileKey::configuration("Drifted.bsl")]),
             "and its mark survives for the publish that will reflect it",
         );
     }
@@ -2809,7 +2842,10 @@ mod tests {
         let build_start_seq = store.mark_seq_handle().load(Ordering::SeqCst);
         assert_eq!(build_start_seq, 1);
         let read_set = store.context_dirty_paths_bounded("code", build_start_seq).unwrap();
-        assert!(read_set.contains("P.bsl"), "P is in the build's read set");
+        assert!(
+            read_set.contains(&FileKey::configuration("P.bsl")),
+            "P is in the build's read set"
+        );
 
         // A fresher drift re-marks P (seq 2) while the build is processing its read set.
         store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "P.bsl").unwrap();
@@ -2821,14 +2857,14 @@ mod tests {
             .clear_context_dirty_bounded("code", CONFIGURATION_ROOT_ID, "P.bsl", build_start_seq)
             .unwrap();
         assert!(
-            store.context_dirty_paths("code").unwrap().contains("P.bsl"),
+            store.context_dirty_paths("code").unwrap().contains(&FileKey::configuration("P.bsl")),
             "the re-mark stamped after the build started survives the bounded clear",
         );
 
         // The next build (start-seq 2) does consume it.
         store.clear_context_dirty_bounded("code", CONFIGURATION_ROOT_ID, "P.bsl", 2).unwrap();
         assert!(
-            !store.context_dirty_paths("code").unwrap().contains("P.bsl"),
+            !store.context_dirty_paths("code").unwrap().contains(&FileKey::configuration("P.bsl")),
             "a build whose start-seq covers the re-mark clears it",
         );
     }
@@ -3605,8 +3641,14 @@ mod tests {
 
         let fingerprints = store.load_baseline_manifest_fingerprints("code").unwrap().unwrap();
         assert_eq!(fingerprints.len(), 2);
-        assert_eq!(fingerprints.get("src/A.bsl").map(String::as_str), Some("fp-a"));
-        assert_eq!(fingerprints.get("src/B.bsl").map(String::as_str), Some("fp-b"));
+        assert_eq!(
+            fingerprints.get(&FileKey::configuration("src/A.bsl")).map(String::as_str),
+            Some("fp-a")
+        );
+        assert_eq!(
+            fingerprints.get(&FileKey::configuration("src/B.bsl")).map(String::as_str),
+            Some("fp-b")
+        );
 
         store.clear_baseline_manifest().unwrap();
         assert!(store.load_baseline_manifest().unwrap().is_none());
@@ -3665,13 +3707,13 @@ mod tests {
 
         let paths = store.overlay_tombstone_paths("code").unwrap();
         assert_eq!(paths.len(), 2);
-        assert!(paths.contains("src/A.bsl"));
-        assert!(paths.contains("src/B.bsl"));
+        assert!(paths.contains(&FileKey::configuration("src/A.bsl")));
+        assert!(paths.contains(&FileKey::configuration("src/B.bsl")));
 
         store.remove_overlay_tombstone(CONFIGURATION_ROOT_ID, "src/A.bsl").unwrap();
         let paths = store.overlay_tombstone_paths("code").unwrap();
         assert_eq!(paths.len(), 1);
-        assert!(paths.contains("src/B.bsl"));
+        assert!(paths.contains(&FileKey::configuration("src/B.bsl")));
 
         store.clear_overlay_tombstones("code").unwrap();
         assert!(store.overlay_tombstone_paths("code").unwrap().is_empty());

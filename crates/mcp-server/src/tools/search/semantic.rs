@@ -320,7 +320,7 @@ fn run_direct_semantic(
 
 fn merge_direct_semantic_with_refill<F>(
     overlay_hits: &[SemanticHit],
-    hidden_paths: &HashSet<String>,
+    hidden_paths: &HashSet<bsl_search::FileKey>,
     limit: usize,
     mut fetch_baseline: F,
 ) -> DirectResult
@@ -389,15 +389,15 @@ mod tests {
     #[test]
     fn direct_semantic_refill_recovers_results_hidden_by_overlay() {
         let hidden_paths = HashSet::from([
-            "src/hidden1.bsl".to_owned(),
-            "src/hidden2.bsl".to_owned(),
-            "src/hidden3.bsl".to_owned(),
-            "src/hidden4.bsl".to_owned(),
-            "src/hidden5.bsl".to_owned(),
-            "src/hidden6.bsl".to_owned(),
-            "src/hidden7.bsl".to_owned(),
-            "src/hidden8.bsl".to_owned(),
-            "src/hidden9.bsl".to_owned(),
+            bsl_search::FileKey::configuration("src/hidden1.bsl"),
+            bsl_search::FileKey::configuration("src/hidden2.bsl"),
+            bsl_search::FileKey::configuration("src/hidden3.bsl"),
+            bsl_search::FileKey::configuration("src/hidden4.bsl"),
+            bsl_search::FileKey::configuration("src/hidden5.bsl"),
+            bsl_search::FileKey::configuration("src/hidden6.bsl"),
+            bsl_search::FileKey::configuration("src/hidden7.bsl"),
+            bsl_search::FileKey::configuration("src/hidden8.bsl"),
+            bsl_search::FileKey::configuration("src/hidden9.bsl"),
         ]);
         let baseline = vec![
             semantic_hit("src/hidden1.bsl", "Hidden1", 1.00),

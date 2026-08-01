@@ -76,6 +76,7 @@ mod tests {
     fn doc(symbol_name: &str, path: &str, text: &str, content_hash: &str) -> IndexedDocument {
         IndexedDocument {
             collection: "code".to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: path.to_owned(),
             symbol_name: symbol_name.to_owned(),
             kind: "procedure".to_owned(),
@@ -105,7 +106,7 @@ mod tests {
             BaselineOverlaySearchService::new(catalog, content_store, InMemoryResolvedViewResolver);
         let mut overlay = SearchOverlay::new(baseline.clone());
         overlay.replace_file(
-            DocumentPath::new("code", "CommonModules/A.bsl"),
+            DocumentPath::configuration("code", "CommonModules/A.bsl"),
             vec![doc("NewName", "CommonModules/A.bsl", "new body", "new-hash")],
         );
 

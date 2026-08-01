@@ -123,9 +123,10 @@ mod tests {
             BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "local-workspace-baseline");
         let mut overlay = SearchOverlay::new(baseline.clone());
         overlay.replace_file(
-            DocumentPath::new("code", "CommonModules/A.bsl"),
+            DocumentPath::configuration("code", "CommonModules/A.bsl"),
             vec![crate::IndexedDocument {
                 collection: "code".to_owned(),
+                root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                 path: "CommonModules/A.bsl".to_owned(),
                 symbol_name: "Измененная".to_owned(),
                 kind: "procedure".to_owned(),

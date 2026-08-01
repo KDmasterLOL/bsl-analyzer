@@ -523,6 +523,7 @@ mod tests {
     fn doc_hit_structure_rounds_the_score_the_listing_prints() {
         let hits = vec![SearchHit {
             collection: "platform".to_owned(),
+            root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
             file_path: "Массив.html".to_owned(),
             symbol_name: "Массив".to_owned(),
             kind: "type".to_owned(),
@@ -546,6 +547,7 @@ mod tests {
         // tie to even (0.062), arithmetic rounding breaks it away from zero (0.063).
         let hits = vec![SearchHit {
             collection: "platform".to_owned(),
+            root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
             file_path: "Массив.html".to_owned(),
             symbol_name: "Массив".to_owned(),
             kind: "type".to_owned(),

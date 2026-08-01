@@ -1347,6 +1347,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "GhostModule.bsl".to_owned(),
                     symbol_name: "ПризрачнаяПроцедура".to_owned(),
                     kind: "procedure".to_owned(),
@@ -1451,6 +1452,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "GhostModule.bsl".to_owned(),
                     symbol_name: "ПризрачнаяПроцедура".to_owned(),
                     kind: "procedure".to_owned(),
@@ -1702,7 +1704,7 @@ mod tests {
                     .workspace_overlay_dirty_paths_snapshot()
                     .unwrap()
                     .keys()
-                    .any(|p| p.ends_with("Module.bsl"))
+                    .any(|key| key.path.ends_with("Module.bsl"))
             };
             if marked {
                 break;
@@ -1911,7 +1913,7 @@ mod tests {
             .all_files_in_collection("code")
             .unwrap()
             .into_iter()
-            .map(|(path, _hash)| path)
+            .map(|(key, _hash)| key.path)
             .collect();
         assert!(
             files.iter().any(|p| p.contains("Постоянный")),

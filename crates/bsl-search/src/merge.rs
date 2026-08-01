@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::domain::{LexicalHit, OverlayChange, SearchOverlay, SemanticHit};
+use crate::workspace_roots::FileKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitSource {
@@ -11,6 +12,7 @@ pub enum HitSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergedHit {
     pub collection: String,
+    pub root_id: String,
     pub path: String,
     pub symbol_name: String,
     pub kind: String,
@@ -22,7 +24,11 @@ pub struct MergedHit {
 }
 
 pub struct MergeContext {
-    pub hidden_paths: HashSet<(String, String)>,
+    /// Which baseline files the overlay hides, as `(collection, key)`. Keyed by
+    /// the pair and not by the path alone: an extension's local file must not
+    /// hide the configuration file that repeats its relative path in the
+    /// published baseline.
+    pub hidden_paths: HashSet<(String, FileKey)>,
 }
 
 pub fn build_merge_context(overlay: &SearchOverlay) -> MergeContext {
@@ -30,12 +36,12 @@ pub fn build_merge_context(overlay: &SearchOverlay) -> MergeContext {
     for change in &overlay.changes {
         match change {
             OverlayChange::DeleteFile(doc_path) => {
-                hidden_paths.insert((doc_path.collection.clone(), doc_path.path.clone()));
+                hidden_paths.insert((doc_path.collection.clone(), key_of_document_path(doc_path)));
             }
             OverlayChange::ReplaceFile(file_overlay) => {
                 hidden_paths.insert((
                     file_overlay.target.collection.clone(),
-                    file_overlay.target.path.clone(),
+                    key_of_document_path(&file_overlay.target),
                 ));
             }
         }
@@ -43,9 +49,42 @@ pub fn build_merge_context(overlay: &SearchOverlay) -> MergeContext {
     MergeContext { hidden_paths }
 }
 
-pub fn merge_context_for_collection(paths: &HashSet<String>, collection: &str) -> MergeContext {
+fn key_of_document_path(doc_path: &crate::domain::DocumentPath) -> FileKey {
+    FileKey::new(&doc_path.root_id, &doc_path.path)
+}
+
+pub fn merge_context_for_collection(keys: &HashSet<FileKey>, collection: &str) -> MergeContext {
     MergeContext {
-        hidden_paths: paths.iter().map(|p| (collection.to_owned(), p.clone())).collect(),
+        hidden_paths: keys.iter().map(|key| (collection.to_owned(), key.clone())).collect(),
+    }
+}
+
+/// A hit's file identity. Built here rather than stored on the hit's key type so
+/// the two hit flavours (lexical, semantic) share one spelling.
+fn hit_key(hit: &(impl HitIdentity + ?Sized)) -> FileKey {
+    FileKey::new(hit.root_id(), hit.path())
+}
+
+trait HitIdentity {
+    fn root_id(&self) -> &str;
+    fn path(&self) -> &str;
+}
+
+impl HitIdentity for LexicalHit {
+    fn root_id(&self) -> &str {
+        &self.root_id
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+impl HitIdentity for SemanticHit {
+    fn root_id(&self) -> &str {
+        &self.root_id
+    }
+    fn path(&self) -> &str {
+        &self.path
     }
 }
 
@@ -57,9 +96,10 @@ pub fn merge_lexical(
 ) -> Vec<MergedHit> {
     let baseline_iter = baseline_hits
         .iter()
-        .filter(|h| !context.hidden_paths.contains(&(h.collection.clone(), h.path.clone())))
+        .filter(|h| !context.hidden_paths.contains(&(h.collection.clone(), hit_key(*h))))
         .map(|h| MergedHit {
             collection: h.collection.clone(),
+            root_id: h.root_id.clone(),
             path: h.path.clone(),
             symbol_name: h.symbol_name.clone(),
             kind: h.kind.clone(),
@@ -72,6 +112,7 @@ pub fn merge_lexical(
 
     let overlay_iter = overlay_hits.iter().map(|h| MergedHit {
         collection: h.collection.clone(),
+        root_id: h.root_id.clone(),
         path: h.path.clone(),
         symbol_name: h.symbol_name.clone(),
         kind: h.kind.clone(),
@@ -93,9 +134,10 @@ pub fn merge_semantic(
 ) -> Vec<MergedHit> {
     let baseline_iter = baseline_hits
         .iter()
-        .filter(|h| !context.hidden_paths.contains(&(h.collection.clone(), h.path.clone())))
+        .filter(|h| !context.hidden_paths.contains(&(h.collection.clone(), hit_key(*h))))
         .map(|h| MergedHit {
             collection: h.collection.clone(),
+            root_id: h.root_id.clone(),
             path: h.path.clone(),
             symbol_name: h.symbol_name.clone(),
             kind: h.kind.clone(),
@@ -108,6 +150,7 @@ pub fn merge_semantic(
 
     let overlay_iter = overlay_hits.iter().map(|h| MergedHit {
         collection: h.collection.clone(),
+        root_id: h.root_id.clone(),
         path: h.path.clone(),
         symbol_name: h.symbol_name.clone(),
         kind: h.kind.clone(),
@@ -121,12 +164,12 @@ pub fn merge_semantic(
     merge_and_rank(baseline_iter, overlay_iter, limit)
 }
 
-type DedupKey = (String, String, String, u32, u32);
+type DedupKey = (String, FileKey, String, u32, u32);
 
 fn dedup_key(hit: &MergedHit) -> DedupKey {
     (
         hit.collection.clone(),
-        hit.path.clone(),
+        FileKey::new(&hit.root_id, &hit.path),
         hit.symbol_name.clone(),
         hit.line_start,
         hit.line_end,
@@ -169,6 +212,7 @@ mod tests {
     fn lexical(collection: &str, path: &str, symbol: &str, rank: f32) -> LexicalHit {
         LexicalHit {
             collection: collection.into(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: path.into(),
             symbol_name: symbol.into(),
             kind: "function".into(),
@@ -182,6 +226,7 @@ mod tests {
     fn semantic(collection: &str, path: &str, symbol: &str, score: f32) -> SemanticHit {
         SemanticHit {
             collection: collection.into(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: path.into(),
             symbol_name: symbol.into(),
             kind: "function".into(),
@@ -197,7 +242,10 @@ mod tests {
 
     fn context_hiding(paths: &[(&str, &str)]) -> MergeContext {
         MergeContext {
-            hidden_paths: paths.iter().map(|(c, p)| (c.to_string(), p.to_string())).collect(),
+            hidden_paths: paths
+                .iter()
+                .map(|(c, p)| (c.to_string(), FileKey::configuration(*p)))
+                .collect(),
         }
     }
 
@@ -308,12 +356,16 @@ mod tests {
     fn build_merge_context_collects_hidden_paths() {
         let mut overlay =
             SearchOverlay::new(BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "snap1"));
-        overlay.delete_file(DocumentPath::new("code", "src/deleted.bsl"));
-        overlay.replace_file(DocumentPath::new("code", "src/replaced.bsl"), vec![]);
+        overlay.delete_file(DocumentPath::configuration("code", "src/deleted.bsl"));
+        overlay.replace_file(DocumentPath::configuration("code", "src/replaced.bsl"), vec![]);
 
         let ctx = build_merge_context(&overlay);
-        assert!(ctx.hidden_paths.contains(&("code".into(), "src/deleted.bsl".into())));
-        assert!(ctx.hidden_paths.contains(&("code".into(), "src/replaced.bsl".into())));
+        assert!(ctx
+            .hidden_paths
+            .contains(&("code".into(), FileKey::configuration("src/deleted.bsl"))));
+        assert!(ctx
+            .hidden_paths
+            .contains(&("code".into(), FileKey::configuration("src/replaced.bsl"))));
         assert_eq!(ctx.hidden_paths.len(), 2);
     }
 
@@ -362,8 +414,8 @@ mod tests {
     fn end_to_end_context_into_merge() {
         let mut overlay =
             SearchOverlay::new(BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "snap1"));
-        overlay.delete_file(DocumentPath::new("code", "src/deleted.bsl"));
-        overlay.replace_file(DocumentPath::new("code", "src/replaced.bsl"), vec![]);
+        overlay.delete_file(DocumentPath::configuration("code", "src/deleted.bsl"));
+        overlay.replace_file(DocumentPath::configuration("code", "src/replaced.bsl"), vec![]);
 
         let ctx = build_merge_context(&overlay);
         let baseline = vec![

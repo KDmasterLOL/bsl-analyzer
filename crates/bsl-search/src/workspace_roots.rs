@@ -27,6 +27,35 @@ pub struct RejectedRoot {
     pub inside: PathBuf,
 }
 
+/// The identity of an indexed file: the root it belongs to and its path relative
+/// to that root.
+///
+/// A pair rather than one string because the root cannot be folded into the path
+/// without a separator, and every separator collides with a legal configuration
+/// path. It is also what the store rows are keyed by, so a key that travels as
+/// one value cannot lose half of itself on the way to a lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FileKey {
+    pub root_id: String,
+    pub path: String,
+}
+
+impl FileKey {
+    pub fn new(root_id: impl Into<String>, path: impl Into<String>) -> Self {
+        Self { root_id: root_id.into(), path: path.into() }
+    }
+
+    /// A file of the configuration root — the only identity a published baseline
+    /// manifest can carry, since the publisher walks that root alone.
+    pub fn configuration(path: impl Into<String>) -> Self {
+        Self::new(CONFIGURATION_ROOT_ID, path)
+    }
+
+    pub fn is_configuration(&self) -> bool {
+        self.root_id == CONFIGURATION_ROOT_ID
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Root {
     id: String,
@@ -40,6 +69,11 @@ struct Root {
 /// The registered source roots of one workspace.
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceRoots {
+    /// The workspace itself. Not a source root — root ids are relative to it,
+    /// and callers that speak of "the project directory" (the graph, the
+    /// resident host) mean this and not the configuration root, which may sit in
+    /// a subdirectory.
+    workspace: PathBuf,
     roots: Vec<Root>,
 }
 
@@ -92,7 +126,7 @@ impl WorkspaceRoots {
             });
         }
 
-        (Self { roots }, rejected)
+        (Self { workspace: workspace_root.to_path_buf(), roots }, rejected)
     }
 
     /// The root a file belongs to and the key it is stored under, or `None` when
@@ -104,15 +138,27 @@ impl WorkspaceRoots {
     /// only handle on a file the walk reached through a symlink that leaves
     /// every root. Such a file is not dropped — the graph has always seen it —
     /// it is keyed by the walking root instead.
-    pub fn root_of(&self, walked: &Path, canonical: &Path) -> Option<(&str, String)> {
+    pub fn root_of(&self, walked: &Path, canonical: &Path) -> Option<FileKey> {
         self.longest_match(canonical, |root| &root.canonical)
             .or_else(|| self.longest_match(walked, |root| &root.declared))
     }
 
     /// The file a stored key points at, spelled as the project declared it.
-    pub fn resolve(&self, root_id: &str, path: &str) -> Option<PathBuf> {
-        let root = self.roots.iter().find(|root| root.id == root_id)?;
-        Some(root.declared.join(path))
+    pub fn resolve(&self, key: &FileKey) -> Option<PathBuf> {
+        let root = self.roots.iter().find(|root| root.id == key.root_id)?;
+        Some(root.declared.join(&key.path))
+    }
+
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    /// The declared spelling of the configuration root.
+    pub fn configuration(&self) -> Option<&Path> {
+        self.roots
+            .iter()
+            .find(|root| root.id == CONFIGURATION_ROOT_ID)
+            .map(|root| root.declared.as_path())
     }
 
     /// Whether a root is registered under this id.
@@ -139,11 +185,7 @@ impl WorkspaceRoots {
     /// the semantics call the file's owner. The configuration competes like any
     /// other root, so an extension declared *around* it keeps only the files
     /// outside it.
-    fn longest_match(
-        &self,
-        path: &Path,
-        spelling: impl Fn(&Root) -> &PathBuf,
-    ) -> Option<(&str, String)> {
+    fn longest_match(&self, path: &Path, spelling: impl Fn(&Root) -> &PathBuf) -> Option<FileKey> {
         self.roots
             .iter()
             .filter_map(|root| {
@@ -151,11 +193,12 @@ impl WorkspaceRoots {
                 // `strip_prefix` compares whole components, so `cf` never
                 // swallows `cf_ext`. An empty remainder means the path *is* the
                 // root, which is not a file in it.
-                (rel.components().next().is_some())
-                    .then(|| (spelling(root).components().count(), root.id.as_str(), key_of(rel)))
+                (rel.components().next().is_some()).then(|| {
+                    (spelling(root).components().count(), FileKey::new(&root.id, key_of(rel)))
+                })
             })
-            .max_by_key(|(depth, _, _)| *depth)
-            .map(|(_, id, key)| (id, key))
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, key)| key)
     }
 }
 
@@ -217,7 +260,7 @@ mod tests {
 
     /// The attribution of a file that exists only as a path: both spellings are
     /// the same when no alias is involved.
-    fn owner<'a>(roots: &'a WorkspaceRoots, file: &Path) -> Option<(&'a str, String)> {
+    fn owner(roots: &WorkspaceRoots, file: &Path) -> Option<FileKey> {
         roots.root_of(file, file)
     }
 
@@ -236,7 +279,7 @@ mod tests {
         {
             assert_eq!(
                 owner(&roots, &root.join(MODULE)),
-                Some((expected_id, MODULE.to_owned())),
+                Some(FileKey::new(expected_id, MODULE.to_owned())),
                 "the same relative path under {root:?} must key to its own root"
             );
         }
@@ -251,12 +294,12 @@ mod tests {
 
         assert_eq!(
             owner(&roots, &made[2].join(MODULE)),
-            Some(("cfe/outer/inner", MODULE.to_owned())),
+            Some(FileKey::new("cfe/outer/inner", MODULE.to_owned())),
             "the nested root is the owner, not the one that merely contains it"
         );
         assert_eq!(
             owner(&roots, &made[1].join(MODULE)),
-            Some(("cfe/outer", MODULE.to_owned())),
+            Some(FileKey::new("cfe/outer", MODULE.to_owned())),
             "a file outside the nested root still belongs to the outer one"
         );
     }
@@ -271,7 +314,7 @@ mod tests {
 
         assert_eq!(
             owner(&roots, &made[1].join(MODULE)),
-            Some(("cf_ext", MODULE.to_owned())),
+            Some(FileKey::new("cf_ext", MODULE.to_owned())),
             "`cf` must not claim `cf_ext`"
         );
     }
@@ -308,7 +351,7 @@ mod tests {
         // graph enumeration call it too.
         assert_eq!(
             owner(&roots, &made[1].join(MODULE)),
-            Some((CONFIGURATION_ROOT_ID, format!("nested/{MODULE}"))),
+            Some(FileKey::new(CONFIGURATION_ROOT_ID, format!("nested/{MODULE}"))),
         );
     }
 
@@ -326,12 +369,12 @@ mod tests {
         assert!(rejected.is_empty(), "containing the configuration is not an overlap to reject");
         assert_eq!(
             owner(&roots, &made[0].join(MODULE)),
-            Some((CONFIGURATION_ROOT_ID, MODULE.to_owned())),
+            Some(FileKey::new(CONFIGURATION_ROOT_ID, MODULE.to_owned())),
             "the configuration's own subtree stays its own"
         );
         assert_eq!(
             owner(&roots, &made[1].join(MODULE)),
-            Some((".", format!("src/own/{MODULE}"))),
+            Some(FileKey::new(".", format!("src/own/{MODULE}"))),
             "everything outside it belongs to the surrounding root"
         );
     }
@@ -359,7 +402,7 @@ mod tests {
         assert_eq!(rejected.len(), 1, "the duplicate root is reported");
         assert_eq!(
             owner(&roots, &made[0].join(MODULE)),
-            Some((CONFIGURATION_ROOT_ID, MODULE.to_owned())),
+            Some(FileKey::new(CONFIGURATION_ROOT_ID, MODULE.to_owned())),
             "one file must not produce both a configuration row and an extension row"
         );
     }
@@ -372,8 +415,8 @@ mod tests {
 
         for root in [&made[0], &made[1]] {
             let file = root.join(MODULE);
-            let (id, key) = owner(&roots, &file).unwrap();
-            assert_eq!(roots.resolve(id, &key).as_deref(), Some(file.as_path()));
+            let key = owner(&roots, &file).unwrap();
+            assert_eq!(roots.resolve(&key).as_deref(), Some(file.as_path()));
         }
     }
 
@@ -401,7 +444,7 @@ mod tests {
             let canonical = made[2].join(MODULE);
             assert_eq!(
                 roots.root_of(&walked, &canonical),
-                Some(("cfe/two", MODULE.to_owned())),
+                Some(FileKey::new("cfe/two", MODULE.to_owned())),
                 "the root the file lives in owns it, not the one that links to it"
             );
         }
@@ -424,7 +467,7 @@ mod tests {
                 std::fs::canonicalize(outside.path()).unwrap().join("tree").join(MODULE);
             assert_eq!(
                 roots.root_of(&walked, &canonical),
-                Some((CONFIGURATION_ROOT_ID, format!("Linked/{MODULE}"))),
+                Some(FileKey::new(CONFIGURATION_ROOT_ID, format!("Linked/{MODULE}"))),
             );
         }
 
@@ -450,9 +493,9 @@ mod tests {
             );
             let file = alias.join(MODULE);
             let canonical = std::fs::canonicalize(&real).unwrap().join(MODULE);
-            let (id, key) = roots.root_of(&file, &canonical).unwrap();
-            assert_ne!(id, CONFIGURATION_ROOT_ID, "the extension keeps its own identity");
-            assert_eq!(key, MODULE);
+            let key = roots.root_of(&file, &canonical).unwrap();
+            assert_ne!(key.root_id, CONFIGURATION_ROOT_ID, "the extension keeps its own identity");
+            assert_eq!(key.path, MODULE);
         }
     }
 }

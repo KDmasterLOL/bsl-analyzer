@@ -474,17 +474,17 @@ impl SharedState {
 /// absent/loading, or a path it cannot serve, is simply missing from the map and the
 /// reindex disk-reads it — so search never regresses when the resident is unavailable.
 pub(super) fn prefetch_resident_overlay(engine: &SharedSearchEngine) {
-    let (source, workspace_root, dirty) = {
+    let (source, roots, dirty) = {
         let Ok(guard) = engine.lock() else { return };
         let Some(engine) = guard.as_ref() else { return };
         let Some(source) = engine.module_snapshot_source() else { return };
-        // The overlay keys dirty paths relative to THIS engine root (the project's — possibly
-        // nested — source root); resolving them for the resident needs the same root.
-        let Some(workspace_root) = engine.workspace_root().map(Path::to_path_buf) else {
+        // The overlay keys dirty files by (root, path relative to that root);
+        // resolving them for the resident needs the same table.
+        let Some(roots) = engine.workspace_roots().cloned() else {
             return;
         };
         match engine.workspace_overlay_dirty_paths() {
-            Ok(dirty) => (source, workspace_root, dirty),
+            Ok(dirty) => (source, roots, dirty),
             Err(e) => {
                 tracing::debug!("overlay dirty-path read failed: {e}");
                 return;
@@ -504,24 +504,26 @@ pub(super) fn prefetch_resident_overlay(engine: &SharedSearchEngine) {
 
     // Resident reads run OFF the engine lock. The `!Send` parses stay in this local map on
     // the calling thread and never cross a thread or an await boundary.
-    let mut snapshots: std::collections::HashMap<String, bsl_search::ModuleSnapshot> =
+    let mut snapshots: std::collections::HashMap<bsl_search::FileKey, bsl_search::ModuleSnapshot> =
         std::collections::HashMap::new();
     // Cap the per-query resident prefetch: a branch switch can dirty thousands of paths, and
     // fetching+reindexing them all on the query thread would be unbounded work. Serve at most
     // this many from the shared parse per query; the remainder STAY dirty and are picked up by
     // the query's own lazy disk refresh and by later queries' prefetches. The cap is the whole
     // budget — no separate time budget needed.
-    for rel_path in dirty.iter().take(MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY) {
-        // Resolve the engine-relative dirty path to an ABSOLUTE path against the engine root
-        // before handing it to the resident: the resident is indexed under the OUTER workspace
-        // root, so a bare relative path would be re-joined against that root and silently miss
-        // on every nested config. The snapshot map stays keyed by the engine rel, which is
-        // what `reindex_dirty_from_snapshots` looks up.
-        let abs_path = workspace_root.join(rel_path);
+    for key in dirty.iter().take(MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY) {
+        // Resolve the dirty key to an ABSOLUTE path through its own root before handing it to
+        // the resident: the resident is indexed under the OUTER workspace root, so a bare
+        // root-relative path would be re-joined against that root and silently miss on every
+        // nested config — and on every extension. The map stays keyed by the store key, which
+        // is what `reindex_dirty_from_snapshots` looks up.
+        let Some(abs_path) = roots.resolve(key) else {
+            continue;
+        };
         if let bsl_search::SnapshotFetch::Fetched(snapshot) =
             source.text_and_parse(&abs_path.to_string_lossy())
         {
-            snapshots.insert(rel_path.clone(), snapshot);
+            snapshots.insert(key.clone(), snapshot);
         }
     }
     if snapshots.is_empty() {
@@ -670,7 +672,7 @@ mod tests {
                 let guard = engine_arc.lock().unwrap();
                 guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
             };
-            if snapshot.keys().any(|p| p.ends_with("Module.bsl")) {
+            if snapshot.keys().any(|key| key.path.ends_with("Module.bsl")) {
                 dirty_has_bsl = true;
                 break;
             }
@@ -683,7 +685,7 @@ mod tests {
             guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
         };
         assert!(
-            !snapshot.keys().any(|p| p.ends_with("Configuration.xml")),
+            !snapshot.keys().any(|key| key.path.ends_with("Configuration.xml")),
             "search ignores non-.bsl paths",
         );
         assert!(watcher_ready.load(Ordering::SeqCst), "the sink publishes watcher readiness");
@@ -735,10 +737,10 @@ mod tests {
             let guard = engine_arc.lock().unwrap();
             guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
         };
-        assert!(snapshot.keys().any(|p| p.ends_with("A.bsl")), "top-level .bsl re-marked");
-        assert!(snapshot.keys().any(|p| p.ends_with("B.bsl")), "nested .bsl re-marked");
+        assert!(snapshot.keys().any(|key| key.path.ends_with("A.bsl")), "top-level .bsl re-marked");
+        assert!(snapshot.keys().any(|key| key.path.ends_with("B.bsl")), "nested .bsl re-marked");
         assert!(
-            !snapshot.keys().any(|p| p.ends_with("Configuration.xml")),
+            !snapshot.keys().any(|key| key.path.ends_with("Configuration.xml")),
             "non-.bsl paths are left alone",
         );
     }
@@ -760,6 +762,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "Removed.bsl".to_owned(),
                     symbol_name: "УдаляемаяПроцедура".to_owned(),
                     kind: "procedure".to_owned(),
@@ -849,11 +852,15 @@ mod tests {
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
-            dirty.contains("Catalogs/Товары/Ext/ObjectModule.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration(
+                "Catalogs/Товары/Ext/ObjectModule.bsl"
+            )),
             "the owned module is marked context-dirty: {dirty:?}",
         );
         assert!(
-            !dirty.contains("Catalogs/Другой/Ext/ObjectModule.bsl"),
+            !dirty.contains(&bsl_search::FileKey::configuration(
+                "Catalogs/Другой/Ext/ObjectModule.bsl"
+            )),
             "an unrelated object's module is left untouched: {dirty:?}",
         );
         assert_eq!(dirty.len(), 1, "only the owned subtree is marked, not the whole tree");
@@ -884,6 +891,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "CommonModules/А/Ext/Module.bsl".to_owned(),
                     symbol_name: "П".to_owned(),
                     kind: "procedure".to_owned(),
@@ -918,7 +926,7 @@ mod tests {
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
-            dirty.contains("CommonModules/А/Ext/Module.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration("CommonModules/А/Ext/Module.bsl")),
             "a config edit must mark every indexed document context-dirty: {dirty:?}",
         );
     }
@@ -946,6 +954,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "CommonModules/Б/Ext/Module.bsl".to_owned(),
                     symbol_name: "П".to_owned(),
                     kind: "procedure".to_owned(),
@@ -972,7 +981,7 @@ mod tests {
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
-            dirty.contains("CommonModules/Б/Ext/Module.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration("CommonModules/Б/Ext/Module.bsl")),
             "a rescan must conservatively mark every indexed document context-dirty: {dirty:?}",
         );
     }
@@ -1060,15 +1069,15 @@ mod tests {
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
-            dirty.contains("Catalogs/Х/Ext/ObjectModule.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration("Catalogs/Х/Ext/ObjectModule.bsl")),
             "the owned module is marked context-dirty: {dirty:?}",
         );
         assert!(
-            dirty.contains("CommonModules/Б/Ext/Module.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration("CommonModules/Б/Ext/Module.bsl")),
             "the referencing module (reads the catalog) is marked context-dirty: {dirty:?}",
         );
         assert!(
-            !dirty.contains("CommonModules/В/Ext/Module.bsl"),
+            !dirty.contains(&bsl_search::FileKey::configuration("CommonModules/В/Ext/Module.bsl")),
             "a module that references nothing about the catalog is left untouched: {dirty:?}",
         );
     }
@@ -1119,11 +1128,11 @@ mod tests {
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
-            dirty.contains("Catalogs/Х/Ext/ObjectModule.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration("Catalogs/Х/Ext/ObjectModule.bsl")),
             "the owned module is still marked without a published graph: {dirty:?}",
         );
         assert!(
-            !dirty.contains("CommonModules/Б/Ext/Module.bsl"),
+            !dirty.contains(&bsl_search::FileKey::configuration("CommonModules/Б/Ext/Module.bsl")),
             "referencing resolution is skipped with no published graph: {dirty:?}",
         );
     }
@@ -1143,6 +1152,7 @@ mod tests {
         engine.set_workspace_root(workspace.clone());
         let doc = |path: &str, sym: &str| IndexedDocument {
             collection: "code".to_owned(),
+            root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
             path: path.to_owned(),
             symbol_name: sym.to_owned(),
             kind: "procedure".to_owned(),
@@ -1182,7 +1192,10 @@ mod tests {
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert_eq!(dirty.len(), 2, "a root .xml marks every indexed file: {dirty:?}");
-        assert!(dirty.contains("A.bsl") && dirty.contains("B.bsl"));
+        assert!(
+            dirty.contains(&bsl_search::FileKey::configuration("A.bsl"))
+                && dirty.contains(&bsl_search::FileKey::configuration("B.bsl"))
+        );
     }
     /// An `.xml` drift whose owned module is marked context-dirty must NUDGE the graph to
     /// catch up — otherwise a search-only user (who never triggers a `graph` tool freshness
@@ -1556,7 +1569,7 @@ mod tests {
             .all_files_in_collection("code")
             .unwrap()
             .into_iter()
-            .map(|(path, _hash)| path)
+            .map(|(key, _hash)| key.path)
             .collect();
         assert!(
             files.iter().any(|p| p.contains("Постоянный")) && files.len() == 1,
