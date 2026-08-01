@@ -22,6 +22,12 @@ walkdir.workspace = true
 expect-test.workspace = true
 tempfile.workspace = true
 
+# A symlink cycle the kernel rejects (a file linking to itself, two links pointing at
+# each other) arrives as a bare ELOOP, and `io::ErrorKind::FilesystemLoop` is unstable,
+# so the errno is the only stable way to tell that class from an unreadable file.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 # Test-only: creating a FIFO is the one way to reproduce a blocking open, and
 # the guard against it has no other observable failure than a hang.
 [target.'cfg(unix)'.dev-dependencies]

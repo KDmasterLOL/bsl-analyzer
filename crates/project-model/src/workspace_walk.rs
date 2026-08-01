@@ -115,13 +115,34 @@ fn walk_one_root(root: &Path, outcome: &mut WalkOutcome) {
 /// Only `unreadable` says the file list is short; treating either of the other two that
 /// way would let one dead link or one benign loop block reconciliation forever.
 fn classify_walk_error(error: &walkdir::Error, outcome: &mut WalkOutcome) {
-    if error.loop_ancestor().is_some() {
+    // The root itself. Whatever went wrong, everything under it is hidden, so an empty
+    // list here is not a full walk — not even when the root is a link into nothing.
+    if error.depth() == 0 {
+        outcome.unreadable += 1;
+        return;
+    }
+    if error.loop_ancestor().is_some() || is_symlink_cycle(error) {
         outcome.loops += 1;
     } else if error.path().is_some_and(is_dangling_link) {
         outcome.dangling += 1;
     } else {
         outcome.unreadable += 1;
     }
+}
+
+/// A cycle the OS refuses to resolve, as opposed to the one `walkdir` detects itself.
+/// `loop_ancestor` is set only for a link back into a directory already on the walk's
+/// stack; a file linking to itself, or two links pointing at each other, are rejected
+/// by the kernel first and arrive as a plain IO error. Both mean the same thing to a
+/// caller — there is no unread file behind them.
+#[cfg(unix)]
+fn is_symlink_cycle(error: &walkdir::Error) -> bool {
+    error.io_error().and_then(std::io::Error::raw_os_error) == Some(libc::ELOOP)
+}
+
+#[cfg(not(unix))]
+fn is_symlink_cycle(_error: &walkdir::Error) -> bool {
+    false
 }
 
 /// The canonical path of a walked file, reusing one canonicalisation per containing
@@ -138,34 +159,60 @@ fn canonical_path(
     outcome: &mut WalkOutcome,
 ) -> PathBuf {
     if is_symlink {
-        outcome.canonicalizations += 1;
-        return std::fs::canonicalize(walked).unwrap_or_else(|_| walked.to_path_buf());
+        return canonicalize_counted(walked, outcome);
     }
-    let (Some(parent), Some(name)) = (walked.parent(), walked.file_name()) else {
-        return walked.to_path_buf();
+    // A root given as a bare relative file name has an EMPTY parent, which resolves to
+    // nothing: the per-directory shortcut has no directory to work from, and falling
+    // back to the walked spelling would hand back a relative path where the contract
+    // promises a physical one.
+    let parent = walked.parent().filter(|parent| !parent.as_os_str().is_empty());
+    let (Some(parent), Some(name)) = (parent, walked.file_name()) else {
+        return canonicalize_counted(walked, outcome);
     };
     if let Some(canonical_parent) = dir_cache.get(parent) {
         return canonical_parent.join(name);
     }
     outcome.canonicalizations += 1;
-    let canonical_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-    dir_cache.insert(parent.to_path_buf(), canonical_parent.clone());
-    canonical_parent.join(name)
+    match std::fs::canonicalize(parent) {
+        Ok(canonical_parent) => {
+            dir_cache.insert(parent.to_path_buf(), canonical_parent.clone());
+            canonical_parent.join(name)
+        }
+        // The directory would not resolve, so resolving the file itself is the only
+        // way left to reach a physical spelling.
+        Err(_) => canonicalize_counted(walked, outcome),
+    }
 }
 
-/// Whether a path is a link whose target is absent, as opposed to one whose target
-/// merely could not be read. Only a real absence means there is no file to index; a
-/// permission error on the target is a file that still exists, and calling it absent
-/// would let a caller reconcile a live file out of its store.
+fn canonicalize_counted(path: &Path, outcome: &mut WalkOutcome) -> PathBuf {
+    outcome.canonicalizations += 1;
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether a path is a link whose target cannot exist, as opposed to one whose target
+/// merely could not be read. The kinds are allow-listed on purpose: a permission error,
+/// an IO error or a stale network handle all describe a file that is still there, and
+/// calling those absent would let a caller reconcile a live file out of its store.
 fn is_dangling_link(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
-        && matches!(std::fs::metadata(path), Err(e) if e.kind() == ErrorKind::NotFound)
+        && matches!(std::fs::metadata(path), Err(e) if target_cannot_exist(e.kind()))
+}
+
+/// `NotADirectory` belongs here beside `NotFound`: a path component that is a plain
+/// file makes the target unreachable in principle, not just for now.
+fn target_cannot_exist(kind: ErrorKind) -> bool {
+    matches!(kind, ErrorKind::NotFound | ErrorKind::NotADirectory)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
+
+    /// The one test that has to change the process-wide working directory holds this
+    /// while it does, and restores the directory before releasing it.
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     fn write(path: &Path, text: &str) {
         if let Some(parent) = path.parent() {
@@ -294,6 +341,78 @@ mod tests {
         );
         assert_eq!(outcome.loops, 0);
         assert_eq!(walked_names(&outcome), vec!["Live.bsl"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_points_at_itself_leaves_coverage_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("Live.bsl"), "");
+        std::os::unix::fs::symlink("Loop.bsl", dir.path().join("Loop.bsl")).unwrap();
+
+        let outcome = walk(dir.path());
+
+        assert_eq!(
+            (outcome.unreadable, outcome.loops, outcome.dangling),
+            (0, 1, 0),
+            "a cycle the OS rejects before walkdir sees an ancestor is still a cycle"
+        );
+        assert_eq!(walked_names(&outcome), vec!["Live.bsl"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_through_a_non_directory_is_a_dead_link() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("blocker"), "");
+        std::os::unix::fs::symlink("blocker/Target.bsl", dir.path().join("Dead.bsl")).unwrap();
+
+        let outcome = walk(dir.path());
+
+        assert_eq!(
+            (outcome.unreadable, outcome.loops, outcome.dangling),
+            (0, 0, 1),
+            "a path component that is a file means the target cannot exist"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_link_whose_target_vanished_is_an_unreadable_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        write(&target.join("M.bsl"), "");
+        let root = dir.path().join("root");
+        std::os::unix::fs::symlink(&target, &root).unwrap();
+        fs::remove_dir_all(&target).unwrap();
+
+        let outcome = walk(&root);
+
+        assert!(
+            outcome.unreadable > 0,
+            "the root vanishing hides the whole tree, so the empty list is not a full walk"
+        );
+    }
+
+    #[test]
+    fn a_plain_file_passed_as_a_root_gets_its_physical_spelling() {
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("M.bsl"), "");
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let absolute = fs::canonicalize("M.bsl").unwrap();
+
+        let outcome = walk_workspace_roots(&[PathBuf::from("M.bsl"), absolute.clone()]);
+        std::env::set_current_dir(previous).unwrap();
+
+        assert_eq!(outcome.files.len(), 2);
+        assert_eq!(
+            outcome.files[0].canonical, outcome.files[1].canonical,
+            "one physical file must have one canonical spelling however its root was named"
+        );
+        assert_eq!(outcome.files[0].canonical, absolute);
     }
 
     #[cfg(unix)]
