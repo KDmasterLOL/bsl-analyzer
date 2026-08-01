@@ -140,15 +140,24 @@ fn classify_walk_error(error: &walkdir::Error, outcome: &mut WalkOutcome) {
 /// cycle would let a caller reconcile against a list that is short. Walking the chain is
 /// the only way to tell the two apart, and it happens on the error path only.
 ///
-/// A chain longer than the bound, or one whose spelling drifts (`..` segments the
-/// visited set cannot match), reads as NOT a cycle: that is the conservative answer,
-/// since it makes the caller keep its rows rather than drop them.
+/// A hop is recognised by what its path RESOLVES to, not by how it is spelled: a link
+/// to `sub/../Loop.bsl` returns to itself every step while the string grows without
+/// end, and comparing spellings would keep missing the repeat. The link itself cannot
+/// be canonicalised — that is the very call the kernel refuses — so its directory is,
+/// which also resolves `..` through any links on the way, as lexical folding would not.
+///
+/// A chain longer than the bound, or one whose directory will not resolve, reads as NOT
+/// a cycle: that is the conservative answer, since it makes the caller keep its rows
+/// rather than drop them.
 fn links_form_a_cycle(path: &Path) -> bool {
     const MAX_HOPS: usize = 256;
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let mut current = path.to_path_buf();
     for _ in 0..MAX_HOPS {
-        if !visited.insert(current.clone()) {
+        let Some(identity) = resolved_identity(&current) else {
+            return false;
+        };
+        if !visited.insert(identity) {
             return true;
         }
         let Ok(target) = std::fs::read_link(&current) else {
@@ -160,6 +169,15 @@ fn links_form_a_cycle(path: &Path) -> bool {
         };
     }
     false
+}
+
+/// A path's identity for cycle detection: its directory resolved for real, plus its own
+/// name. `None` when the directory cannot be resolved, which leaves the caller with the
+/// conservative answer rather than a guess.
+fn resolved_identity(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty())?;
+    Some(std::fs::canonicalize(parent).ok()?.join(name))
 }
 
 /// The canonical path of a walked file, reusing one canonicalisation per containing
@@ -373,6 +391,24 @@ mod tests {
             (outcome.unreadable, outcome.loops, outcome.dangling),
             (0, 1, 0),
             "a cycle the OS rejects before walkdir sees an ancestor is still a cycle"
+        );
+        assert_eq!(walked_names(&outcome), vec!["Live.bsl"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cycle_spelled_through_parent_components_is_still_a_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        write(&dir.path().join("Live.bsl"), "");
+        std::os::unix::fs::symlink("sub/../Loop.bsl", dir.path().join("Loop.bsl")).unwrap();
+
+        let outcome = walk(dir.path());
+
+        assert_eq!(
+            (outcome.unreadable, outcome.loops, outcome.dangling),
+            (0, 1, 0),
+            "identity of a path is what it resolves to, not how it is spelled"
         );
         assert_eq!(walked_names(&outcome), vec!["Live.bsl"]);
     }
