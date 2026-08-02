@@ -8,10 +8,7 @@ use std::time::{Duration, Instant};
 use vfs::{Vfs, VfsPath};
 
 use crate::change_hub::{Health, SinkCursor, WorkspaceChangeHub};
-use crate::graph::input::{
-    build_source_root, db_for_files_lazy, enumerate_bsl_files, ProjectSnapshot,
-};
-use crate::graph::scan::scan_stats_over_roots;
+use crate::graph::input::{build_source_root, db_for_files_lazy, ProjectSnapshot};
 
 use super::drift::{
     compute_freshness, config_identity, config_identity_now, reconcile_interval, ScanCache,
@@ -479,9 +476,14 @@ impl DiagnosticsState {
         let project = crate::project::at(root)
             .map_err(|e| anyhow::anyhow!("invalid project at {}: {e}", root.display()))?;
         let snapshot = ProjectSnapshot::from_project(&project);
-        let files = enumerate_bsl_files(&snapshot);
+        // ONE scan serves both the resident's file set and the drift baseline
+        // below: two walks here could disagree (a file deleted between them would
+        // sit in the resident forever, invisible to every later drift scan,
+        // because the baseline never contained it).
+        let universe = crate::graph::universe::ScannedUniverse::scan(&snapshot.scan_roots);
+        let files = &universe.files;
         // `ProjectSnapshot` already registers canonical roots, matching the
-        // canonical `.bsl` universe `enumerate_bsl_files` produces.
+        // canonical `.bsl` universe the scan produces.
         let configs = snapshot.configs.clone();
         let mut config = ide::DiagnosticsConfig::from_project_json(
             &project.config.diagnostics,
@@ -501,12 +503,12 @@ impl DiagnosticsState {
         // current HEAD; the drift poll rebuilds it when the refs move.
         let ignored_authors = project.config.analysis.ignored_authors.clone();
         let author_filter = super::resident::build_author_filter(root, &ignored_authors);
-        let source_root = build_source_root(&files);
+        let source_root = build_source_root(files);
         // Disk-backed: register each file's content revision and drop its text, so the
         // whole-workspace resident is not pinned as salsa inputs (which OOMs on a large
         // config). `file_text_query` re-reads on demand under its LRU cap — the same
         // model the LSP server and CLI `analyze` use.
-        let mut db = db_for_files_lazy(&source_root, &files, &configs, None);
+        let mut db = db_for_files_lazy(&source_root, files, &configs, None);
 
         // Pre-seed the VFS with the SAME FileIds the source root uses for each `.bsl`,
         // in enumerate order, so the interner assigns id `i` to `files[i]`. The metadata
@@ -516,7 +518,7 @@ impl DiagnosticsState {
         let vfs = ResidentVfs(RefCell::new(Vfs::default()));
         {
             let mut guard = vfs.0.borrow_mut();
-            for (file_id, path) in &files {
+            for (file_id, path) in files {
                 let allocated = guard.alloc_file_id(VfsPath::new(path.clone()));
                 // A hard check, not `debug_assert`: this is a one-time O(n) pass at
                 // resident build (not a hot path), and a release-mode misalignment
@@ -530,20 +532,15 @@ impl DiagnosticsState {
         ide_host_core::bootstrap_metadata_substrate(&mut db, &vfs);
 
         let mut by_path = HashMap::with_capacity(files.len());
-        for (file_id, path) in &files {
+        for (file_id, path) in files {
             by_path.insert(canonical_key(path), *file_id);
         }
-        // The drift baseline and the config identity derive from the SAME snapshot
-        // that built the resident — a re-derived project here could reflect a
-        // topology edit that landed mid-build, and comparing later scans against
-        // that newer baseline would report the stale resident as fresh forever.
-        let stats: HashMap<String, u64> = scan_stats_over_roots(&snapshot.scan_roots)
-            .into_iter()
-            .map(|s| {
-                let fp = s.fingerprint();
-                (s.path, fp)
-            })
-            .collect();
+        // The drift baseline derives from the SAME scan that gave the resident its
+        // files (and the config identity from the same snapshot) — a fresh walk
+        // here could reflect a change that landed mid-build, and comparing later
+        // scans against that newer baseline would hide the drift forever.
+        let stats: HashMap<String, u64> =
+            universe.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
         let config_fp = config_identity(config_files_fp, &snapshot.configs);
 
         let topology = crate::graph::scan::topology_u64(&snapshot.configs);
@@ -675,4 +672,32 @@ impl DiagnosticsState {
 /// full rebuild because it can alter the project's extension set and thus the db inputs.
 pub(super) fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics_state::test_support::sample_workspace;
+
+    /// One resident build is exactly ONE traversal: the file set and the drift
+    /// baseline are projections of the same scan. Historically this path walked
+    /// twice, and a file deleted between the walks stayed in the resident forever —
+    /// the baseline never contained it, so no later drift scan could evict it.
+    #[test]
+    fn a_resident_build_walks_the_tree_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let before = project_model::source_set::scans_performed_on_thread();
+        let built = DiagnosticsState::build_resident(root).expect("resident builds");
+        let walks = project_model::source_set::scans_performed_on_thread() - before;
+
+        assert!(walks > 0, "a zero count means the instrumentation broke");
+        assert_eq!(walks, 1, "files and drift baseline come from the one scan");
+        assert!(
+            built.stats.keys().any(|k| k.ends_with("Module.bsl")),
+            "the baseline describes the scanned universe"
+        );
+    }
 }

@@ -217,9 +217,10 @@ impl GraphState {
         if stored_fp.is_empty() {
             return false; // no per-file record (older build) → full rebuild
         }
-        // ONE project snapshot serves the eligibility diff, the topology gate, the
-        // patch and the straddle bracket, so a config edit mid-operation cannot mix
-        // two topologies.
+        // ONE project snapshot and ONE scanned universe serve the eligibility diff,
+        // the profile recompute, the pre-fingerprint and the patch, so neither a
+        // config edit nor a file landing mid-operation can hand two passes two
+        // different trees. Only the straddle check walks again.
         let project = crate::graph::ProjectSnapshot::load(workspace_root);
         // A topology change re-shapes visibility for ANY module even when only
         // `.bsl` bodies drifted on disk — never body-patch across it.
@@ -228,8 +229,15 @@ impl GraphState {
                 if stored_token.topology == super::scan::topology_u64(&project.configs) => {}
             _ => return false,
         }
-        let diff =
-            classify_changes(&stored_fp, &super::scan::scan_stats_over_roots(&project.scan_roots));
+        let pre = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        // Before the diff, not inside the bracket: a diff against a short scan reads
+        // hidden files as removals, and an unreadable EMPTY subtree does not move the
+        // stats at all — the diff cannot see incompleteness, only the verdict can.
+        if !pre.clean() {
+            tracing::info!("incremental reload: incomplete workspace scan; full rebuild");
+            return false;
+        }
+        let diff = classify_changes(&stored_fp, &pre.stats);
 
         // Body-only shape: at least one `.bsl` modified, nothing added/removed, no
         // metadata drift (an `.xml` change can flip visibility for any module).
@@ -245,7 +253,8 @@ impl GraphState {
         // Recompute each modified module's profile and partition into body-only
         // (signature unchanged) and signature-changed.
         let profiles =
-            match crate::graph_db::recompute_module_profiles(workspace_root, &modified_paths) {
+            match crate::graph_db::recompute_module_profiles(&project, &pre.files, &modified_paths)
+            {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!("incremental reload: profile recompute failed: {e}");
@@ -307,14 +316,16 @@ impl GraphState {
             }
         }
 
-        // Bracket the patch with fingerprint scans, mirroring the full build's
-        // straddle detection: a write landing mid-patch marks the snapshot stale.
-        let fp_pre = super::scan::workspace_fingerprint_over(&project);
+        // Bracket the patch with the shared pre-scan and a fresh post-scan,
+        // mirroring the full build's straddle detection: a write landing after the
+        // pre-scan marks the snapshot stale.
+        let fp_pre = super::scan::fingerprint_of(&pre.stats, &project.configs);
         let tmp_path = db_path.with_extension(format!("db.building.{}", std::process::id()));
         let built_at = chrono::Utc::now().to_rfc3339();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let summary = crate::graph_db::update_graph_database_bodies(
                 &project,
+                &pre,
                 &db_path,
                 &tmp_path,
                 &changed_paths,
@@ -326,10 +337,12 @@ impl GraphState {
                     built_at,
                 },
             )?;
-            let fp_post = super::scan::workspace_fingerprint_over(
-                &crate::graph::ProjectSnapshot::load(workspace_root),
-            );
-            let force_stale = fp_pre != fp_post;
+            let post_project = crate::graph::ProjectSnapshot::load(workspace_root);
+            let post = crate::graph::universe::ScannedUniverse::scan(&post_project.scan_roots);
+            let fp_post = super::scan::fingerprint_of(&post.stats, &post_project.configs);
+            // `pre.clean()` is guaranteed above; it stays in the formula so the two
+            // decisions cannot drift apart if the gate ever moves.
+            let force_stale = publish_force_stale(fp_pre, fp_post, pre.clean(), post.clean());
             {
                 let conn = rusqlite::Connection::open(&tmp_path)?;
                 conn.execute(
@@ -909,6 +922,32 @@ mod tests {
         assert_eq!(meta_string(&graph_db_path(root), "built_at"), "cached-build-sentinel");
     }
 
+    /// Test shorthand for the profile recompute: pairs the enumeration with the
+    /// snapshot it came from, as the production incremental path does.
+    fn recompute_profiles_for_test(
+        root: &Path,
+        changed: &[std::path::PathBuf],
+    ) -> anyhow::Result<rustc_hash::FxHashMap<String, crate::graph_db::ModuleProfile>> {
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        crate::graph_db::recompute_module_profiles(&project, &universe.files, changed)
+    }
+
+    /// Test shorthand for the incremental patch: ONE loaded snapshot and ONE
+    /// scanned universe feed the body-only update, as production does.
+    fn update_bodies_for_test(
+        root: &Path,
+        src: &Path,
+        out: &Path,
+        changed: &[std::path::PathBuf],
+        batch_size: usize,
+        meta: &crate::graph_db::GraphMeta,
+    ) -> anyhow::Result<ide::GraphBuildSummary> {
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        update_graph_database_bodies(&project, &universe, src, out, changed, batch_size, meta)
+    }
+
     /// Test shorthand for the production pairing: ONE loaded snapshot and ONE
     /// scanned universe feed a whole-config build.
     fn build_whole_graph(
@@ -1095,6 +1134,72 @@ mod tests {
 
         assert!(walks > 0, "a zero count means the instrumentation broke, not that no walk ran");
         assert_eq!(walks, 2, "pre-scan + straddle post-scan, nothing else");
+    }
+
+    /// One incremental reload is also exactly TWO traversals: the shared pre-scan
+    /// (eligibility diff + profiles + fingerprint + patch) and the straddle
+    /// bracket's post-scan. Historically this path walked six times.
+    #[test]
+    fn an_incremental_reload_walks_the_tree_exactly_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        // Body-only: the signature line is untouched, so the fast path is eligible.
+        write(
+            root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать() Экспорт\nЗначение = 1;\nВозврат Значение;\nКонецФункции",
+        );
+
+        let before = project_model::source_set::scans_performed_on_thread();
+        let took_fast_path = graph.try_incremental_reload(root, 2, 0);
+        let walks = project_model::source_set::scans_performed_on_thread() - before;
+
+        assert!(took_fast_path, "a body-only edit takes the incremental path");
+        assert!(walks > 0, "a zero count means the instrumentation broke");
+        assert_eq!(walks, 2, "shared pre-scan + straddle post-scan, nothing else");
+    }
+
+    /// A scan that cannot cover the whole tree disables the incremental path
+    /// BEFORE the eligibility diff: a diff against a short scan reads hidden
+    /// files as removals, and an unreadable EMPTY subtree does not move the
+    /// stats at all — only the verdict can see it.
+    #[cfg(unix)]
+    #[test]
+    fn an_unclean_scan_disables_the_incremental_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        write(
+            root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать() Экспорт\nЗначение = 2;\nВозврат Значение;\nКонецФункции",
+        );
+        let closed = root.join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&closed).is_ok() {
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let refused = !graph.try_incremental_reload(root, 2, 0);
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(refused, "an incomplete scan must fall back to the full rebuild");
+        assert!(
+            graph.try_incremental_reload(root, 3, 0),
+            "positive control: the same edit goes incremental once the scan is clean"
+        );
     }
 
     /// A cached build whose fingerprint no longer matches the workspace (it moved
@@ -2535,15 +2640,8 @@ mod tests {
         let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("incremental update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
         build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild of edited tree");
@@ -2679,15 +2777,8 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("incremental update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
         build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
@@ -2848,15 +2939,8 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("incremental update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
         build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
@@ -3001,15 +3085,8 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("incremental update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
         build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
@@ -3195,15 +3272,8 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("incremental update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
         build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
@@ -3261,14 +3331,7 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        let result = update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        );
+        let result = update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta());
         assert!(result.is_err(), "casing drift must bail to full rebuild, got {result:?}");
     }
 
@@ -3304,14 +3367,7 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        let result = update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        );
+        let result = update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta());
         assert!(result.is_err(), "dropping a shared aux ref must bail, got {result:?}");
     }
 
@@ -3371,14 +3427,7 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Альфа/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        let result = update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        );
+        let result = update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta());
         assert!(result.is_err(), "touching a recorded casing variant must bail, got {result:?}");
     }
 
@@ -3433,15 +3482,8 @@ mod tests {
             root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap(),
         ];
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("multi-file body-only update succeeds (current result is still correct)");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("multi-file body-only update succeeds (current result is still correct)");
 
         // The newly-introduced inconsistency is now persisted, so a later reload bails.
         let variants: String = Connection::open(&db_inc)
@@ -3518,9 +3560,7 @@ mod tests {
         let core_path = root.join("CommonModules/Ядро/Ext/Module.bsl").canonicalize().unwrap();
         let core_key = core_path.to_string_lossy().into_owned();
 
-        let profiles =
-            crate::graph_db::recompute_module_profiles(root, std::slice::from_ref(&core_path))
-                .unwrap();
+        let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&core_path)).unwrap();
         let profile = profiles.get(&core_key).expect("profiled Ядро");
         let callers = crate::graph_db::caller_delta_plan(&db_pre, &[(core_key.as_str(), profile)])
             .unwrap()
@@ -3531,15 +3571,8 @@ mod tests {
         let mut changed = vec![core_path];
         changed.extend(callers);
         let db_inc = root.join(".build/inc.db");
-        crate::graph_db::update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("caller-delta update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("caller-delta update");
 
         let db_full = root.join(".build/full.db");
         build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
@@ -3597,9 +3630,7 @@ mod tests {
         write(root, "CommonModules/Ядро/Ext/Module.bsl", "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры\nПроцедура Новый() Экспорт КонецПроцедуры");
         let core_path = root.join("CommonModules/Ядро/Ext/Module.bsl").canonicalize().unwrap();
         let core_key = core_path.to_string_lossy().into_owned();
-        let profiles =
-            crate::graph_db::recompute_module_profiles(root, std::slice::from_ref(&core_path))
-                .unwrap();
+        let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&core_path)).unwrap();
         let profile = profiles.get(&core_key).unwrap();
         let callers = crate::graph_db::caller_delta_plan(&db_pre, &[(core_key.as_str(), profile)])
             .unwrap()
@@ -3610,15 +3641,8 @@ mod tests {
         let mut changed = vec![core_path];
         changed.extend(callers);
         let db_inc = root.join(".build/inc.db");
-        crate::graph_db::update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("caller-delta update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("caller-delta update");
 
         let db_full = root.join(".build/full.db");
         build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
@@ -3672,15 +3696,8 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Алиса/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        crate::graph_db::update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("body-only update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("body-only update");
 
         let db_full = root.join(".build/full.db");
         build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");

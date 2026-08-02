@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide::RootDatabaseImpl;
+#[cfg(test)]
 use project_model::SourceSet;
 use vfs::FileId;
 
@@ -68,10 +69,9 @@ pub(super) fn scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
 /// file-id↔path map that lets the graph build load one batch of texts at a time
 /// while keeping ids consistent across batches.
 ///
-/// One call is one traversal. An operation with several passes over the same
-/// universe (fingerprint + build + persisted stats) must not call this per pass —
-/// it takes ONE [`SourceSet::scan`] and projects it, so every pass sees the same
-/// tree.
+/// Test-side wrapper: production paths scan a `ScannedUniverse` explicitly and
+/// share it across their passes, so the verdict of the same scan stays in hand.
+#[cfg(test)]
 pub(crate) fn enumerate_bsl_files(project: &ProjectSnapshot) -> Vec<(FileId, PathBuf)> {
     super::universe::bsl_files_from(&SourceSet::scan(&project.scan_roots))
 }

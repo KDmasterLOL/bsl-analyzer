@@ -25,8 +25,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rustc_hash::FxHashMap;
 use vfs::FileId;
 
-use crate::graph::input::{build_source_root, db_for_files, enumerate_bsl_files};
-use crate::graph::scan::scan_stats_over_roots;
+#[cfg(test)]
+use crate::graph::input::enumerate_bsl_files;
+use crate::graph::input::{build_source_root, db_for_files};
 
 /// Bumped whenever the table layout OR the persisted edge/node content changes so a
 /// stale on-disk cache from an older binary is rejected (via the `meta` row) and
@@ -937,13 +938,14 @@ fn insert_node_row(tx: &rusqlite::Transaction<'_>, row: &NodeRow, id: &str) -> a
 /// snapshot until it reopens and no in-place mutation races a query.
 pub(crate) fn update_graph_database_bodies(
     project: &crate::graph::ProjectSnapshot,
+    universe: &crate::graph::universe::ScannedUniverse,
     src_path: &Path,
     out_path: &Path,
     changed_paths: &[PathBuf],
     batch_size: usize,
     meta: &GraphMeta,
 ) -> anyhow::Result<GraphBuildSummary> {
-    let files = enumerate_bsl_files(project);
+    let files = &universe.files;
     let all_modules: Vec<ModuleId> = files.iter().map(|(f, _)| ModuleId::new(*f)).collect();
     let paths: FxHashMap<FileId, String> =
         files.iter().map(|(f, p)| (*f, p.to_string_lossy().replace('\\', "/"))).collect();
@@ -967,7 +969,7 @@ pub(crate) fn update_graph_database_bodies(
         );
     }
 
-    let source_root = build_source_root(&files);
+    let source_root = build_source_root(files);
     let config_cache = std::sync::Arc::new(ide::GraphConfigCache::default());
     let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
         let batch_files: Vec<(FileId, PathBuf)> =
@@ -1011,10 +1013,8 @@ pub(crate) fn update_graph_database_bodies(
         format!("copying graph db {} → {}", src_path.display(), out_path.display())
     })?;
 
-    let stat_fp: FxHashMap<String, u64> = scan_stats_over_roots(&project.scan_roots)
-        .iter()
-        .map(|s| (s.path.clone(), s.fingerprint()))
-        .collect();
+    let stat_fp: FxHashMap<String, u64> =
+        universe.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
 
     let mut conn = Connection::open(out_path)?;
     {
@@ -1197,15 +1197,17 @@ pub struct ModuleProfile {
 /// Builds a tiny resident index over only those modules — these reads are a module's
 /// own item-tree + dispatch, no cross-module data — so it stays cheap. Keyed by
 /// canonical path.
+///
+/// `files` is the operation's ALREADY-SCANNED enumeration: profiling must judge the
+/// same universe the eligibility diff saw, not a fresh walk that may already differ.
 pub fn recompute_module_profiles(
-    workspace_root: &Path,
+    project: &crate::graph::ProjectSnapshot,
+    files: &[(FileId, PathBuf)],
     changed_paths: &[PathBuf],
 ) -> anyhow::Result<FxHashMap<String, ModuleProfile>> {
     use ide::graph_index::GraphIndex;
 
-    let project = crate::graph::ProjectSnapshot::load(workspace_root);
-    let files = enumerate_bsl_files(&project);
-    let source_root = crate::graph::build_source_root(&files);
+    let source_root = crate::graph::build_source_root(files);
 
     let changed_set: std::collections::HashSet<&Path> =
         changed_paths.iter().map(|p| p.as_path()).collect();
@@ -1694,8 +1696,9 @@ mod tests {
             "Перем Состояние;\n&НаСервере\nПроцедура Выполнить() Экспорт\nКонецПроцедуры",
         )
         .unwrap();
-        let profiles =
-            recompute_module_profiles(root, &changed).expect("profile recomputation succeeds");
+        let (edited_project, edited_universe) = scanned(root);
+        let profiles = recompute_module_profiles(&edited_project, &edited_universe.files, &changed)
+            .expect("profile recomputation succeeds");
         let profile = profiles.get(&path_key).expect("changed module has a profile");
         assert_eq!(
             profile.sig_hash,
@@ -1705,7 +1708,8 @@ mod tests {
 
         let db_incremental = root.join(".build/incremental.db");
         update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
+            &edited_project,
+            &edited_universe,
             &db_pre,
             &db_incremental,
             &changed,

@@ -80,13 +80,10 @@ pub(super) fn workspace_fingerprint(workspace_root: &Path) -> crate::graph_db::G
     workspace_fingerprint_over(&super::input::ProjectSnapshot::load(workspace_root))
 }
 
-/// The fingerprint over an already-loaded project snapshot, so an operation
-/// that brackets a build with pre/post scans stats the SAME root universe both
-/// times instead of re-deriving the project mid-operation. This is the ONE fold
-/// point for graph identity — the build/adoption bracket and the live query-path
-/// freshness check both go through it, so a topology-only change (a `dependsOn`
-/// edit, an auto-discovered extension) can never be fresh on one path and stale
-/// on the other.
+/// The fingerprint over an already-loaded project snapshot. Test-side companion
+/// of [`workspace_fingerprint`] — production brackets scan a universe explicitly
+/// and fold it with [`fingerprint_of`], keeping the same scan's verdict in hand.
+#[cfg(test)]
 pub(crate) fn workspace_fingerprint_over(
     project: &super::input::ProjectSnapshot,
 ) -> crate::graph_db::GraphFp {
