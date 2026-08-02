@@ -14,16 +14,11 @@ crates/bsl-debug/src/constants.rs	OrdinaryApplicationModule	1	сравнение
 crates/bsl-debug/src/constants.rs	RecordSetModule	1	сравнение
 crates/bsl-debug/src/constants.rs	SessionModule	1	сравнение
 crates/bsl-debug/src/constants.rs	ValueManagerModule	1	сравнение
-crates/bsl-debug/src/module_index.rs	CommandModule.bsl	1	сравнение
 crates/bsl-debug/src/module_index.rs	Commands	1	сравнение
-crates/bsl-debug/src/module_index.rs	Configuration.xml	2	сравнение
-crates/bsl-debug/src/module_index.rs	Ext	5	сравнение
-crates/bsl-debug/src/module_index.rs	Form	1	сравнение
+crates/bsl-debug/src/module_index.rs	Configuration.xml	1	конструкция
+crates/bsl-debug/src/module_index.rs	Ext	1	конструкция
 crates/bsl-debug/src/module_index.rs	Forms	1	сравнение
 crates/bsl-debug/src/module_index.rs	Module	1	сравнение
-crates/bsl-debug/src/module_index.rs	Module.bsl	1	сравнение
-crates/bsl-debug/src/module_index.rs	bsl	2	сравнение
-crates/bsl-debug/src/module_index.rs	xml	2	сравнение
 crates/bsl-debug/src/types/xml.rs	ConfigModule	2	вне-класса: значение поля DAP-протокола
 crates/bsl-debug/src/types/xml.rs	ExtensionModule	2	вне-класса: значение поля DAP-протокола
 crates/bsl-launcher/src/cache.rs	bin	1	вне-класса: каталог кэша лаунчера
