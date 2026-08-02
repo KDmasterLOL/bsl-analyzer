@@ -3152,4 +3152,59 @@ mod tests {
         let hits_b = engine.search_with_embedding(&vec_b, 5, None).unwrap();
         assert_eq!(hits_b.first().map(|h| h.symbol_name.as_str()), Some("Бета"));
     }
+
+    /// A symlink spelled `.bsl` whose target is not a BSL source is not a source
+    /// file: the graph walk drops it because the roles of the two spellings
+    /// disagree, and the overlay must agree with that universe.
+    #[cfg(unix)]
+    #[test]
+    fn probe_a_symlink_to_a_non_bsl_target_is_not_indexed() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let target = extension.join("Target.txt");
+        fs::write(&target, "Процедура ТолькоЧерезСсылку()\nКонецПроцедуры").unwrap();
+        let alias = configuration.join("Alias.bsl");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        engine.set_workspace_roots(roots);
+        engine.prime_workspace_overlay().unwrap();
+        let before = engine.text_search("ТолькоЧерезСсылку", 10, Some("code")).unwrap();
+        assert!(before.is_empty(), "a .txt is not a BSL source file: {before:?}");
+    }
+
+    /// A cold overlay prime is exactly one walk of the workspace, and an
+    /// initialized watcher-mode engine performs none: the walk count is the
+    /// observable proving every overlay pass shares the one common scan instead
+    /// of a private traversal with its own symlink and error policy.
+    #[test]
+    fn a_cold_prime_walks_the_workspace_exactly_once() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("M.bsl"), "Процедура Раз()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+
+        let before = project_model::source_set::scans_performed_on_thread();
+        engine.prime_workspace_overlay().unwrap();
+        let walked = project_model::source_set::scans_performed_on_thread() - before;
+        assert_eq!(walked, 1, "one cold prime is one walk");
+
+        engine.enable_workspace_watcher_mode();
+        let before = project_model::source_set::scans_performed_on_thread();
+        engine.prime_workspace_overlay().unwrap();
+        let walked = project_model::source_set::scans_performed_on_thread() - before;
+        assert_eq!(walked, 0, "an initialized watcher-mode cache must not rescan");
+    }
 }

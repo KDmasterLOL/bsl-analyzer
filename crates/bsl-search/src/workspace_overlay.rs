@@ -7,7 +7,7 @@ use crate::store::Store;
 use crate::workspace_roots::{FileKey, WorkspaceRoots};
 use code_chunk::Chunker;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -441,7 +441,7 @@ impl WorkspaceOverlayCache {
         batch_size: usize,
         hash_mode: BaselineHashMode,
     ) -> Result<(), SearchError> {
-        let workspace_files = scan_workspace_files(roots);
+        let workspace_files = scan_workspace_files(roots).files;
         let mut seen_keys = HashSet::new();
         let mut hidden_paths = HashSet::new();
 
@@ -677,7 +677,7 @@ impl WorkspaceOverlayCache {
             }
         }
 
-        let workspace_files = scan_workspace_files(roots);
+        let workspace_files = scan_workspace_files(roots).files;
         let mut seen_keys = HashSet::new();
         let mut hidden_paths = HashSet::new();
         let mut updated_persisted = HashMap::new();
@@ -832,7 +832,7 @@ impl WorkspaceOverlayCache {
         let persisted =
             store.load_overlay_fingerprint_cache(&snapshot_id).unwrap_or(None).unwrap_or_default();
 
-        let workspace_files = scan_workspace_files(roots);
+        let workspace_files = scan_workspace_files(roots).files;
         let mut seen_keys = HashSet::new();
         let mut hidden_paths = HashSet::new();
         let mut updated_persisted = HashMap::new();
@@ -1237,68 +1237,64 @@ struct WorkspaceFileState {
     fingerprint: FileFingerprint,
 }
 
-/// Every `.bsl` file of every registered root, each under the key it is stored
-/// by. Roots may nest, so a file reached from two of them is enumerated twice
-/// and attributed to the same owner both times; de-duplicating by key is what
-/// keeps one file one entry.
-fn scan_workspace_files(roots: &WorkspaceRoots) -> Vec<WorkspaceFileState> {
-    let mut seen = HashSet::new();
-    let mut files = Vec::new();
-    for (_, root) in roots.entries() {
-        for state in scan_one_root(roots, root) {
-            if seen.insert(state.key.clone()) {
-                files.push(state);
-            }
-        }
-    }
-    files
+/// Everything one full scan of the registered roots saw: the files under their
+/// store keys, plus how much of the tree the walk could NOT vouch for. The
+/// counters travel with the files because they qualify them — a consumer that
+/// reconciles a store against `files` must know whether the list may speak for
+/// the whole tree.
+#[derive(Debug, Default)]
+struct ScannedFiles {
+    files: Vec<WorkspaceFileState>,
+    /// See [`project_model::SourceSet::unreadable`]: coverage is incomplete.
+    unreadable: usize,
+    /// See [`project_model::SourceSet::canonical_fallbacks`]: identity is degraded.
+    canonical_fallbacks: usize,
 }
 
-fn scan_one_root(roots: &WorkspaceRoots, root: &Path) -> Vec<WorkspaceFileState> {
-    // The canonical spelling is taken ONCE for the root and each file's derived
-    // from it, rather than per file: the walk does not follow directory links, so
-    // everything it reaches is physically under this root and the only aliasing
-    // that can occur is in the root's own path. A walk that starts following
-    // links must supply the canonical spelling itself — deriving it here would
-    // then name a file that is not where the walk actually went.
-    let root_canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            bsl_conventions::has_extension(entry.path(), bsl_conventions::BSL_EXTENSION)
-        })
-        .filter_map(|entry| {
-            let walked = entry.path();
-            // Following the link: the read below reads the target, so the target
-            // is what the fingerprint must describe. A dangling link fails here
-            // and is dropped, which is right — there is no file to index.
-            let metadata = std::fs::metadata(walked).ok()?;
-            // A symlinked FILE is still yielded (only directory links are not
-            // descended into), and it may point out of this root entirely. Its
-            // canonical spelling has to be taken for real; deriving it from the
-            // root would name a file that is not the one being read, and the
-            // point-update path — which canonicalizes in full — would then
-            // attribute the same file to a different root.
-            let canonical = if entry.path_is_symlink() {
-                std::fs::canonicalize(walked).ok()?
-            } else {
-                match walked.strip_prefix(root) {
-                    Ok(rel) => root_canonical.join(rel),
-                    Err(_) => walked.to_path_buf(),
-                }
-            };
-            let key = roots.root_of(walked, &canonical)?;
-            Some(WorkspaceFileState {
-                key,
-                abs_path: entry.into_path(),
-                fingerprint: FileFingerprint {
-                    len: metadata.len(),
-                    modified: metadata.modified().ok(),
-                },
-            })
-        })
-        .collect()
+/// Every source file of every registered root, each under the key it is stored
+/// by, from the one shared workspace walk.
+fn scan_workspace_files(roots: &WorkspaceRoots) -> ScannedFiles {
+    let declared: Vec<PathBuf> = roots.entries().map(|(_, root)| root.to_path_buf()).collect();
+    let set = project_model::SourceSet::scan(&declared);
+    let scanned = scanned_files_from(roots, &set);
+    if scanned.unreadable > 0 || scanned.canonical_fallbacks > 0 {
+        tracing::warn!(
+            unreadable = scanned.unreadable,
+            canonical_fallbacks = scanned.canonical_fallbacks,
+            "workspace overlay scan did not cover the whole tree"
+        );
+    }
+    scanned
+}
+
+/// The pure projection of a walk result into overlay terms. Roots may nest, so
+/// a file reached from two of them is enumerated twice and attributed to the
+/// same owner both times; de-duplicating by key is what keeps one file one
+/// entry. A file whose key cannot be built (a root that is itself a file) is
+/// dropped, as it always was.
+fn scanned_files_from(roots: &WorkspaceRoots, set: &project_model::SourceSet) -> ScannedFiles {
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+    for file in &set.files {
+        if file.role != project_model::FileRole::Source {
+            continue;
+        }
+        let Some(key) = roots.root_of(&file.walked, &file.canonical) else {
+            continue;
+        };
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        files.push(WorkspaceFileState {
+            key,
+            abs_path: file.walked.clone(),
+            fingerprint: FileFingerprint {
+                len: file.metadata.len(),
+                modified: file.metadata.modified().ok(),
+            },
+        });
+    }
+    ScannedFiles { files, unreadable: set.unreadable, canonical_fallbacks: set.canonical_fallbacks }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2642,5 +2638,42 @@ mod tests {
             overlay.lexical_documents.iter().map(|doc| doc.symbol_name.clone()).collect();
         names.sort();
         assert_eq!(names, vec!["ИзменённаяА".to_owned(), "НоваяБ".to_owned()]);
+    }
+
+    /// A directory symlink inside a root is part of the workspace universe: the
+    /// graph walk follows directory links, and an overlay scan that does not
+    /// silently serves a different set of files than every other consumer.
+    #[cfg(unix)]
+    #[test]
+    fn a_module_behind_a_directory_link_reaches_the_overlay() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let real = outside.path().join("shared");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("M.bsl"), "Процедура ЗаКаталожнойСсылкой()\nКонецПроцедуры").unwrap();
+        std::os::unix::fs::symlink(&real, workspace.join("linked")).unwrap();
+
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let roots = single_root(workspace);
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
+        let documents = cache.snapshot().lexical_documents;
+
+        assert_eq!(documents.len(), 1, "the linked subtree belongs to the universe");
+        assert_eq!(documents[0].symbol_name, "ЗаКаталожнойСсылкой");
+    }
+
+    /// The overlay must not walk the tree itself: the walk policy (which links
+    /// are followed, how errors are classified) lives in `project-model`, and a
+    /// private traversal here would quietly diverge from it again.
+    #[test]
+    fn the_overlay_does_not_carry_its_own_tree_walk() {
+        let source = include_str!("workspace_overlay.rs");
+        let needle: String = ["walk", "dir"].concat();
+        assert!(
+            !source.to_lowercase().contains(&needle),
+            "workspace_overlay.rs must scan through project_model::SourceSet::scan"
+        );
     }
 }
