@@ -96,3 +96,16 @@ crates/mcp-server/src/tools/metadata.rs	Ext	1	сравнение
 crates/mcp-server/src/tools/metadata.rs	Form.xml	1	сравнение
 crates/mcp-server/src/tools/metadata.rs	Forms	1	сравнение
 crates/project-model/src/lib.rs	Configuration.xml	6	сравнение
+crates/bsl-analyzer/src/bench/discover.rs	form	2	вне-класса: метка категории бенча
+crates/bsl-analyzer/src/bin/cli/contract.rs	commands	1	вне-класса: имя раздела контракта CLI
+crates/bsl-metadata/src/metadata_object.rs	commonmodule	1	вне-класса: двуязычное имя вида MDO
+crates/bsl-metadata/src/xml_parser/form.rs	form	2	вне-класса: метка контекста ошибки
+crates/hir-def/src/graph_index.rs	form	1	вне-класса: вид узла графа
+crates/ide-db/src/metadata.rs	commands	1	сравнение
+crates/ide/src/graph.rs	form	2	вне-класса: вид узла графа
+crates/ide/src/symbol_info/form/card.rs	form	1	вне-класса: вид символа
+crates/mcp-server/src/contract.rs	form	1	вне-класса: вид узла графа
+crates/mcp-server/src/graph_query.rs	form	4	вне-класса: вид узла графа
+crates/mcp-server/src/lib.rs	form	2	вне-класса: вид узла графа
+crates/mcp-server/src/tools/graph.rs	form	2	вне-класса: вид узла графа
+crates/mcp-server/src/tools/metadata.rs	commonmodule	1	вне-класса: двуязычное имя вида MDO

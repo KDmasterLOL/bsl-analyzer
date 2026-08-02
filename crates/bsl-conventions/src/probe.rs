@@ -86,6 +86,10 @@ mod tests {
         assert!(found.ends_with("Module.bsl"));
     }
 
+    /// На регистронезависимой ФС точная проба попадает при любом написании и
+    /// листинг не выполняется — там возвращается сконструированное написание,
+    /// как и до этого хелпера (граница узла).
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn a_case_variant_is_found_by_listing_and_keeps_its_real_spelling() {
         let dir = tempfile::tempdir().unwrap();
@@ -109,6 +113,7 @@ mod tests {
         assert_eq!(found.file_name().unwrap(), "Товар.XML");
     }
 
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn a_stem_probe_never_takes_a_case_variant_stem() {
         let dir = tempfile::tempdir().unwrap();
@@ -120,6 +125,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn a_chain_resolves_each_component_by_its_own_listing() {
         let dir = tempfile::tempdir().unwrap();

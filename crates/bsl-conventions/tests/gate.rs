@@ -198,7 +198,7 @@ fn test_regions(masked: &str) -> Vec<(usize, usize)> {
             continue;
         };
         let attr_text = &masked[attr_text.0..attr_text.1];
-        if !(attr_text.trim_start().starts_with("cfg") && has_word(attr_text, "test")) {
+        if !is_test_only_cfg(attr_text) {
             search_from = attr_end;
             continue;
         }
@@ -259,6 +259,16 @@ fn balanced(bytes: &[u8], open_at: usize, open: u8, close: u8) -> Option<((usize
     None
 }
 
+/// Whether this attribute makes its item TEST-ONLY: `cfg(test)` or
+/// `cfg(all(test, …))`. `cfg(not(test))`, `cfg(any(test, …))` and
+/// `cfg_attr(test, …)` all leave the item in production builds, so their
+/// regions must stay in the scan.
+fn is_test_only_cfg(attr_text: &str) -> bool {
+    let normalized: String = attr_text.chars().filter(|c| !c.is_whitespace()).collect();
+    normalized == "cfg(test)"
+        || (normalized.starts_with("cfg(all(") && has_word(&normalized, "test"))
+}
+
 fn has_word(text: &str, word: &str) -> bool {
     let bytes = text.as_bytes();
     let mut from = 0;
@@ -279,11 +289,11 @@ fn has_word(text: &str, word: &str) -> bool {
 
 /// Is this literal shaped like a conventional name?
 ///
-/// Suffix and bare-extension checks are case-insensitive — the already-folded
-/// comparison family spells them lowercase. Segment and stem checks are
-/// exact-case: an exact comparison necessarily spells the canonical form, so
-/// widening them to ci would only pull in unrelated words (`form` and `module`
-/// are graph node kinds).
+/// Every check is case-insensitive: the ci-comparison family spells its
+/// literals in whatever case it likes (`eq_ignore_ascii_case("objectmodule")`),
+/// so an exact-case scan would be blind to precisely the comparisons this gate
+/// polices. Unrelated same-spelling words (graph node kinds `form`, `module`)
+/// land in the allowlist as out-of-class rows.
 fn is_conventional_shape(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     if lower.ends_with(".bsl") || lower.ends_with(".xml") || lower.ends_with(".bin") {
@@ -292,12 +302,19 @@ fn is_conventional_shape(text: &str) -> bool {
     if matches!(lower.as_str(), "bsl" | "xml" | "bin") {
         return true;
     }
-    if matches!(text, "Ext" | "Form" | "Forms" | "Commands") {
+    if matches!(lower.as_str(), "ext" | "form" | "forms" | "commands") {
         return true;
     }
     // Bare module stems the way the debugger compares them after
-    // `file_stem()`: alphabetic, canonical `…Module`, no extension.
-    if text.ends_with("Module") && text.bytes().all(|b| b.is_ascii_alphabetic()) {
+    // `file_stem()`: alphabetic, `…Module` in any ASCII case — a ci comparison
+    // spells the literal however it likes. The bare word `module` itself is a
+    // graph node kind, not a stem, hence the length cut plus the one canonical
+    // spelling the debugger's table actually uses.
+    if text == "Module"
+        || (lower.ends_with("module")
+            && lower.len() > "module".len()
+            && text.bytes().all(|b| b.is_ascii_alphabetic()))
+    {
         return true;
     }
     false
@@ -334,6 +351,20 @@ fn scanned_files(root: &Path) -> Vec<PathBuf> {
                 }
             }
         }
+        // Build scripts are production targets of their crate.
+        let build_rs = crate_dir.join("build.rs");
+        if build_rs.is_file() {
+            files.push(build_rs);
+        }
+    }
+    // So is the workspace's own task runner.
+    let xtask_src = root.join("xtask/src");
+    if xtask_src.is_dir() {
+        for entry in walkdir::WalkDir::new(&xtask_src).into_iter().flatten() {
+            if entry.file_type().is_file() && entry.path().extension().is_some_and(|e| e == "rs") {
+                files.push(entry.path().to_path_buf());
+            }
+        }
     }
     files.sort();
     files
@@ -354,7 +385,7 @@ fn is_test_named(file: &Path) -> bool {
 /// Module names declared as `#[cfg(test)] mod name;` inside the given test
 /// regions: their bodies live in sibling files that are compiled only under
 /// test, so those files must leave the scan entirely.
-fn test_module_names(masked: &str, regions: &[(usize, usize)]) -> Vec<String> {
+fn test_module_names(source: &str, masked: &str, regions: &[(usize, usize)]) -> Vec<String> {
     let mut names = Vec::new();
     for &(start, end) in regions {
         let region = &masked[start..end.min(masked.len())];
@@ -365,9 +396,25 @@ fn test_module_names(masked: &str, regions: &[(usize, usize)]) -> Vec<String> {
         let rest = &region[found + 4..];
         let name: String =
             rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-        if !name.is_empty() && rest[name.len()..].trim_start().starts_with(';') {
-            names.push(name);
+        if name.is_empty() || !rest[name.len()..].trim_start().starts_with(';') {
+            continue;
         }
+        // A `#[path = "…"]` on the declaration points the module at an
+        // arbitrary file; the masked text blanks string contents, so the
+        // spelling comes from the ORIGINAL source at the same offsets.
+        let region_src = &source[start..end.min(source.len())];
+        if let Some(p) = region_src.find("path") {
+            let after = &region_src[p..];
+            if let (Some(q1), Some(_)) = (after.find('"'), after.find('=')) {
+                if let Some(q2) = after[q1 + 1..].find('"') {
+                    let target = &after[q1 + 1..q1 + 1 + q2];
+                    if let Some(stem) = target.strip_suffix(".rs") {
+                        names.push(stem.to_string());
+                    }
+                }
+            }
+        }
+        names.push(name);
     }
     names
 }
@@ -389,7 +436,7 @@ fn collect_findings(root: &Path) -> Findings {
         // path that never matches.
         let dir = file.parent().unwrap();
         let stem_dir = file.file_stem().map(|s| dir.join(s));
-        for name in test_module_names(&masked, &regions) {
+        for name in test_module_names(&source, &masked, &regions) {
             excluded_files.push(dir.join(format!("{name}.rs")));
             excluded_files.push(dir.join(&name));
             if let Some(stem_dir) = &stem_dir {
