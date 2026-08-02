@@ -122,15 +122,23 @@ fn relative_to_root(root: &Path, path: &Path) -> Option<String> {
     Some(stripped.to_string_lossy().replace('\\', "/"))
 }
 
+fn file_is(relative_path: &str, name: bsl_conventions::ConventionalName) -> bool {
+    std::path::Path::new(relative_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(bsl_conventions::conventional_of)
+        == Some(name)
+}
+
 fn classify(relative_path: &str) -> String {
     let p = relative_path;
     if p.contains("/CommonModules/") || p.starts_with("CommonModules/") {
         "common".to_string()
     } else if p.contains("/Forms/") {
         "form".to_string()
-    } else if p.ends_with("ObjectModule.bsl") {
+    } else if file_is(p, bsl_conventions::ConventionalName::ObjectModule) {
         "object".to_string()
-    } else if p.ends_with("ManagerModule.bsl") {
+    } else if file_is(p, bsl_conventions::ConventionalName::ManagerModule) {
         "manager".to_string()
     } else {
         "other".to_string()

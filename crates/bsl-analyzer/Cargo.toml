@@ -20,6 +20,7 @@ path = "src/bin/main.rs"
 salsa-detailed-trace = ["salsa/detailed-trace"]
 
 [dependencies]
+bsl-conventions.workspace = true
 ide.workspace = true
 ide-host-core.workspace = true
 parser.workspace = true

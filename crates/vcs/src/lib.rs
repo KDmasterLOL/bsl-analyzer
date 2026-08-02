@@ -181,7 +181,7 @@ fn is_whole_file_status(status: Delta) -> bool {
 }
 
 fn is_bsl_path(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl"))
+    bsl_conventions::has_extension(path, bsl_conventions::BSL_EXTENSION)
 }
 
 fn collect_file_changes(diff: &git2::Diff<'_>) -> Result<HashMap<String, FileChange>> {

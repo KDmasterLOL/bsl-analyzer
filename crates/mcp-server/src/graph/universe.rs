@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
-use project_model::{SourceSet, WalkedFile};
+use project_model::{file_role::FileRole, SourceSet};
 use vfs::FileId;
 
 use super::scan::FileStat;
@@ -49,28 +49,16 @@ impl ScannedUniverse {
     }
 }
 
-/// The graph's historical extension predicate: EXACT lowercase spelling, judged on
-/// the walked path. The shared walker itself matches extensions case-insensitively;
-/// widening the graph's universe to agree with it also changes every consumer that
-/// decodes semantics from a file's full name, so the widening ships separately and
-/// this filter is the single place it will land.
-fn legacy_extension(file: &WalkedFile) -> Option<&'static str> {
-    match file.walked.extension().and_then(|e| e.to_str()) {
-        Some("bsl") => Some("bsl"),
-        Some("xml") => Some("xml"),
-        _ => None,
-    }
-}
-
 /// The `.bsl` universe in enumeration shape: canonical paths with stable
 /// [`FileId`]s assigned in scan order, first occurrence of each canonical path
-/// winning — the keying `enumerate_bsl_files` has always used.
+/// winning — the keying `enumerate_bsl_files` has always used. Membership is the
+/// walker's own role verdict, so a case-variant spelling the walker took is in.
 pub(crate) fn bsl_files_from(set: &SourceSet) -> Vec<(FileId, PathBuf)> {
     let mut entries: Vec<(FileId, PathBuf)> = Vec::new();
     let mut seen: HashSet<&PathBuf> = HashSet::new();
     let mut next_id = 0u32;
     for file in &set.files {
-        if legacy_extension(file) != Some("bsl") {
+        if file.role != FileRole::Source {
             continue;
         }
         if !seen.insert(&file.canonical) {
@@ -90,7 +78,7 @@ pub(crate) fn file_stats_from(set: &SourceSet) -> Vec<FileStat> {
     let mut stats: Vec<FileStat> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for file in &set.files {
-        if legacy_extension(file).is_none() {
+        if file.role == FileRole::Ignored {
             continue;
         }
         let path = file.canonical.to_string_lossy().into_owned();
@@ -188,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shim_keeps_an_upper_case_extension_out_of_both_projections() {
+    fn a_case_variant_spelling_is_in_both_projections() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join("Lower.bsl"), "");
         write(&dir.path().join("Upper.BSL"), "");
@@ -196,15 +184,13 @@ mod tests {
 
         let set = scan(dir.path());
 
-        // The walker itself takes the upper-case spellings — the narrowing is the
-        // projection's doing, so removing the shim makes this test fail.
+        // The projections take the walker's own role verdict: whatever spelling
+        // the walker admitted is in the universe, no second narrowing.
         assert_eq!(set.files.len(), 3, "the shared walker is case-insensitive");
         let bsl: Vec<PathBuf> = bsl_files_from(&set).into_iter().map(|(_, p)| p).collect();
-        assert_eq!(bsl.len(), 1);
-        assert!(bsl[0].ends_with("Lower.bsl"));
+        assert_eq!(bsl.len(), 2);
         let stats = file_stats_from(&set);
-        assert_eq!(stats.len(), 1);
-        assert!(stats[0].path.ends_with("Lower.bsl"));
+        assert_eq!(stats.len(), 3, "оба .bsl и .XML — вся вселенная в статах");
     }
 
     #[test]

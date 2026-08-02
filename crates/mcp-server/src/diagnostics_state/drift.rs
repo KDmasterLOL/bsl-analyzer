@@ -142,15 +142,27 @@ impl DiagnosticsState {
             .iter()
             .chain(&changes.removed)
             .chain(&changes.modified)
-            .filter(|p| p.ends_with(".xml"))
+            .filter(|p| bsl_conventions::str_has_extension(p, bsl_conventions::XML_EXTENSION))
             .map(PathBuf::from)
             .collect();
-        let added_bsl: Vec<String> =
-            changes.added.iter().filter(|p| !p.ends_with(".xml")).cloned().collect();
-        let modified_bsl: Vec<String> =
-            changes.modified.iter().filter(|p| !p.ends_with(".xml")).cloned().collect();
-        let removed_bsl: Vec<String> =
-            changes.removed.iter().filter(|p| !p.ends_with(".xml")).cloned().collect();
+        let added_bsl: Vec<String> = changes
+            .added
+            .iter()
+            .filter(|p| !bsl_conventions::str_has_extension(p, bsl_conventions::XML_EXTENSION))
+            .cloned()
+            .collect();
+        let modified_bsl: Vec<String> = changes
+            .modified
+            .iter()
+            .filter(|p| !bsl_conventions::str_has_extension(p, bsl_conventions::XML_EXTENSION))
+            .cloned()
+            .collect();
+        let removed_bsl: Vec<String> = changes
+            .removed
+            .iter()
+            .filter(|p| !bsl_conventions::str_has_extension(p, bsl_conventions::XML_EXTENSION))
+            .cloned()
+            .collect();
         self.apply_metadata_and_body_drift(
             &xml_paths,
             &added_bsl,

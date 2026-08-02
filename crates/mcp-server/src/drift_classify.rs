@@ -7,24 +7,21 @@
 //! path has always used.
 //!
 //! The taxonomy (`.xml` metadata / `.bsl` body modified / `.bsl` removed / subtree
-//! rescan / config) is shared; baseline-relative policy is the caller's, selected by the
-//! `baseline` argument:
+//! rescan / config) is shared, and extension matching is case-insensitive for every
+//! caller — one policy, owned by `bsl_conventions`. Baseline-relative behaviour is
+//! still the caller's, selected by the `baseline` argument:
 //!
-//! - With a baseline (diagnostics), EXTENSION MATCHING is an exact lowercase suffix
-//!   (`ends_with(".bsl")` / `ends_with(".xml")`), so `Module.BSL` is ignored just as
-//!   before. A new `.bsl` lands in `bsl_added`, a removed tracked `.bsl` in
-//!   `bsl_removed` — both are reconciled into the live resident in place (the file
-//!   universe moves without a rebuild). Content-unchanged touches are dropped, and
-//!   `new_fp`/`removed_keys` carry the stats delta. Only a removed directory subtree
-//!   (descendants unenumerable) remains `structural_rescan`.
-//! - Without a baseline (search), EXTENSION MATCHING is case-INSENSITIVE (as the old
-//!   search sink's `extension().eq_ignore_ascii_case`), so `Module.BSL` is classified.
-//!   Every present `.bsl` is `bsl_modified`, every gone `.bsl` is `bsl_removed`, and every
-//!   `.xml` (present or gone) is a resolver input; `structural_rescan` reduces to a real
-//!   subtree removal.
+//! - With a baseline (diagnostics), a new `.bsl` lands in `bsl_added`, a removed
+//!   tracked `.bsl` in `bsl_removed` — both are reconciled into the live resident in
+//!   place (the file universe moves without a rebuild). Content-unchanged touches are
+//!   dropped, and `new_fp`/`removed_keys` carry the stats delta. Only a removed
+//!   directory subtree (descendants unenumerable) remains `structural_rescan`.
+//! - Without a baseline (search), every present `.bsl` is `bsl_modified`, every gone
+//!   `.bsl` is `bsl_removed`, and every `.xml` (present or gone) is a resolver input;
+//!   `structural_rescan` reduces to a real subtree removal.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::change_hub::{ChangeEntry, ChangeKind};
 use crate::graph::scan::file_fingerprint;
@@ -39,7 +36,7 @@ pub(crate) struct DriftPath {
 }
 
 /// Drained hub entries bucketed by on-disk truth and file class. See the module docs for
-/// the baseline policy split.
+/// the baseline-relative behaviour.
 #[derive(Default)]
 pub(crate) struct DriftClassification {
     /// `.xml` metadata that changed (added / edited / removed). Diagnostics point-refreshes
@@ -69,23 +66,6 @@ pub(crate) struct DriftClassification {
     pub removed_keys: Vec<String>,
 }
 
-/// Whether `key` carries the file class `dot_ext` (e.g. `".bsl"`), under the caller's
-/// matching policy. The two consumers had different historical rules and this preserves
-/// both exactly:
-/// - baseline policy (diagnostics, `case_insensitive == false`): an exact lowercase
-///   suffix, the old inline `key.ends_with(".bsl")` / `ends_with(".xml")`. `Module.BSL`
-///   does NOT match — a change diagnostics has always ignored.
-/// - search policy (`case_insensitive == true`): a case-insensitive extension match, as
-///   the old search sink's `extension().eq_ignore_ascii_case`. `Module.BSL` DOES match.
-fn is_ext(key: &str, dot_ext: &str, case_insensitive: bool) -> bool {
-    if case_insensitive {
-        let bare = &dot_ext[1..];
-        Path::new(key).extension().is_some_and(|e| e.eq_ignore_ascii_case(bare))
-    } else {
-        key.ends_with(dot_ext)
-    }
-}
-
 /// Classify drained hub `entries`. `config_paths` are the canonical analyzer-config file
 /// paths at the workspace root (a match forces `config_changed`); `baseline` is the
 /// per-path fingerprint map to diff against, or `None` for the stateless (search) policy.
@@ -96,10 +76,6 @@ pub(crate) fn classify_drift(
 ) -> DriftClassification {
     let mut out = DriftClassification::default();
     let mut seen: HashSet<String> = HashSet::new();
-    // Search (no baseline) matches extensions case-insensitively, as its old sink did;
-    // diagnostics (baseline) matches the exact lowercase suffix, as its old inline rules
-    // did. See [`is_ext`].
-    let case_insensitive = baseline.is_none();
 
     for entry in entries {
         // A vanished directory subtree expands into removed descendants the drain could
@@ -119,8 +95,8 @@ pub(crate) fn classify_drift(
         if !seen.insert(key.clone()) {
             continue;
         }
-        let is_xml = is_ext(&key, ".xml", case_insensitive);
-        let is_bsl = is_ext(&key, ".bsl", case_insensitive);
+        let is_xml = bsl_conventions::str_has_extension(&key, bsl_conventions::XML_EXTENSION);
+        let is_bsl = bsl_conventions::str_has_extension(&key, bsl_conventions::BSL_EXTENSION);
         if !is_xml && !is_bsl {
             continue;
         }
@@ -322,7 +298,7 @@ mod tests {
     /// old exact lowercase suffix, so an uppercase `Module.BSL` is ignored; the stateless
     /// (search) policy matches case-insensitively, so the same path is classified.
     #[test]
-    fn uppercase_extension_follows_the_matching_policy() {
+    fn an_uppercase_extension_is_a_body_for_both_callers() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let upper = root.join("Module.BSL");
@@ -331,19 +307,14 @@ mod tests {
 
         let entries = [entry(&key, ChangeKind::MaybeChanged)];
 
-        // Baseline policy: the exact `ends_with(".bsl")` rule ignores the uppercase file,
-        // exactly as the old inline diagnostics classification did.
-        let mut baseline = HashMap::new();
-        baseline.insert(key.clone(), 0u64);
+        // One policy for both callers: `Module.BSL` is a module body whether the
+        // classification runs against a baseline (diagnostics) or without one (search).
+        let baseline = HashMap::new();
         let diag = classify_drift(&entries, &HashSet::new(), Some(&baseline));
-        assert!(
-            diag.bsl_modified.is_empty() && !diag.structural_rescan,
-            "baseline policy ignores an uppercase .BSL extension",
-        );
+        assert_eq!(diag.bsl_added.len(), 1, "с бейзлайном новый .BSL — добавленное тело");
 
-        // Search policy: the case-insensitive rule classifies it as a body edit.
         let search = classify_drift(&entries, &HashSet::new(), None);
-        assert_eq!(search.bsl_modified.len(), 1, "search policy matches .BSL case-insensitively");
+        assert_eq!(search.bsl_modified.len(), 1, "без бейзлайна .BSL — правка тела");
         assert_eq!(search.bsl_modified[0].key, key);
     }
 

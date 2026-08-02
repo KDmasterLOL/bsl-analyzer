@@ -11,6 +11,7 @@ description = "git2-backed diff reports for analysis scoping (vendor-diff filter
 doctest = false
 
 [dependencies]
+bsl-conventions.workspace = true
 anyhow.workspace = true
 git2.workspace = true
 serde.workspace = true

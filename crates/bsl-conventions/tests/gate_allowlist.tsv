@@ -2,10 +2,6 @@
 # Причины: "конструкция" (каноническое написание строится, не сравнивается),
 # "вне-класса" (XML-тег, имя конфига анализатора и т.п.), "сравнение"
 # (inline-сравнение, ещё не переведённое на словарь — сжимающийся фронт).
-crates/bsl-analyzer/src/bench/discover.rs	ManagerModule.bsl	1	сравнение
-crates/bsl-analyzer/src/bench/discover.rs	ObjectModule.bsl	1	сравнение
-crates/bsl-analyzer/src/bin/cli/analyze.rs	bsl	1	сравнение
-crates/bsl-analyzer/src/bin/cli/deps.rs	bsl	1	сравнение
 crates/bsl-analyzer/src/bin/cli/source_set.rs	Configuration.xml	3	сравнение
 crates/bsl-analyzer/src/reporters/junit.rs	bsl-analyzer.junit.xml	1	вне-класса: имя собственного отчёта анализатора
 crates/bsl-analyzer/src/server.rs	bsl	1	вне-класса: идентификатор источника LSP-диагностик
@@ -67,7 +63,6 @@ crates/bsl-metadata/src/xml_parser/form.rs	{}.xml	1	сравнение
 crates/bsl-metadata/src/xml_parser/http_service.rs	HTTPServices/{}/Ext/Module.bsl	1	сравнение
 crates/bsl-metadata/src/xml_parser/predefined_parser.rs	Failed to parse Predefined.xml	1	вне-класса: текст сообщения об ошибке
 crates/bsl-metadata/src/xml_parser/web_service.rs	WebServices/{}/Ext/Module.bsl	1	сравнение
-crates/bsl-search/examples/chunk_stats.rs	bsl	1	сравнение
 crates/bsl-search/src/context.rs	CommandModule.bsl	1	сравнение
 crates/bsl-search/src/context.rs	Commands	1	сравнение
 crates/bsl-search/src/context.rs	Ext	1	сравнение
@@ -82,8 +77,6 @@ crates/bsl-search/src/context.rs	OrdinaryApplicationModule.bsl	1	сравнен�
 crates/bsl-search/src/context.rs	RecordSetModule.bsl	1	сравнение
 crates/bsl-search/src/context.rs	SessionModule.bsl	1	сравнение
 crates/bsl-search/src/context.rs	ValueManagerModule.bsl	1	сравнение
-crates/bsl-search/src/engine.rs	bsl	4	сравнение
-crates/bsl-search/src/workspace_overlay.rs	bsl	1	сравнение
 crates/bsl-types/src/display.rs	CommonModule	1	вне-класса: отображаемое имя типа
 crates/hir-def/src/module_index.rs	Ext	1	сравнение
 crates/hir-def/src/module_index.rs	Form	1	сравнение
@@ -136,23 +129,9 @@ crates/ide-diagnostics/src/runner.rs	ProtectedModule	1	вне-класса: ко
 crates/ide/src/goto_definition.rs	{name}.xml	1	сравнение
 crates/ide/src/goto_definition.rs	{}.xml	1	сравнение
 crates/ide/src/symbol_info/form.rs	Form	1	вне-класса: английское имя идентификатора BSL «Форма»
-crates/mcp-server/src/diagnostics_state/drift.rs	.xml	4	сравнение
-crates/mcp-server/src/drift_classify.rs	.bsl	1	сравнение
-crates/mcp-server/src/drift_classify.rs	.xml	1	сравнение
-crates/mcp-server/src/graph/build.rs	.bsl	1	сравнение
-crates/mcp-server/src/graph/scan.rs	.xml	1	сравнение
-crates/mcp-server/src/graph/snapshot.rs	bsl	1	сравнение
-crates/mcp-server/src/graph/snapshot.rs	xml	1	сравнение
-crates/mcp-server/src/graph/universe.rs	bsl	3	сравнение
-crates/mcp-server/src/graph/universe.rs	xml	2	сравнение
-crates/mcp-server/src/state/sync.rs	Configuration.xml	1	сравнение
-crates/mcp-server/src/state/sync.rs	bsl	4	сравнение
 crates/mcp-server/src/tools/metadata.rs	Ext	1	сравнение
 crates/mcp-server/src/tools/metadata.rs	Form.xml	1	сравнение
 crates/mcp-server/src/tools/metadata.rs	Forms	1	сравнение
 crates/project-model/src/file_role.rs	Ext	1	сравнение
 crates/project-model/src/file_role.rs	Module.bsl	1	сравнение
-crates/project-model/src/file_role.rs	bsl	1	сравнение
-crates/project-model/src/file_role.rs	xml	1	сравнение
 crates/project-model/src/lib.rs	Configuration.xml	6	сравнение
-crates/vcs/src/lib.rs	bsl	1	сравнение

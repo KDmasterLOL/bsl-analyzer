@@ -300,6 +300,7 @@ dependencies = [
  "anyhow",
  "base-db",
  "blake3",
+ "bsl-conventions",
  "bsl-debug",
  "bsl-metadata",
  "bsl-platform",
@@ -436,6 +437,7 @@ name = "bsl-search"
 version = "0.2.66"
 dependencies = [
  "blake3",
+ "bsl-conventions",
  "code-chunk",
  "crossbeam-channel",
  "expect-test",
@@ -2604,6 +2606,7 @@ dependencies = [
  "axum",
  "base-db",
  "blake3",
+ "bsl-conventions",
  "bsl-debug",
  "bsl-metadata",
  "bsl-platform",
@@ -3223,6 +3226,7 @@ version = "0.2.66"
 dependencies = [
  "base-db",
  "blake3",
+ "bsl-conventions",
  "bsl-metadata",
  "chrono",
  "expect-test",
@@ -4938,6 +4942,7 @@ name = "vcs"
 version = "0.2.66"
 dependencies = [
  "anyhow",
+ "bsl-conventions",
  "git2",
  "serde",
  "serde_json",

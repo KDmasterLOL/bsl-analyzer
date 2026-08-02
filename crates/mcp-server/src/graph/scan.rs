@@ -160,7 +160,11 @@ impl WorkspaceDiff {
     /// configuration visibility for *any* module, so it forces a full rebuild — no
     /// fast path is sound for it.
     pub(crate) fn touches_metadata(&self) -> bool {
-        self.added.iter().chain(&self.removed).chain(&self.modified).any(|p| p.ends_with(".xml"))
+        self.added
+            .iter()
+            .chain(&self.removed)
+            .chain(&self.modified)
+            .any(|p| bsl_conventions::str_has_extension(p, bsl_conventions::XML_EXTENSION))
     }
 }
 
@@ -191,4 +195,19 @@ pub(crate) fn classify_changes(
     modified.sort();
     removed.sort();
     WorkspaceDiff { added, removed, modified }
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_drift_is_seen_in_any_extension_spelling() {
+        let diff = WorkspaceDiff {
+            added: vec!["cfg/Meta.XML".to_string()],
+            removed: Vec::new(),
+            modified: Vec::new(),
+        };
+        assert!(diff.touches_metadata(), "верхнерегистровый .XML — тоже дрейф метаданных");
+    }
 }

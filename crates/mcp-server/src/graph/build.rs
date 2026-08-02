@@ -306,7 +306,7 @@ impl GraphState {
             // 2.6 GB copy) is cheaper than reprojecting most modules. Compare against
             // the `.bsl` module count only — `changed_paths` are modules, while
             // `stored_fp` also counts `.xml`, which would skew the threshold.
-            let module_total = stored_fp.keys().filter(|p| p.ends_with(".bsl")).count();
+            let module_total = bsl_module_total(&stored_fp);
             if changed_paths.len() * 2 > module_total {
                 tracing::info!(
                     changed = changed_paths.len(),
@@ -792,6 +792,15 @@ impl ide::FusedChunkSink for FusedChunkWriter<'_> {
 /// Read the stored per-file fingerprints from a built graph's `files` table. Any
 /// open/query failure (missing file, older schema without the table) yields an empty
 /// map, which classifies every current file as `added` → conservative full rebuild.
+/// The `.bsl` module count of a stored fingerprint map — the denominator of the
+/// incremental-reload breadth threshold (`.xml` rows would skew it).
+fn bsl_module_total(stored_fp: &std::collections::HashMap<String, u64>) -> usize {
+    stored_fp
+        .keys()
+        .filter(|p| bsl_conventions::str_has_extension(p, bsl_conventions::BSL_EXTENSION))
+        .count()
+}
+
 pub(crate) fn read_stored_fingerprints(db_path: &Path) -> std::collections::HashMap<String, u64> {
     let mut map = std::collections::HashMap::new();
     // Read-only open: never create the file as a side effect. A missing/older DB
@@ -840,6 +849,24 @@ pub(crate) fn read_stored_sig_hashes(
         map.insert(row.0, row.1);
     }
     map
+}
+
+#[cfg(test)]
+mod module_total_tests {
+    use super::bsl_module_total;
+
+    #[test]
+    fn the_incremental_threshold_counts_case_variant_modules() {
+        let mut stored = std::collections::HashMap::new();
+        stored.insert("cfg/CommonModules/A/Ext/Module.bsl".to_string(), 1u64);
+        stored.insert("cfg/CommonModules/B/Ext/Module.BSL".to_string(), 2u64);
+        stored.insert("cfg/CommonModules/B.xml".to_string(), 3u64);
+        assert_eq!(
+            bsl_module_total(&stored),
+            2,
+            "Module.BSL — модуль и участвует в знаменателе порога"
+        );
+    }
 }
 
 #[cfg(test)]

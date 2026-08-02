@@ -321,7 +321,8 @@ fn entry_touches_scan_universe(entry: &ChangeEntry) -> bool {
         return true;
     }
     let is_scan_ext = |path: &Path| {
-        matches!(path.extension().and_then(|e| e.to_str()), Some("bsl") | Some("xml"))
+        bsl_conventions::has_extension(path, bsl_conventions::BSL_EXTENSION)
+            || bsl_conventions::has_extension(path, bsl_conventions::XML_EXTENSION)
     };
     is_scan_ext(&entry.canonical) || is_scan_ext(&entry.raw) || entry_is_config_file(entry)
 }
@@ -366,6 +367,21 @@ mod tests {
     use super::*;
     use crate::change_hub::WorkspaceChangeHub;
     use std::time::Duration;
+
+    #[test]
+    fn a_case_variant_module_still_touches_the_scan_universe() {
+        let path = std::path::PathBuf::from("/w/CommonModules/X/Ext/Module.BSL");
+        let entry = ChangeEntry {
+            canonical: path.clone(),
+            raw: path,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        assert!(
+            entry_touches_scan_universe(&entry),
+            "Module.BSL входит во вселенную скана — хаб обязан сбросить кэш отпечатка"
+        );
+    }
 
     /// A second daemon generation over the same workspace renames ITS build into the shared
     /// path. On a pool miss the reopen must not serve that file when it was built under a

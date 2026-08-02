@@ -9,6 +9,7 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
+bsl-conventions.workspace = true
 ide-host-core.workspace = true
 bsl-debug.workspace = true
 bsl-metadata.workspace = true

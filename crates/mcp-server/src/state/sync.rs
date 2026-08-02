@@ -338,7 +338,7 @@ impl SharedState {
             };
             if file.file_type().is_file() {
                 let path = file.path();
-                if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+                if project_model::is_bsl_source_path(path) {
                     present.insert(path.to_path_buf());
                 }
                 Self::mark_search_path_dirty(engine, path);
@@ -403,10 +403,7 @@ impl SharedState {
             match entry {
                 Ok(entry) => {
                     if entry.file_type().is_file()
-                        && entry
-                            .path()
-                            .extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("bsl"))
+                        && project_model::is_bsl_source_path(entry.path())
                     {
                         present.insert(entry.path().to_path_buf());
                     }
@@ -447,7 +444,7 @@ impl SharedState {
     /// Mark one path dirty in the search overlay if it is a `.bsl` file. Filtering
     /// on the consumer side keeps the hub itself extension-agnostic.
     fn mark_search_path_dirty(engine: &SharedSearchEngine, path: &Path) {
-        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+        if !project_model::is_bsl_source_path(path) {
             return;
         }
         if let Ok(guard) = engine.lock() {
@@ -557,7 +554,7 @@ fn walk_bsl_files(dir: &Path) -> Vec<PathBuf> {
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .map(|e| e.path().to_path_buf())
-        .filter(|p| p.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+        .filter(|p| project_model::is_bsl_source_path(p))
         .collect()
 }
 
@@ -607,7 +604,10 @@ fn graph_file_to_rel(file: &str, source_prefix: &str) -> Option<String> {
 fn is_workspace_root_xml(xml: &Path, workspace_root: Option<&Path>) -> bool {
     match workspace_root {
         Some(root) => xml.parent() == Some(root),
-        None => xml.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Configuration.xml")),
+        None => {
+            xml.file_name().and_then(|n| n.to_str()).and_then(bsl_conventions::conventional_of)
+                == Some(bsl_conventions::ConventionalName::ConfigurationXml)
+        }
     }
 }
 

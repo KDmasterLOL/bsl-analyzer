@@ -1,8 +1,8 @@
 use std::path::Path;
 
-pub const SOURCE_EXTENSIONS: &[&str] = &["bsl"];
+pub const SOURCE_EXTENSIONS: &[&str] = &[bsl_conventions::BSL_EXTENSION];
 
-pub const METADATA_WATCHED_EXTENSIONS: &[&str] = &["xml"];
+pub const METADATA_WATCHED_EXTENSIONS: &[&str] = &[bsl_conventions::XML_EXTENSION];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileRole {

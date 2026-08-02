@@ -1265,7 +1265,9 @@ fn scan_one_root(roots: &WorkspaceRoots, root: &Path) -> Vec<WorkspaceFileState>
     walkdir::WalkDir::new(root)
         .into_iter()
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+        .filter(|entry| {
+            bsl_conventions::has_extension(entry.path(), bsl_conventions::BSL_EXTENSION)
+        })
         .filter_map(|entry| {
             let walked = entry.path();
             // Following the link: the read below reads the target, so the target

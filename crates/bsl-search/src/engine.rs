@@ -412,7 +412,7 @@ impl SearchEngine {
         let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+            .filter(|e| bsl_conventions::has_extension(e.path(), bsl_conventions::BSL_EXTENSION))
             .map(|e| e.into_path())
             .collect();
 
@@ -831,7 +831,7 @@ impl SearchEngine {
         let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+            .filter(|e| bsl_conventions::has_extension(e.path(), bsl_conventions::BSL_EXTENSION))
             .map(|e| e.into_path())
             .collect();
 
@@ -909,7 +909,7 @@ impl SearchEngine {
         let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+            .filter(|e| bsl_conventions::has_extension(e.path(), bsl_conventions::BSL_EXTENSION))
             .map(|e| e.into_path())
             .collect();
 
@@ -1174,7 +1174,7 @@ impl SearchEngine {
     /// ranks roots by, which is why [`WorkspaceRoots::root_of`] takes two.
     fn workspace_file_key(&self, path: &Path) -> Option<FileKey> {
         let roots = self.workspace_roots.as_ref()?;
-        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+        if !bsl_conventions::has_extension(path, bsl_conventions::BSL_EXTENSION) {
             return None;
         }
         let walked =
