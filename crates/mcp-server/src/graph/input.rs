@@ -1,11 +1,10 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide::RootDatabaseImpl;
+use project_model::SourceSet;
 use vfs::FileId;
-use walkdir::WalkDir;
 
 /// The whole workspace is loaded into a single source root.
 pub(crate) const GRAPH_SOURCE_ROOT: SourceRootId = SourceRootId(0);
@@ -65,36 +64,16 @@ pub(super) fn scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
 }
 
 /// Enumerate every `.bsl` file under the config + extension roots, assigning a
-/// stable [`FileId`] in walk order. No file text is read — this is the cheap
+/// stable [`FileId`] in scan order. No file text is read — this is the cheap
 /// file-id↔path map that lets the graph build load one batch of texts at a time
 /// while keeping ids consistent across batches.
+///
+/// One call is one traversal. An operation with several passes over the same
+/// universe (fingerprint + build + persisted stats) must not call this per pass —
+/// it takes ONE [`SourceSet::scan`] and projects it, so every pass sees the same
+/// tree.
 pub(crate) fn enumerate_bsl_files(project: &ProjectSnapshot) -> Vec<(FileId, PathBuf)> {
-    let mut entries: Vec<(FileId, PathBuf)> = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut next_id = 0u32;
-    for root in &project.scan_roots {
-        for entry in WalkDir::new(root).follow_links(true) {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!("graph scan: walk error: {e}");
-                    continue;
-                }
-            };
-            if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|e| e.to_str()) != Some("bsl")
-            {
-                continue;
-            }
-            let path = entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            entries.push((FileId(next_id), path));
-            next_id += 1;
-        }
-    }
-    entries
+    super::universe::bsl_files_from(&SourceSet::scan(&project.scan_roots))
 }
 
 pub(crate) use ide_host_core::build_source_root;

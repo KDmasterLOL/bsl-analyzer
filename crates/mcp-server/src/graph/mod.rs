@@ -19,6 +19,7 @@ mod state;
 #[cfg(test)]
 mod test_support;
 mod types;
+pub(crate) mod universe;
 
 #[allow(
     unused_imports,
