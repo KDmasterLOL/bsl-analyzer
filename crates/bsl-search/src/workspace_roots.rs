@@ -260,6 +260,26 @@ fn root_id_for(workspace_canonical: &Path, canonical: &Path, declared: &Path) ->
     }
 }
 
+/// The canonical spelling of a path, falling back to the canonical spelling of
+/// its directory when the file itself is gone.
+///
+/// Deletion is the case this exists for: a removed file cannot be canonicalized,
+/// and dropping all the way to the walked spelling would leave attribution
+/// ranking roots by their declared paths alone. A file that lived under a root
+/// reached through an alias would then be removed under a DIFFERENT root's key —
+/// tombstone and all — while its real row stayed behind serving a dead hit.
+pub(crate) fn canonical_spelling(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+            .map(|parent| parent.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -757,8 +757,11 @@ impl WorkspaceOverlayCache {
                     continue;
                 }
             };
-            let fingerprint =
-                FileFingerprint { len: metadata.len(), modified: metadata.modified().ok() };
+            let fingerprint = FileFingerprint {
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+                canonical: crate::workspace_roots::canonical_spelling(&abs_path),
+            };
 
             if let Some(entry) = self.entries.get_mut(&key) {
                 if entry.fingerprint == fingerprint {
@@ -931,6 +934,7 @@ impl WorkspaceOverlayCache {
             if let Some(cached) = persisted.get(&file.key) {
                 if cached.file_size == file.fingerprint.len
                     && fingerprint_mtime_matches(file.fingerprint.modified, cached)
+                    && fingerprint_canonical_matches(&file.fingerprint, cached)
                 {
                     updated_persisted.insert(file.key.clone(), cached.clone());
 
@@ -963,6 +967,7 @@ impl WorkspaceOverlayCache {
                         file_mtime_secs: secs,
                         file_mtime_nanos: nanos,
                         content_fingerprint: local_fp.clone(),
+                        canonical: file.fingerprint.canonical.to_string_lossy().into_owned(),
                     },
                 );
             }
@@ -1090,6 +1095,7 @@ impl WorkspaceOverlayCache {
             if let Some(cached) = persisted.get(&file.key) {
                 if cached.file_size == file.fingerprint.len
                     && fingerprint_mtime_matches(file.fingerprint.modified, cached)
+                    && fingerprint_canonical_matches(&file.fingerprint, cached)
                 {
                     updated_persisted.insert(file.key.clone(), cached.clone());
 
@@ -1122,6 +1128,7 @@ impl WorkspaceOverlayCache {
                         file_mtime_secs: secs,
                         file_mtime_nanos: nanos,
                         content_fingerprint: local_fp.clone(),
+                        canonical: file.fingerprint.canonical.to_string_lossy().into_owned(),
                     },
                 );
             }
@@ -1383,8 +1390,11 @@ impl WorkspaceOverlayCache {
                     continue;
                 }
             };
-            let fingerprint =
-                FileFingerprint { len: metadata.len(), modified: metadata.modified().ok() };
+            let fingerprint = FileFingerprint {
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+                canonical: crate::workspace_roots::canonical_spelling(&abs_path),
+            };
 
             if let Some(entry) = self.entries.get_mut(&key) {
                 if entry.fingerprint == fingerprint {
@@ -1535,6 +1545,21 @@ impl WorkspaceOverlayCache {
 struct FileFingerprint {
     len: u64,
     modified: Option<SystemTime>,
+    /// The physical spelling of what was actually read. Without it a link retargeted onto a
+    /// file with the same `(len, mtime)` keeps passing for unchanged, and the old target is
+    /// served forever; only the identical target may stay invisible.
+    canonical: PathBuf,
+}
+
+/// Whether a persisted row's physical spelling matches the file just stat'ed. An empty stored
+/// spelling is a row from before the column existed: never a match, so the file is re-read and
+/// the re-save fills the spelling in — old rows heal themselves. Both sides compare through the
+/// same lossy conversion, so a non-UTF-8 path stays equal to itself.
+fn fingerprint_canonical_matches(
+    fingerprint: &FileFingerprint,
+    cached: &crate::store::PersistedFingerprint,
+) -> bool {
+    !cached.canonical.is_empty() && *cached.canonical == *fingerprint.canonical.to_string_lossy()
 }
 
 fn fingerprint_mtime_matches(
@@ -1665,6 +1690,7 @@ fn scanned_files_from(roots: &WorkspaceRoots, set: &project_model::SourceSet) ->
             fingerprint: FileFingerprint {
                 len: file.metadata.len(),
                 modified: file.metadata.modified().ok(),
+                canonical: file.canonical.clone(),
             },
         });
     }
@@ -3061,6 +3087,7 @@ mod tests {
                     fingerprint: super::FileFingerprint {
                         len: metadata.len(),
                         modified: metadata.modified().ok(),
+                        canonical: crate::workspace_roots::canonical_spelling(path),
                     },
                 }
             })
@@ -4640,6 +4667,218 @@ mod tests {
             (plan.scan_unreadable(), plan.scan_canonical_fallbacks(), plan.read_failure_count()),
             (2, 1, 1),
             "each completeness field crosses the accessor unchanged"
+        );
+    }
+
+    /// Two link targets of the SAME byte length with the SAME forced mtime — the shape that
+    /// makes a `(len, mtime)` fingerprint blind, so only the physical spelling can tell them
+    /// apart.
+    #[cfg(unix)]
+    fn equal_stat_targets(outside: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let first = outside.join("Первый.bsl");
+        let second = outside.join("Второй.bsl");
+        fs::write(&first, "Процедура ПерваяЦель()\nКонецПроцедуры").unwrap();
+        fs::write(&second, "Процедура ВтораяЦель()\nКонецПроцедуры").unwrap();
+        assert_eq!(
+            fs::metadata(&first).unwrap().len(),
+            fs::metadata(&second).unwrap().len(),
+            "the stand needs equal lengths"
+        );
+        let mtime = fs::metadata(&first).unwrap().modified().unwrap();
+        fs::File::options().write(true).open(&second).unwrap().set_modified(mtime).unwrap();
+        (first, second)
+    }
+
+    /// Retargeting a link onto a file with the same `(len, mtime)` must be seen by the next
+    /// full refresh: a file's identity includes WHERE it physically is, and a fingerprint blind
+    /// to the spelling serves the old target forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_retargeted_link_at_equal_stat_is_reread_by_a_full_refresh() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let (first, second) = equal_stat_targets(outside.path());
+        let alias = workspace.join("Alias.bsl");
+        std::os::unix::fs::symlink(&first, &alias).unwrap();
+
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let roots = single_root(workspace);
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "ПерваяЦель");
+
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&second, &alias).unwrap();
+        cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
+        assert_eq!(
+            cache.snapshot().lexical_documents[0].symbol_name,
+            "ВтораяЦель",
+            "the retarget moves the fingerprint even at equal (len, mtime)"
+        );
+    }
+
+    /// The same blindness through both persisted-fingerprint gates: a cache row taken before
+    /// the retarget must not pass for the new target, on the in-place manifest refresh and on
+    /// the planned one alike.
+    #[cfg(unix)]
+    #[test]
+    fn a_retargeted_link_at_equal_stat_misses_both_fingerprint_gates() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let (first, second) = equal_stat_targets(outside.path());
+        let alias = workspace.join("Alias.bsl");
+        std::os::unix::fs::symlink(&first, &alias).unwrap();
+        // The file EQUALS the manifest, so the first pass leaves no overlay entry — only the
+        // cache row; the second pass must miss that row by spelling, re-read and diverge.
+        let manifest = HashMap::from([(
+            key("Alias.bsl"),
+            super::fingerprint_content(&fs::read_to_string(&first).unwrap(), "Alias.bsl"),
+        )]);
+        let roots = single_root(workspace);
+
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents.len(), 0, "baseline-equal: row only");
+        assert_eq!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            1
+        );
+
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&second, &alias).unwrap();
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        assert_eq!(
+            cache.snapshot().lexical_documents.len(),
+            1,
+            "the stale row must not vouch for the retargeted link"
+        );
+        assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "ВтораяЦель");
+
+        // The planned path re-reads through its own, independent gate.
+        let plan_store = Store::open(&workspace.join("search-plan.db")).unwrap();
+        let mut plan_cache = WorkspaceOverlayCache::default();
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&first, &alias).unwrap();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &plan_store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        plan_cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &plan_store).unwrap();
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&second, &alias).unwrap();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &plan_store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.overlay_file_count(),
+            1,
+            "the planned gate must miss the stale row by spelling too"
+        );
+    }
+
+    /// The point paths take their fingerprints through their own constructors; the retarget
+    /// must move those too, on both independent implementations.
+    #[cfg(unix)]
+    #[test]
+    fn a_retargeted_link_at_equal_stat_is_reread_by_point_refreshes() {
+        for use_manifest in [false, true] {
+            let dir = tempdir().unwrap();
+            let outside = tempdir().unwrap();
+            let workspace = dir.path();
+            let (first, second) = equal_stat_targets(outside.path());
+            let alias = workspace.join("Alias.bsl");
+            std::os::unix::fs::symlink(&first, &alias).unwrap();
+
+            let store = Store::open(&workspace.join("search.db")).unwrap();
+            let roots = single_root(workspace);
+            let manifest: HashMap<FileKey, String> = HashMap::new();
+            let mut cache = WorkspaceOverlayCache::default();
+            cache.enable_watcher_mode();
+            if use_manifest {
+                cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+            } else {
+                cache
+                    .refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true)
+                    .unwrap();
+            }
+            assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "ПерваяЦель");
+
+            fs::remove_file(&alias).unwrap();
+            std::os::unix::fs::symlink(&second, &alias).unwrap();
+            cache.mark_dirty_path(key("Alias.bsl"));
+            if use_manifest {
+                cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+            } else {
+                cache
+                    .refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, false)
+                    .unwrap();
+            }
+            assert_eq!(
+                cache.snapshot().lexical_documents[0].symbol_name,
+                "ВтораяЦель",
+                "manifest={use_manifest}: the point path must see the retarget"
+            );
+        }
+    }
+
+    /// A row from before the spelling column existed carries an empty `canonical` and must
+    /// never pass the gate, even at matching `(len, mtime)`: the file is re-read and the
+    /// re-save fills the spelling in — old rows heal, they are not trusted.
+    #[test]
+    fn an_empty_canonical_row_is_never_a_gate_hit() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Solo.bsl");
+        fs::write(&file, "Процедура Настоящая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(key("Solo.bsl"), "manifest-differs".to_owned())]);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        // A stale pre-column row claiming the file EQUALS the manifest, at the file's real
+        // (len, mtime) — everything matches except the spelling, which is empty.
+        let metadata = fs::metadata(&file).unwrap();
+        let (secs, nanos) = super::mtime_to_secs_nanos(metadata.modified().ok()).unwrap();
+        store
+            .save_overlay_fingerprint_cache(
+                "",
+                &HashMap::from([(
+                    key("Solo.bsl"),
+                    crate::store::PersistedFingerprint {
+                        file_size: metadata.len(),
+                        file_mtime_secs: secs,
+                        file_mtime_nanos: nanos,
+                        content_fingerprint: "manifest-differs".to_owned(),
+                        canonical: String::new(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &single_root(workspace),
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 1, "the empty-spelling row must not be trusted");
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert!(
+            !rows.get(&key("Solo.bsl")).map(|row| row.canonical.as_str()).unwrap_or("").is_empty(),
+            "the published re-read heals the row with the real spelling"
         );
     }
 

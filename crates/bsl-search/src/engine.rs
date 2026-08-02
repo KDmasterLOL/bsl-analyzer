@@ -1179,7 +1179,7 @@ impl SearchEngine {
         }
         let walked =
             if path.is_absolute() { path.to_path_buf() } else { roots.workspace().join(path) };
-        roots.root_of(&walked, &canonical_spelling(&walked))
+        roots.root_of(&walked, &crate::workspace_roots::canonical_spelling(&walked))
     }
 
     /// Mark one workspace `.bsl` file's stored graph context stale, so a later
@@ -2157,26 +2157,6 @@ impl SearchEngine {
         self.store.remove_file(CONFIGURATION_ROOT_ID, rel_path, collection)?;
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(())
-    }
-}
-
-/// The canonical spelling of a path, falling back to the canonical spelling of
-/// its directory when the file itself is gone.
-///
-/// Deletion is the case this exists for: a removed file cannot be canonicalized,
-/// and dropping all the way to the walked spelling would leave attribution
-/// ranking roots by their declared paths alone. A file that lived under a root
-/// reached through an alias would then be removed under a DIFFERENT root's key —
-/// tombstone and all — while its real row stayed behind serving a dead hit.
-fn canonical_spelling(path: &Path) -> std::path::PathBuf {
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        return canonical;
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
-            .map(|parent| parent.join(name))
-            .unwrap_or_else(|_| path.to_path_buf()),
-        _ => path.to_path_buf(),
     }
 }
 

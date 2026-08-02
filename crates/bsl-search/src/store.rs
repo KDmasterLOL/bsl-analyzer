@@ -125,6 +125,7 @@ const ROOT_KEYED_TABLES: &[RootKeyedTable] = &[
             file_mtime_nanos     INTEGER NOT NULL,
             content_fingerprint  TEXT    NOT NULL,
             manifest_snapshot_id TEXT    NOT NULL,
+            canonical            TEXT    NOT NULL DEFAULT '',
             PRIMARY KEY (root_id, path)
         ",
         suffix: "",
@@ -313,12 +314,42 @@ impl Store {
             }
         }
         Self::create_schema(&tx)?;
+        // Additive columns are added in place, NOT via a SCHEMA_VERSION bump: a version
+        // mismatch wipes every derived table, which is exactly what an additive change
+        // exists to avoid. `create_schema` only creates missing tables, so an existing
+        // database needs the column grafted onto its live table, data intact.
+        Self::ensure_column(
+            &tx,
+            "overlay_fingerprint_cache",
+            "canonical",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+
         Self::ensure_embedding_generation(&tx, &self.path)?;
         tx.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Add `column` to `table` when it is missing — the in-place half of an additive schema
+    /// change. A no-op on a fresh database, whose `CREATE TABLE` already carries the column.
+    fn ensure_column(
+        tx: &Connection,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), SearchError> {
+        let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+        let exists = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|name| name.ok())
+            .any(|name| name == column);
+        if !exists {
+            tx.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+        }
         Ok(())
     }
 
@@ -2117,7 +2148,7 @@ impl Store {
     ) -> Result<Option<HashMap<FileKey, PersistedFingerprint>>, SearchError> {
         let mut stmt = self.conn.prepare(
             "SELECT root_id, path, file_size, file_mtime_secs, file_mtime_nanos,
-                    content_fingerprint
+                    content_fingerprint, canonical
              FROM overlay_fingerprint_cache
              WHERE manifest_snapshot_id = ?1",
         )?;
@@ -2129,6 +2160,7 @@ impl Store {
                     file_mtime_secs: row.get::<_, i64>(3)?,
                     file_mtime_nanos: row.get::<_, u32>(4)?,
                     content_fingerprint: row.get::<_, String>(5)?,
+                    canonical: row.get::<_, String>(6)?,
                 },
             ))
         })?;
@@ -2160,8 +2192,8 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "INSERT INTO overlay_fingerprint_cache
              (root_id, path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint,
-              manifest_snapshot_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+              manifest_snapshot_id, canonical)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         for (key, entry) in entries {
             stmt.execute(params![
@@ -2172,6 +2204,7 @@ impl Store {
                 entry.file_mtime_nanos,
                 entry.content_fingerprint,
                 manifest_snapshot_id,
+                entry.canonical,
             ])?;
         }
         Ok(())
@@ -2313,6 +2346,10 @@ pub struct PersistedFingerprint {
     pub file_mtime_secs: i64,
     pub file_mtime_nanos: u32,
     pub content_fingerprint: String,
+    /// The physical spelling of the file the row was verified against. An empty string is a row
+    /// from before the column existed: it must NOT count as a match — the gate re-reads and the
+    /// re-save writes the spelling, so old rows heal themselves.
+    pub canonical: String,
 }
 
 #[cfg(test)]
@@ -2320,6 +2357,55 @@ mod tests {
     use super::*;
     use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
     use code_chunk::{Chunk, ChunkKind};
+
+    /// The `canonical` column lands via an in-place ALTER, not via the version-bump wipe: rows
+    /// written before the column keep living (in the altered table AND in its neighbours), and
+    /// the grafted column arrives empty. Dropping the column emulates a database of the release
+    /// before it — "column present and working" alone would not tell the ALTER from a wipe that
+    /// recreated everything.
+    #[test]
+    fn the_canonical_column_is_added_in_place_without_wiping() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+        {
+            let store = Store::open(&db_path).unwrap();
+            store.upsert_file(CONFIGURATION_ROOT_ID, "Neighbour.bsl", b"hash", "code").unwrap();
+            store
+                .save_overlay_fingerprint_cache(
+                    "snap",
+                    &std::collections::HashMap::from([(
+                        FileKey::configuration("Cached.bsl"),
+                        PersistedFingerprint {
+                            file_size: 7,
+                            file_mtime_secs: 1,
+                            file_mtime_nanos: 2,
+                            content_fingerprint: "fp".to_owned(),
+                            canonical: "/spelled".to_owned(),
+                        },
+                    )]),
+                )
+                .unwrap();
+        }
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("ALTER TABLE overlay_fingerprint_cache DROP COLUMN canonical", [])
+                .unwrap();
+        }
+
+        let store = Store::open(&db_path).unwrap();
+        let rows = store.load_overlay_fingerprint_cache("snap").unwrap().unwrap_or_default();
+        let row = rows.get(&FileKey::configuration("Cached.bsl")).expect("the row survived");
+        assert_eq!(
+            (row.file_size, row.canonical.as_str()),
+            (7, ""),
+            "data intact, the grafted column arrives empty"
+        );
+        assert_eq!(
+            store.all_files_in_collection("code").unwrap().len(),
+            1,
+            "the neighbouring table survived too"
+        );
+    }
 
     /// A store in the shape the release before composite keys wrote, built with
     /// raw SQL on purpose.
