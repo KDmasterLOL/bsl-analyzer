@@ -1180,14 +1180,23 @@ impl SearchEngine {
         let walked =
             if path.is_absolute() { path.to_path_buf() } else { roots.workspace().join(path) };
         let canonical = crate::workspace_roots::canonical_spelling(&walked);
-        // A `.bsl`-spelled link may resolve to a non-source target. A key under the target's
-        // root would be one that is FORBIDDEN to exist (the walk drops such files), so canonical
+        // A `.bsl`-spelled link may resolve to a non-source target — by role, or by not being
+        // a regular file at all (a directory spelled `.bsl`). A key under such a target's root
+        // would be one that is FORBIDDEN to exist (the walk drops such files), so canonical
         // attribution is meaningless there; the walked spelling is the only key the file could
-        // ever have been indexed under — the key a removal must reach.
-        if project_model::file_role(&canonical) == project_model::FileRole::Source {
+        // ever have been indexed under — the key a removal must reach. A GONE target still
+        // attributes canonically: it was a file if it was anything, and the tombstone path
+        // needs the last known spelling.
+        let target_is_source = project_model::file_role(&canonical)
+            == project_model::FileRole::Source
+            && match std::fs::metadata(&canonical) {
+                Ok(metadata) => metadata.is_file(),
+                Err(_) => true,
+            };
+        if target_is_source {
             roots.root_of(&walked, &canonical)
         } else {
-            roots.root_of(&walked, &walked)
+            roots.root_of_declared(&walked)
         }
     }
 
@@ -3183,6 +3192,89 @@ mod tests {
             (key.root_id.as_str(), key.path.as_str()),
             (crate::CONFIGURATION_ROOT_ID, "Alias.bsl"),
             "attribution must not follow the non-source target into its root"
+        );
+    }
+
+    /// Walked-spelling attribution must rank the DECLARED roots: for a root declared through a
+    /// link, the walked path also lies under the enclosing root's canonical spelling, and a
+    /// canonical-ranked lookup would hand the key to the wrong root — missing the row the
+    /// removal must reach.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_source_target_under_a_linked_root_keys_by_the_declared_root() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        let real_ext = outside.path().join("ext");
+        fs::create_dir_all(&real_ext).unwrap();
+        let ext_link = configuration.join("ext");
+        std::os::unix::fs::symlink(&real_ext, &ext_link).unwrap();
+        let source = outside.path().join("Source.bsl");
+        fs::write(&source, "Процедура Настоящая()\nКонецПроцедуры").unwrap();
+        let alias = real_ext.join("Alias.bsl");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            std::slice::from_ref(&ext_link),
+        );
+        engine.set_workspace_roots(roots);
+        let walked_alias = ext_link.join("Alias.bsl");
+        let old_key = engine.workspace_file_key(&walked_alias).unwrap();
+        engine.store().upsert_file(&old_key.root_id, &old_key.path, b"h", "code").unwrap();
+
+        let foreign = outside.path().join("Foreign.txt");
+        fs::write(&foreign, "не исходник").unwrap();
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&foreign, &alias).unwrap();
+        assert!(engine.remove_workspace_path(&walked_alias).unwrap());
+        assert_eq!(
+            engine.file_count().unwrap(),
+            0,
+            "the removal must reach the key the file was indexed under"
+        );
+    }
+
+    /// A directory spelled `.bsl` must not pass for a source target: extension-only role
+    /// classification would attribute the key to the DIRECTORY'S root, and the stale row under
+    /// the walked key would never be reached.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_target_spelled_bsl_keys_by_the_walked_spelling() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let source = outside.path().join("Source.bsl");
+        fs::write(&source, "Процедура Настоящая()\nКонецПроцедуры").unwrap();
+        let alias = configuration.join("Alias.bsl");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        engine.set_workspace_roots(roots);
+        let old_key = engine.workspace_file_key(&alias).unwrap();
+        engine.store().upsert_file(&old_key.root_id, &old_key.path, b"h", "code").unwrap();
+
+        fs::create_dir(extension.join("Target.bsl")).unwrap();
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(extension.join("Target.bsl"), &alias).unwrap();
+        assert!(engine.remove_workspace_path(&alias).unwrap());
+        assert_eq!(
+            engine.file_count().unwrap(),
+            0,
+            "a live directory target is not a source; the walked key owns the row"
         );
     }
 

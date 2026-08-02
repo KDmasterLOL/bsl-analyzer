@@ -685,10 +685,16 @@ impl WorkspaceOverlayCache {
     }
 
     /// Retract one key's persisted fingerprint row: its "verified against the manifest" claim
-    /// did not survive whatever the caller just observed.
-    fn retract_fingerprint_row(store: &Store, key: &FileKey) {
-        if let Err(error) = store.delete_overlay_fingerprint_entries(std::slice::from_ref(key)) {
-            tracing::warn!("failed to retract overlay fingerprint row: {error}");
+    /// did not survive whatever the caller just observed. Returns whether the retraction
+    /// LANDED — a caller about to consume the dirty mark must keep it on failure, or the stale
+    /// row outlives the process with nothing left to retry it.
+    fn retract_fingerprint_row(store: &Store, key: &FileKey) -> bool {
+        match store.delete_overlay_fingerprint_entries(std::slice::from_ref(key)) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!("failed to retract overlay fingerprint row: {error}");
+                false
+            }
         }
     }
 
@@ -1397,7 +1403,13 @@ impl WorkspaceOverlayCache {
             // A key whose root is no longer registered resolves to nothing; that is a change of
             // composition, not a filesystem error, and it settles like a deletion.
             let Some(abs_path) = roots.resolve(&key) else {
-                Self::retract_fingerprint_row(store, &key);
+                if !Self::retract_fingerprint_row(store, &key) {
+                    self.retain_dirty_after_failure(
+                        key.clone(),
+                        prior_failures,
+                        "row retraction failed",
+                    );
+                }
                 self.remove_point_entry(key, baseline_fingerprint.is_some());
                 continue;
             };
@@ -1407,8 +1419,15 @@ impl WorkspaceOverlayCache {
                 Err(error) => {
                     // Whichever way this settles, the row's "verified" claim did not survive
                     // the failed stat.
-                    Self::retract_fingerprint_row(store, &key);
+                    let retracted = Self::retract_fingerprint_row(store, &key);
                     if point_target_is_absent(&error, &abs_path) && root_is_reachable(roots, &key) {
+                        if !retracted {
+                            self.retain_dirty_after_failure(
+                                key.clone(),
+                                prior_failures,
+                                "row retraction failed",
+                            );
+                        }
                         self.remove_point_entry(key, baseline_fingerprint.is_some());
                     } else {
                         self.retain_dirty_after_failure(key, prior_failures, "stat failed");
@@ -1428,7 +1447,13 @@ impl WorkspaceOverlayCache {
                 || project_model::file_role(&fingerprint.canonical)
                     != project_model::FileRole::Source
             {
-                Self::retract_fingerprint_row(store, &key);
+                if !Self::retract_fingerprint_row(store, &key) {
+                    self.retain_dirty_after_failure(
+                        key.clone(),
+                        prior_failures,
+                        "row retraction failed",
+                    );
+                }
                 self.remove_point_entry(key, baseline_fingerprint.is_some());
                 continue;
             }
@@ -1466,11 +1491,23 @@ impl WorkspaceOverlayCache {
             let content = match std::fs::read_to_string(&abs_path) {
                 Ok(content) => content,
                 Err(_) => {
-                    Self::retract_fingerprint_row(store, &key);
+                    // The mark is retained either way, so a failed retraction is retried too.
+                    let _ = Self::retract_fingerprint_row(store, &key);
                     self.retain_dirty_after_failure(key, prior_failures, "read failed");
                     continue;
                 }
             };
+            // The successful read produced FRESHER knowledge than the persisted row, so its
+            // "verified" claim no longer stands whatever the branches below decide: at an
+            // unchanged (len, mtime, canonical) the old row would suppress this very result
+            // after a restart. A failed retraction keeps the mark for a retried one.
+            if !Self::retract_fingerprint_row(store, &key) {
+                self.retain_dirty_after_failure(
+                    key.clone(),
+                    prior_failures,
+                    "row retraction failed",
+                );
+            }
             let file_hash = normalized_file_hash_for_content(&content);
             let local_fp = fingerprint_content(&content, &key.path);
             if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
@@ -4070,7 +4107,7 @@ mod tests {
         // Swap the contents at the SAME (len, mtime): only the retracted row makes the next
         // full plan re-read the file.
         let mtime = fs::metadata(&swapped).unwrap().modified().unwrap();
-        fs::write(&swapped, "Процедура Втораяя()\nКонецПроцедуры").unwrap();
+        fs::write(&swapped, "Процедура Вторая()\nКонецПроцедуры").unwrap();
         fs::File::options().write(true).open(&swapped).unwrap().set_modified(mtime).unwrap();
         if !deny_access(&swapped) {
             return;
@@ -4126,7 +4163,7 @@ mod tests {
         );
 
         let mtime = fs::metadata(&swapped).unwrap().modified().unwrap();
-        fs::write(&swapped, "Процедура Втораяя()\nКонецПроцедуры").unwrap();
+        fs::write(&swapped, "Процедура Вторая()\nКонецПроцедуры").unwrap();
         fs::File::options().write(true).open(&swapped).unwrap().set_modified(mtime).unwrap();
         if !deny_access(&closed) {
             return;
@@ -4182,7 +4219,7 @@ mod tests {
         );
 
         let mtime = fs::metadata(&unseen).unwrap().modified().unwrap();
-        fs::write(&unseen, "Процедура Втораяя()\nКонецПроцедуры").unwrap();
+        fs::write(&unseen, "Процедура Вторая()\nКонецПроцедуры").unwrap();
         fs::File::options().write(true).open(&unseen).unwrap().set_modified(mtime).unwrap();
         cache
             .full_refresh_from_manifest_scanned(
@@ -4534,7 +4571,7 @@ mod tests {
         // Mid-embed, the file is swapped at the same (len, mtime) and a point refresh fails to
         // read it — retracting the row and keeping the key dirty.
         let mtime = fs::metadata(&swapped).unwrap().modified().unwrap();
-        fs::write(&swapped, "Процедура Втораяя()\nКонецПроцедуры").unwrap();
+        fs::write(&swapped, "Процедура Вторая()\nКонецПроцедуры").unwrap();
         fs::File::options().write(true).open(&swapped).unwrap().set_modified(mtime).unwrap();
         if !deny_access(&swapped) {
             return;
@@ -5118,7 +5155,7 @@ mod tests {
         // row is now stale, and the publish must not leave it behind just because the filtered
         // map came out empty.
         let mtime = fs::metadata(&file).unwrap().modified().unwrap();
-        fs::write(&file, "Процедура Втораяя()\nКонецПроцедуры").unwrap();
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
         fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
         cache.mark_dirty_path(key("A.bsl"));
         cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
@@ -5131,6 +5168,106 @@ mod tests {
                 .contains_key(&key("A.bsl")),
             "the filtered row must not survive to pass the gate after a restart"
         );
+    }
+
+    /// A SUCCESSFUL point re-read makes the old fingerprint row stale just as surely as a
+    /// failed one: the row says "verified equal to the manifest", the re-read just proved
+    /// otherwise, and at unchanged `(len, mtime, canonical)` the surviving row would suppress
+    /// the published edit after a restart.
+    #[test]
+    fn a_successful_point_reread_retracts_the_old_fingerprint_row() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, original).unwrap();
+        let manifest =
+            HashMap::from([(key("A.bsl"), super::fingerprint_content(original, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            1
+        );
+
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert_eq!(
+            cache.snapshot().lexical_documents[0].symbol_name,
+            "Вторая",
+            "the point re-read published the edit in-process"
+        );
+
+        // "Restart": a fresh plan must not let the stale row suppress the published edit.
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 1, "the edit survives the restart");
+    }
+
+    /// A failed row retraction must not pass for a done one: the dirty mark stays (with its
+    /// budget) so a later pass retries the retraction, instead of the stale row silently
+    /// outliving the process.
+    #[test]
+    fn a_failed_row_retraction_keeps_the_dirty_mark() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Живая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(
+            key("A.bsl"),
+            super::fingerprint_content("Процедура Живая()\nКонецПроцедуры", "A.bsl"),
+        )]);
+        let roots = single_root(workspace);
+        let db_path = workspace.join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            1
+        );
+
+        // A second connection injects a trigger that makes every row deletion fail.
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_fp_delete BEFORE DELETE ON overlay_fingerprint_cache \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        fs::remove_file(&file).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "an unretracted row keeps its key marked for the retry"
+        );
+
+        // With the sabotage removed, the retried pass settles the removal for real.
+        saboteur.execute_batch("DROP TRIGGER deny_fp_delete;").unwrap();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert!(
+            !store
+                .load_overlay_fingerprint_cache("")
+                .unwrap_or(None)
+                .unwrap_or_default()
+                .contains_key(&key("A.bsl")),
+            "the retried retraction lands"
+        );
+        assert!(!cache.dirty_paths_snapshot().contains_key(&key("A.bsl")));
     }
 
     /// The overlay must not walk the tree itself: the walk policy (which links

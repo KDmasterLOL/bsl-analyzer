@@ -161,6 +161,15 @@ impl WorkspaceRoots {
             .or_else(|| self.longest_match(walked, |root| &root.declared))
     }
 
+    /// The owning root ranked by the DECLARED spellings alone. For a file whose canonical
+    /// target must not take part in attribution (a non-source target), plain [`Self::root_of`]
+    /// would still rank the walked path against the CANONICAL root spellings first — and under
+    /// a root declared through a link, the walked path also lies under the enclosing root's
+    /// canonical spelling, handing the key to the wrong root.
+    pub(crate) fn root_of_declared(&self, walked: &Path) -> Option<FileKey> {
+        self.longest_match(walked, |root| &root.declared)
+    }
+
     /// The file a stored key points at, spelled as the project declared it.
     pub fn resolve(&self, key: &FileKey) -> Option<PathBuf> {
         let root = self.roots.iter().find(|root| root.id == key.root_id)?;
