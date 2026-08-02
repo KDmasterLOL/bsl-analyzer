@@ -517,7 +517,6 @@ fn collect_findings(root: &Path) -> Findings {
 
 struct AllowRow {
     count: usize,
-    #[allow(dead_code, reason = "прочитано ради самодокументации строки; проверяется только счёт")]
     cause: String,
 }
 
@@ -563,6 +562,15 @@ fn no_conventional_name_literal_lives_outside_the_dictionary_unaccounted() {
             Some(_) => {}
         }
     }
+    // Финал миграции: причина «сравнение» исчерпана — inline-сравнение
+    // конвенционного имени возможно только словарём. Новая строка с такой
+    // причиной — это возврат класса, а не учёт.
+    let comparisons: Vec<String> = allowlist
+        .iter()
+        .filter(|(_, row)| row.cause.starts_with("сравнение"))
+        .map(|((file, literal), _)| format!("{file}\t{literal}"))
+        .collect();
+
     let stale: Vec<String> = allowlist
         .keys()
         .filter(|key| !findings.contains_key(*key))
@@ -570,14 +578,16 @@ fn no_conventional_name_literal_lives_outside_the_dictionary_unaccounted() {
         .collect();
 
     assert!(
-        missing.is_empty() && drifted.is_empty() && stale.is_empty(),
+        missing.is_empty() && drifted.is_empty() && stale.is_empty() && comparisons.is_empty(),
         "гейт словаря разошёлся с кодом.\n\
          \nНе учтено в allowlist (готовые строки, причину назначить осознанно):\n{}\
          \nСчёт разошёлся:\n{}\
-         \nПротухшие строки allowlist:\n{}\n",
+         \nПротухшие строки allowlist:\n{}\
+         \nНедопустимая причина «сравнение»:\n{}\n",
         missing.join("\n"),
         drifted.join("\n"),
         stale.join("\n"),
+        comparisons.join("\n"),
     );
 }
 

@@ -263,8 +263,9 @@ impl ModuleIndex {
                 ],
             );
             if let Some(module_file) = module_file {
-                let property_id = property_id_for_module(dir_name, "Module")
-                    .unwrap_or(crate::constants::PROPERTY_FORM_MODULE);
+                let property_id =
+                    property_id_for_module(dir_name, bsl_conventions::ConventionalName::Module)
+                        .unwrap_or(crate::constants::PROPERTY_FORM_MODULE);
 
                 let module_id = ModuleId {
                     extension: extension.to_string(),
@@ -347,20 +348,18 @@ impl ModuleIndex {
                 continue;
             }
 
-            // Канонизация стебля: MODULE.BSL — тот же вид модуля, что Module.bsl;
-            // неконвенционное имя остаётся как есть и не найдётся в таблице.
-            let stem = path
+            let Some(kind) = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .and_then(bsl_conventions::conventional_of)
-                .map(|c| c.canonical_stem().to_string())
-                .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()))
-                .unwrap_or_default();
+            else {
+                continue;
+            };
 
-            let property_id = match property_id_for_module(dir_name, &stem) {
+            let property_id = match property_id_for_module(dir_name, kind) {
                 Some(id) => id,
                 None => {
-                    debug!(dir_name, stem, "skipping unknown module type");
+                    debug!(dir_name, ?kind, "skipping unknown module type");
                     continue;
                 }
             };
@@ -394,17 +393,15 @@ impl ModuleIndex {
                 continue;
             }
 
-            // Канонизация стебля: MODULE.BSL — тот же вид модуля, что Module.bsl;
-            // неконвенционное имя остаётся как есть и не найдётся в таблице.
-            let stem = path
+            let Some(kind) = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .and_then(bsl_conventions::conventional_of)
-                .map(|c| c.canonical_stem().to_string())
-                .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()))
-                .unwrap_or_default();
+            else {
+                continue;
+            };
 
-            let property_id = match property_id_for_module(dir_name, &stem) {
+            let property_id = match property_id_for_module(dir_name, kind) {
                 Some(id) => id,
                 None => continue,
             };

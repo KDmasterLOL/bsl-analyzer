@@ -1,24 +1,13 @@
 # Учёт литералов конвенционных имён вне словаря: файл, литерал, счёт, причина.
-# Причины: "конструкция" (каноническое написание строится, не сравнивается),
-# "вне-класса" (XML-тег, имя конфига анализатора и т.п.), "сравнение"
-# (inline-сравнение, ещё не переведённое на словарь — сжимающийся фронт).
+# Причины: "конструкция" (каноническое написание строится, не сравнивается)
+# и "вне-класса" (XML-тег, код диагностики, вид узла графа и т.п.).
+# Причина "сравнение" исчерпана миграцией: гейт её больше не принимает.
 crates/bsl-analyzer/src/reporters/junit.rs	bsl-analyzer.junit.xml	1	вне-класса: имя собственного отчёта анализатора
 crates/bsl-analyzer/src/server.rs	bsl	1	вне-класса: идентификатор источника LSP-диагностик
-crates/bsl-debug/src/constants.rs	CommandModule	1	сравнение
-crates/bsl-debug/src/constants.rs	ExternalConnectionModule	1	сравнение
-crates/bsl-debug/src/constants.rs	ManagedApplicationModule	1	сравнение
-crates/bsl-debug/src/constants.rs	ManagerModule	1	сравнение
-crates/bsl-debug/src/constants.rs	Module	1	сравнение
-crates/bsl-debug/src/constants.rs	ObjectModule	1	сравнение
-crates/bsl-debug/src/constants.rs	OrdinaryApplicationModule	1	сравнение
-crates/bsl-debug/src/constants.rs	RecordSetModule	1	сравнение
-crates/bsl-debug/src/constants.rs	SessionModule	1	сравнение
-crates/bsl-debug/src/constants.rs	ValueManagerModule	1	сравнение
-crates/bsl-debug/src/module_index.rs	Commands	1	сравнение
-crates/bsl-debug/src/module_index.rs	Configuration.xml	1	конструкция
-crates/bsl-debug/src/module_index.rs	Ext	1	конструкция
-crates/bsl-debug/src/module_index.rs	Forms	1	сравнение
-crates/bsl-debug/src/module_index.rs	Module	1	сравнение
+crates/bsl-debug/src/module_index.rs	Commands	1	конструкция: fallback канонического написания
+crates/bsl-debug/src/module_index.rs	Configuration.xml	1	конструкция: fallback канонического написания
+crates/bsl-debug/src/module_index.rs	Ext	1	конструкция: fallback канонического написания
+crates/bsl-debug/src/module_index.rs	Forms	1	конструкция: fallback канонического написания
 crates/bsl-debug/src/types/xml.rs	ConfigModule	2	вне-класса: значение поля DAP-протокола
 crates/bsl-debug/src/types/xml.rs	ExtensionModule	2	вне-класса: значение поля DAP-протокола
 crates/bsl-launcher/src/cache.rs	bin	1	вне-класса: каталог кэша лаунчера
@@ -39,22 +28,21 @@ crates/bsl-metadata/src/enums.rs	ValueManagerModule	1	вне-класса: им�
 crates/bsl-metadata/src/enums.rs	WEBServiceModule	1	вне-класса: имя вида модуля в значениях XML
 crates/bsl-metadata/src/event_subscription.rs	CommonModule	1	вне-класса: значение в XML метаданных
 crates/bsl-metadata/src/metadata_object.rs	CommonModule	1	вне-класса: имя XML-тега
-crates/bsl-metadata/src/module_path.rs	Ext	1	сравнение
 crates/bsl-metadata/src/scheduled_job.rs	CommonModule	1	вне-класса: значение в XML метаданных
 crates/bsl-metadata/src/xml_parser/form.rs	Commands	1	вне-класса: имя XML-элемента, XML регистрозависим
 crates/bsl-metadata/src/xml_parser/form.rs	Form	4	вне-класса: имя XML-элемента, XML регистрозависим
-crates/bsl-metadata/src/xml_parser/form.rs	{}.xml	1	сравнение
-crates/bsl-metadata/src/xml_parser/http_service.rs	HTTPServices/{}/Ext/Module.bsl	1	сравнение
+crates/bsl-metadata/src/xml_parser/form.rs	{}.xml	1	конструкция: fallback канонического написания
+crates/bsl-metadata/src/xml_parser/http_service.rs	HTTPServices/{}/Ext/Module.bsl	1	конструкция: канонический URI по умолчанию, загрузчик переписывает найденным
 crates/bsl-metadata/src/xml_parser/predefined_parser.rs	Failed to parse Predefined.xml	1	вне-класса: текст сообщения об ошибке
-crates/bsl-metadata/src/xml_parser/web_service.rs	WebServices/{}/Ext/Module.bsl	1	сравнение
-crates/bsl-search/src/context.rs	Ext	1	сравнение
+crates/bsl-metadata/src/xml_parser/web_service.rs	WebServices/{}/Ext/Module.bsl	1	конструкция: канонический URI по умолчанию, загрузчик переписывает найденным
+crates/bsl-search/src/context.rs	Ext	1	вне-класса: позиция имени объекта, сравнение сознательно точное
 crates/bsl-types/src/display.rs	CommonModule	1	вне-класса: отображаемое имя типа
 crates/hir-ty/src/platform_type_name.rs	xml	1	вне-класса: тег имени платформенного типа
 crates/hir-ty/src/subtype.rs	CommonModule	1	вне-класса: имя типа в решётке подтипов
 crates/hir/src/definition.rs	Module	1	вне-класса: отображаемое имя вида определения
 crates/ide-db/src/database.rs	Found configuration root via Configuration.xml	1	вне-класса: текст лога
 crates/ide-db/src/metadata.rs	CommonModule	1	вне-класса: метка вида модуля в диагностическом логе
-crates/ide-diagnostics/src/handlers/missed_required_parameter.rs	{}/{}/Ext/ManagerModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/missed_required_parameter.rs	{}/{}/Ext/ManagerModule.bsl	1	конструкция: кандидат разрешается регистронезависимо
 crates/ide-diagnostics/src/handlers/redundant_access_to_object.rs	checkFormModule	1	вне-класса: имя параметра диагностики
 crates/ide-diagnostics/src/handlers/redundant_access_to_object.rs	checkObjectModule	1	вне-класса: имя параметра диагностики
 crates/ide-diagnostics/src/handlers/redundant_access_to_object.rs	checkRecordSetModule	1	вне-класса: имя параметра диагностики
@@ -62,15 +50,15 @@ crates/ide-diagnostics/src/handlers/typo.rs	xml	1	вне-класса: слов�
 crates/ide-diagnostics/src/handlers/unused_local_method.rs	checkObjectModule	1	вне-класса: имя параметра диагностики
 crates/ide-diagnostics/src/runner.rs	ExecuteExternalCodeInCommonModule	1	вне-класса: код диагностики
 crates/ide-diagnostics/src/runner.rs	ProtectedModule	1	вне-класса: код диагностики
-crates/ide/src/goto_definition.rs	{name}.xml	1	сравнение
-crates/ide/src/goto_definition.rs	{}.xml	1	сравнение
+crates/ide/src/goto_definition.rs	{name}.xml	1	конструкция: кандидат разрешается регистронезависимо
+crates/ide/src/goto_definition.rs	{}.xml	1	конструкция: кандидат разрешается регистронезависимо
 crates/ide/src/symbol_info/form.rs	Form	1	вне-класса: английское имя идентификатора BSL «Форма»
 crates/bsl-analyzer/src/bench/discover.rs	form	2	вне-класса: метка категории бенча
 crates/bsl-analyzer/src/bin/cli/contract.rs	commands	1	вне-класса: имя раздела контракта CLI
 crates/bsl-metadata/src/metadata_object.rs	commonmodule	1	вне-класса: двуязычное имя вида MDO
 crates/bsl-metadata/src/xml_parser/form.rs	form	2	вне-класса: метка контекста ошибки
 crates/hir-def/src/graph_index.rs	form	1	вне-класса: вид узла графа
-crates/ide-db/src/metadata.rs	commands	1	сравнение
+crates/ide-db/src/metadata.rs	commands	1	вне-класса: свод коллекций фолдингом, уже регистронезависим
 crates/ide/src/graph.rs	form	2	вне-класса: вид узла графа
 crates/ide/src/symbol_info/form/card.rs	form	1	вне-класса: вид символа
 crates/mcp-server/src/contract.rs	form	1	вне-класса: вид узла графа

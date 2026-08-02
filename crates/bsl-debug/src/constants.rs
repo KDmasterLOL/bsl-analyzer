@@ -22,21 +22,25 @@ pub const PROPERTY_ORDINARY_APP_MODULE: &str = "a78d9ce3-4e0c-48d5-9863-ae7342ee
 
 const SINGLE_MODULE_DIRS: &[&str] = &["CommonModules", "WebServices", "HTTPServices"];
 
-pub fn property_id_for_module(dir_name: &str, module_stem: &str) -> Option<&'static str> {
+pub fn property_id_for_module(
+    dir_name: &str,
+    module_kind: bsl_conventions::ConventionalName,
+) -> Option<&'static str> {
+    use bsl_conventions::ConventionalName as Conv;
     if SINGLE_MODULE_DIRS.contains(&dir_name) {
         return Some(PROPERTY_MODULE);
     }
-    match module_stem {
-        "Module" => Some(PROPERTY_FORM_MODULE),
-        "CommandModule" => Some(PROPERTY_COMMAND_MODULE),
-        "ObjectModule" => Some(PROPERTY_OBJECT_MODULE),
-        "ManagerModule" => Some(PROPERTY_MANAGER_MODULE),
-        "RecordSetModule" => Some(PROPERTY_RECORDSET_MODULE),
-        "ValueManagerModule" => Some(PROPERTY_VALUE_MANAGER_MODULE),
-        "ManagedApplicationModule" => Some(PROPERTY_MANAGED_APP_MODULE),
-        "SessionModule" => Some(PROPERTY_SESSION_MODULE),
-        "ExternalConnectionModule" => Some(PROPERTY_EXTERNAL_CONNECTION_MODULE),
-        "OrdinaryApplicationModule" => Some(PROPERTY_ORDINARY_APP_MODULE),
+    match module_kind {
+        Conv::Module => Some(PROPERTY_FORM_MODULE),
+        Conv::CommandModule => Some(PROPERTY_COMMAND_MODULE),
+        Conv::ObjectModule => Some(PROPERTY_OBJECT_MODULE),
+        Conv::ManagerModule => Some(PROPERTY_MANAGER_MODULE),
+        Conv::RecordSetModule => Some(PROPERTY_RECORDSET_MODULE),
+        Conv::ValueManagerModule => Some(PROPERTY_VALUE_MANAGER_MODULE),
+        Conv::ManagedApplicationModule => Some(PROPERTY_MANAGED_APP_MODULE),
+        Conv::SessionModule => Some(PROPERTY_SESSION_MODULE),
+        Conv::ExternalConnectionModule => Some(PROPERTY_EXTERNAL_CONNECTION_MODULE),
+        Conv::OrdinaryApplicationModule => Some(PROPERTY_ORDINARY_APP_MODULE),
         _ => None,
     }
 }

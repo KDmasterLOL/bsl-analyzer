@@ -108,8 +108,9 @@ pub fn split_module_path<'a>(
     // The service level decides the distance (invariants 4-5). Trying both
     // distances and keeping whichever lands on a collection-looking segment is
     // what made an ancestor directory win.
-    let has_service_level =
-        parts.len().checked_sub(2).is_some_and(|i| parts[i].eq_ignore_ascii_case("Ext"));
+    let has_service_level = parts.len().checked_sub(2).is_some_and(|i| {
+        bsl_conventions::conventional_of(parts[i]) == Some(bsl_conventions::ConventionalName::Ext)
+    });
     let distance_from_end = if has_service_level { 4 } else { 3 };
     let collection_idx = parts.len().checked_sub(distance_from_end)?;
     if !is_collection(parts[collection_idx]) {
