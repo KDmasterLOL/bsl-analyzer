@@ -1458,34 +1458,45 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
-            if let Some(entry) = self.entries.get_mut(&key) {
-                if entry.fingerprint == fingerprint {
-                    let local_fp =
-                        fingerprint_overlay_documents(&entry.lexical_documents, &key.path);
-                    if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
-                        self.entries.remove(&key);
-                        self.hidden_paths.remove(&key);
-                    } else {
-                        if baseline_fingerprint.is_some() {
-                            self.hidden_paths.insert(key.clone());
-                        } else {
-                            self.hidden_paths.remove(&key);
-                        }
-                        if entry.vector_documents.is_empty() {
-                            // ReuseOnly passes `embedder = None`: this attaches any cached
-                            // vectors and leaves the rest lexical-only. Embed (warmup) fills
-                            // the gaps via the remote embedder.
-                            entry.vector_documents = build_overlay_vectors(
-                                embedder,
-                                batch_size,
-                                &entry.lexical_documents,
-                                &entry.embedding_inputs,
-                                &mut self.embedding_cache,
-                            )?;
-                        }
-                    }
-                    continue;
+            let entry_fingerprint_matches =
+                self.entries.get(&key).is_some_and(|entry| entry.fingerprint == fingerprint);
+            if entry_fingerprint_matches {
+                // Even the no-read fast path must settle the row: the mark that brought the key
+                // here may be the leftover obligation of a FAILED retraction after a re-read at
+                // this very fingerprint, and consuming the mark without the retraction would
+                // leave the stale row vouching forever. Failure keeps the mark once more.
+                if !Self::retract_fingerprint_row(store, &key) {
+                    self.retain_dirty_after_failure(
+                        key.clone(),
+                        prior_failures,
+                        "row retraction failed",
+                    );
                 }
+                let entry = self.entries.get_mut(&key).expect("presence was just checked");
+                let local_fp = fingerprint_overlay_documents(&entry.lexical_documents, &key.path);
+                if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
+                    self.entries.remove(&key);
+                    self.hidden_paths.remove(&key);
+                } else {
+                    if baseline_fingerprint.is_some() {
+                        self.hidden_paths.insert(key.clone());
+                    } else {
+                        self.hidden_paths.remove(&key);
+                    }
+                    if entry.vector_documents.is_empty() {
+                        // ReuseOnly passes `embedder = None`: this attaches any cached
+                        // vectors and leaves the rest lexical-only. Embed (warmup) fills
+                        // the gaps via the remote embedder.
+                        entry.vector_documents = build_overlay_vectors(
+                            embedder,
+                            batch_size,
+                            &entry.lexical_documents,
+                            &entry.embedding_inputs,
+                            &mut self.embedding_cache,
+                        )?;
+                    }
+                }
+                continue;
             }
 
             let content = match std::fs::read_to_string(&abs_path) {
@@ -5268,6 +5279,66 @@ mod tests {
             "the retried retraction lands"
         );
         assert!(!cache.dirty_paths_snapshot().contains_key(&key("A.bsl")));
+    }
+
+    /// The retraction obligation left by a FAILED retract must be honoured even when the retry
+    /// lands in the equal-fingerprint fast path: the re-published entry matches the file, the
+    /// branch reads nothing — but the mark that brought the key here says the row is stale,
+    /// and consuming the mark without the retraction would leave the false row forever.
+    #[test]
+    fn a_failed_retraction_is_retried_through_the_equal_fingerprint_path() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, original).unwrap();
+        let manifest =
+            HashMap::from([(key("A.bsl"), super::fingerprint_content(original, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let db_path = workspace.join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        // The edit at unchanged (len, mtime): the re-read succeeds and publishes, but the
+        // sabotaged retraction fails, leaving the mark as the only trace of the stale row.
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_fp_delete BEFORE DELETE ON overlay_fingerprint_cache \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "Вторая");
+        assert!(cache.dirty_paths_snapshot().contains_key(&key("A.bsl")));
+
+        // The retried pass meets the freshly-published entry (equal fingerprint, no read) and
+        // must STILL settle the retraction before consuming the mark.
+        saboteur.execute_batch("DROP TRIGGER deny_fp_delete;").unwrap();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert!(
+            !store
+                .load_overlay_fingerprint_cache("")
+                .unwrap_or(None)
+                .unwrap_or_default()
+                .contains_key(&key("A.bsl")),
+            "the obligation survives into the fast path"
+        );
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 1, "the edit survives the restart");
     }
 
     /// The overlay must not walk the tree itself: the walk policy (which links
