@@ -19,6 +19,7 @@ mod resolver;
 mod store;
 mod vector_persist;
 mod workspace_overlay;
+mod workspace_roots;
 
 pub use baseline_runtime::BaselineOverlaySearchService;
 pub use code_chunk::{Chunk, ChunkKind, Chunker};
@@ -72,3 +73,6 @@ pub use resolved_view_search::lexical_hits as lexical_hits_for_resolved_view;
 pub use resolver::{InMemoryResolvedViewResolver, ResolvedView};
 pub use store::{BaselineManifestRecord, ChunkInfo, Store, TextSearchResult};
 pub use workspace_overlay::{BaselineHashMode, RefreshPlan, WorkspaceOverlayStats};
+pub use workspace_roots::{
+    FileKey, RejectedRoot, Rejection, WorkspaceRoots, CONFIGURATION_ROOT_ID,
+};

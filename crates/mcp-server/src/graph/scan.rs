@@ -1,10 +1,10 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use walkdir::WalkDir;
+use project_model::SourceSet;
 
 use crate::graph_query::GraphDb;
 
@@ -61,132 +61,49 @@ pub(crate) fn scan_file_stats(workspace_root: &Path) -> Vec<FileStat> {
     scan_stats_over_roots(&super::input::scan_roots(workspace_root))
 }
 
-/// The parallel scan over an explicit set of roots (each a directory, or occasionally a
-/// single file for a misconfigured extension path). Split out so it can be exercised
-/// directly against the sequential reference in tests.
+/// The scan over an explicit set of roots (each a directory, or occasionally a
+/// single file for a misconfigured extension path), projected into stats shape.
+///
+/// One call is one traversal (parallel across top-level directories inside
+/// [`SourceSet::scan`]). An operation with several passes over the same universe
+/// must take ONE `SourceSet` and project it instead of calling this per pass.
 pub(crate) fn scan_stats_over_roots(roots: &[PathBuf]) -> Vec<FileStat> {
-    use rayon::prelude::*;
-
-    // Work units: each top-level entry under each scan-root directory. Directories are
-    // walked in parallel; a file reachable through two roots (e.g. a symlinked subtree) is
-    // de-duplicated when the per-unit results are merged, so the output set is independent
-    // of how the work was partitioned.
-    let mut units: Vec<PathBuf> = Vec::new();
-    for root in roots {
-        match std::fs::read_dir(root) {
-            Ok(entries) => units.extend(entries.flatten().map(|e| e.path())),
-            // Not a directory (a misconfigured extension path pointing at a file) or
-            // unreadable: a file root is itself one work unit — matching the old
-            // `WalkDir::new(file)` which yielded it; anything else contributes nothing.
-            Err(_) => {
-                if root.is_file() {
-                    units.push(root.clone());
-                }
-            }
-        }
-    }
-
-    let per_unit: Vec<Vec<FileStat>> = units.par_iter().map(|unit| walk_unit_stats(unit)).collect();
-
-    // Merge and de-duplicate by canonical path. The kept `FileStat` is identical whichever
-    // occurrence wins: `(mtime, len)` come from the same on-disk target.
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut stats: Vec<FileStat> = Vec::new();
-    for stat in per_unit.into_iter().flatten() {
-        if seen.insert(stat.path.clone()) {
-            stats.push(stat);
-        }
-    }
-    stats
-}
-
-/// Walk one top-level unit (a directory subtree, or a single top-level file) and collect
-/// the `(canonical path, mtime, len)` of every `.bsl`/`.xml` under it. A per-directory
-/// cache canonicalises each containing directory once instead of every file, which
-/// dominates the walk's syscall cost on a large configuration.
-fn walk_unit_stats(unit: &Path) -> Vec<FileStat> {
-    let mut out: Vec<FileStat> = Vec::new();
-    let mut dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
-    for entry in WalkDir::new(unit).follow_links(true) {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        match entry.path().extension().and_then(|e| e.to_str()) {
-            Some("bsl") | Some("xml") => {}
-            _ => continue,
-        }
-        let canonical = canonical_file_path(entry.path(), entry.path_is_symlink(), &mut dir_cache);
-        let (mtime, len) = entry
-            .metadata()
-            .ok()
-            .map(|m| {
-                let mtime = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
-                (mtime, m.len())
-            })
-            .unwrap_or((0, 0));
-        out.push(FileStat { path: canonical.to_string_lossy().into_owned(), mtime, len });
-    }
-    out
-}
-
-/// The canonical path of a walked file, matching `entry.path().canonicalize()` but reusing
-/// a per-directory canonicalisation. A file that is ITSELF a symlink is canonicalised
-/// directly (its target lies elsewhere); a plain file inherits its directory's canonical
-/// prefix joined with its own name — identical to canonicalising the whole path, since only
-/// the directory components could contain symlinks.
-fn canonical_file_path(
-    path: &Path,
-    is_symlink: bool,
-    dir_cache: &mut HashMap<PathBuf, PathBuf>,
-) -> PathBuf {
-    if is_symlink {
-        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => {
-            let canonical_parent = dir_cache
-                .entry(parent.to_path_buf())
-                .or_insert_with(|| parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf()));
-            canonical_parent.join(name)
-        }
-        _ => path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
-    }
+    super::universe::file_stats_from(&SourceSet::scan(roots))
 }
 
 /// A cheap fingerprint of the workspace identity: the order-independent fold of
 /// every graph-relevant file's `(path, mtime, len)` plus the extension-topology
-/// hash. Cache reuse compares it for an exact whole-workspace match.
+/// hash. Test-side wrapper — production callers scan a universe explicitly and
+/// fold it with [`fingerprint_of`], so the verdict of the same scan stays in hand.
+#[cfg(test)]
 pub(super) fn workspace_fingerprint(workspace_root: &Path) -> crate::graph_db::GraphFp {
     workspace_fingerprint_over(&super::input::ProjectSnapshot::load(workspace_root))
 }
 
-/// The fingerprint over an already-loaded project snapshot, so an operation
-/// that brackets a build with pre/post scans stats the SAME root universe both
-/// times instead of re-deriving the project mid-operation. This is the ONE fold
-/// point for graph identity — the build/adoption bracket and the live query-path
-/// freshness check both go through it, so a topology-only change (a `dependsOn`
-/// edit, an auto-discovered extension) can never be fresh on one path and stale
-/// on the other.
+/// The fingerprint over an already-loaded project snapshot. Test-side companion
+/// of [`workspace_fingerprint`] — production brackets scan a universe explicitly
+/// and fold it with [`fingerprint_of`], keeping the same scan's verdict in hand.
+#[cfg(test)]
 pub(crate) fn workspace_fingerprint_over(
     project: &super::input::ProjectSnapshot,
 ) -> crate::graph_db::GraphFp {
-    let mut entries: Vec<(String, u128, u64)> = scan_stats_over_roots(&project.scan_roots)
-        .into_iter()
-        .map(|s| (s.path, s.mtime, s.len))
-        .collect();
+    fingerprint_of(&scan_stats_over_roots(&project.scan_roots), &project.configs)
+}
+
+/// The fold over ALREADY-SCANNED stats — the piece of the fingerprint an operation
+/// can compute from a shared universe instead of paying another walk. The fold is
+/// order-independent (rows are sorted here), so any projection of the same scan
+/// folds to the same value.
+pub(crate) fn fingerprint_of(
+    stats: &[FileStat],
+    configs: &ide::WorkspaceConfigsSnapshot,
+) -> crate::graph_db::GraphFp {
+    let mut entries: Vec<(String, u128, u64)> =
+        stats.iter().map(|s| (s.path.clone(), s.mtime, s.len)).collect();
     entries.sort();
     crate::graph_db::GraphFp {
         files: super::snapshot::fold_fingerprint_entries(&entries),
-        topology: topology_u64(&project.configs),
+        topology: topology_u64(configs),
     }
 }
 

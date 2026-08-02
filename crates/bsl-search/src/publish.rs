@@ -502,6 +502,7 @@ mod tests {
     fn indexed_document(path: &str, text: &str) -> IndexedDocument {
         IndexedDocument {
             collection: "code".to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: path.to_owned(),
             symbol_name: path.to_owned(),
             kind: "procedure".to_owned(),

@@ -1,5 +1,6 @@
 use crate::domain::IndexedDocument;
 use crate::ports::GraphContextProvider;
+use crate::workspace_roots::FileKey;
 use code_chunk::{Chunk, ChunkKind};
 
 #[derive(Debug, Clone)]
@@ -69,20 +70,24 @@ pub fn semantic_key_from_parts(
 /// only for method chunks (procedure / function); module headers and absent
 /// providers yield `None`, leaving the embedding text unenriched.
 pub(crate) fn indexed_document_for_chunk(
-    rel_path: &str,
+    key: &FileKey,
     chunk: &Chunk,
     provider: Option<&dyn GraphContextProvider>,
 ) -> IndexedDocument {
     let kind = chunk.kind.label();
     let graph_context = match chunk.kind {
+        // The graph reads a module's identity out of the metadata-shaped path,
+        // which is the path relative to its own root — an extension repeats that
+        // shape, so the root-relative spelling is the one to hand over.
         ChunkKind::Procedure | ChunkKind::Function => {
-            provider.and_then(|p| p.graph_context(rel_path, &chunk.name, kind))
+            provider.and_then(|p| p.graph_context(&key.path, &chunk.name, kind))
         }
         ChunkKind::ModuleHeader => None,
     };
     IndexedDocument {
         collection: "code".to_owned(),
-        path: rel_path.to_owned(),
+        root_id: key.root_id.clone(),
+        path: key.path.clone(),
         symbol_name: chunk.name.clone(),
         kind: kind.to_owned(),
         line_start: chunk.line_start,
@@ -100,6 +105,7 @@ mod tests {
     fn doc() -> IndexedDocument {
         IndexedDocument {
             collection: "code".to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: "A.bsl".to_owned(),
             symbol_name: "Найти".to_owned(),
             kind: "procedure".to_owned(),
@@ -147,12 +153,12 @@ mod tests {
 
     #[test]
     fn chunk_document_carries_provider_context_for_methods_only() {
-        let path = "CommonModules/Сервер/Ext/Module.bsl";
+        let path = FileKey::configuration("CommonModules/Сервер/Ext/Module.bsl");
         let provider = FakeProvider;
 
         // A method chunk gets the provider's context, folded into the embed text.
         let method = chunk(ChunkKind::Procedure, "Делать", "Процедура Делать() КонецПроцедуры");
-        let doc = indexed_document_for_chunk(path, &method, Some(&provider));
+        let doc = indexed_document_for_chunk(&path, &method, Some(&provider));
         assert!(doc.graph_context.as_deref().unwrap().contains("Dispatch: server"));
         let embed = semantic_text_for_indexed_document(&doc);
         assert!(embed.contains("Module: ОбщийМодуль.Сервер.Модуль"), "{embed}");
@@ -160,14 +166,14 @@ mod tests {
 
         // A module header never gets graph context, even with a provider.
         let header = indexed_document_for_chunk(
-            path,
+            &path,
             &chunk(ChunkKind::ModuleHeader, "", "Перем А;"),
             Some(&provider),
         );
         assert_eq!(header.graph_context, None);
 
         // No provider → no context.
-        let plain = indexed_document_for_chunk(path, &method, None);
+        let plain = indexed_document_for_chunk(&path, &method, None);
         assert_eq!(plain.graph_context, None);
     }
 

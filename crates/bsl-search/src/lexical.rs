@@ -47,6 +47,7 @@ pub(crate) fn lexical_hits_for_documents<'a>(
         .filter_map(|document| lexical_score(document, query).map(|score| (document, score)))
         .map(|(document, score)| SearchHit {
             collection: document.collection.clone(),
+            root_id: document.root_id.clone(),
             file_path: document.path.clone(),
             symbol_name: document.symbol_name.clone(),
             kind: document.kind.clone(),
@@ -114,6 +115,7 @@ mod tests {
     fn doc(path: &str, symbol_name: &str, text: &str) -> IndexedDocument {
         IndexedDocument {
             collection: "code".to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: path.to_owned(),
             symbol_name: symbol_name.to_owned(),
             kind: "procedure".to_owned(),

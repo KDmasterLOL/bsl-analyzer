@@ -11,6 +11,7 @@ use crate::workspace_overlay::{
     lexical_hits, normalized_file_hash_for_indexed_documents, semantic_hits, BaselineHashMode,
     RefreshMode, RefreshPlan, WorkspaceOverlayCache, WorkspaceOverlayIndex, WorkspaceOverlayStats,
 };
+use crate::workspace_roots::{FileKey, WorkspaceRoots, CONFIGURATION_ROOT_ID};
 use crate::{
     semantic_key_for_indexed_document, semantic_text_for_indexed_document,
     BaselineOverlaySearchService, BaselineRef, CorpusId,
@@ -69,6 +70,8 @@ pub struct SearchConfig {
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub collection: String,
+    /// The source root the file belongs to; see [`crate::DocumentPath::root_id`].
+    pub root_id: String,
     pub file_path: String,
     pub symbol_name: String,
     pub kind: String,
@@ -82,6 +85,7 @@ impl SearchHit {
     pub fn from_lexical(hit: &crate::domain::LexicalHit) -> Self {
         Self {
             collection: hit.collection.clone(),
+            root_id: hit.root_id.clone(),
             file_path: hit.path.clone(),
             symbol_name: hit.symbol_name.clone(),
             kind: hit.kind.clone(),
@@ -95,6 +99,7 @@ impl SearchHit {
     pub fn to_lexical(&self) -> crate::domain::LexicalHit {
         crate::domain::LexicalHit {
             collection: self.collection.clone(),
+            root_id: self.root_id.clone(),
             path: self.file_path.clone(),
             symbol_name: self.symbol_name.clone(),
             kind: self.kind.clone(),
@@ -108,6 +113,7 @@ impl SearchHit {
     pub fn to_semantic(&self) -> crate::domain::SemanticHit {
         crate::domain::SemanticHit {
             collection: self.collection.clone(),
+            root_id: self.root_id.clone(),
             path: self.file_path.clone(),
             symbol_name: self.symbol_name.clone(),
             kind: self.kind.clone(),
@@ -120,6 +126,7 @@ impl SearchHit {
     pub fn from_merged(hit: crate::merge::MergedHit) -> Self {
         Self {
             collection: hit.collection,
+            root_id: hit.root_id,
             file_path: hit.path,
             symbol_name: hit.symbol_name,
             kind: hit.kind,
@@ -138,7 +145,7 @@ pub struct SearchEngine {
     dim: usize,
     batch_size: usize,
     concurrency: usize,
-    workspace_root: Option<std::path::PathBuf>,
+    workspace_roots: Option<WorkspaceRoots>,
     workspace_overlay_cache: Mutex<WorkspaceOverlayCache>,
     workspace_baseline_hash_mode: BaselineHashMode,
     /// Optional graph-context provider (dependency-inverted via
@@ -186,7 +193,7 @@ impl SearchEngine {
             dim,
             batch_size: execution.batch_size(),
             concurrency: execution.concurrency(),
-            workspace_root: None,
+            workspace_roots: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
             graph_context_provider: None,
@@ -277,7 +284,7 @@ impl SearchEngine {
             dim,
             batch_size: EmbeddingExecutionPolicy::default().batch_size(),
             concurrency: EmbeddingExecutionPolicy::default().concurrency(),
-            workspace_root: None,
+            workspace_roots: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
             graph_context_provider: None,
@@ -304,7 +311,7 @@ impl SearchEngine {
             dim,
             batch_size: execution.batch_size(),
             concurrency: execution.concurrency(),
-            workspace_root: None,
+            workspace_roots: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
             graph_context_provider: None,
@@ -354,7 +361,7 @@ impl SearchEngine {
 
     /// The overlay paths currently marked dirty, so the caller can prefetch resident snapshots
     /// for them off-lock and feed them back through [`Self::reindex_dirty_from_snapshots`].
-    pub fn workspace_overlay_dirty_paths(&self) -> Result<Vec<String>, SearchError> {
+    pub fn workspace_overlay_dirty_paths(&self) -> Result<Vec<FileKey>, SearchError> {
         let cache = self
             .workspace_overlay_cache
             .lock()
@@ -379,9 +386,9 @@ impl SearchEngine {
     /// touches the resident host, keeping the resident and engine locks strictly disjoint.
     pub fn reindex_dirty_from_snapshots(
         &self,
-        snapshots: &HashMap<String, ModuleSnapshot>,
+        snapshots: &HashMap<FileKey, ModuleSnapshot>,
     ) -> Result<(), SearchError> {
-        let Some(workspace_root) = &self.workspace_root else {
+        let Some(roots) = &self.workspace_roots else {
             return Ok(());
         };
         let mut cache = self
@@ -389,7 +396,7 @@ impl SearchEngine {
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
         cache.reindex_dirty_from_snapshots(
-            workspace_root,
+            roots,
             &self.store,
             self.batch_size,
             self.workspace_baseline_hash_mode,
@@ -433,7 +440,7 @@ impl SearchEngine {
             let rel_path =
                 file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            if let Some(stored_hash) = self.store.file_hash(&rel_path)? {
+            if let Some(stored_hash) = self.store.file_hash(CONFIGURATION_ROOT_ID, &rel_path)? {
                 if stored_hash == hash.as_bytes() {
                     continue;
                 }
@@ -447,7 +454,13 @@ impl SearchEngine {
             let provider = self.graph_context_provider.as_deref();
             let docs: Vec<crate::IndexedDocument> = chunks
                 .iter()
-                .map(|c| crate::document::indexed_document_for_chunk(&rel_path, c, provider))
+                .map(|c| {
+                    crate::document::indexed_document_for_chunk(
+                        &FileKey::configuration(&rel_path),
+                        c,
+                        provider,
+                    )
+                })
                 .collect();
             let texts: Vec<String> =
                 docs.iter().map(crate::document::semantic_text_for_indexed_document).collect();
@@ -555,6 +568,7 @@ impl SearchEngine {
             match result.embeddings {
                 Ok(embeddings) => {
                     self.store.reindex_file_with_context(
+                        CONFIGURATION_ROOT_ID,
                         &result.rel_path,
                         &result.hash,
                         &result.chunks,
@@ -608,7 +622,14 @@ impl SearchEngine {
         chunks: &[crate::Chunk],
         graph_contexts: &[Option<String>],
     ) -> Result<(), SearchError> {
-        self.store.reindex_file_with_context(rel_path, hash, chunks, None, Some(graph_contexts))?;
+        self.store.reindex_file_with_context(
+            CONFIGURATION_ROOT_ID,
+            rel_path,
+            hash,
+            chunks,
+            None,
+            Some(graph_contexts),
+        )?;
         Ok(())
     }
 
@@ -831,7 +852,7 @@ impl SearchEngine {
             let rel_path =
                 file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            let had_prior = match self.store.file_hash(&rel_path)? {
+            let had_prior = match self.store.file_hash(CONFIGURATION_ROOT_ID, &rel_path)? {
                 Some(stored_hash) => {
                     if stored_hash == hash.as_bytes() {
                         continue;
@@ -851,7 +872,7 @@ impl SearchEngine {
                 // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
                 // so only prior-stored files are touched.
                 if had_prior {
-                    self.store.remove_file(&rel_path, "code")?;
+                    self.store.remove_file(CONFIGURATION_ROOT_ID, &rel_path, "code")?;
                     indexed += 1;
                 }
                 continue;
@@ -860,12 +881,17 @@ impl SearchEngine {
             let graph_contexts: Vec<Option<String>> = chunks
                 .iter()
                 .map(|c| {
-                    crate::document::indexed_document_for_chunk(&rel_path, c, provider)
-                        .graph_context
+                    crate::document::indexed_document_for_chunk(
+                        &FileKey::configuration(&rel_path),
+                        c,
+                        provider,
+                    )
+                    .graph_context
                 })
                 .collect();
 
             self.store.reindex_file_with_context(
+                CONFIGURATION_ROOT_ID,
                 &rel_path,
                 hash.as_bytes(),
                 &chunks,
@@ -903,7 +929,7 @@ impl SearchEngine {
             let rel_path =
                 file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            let had_prior = match self.store.file_hash(&rel_path)? {
+            let had_prior = match self.store.file_hash(CONFIGURATION_ROOT_ID, &rel_path)? {
                 Some(stored_hash) => {
                     if stored_hash == hash.as_bytes() {
                         continue;
@@ -923,13 +949,19 @@ impl SearchEngine {
                 // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
                 // so only prior-stored files are touched.
                 if had_prior {
-                    self.store.remove_file(&rel_path, "code")?;
+                    self.store.remove_file(CONFIGURATION_ROOT_ID, &rel_path, "code")?;
                     indexed += 1;
                 }
                 continue;
             }
 
-            self.store.reindex_file(&rel_path, hash.as_bytes(), &chunks, None)?;
+            self.store.reindex_file(
+                CONFIGURATION_ROOT_ID,
+                &rel_path,
+                hash.as_bytes(),
+                &chunks,
+                None,
+            )?;
             indexed += 1;
         }
 
@@ -945,7 +977,7 @@ impl SearchEngine {
         documents: &[Document],
         progress: Option<&Arc<IndexProgress>>,
     ) -> Result<usize, SearchError> {
-        if let Some(stored_hash) = self.store.file_hash(virtual_path)? {
+        if let Some(stored_hash) = self.store.file_hash(CONFIGURATION_ROOT_ID, virtual_path)? {
             if stored_hash == version_hash {
                 info!(collection, documents = documents.len(), "documents unchanged, skipping");
                 return Ok(0);
@@ -1078,11 +1110,26 @@ impl SearchEngine {
     }
 
     pub fn workspace_root(&self) -> Option<&std::path::Path> {
-        self.workspace_root.as_deref()
+        self.workspace_roots.as_ref().map(WorkspaceRoots::workspace)
     }
 
+    /// The engine's root table, for a caller that must scan or resolve keys off
+    /// the engine lock (the standalone overlay prime).
+    pub fn workspace_roots(&self) -> Option<&WorkspaceRoots> {
+        self.workspace_roots.as_ref()
+    }
+
+    /// Point the engine at a workspace whose only source root is the workspace
+    /// directory itself. Every file found under it is the configuration's, which
+    /// is what a caller with no project model to consult can honestly say.
     pub fn set_workspace_root(&mut self, workspace_root: impl Into<std::path::PathBuf>) {
-        self.workspace_root = Some(workspace_root.into());
+        let workspace_root = workspace_root.into();
+        let (roots, _) = WorkspaceRoots::build(&workspace_root, &workspace_root, &[]);
+        self.set_workspace_roots(roots);
+    }
+
+    pub fn set_workspace_roots(&mut self, roots: WorkspaceRoots) {
+        self.workspace_roots = Some(roots);
         if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
             cache.clear();
         }
@@ -1105,45 +1152,34 @@ impl SearchEngine {
         &self,
         path: impl AsRef<std::path::Path>,
     ) -> Result<bool, SearchError> {
-        let workspace_root = match &self.workspace_root {
-            Some(root) => root,
-            None => return Ok(false),
-        };
-        let path = path.as_ref();
-        let rel_path = if path.is_absolute() {
-            match path.strip_prefix(workspace_root) {
-                Ok(rel) => rel,
-                Err(_) => return Ok(false),
-            }
-        } else {
-            path
-        };
-
-        if !rel_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+        let Some(key) = self.workspace_file_key(path.as_ref()) else {
             return Ok(false);
-        }
-
-        let rel_path = rel_path.to_string_lossy().to_string();
+        };
         let mut cache = self
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
         cache.enable_watcher_mode();
-        cache.mark_dirty_path(rel_path);
+        cache.mark_dirty_path(key);
         Ok(true)
     }
 
-    /// Strip `path` to a workspace-relative `.bsl` path (the spelling the `code`
-    /// collection is keyed by), or `None` when it is not an absolute path under the
-    /// workspace root or not a `.bsl`. Shared by the workspace point-update entry points.
-    fn workspace_rel_bsl(&self, path: &Path) -> Option<String> {
-        let workspace_root = self.workspace_root.as_ref()?;
-        let rel_path =
-            if path.is_absolute() { path.strip_prefix(workspace_root).ok()? } else { path };
-        if !rel_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+    /// The store key of a workspace `.bsl` file, or `None` when it is not a
+    /// `.bsl` or lies outside every registered root. Shared by the workspace
+    /// point-update entry points.
+    ///
+    /// A relative path is taken as workspace-relative — that is the only reading
+    /// available, and the callers that pass one have already stripped the
+    /// workspace prefix themselves. The canonical spelling is what attribution
+    /// ranks roots by, which is why [`WorkspaceRoots::root_of`] takes two.
+    fn workspace_file_key(&self, path: &Path) -> Option<FileKey> {
+        let roots = self.workspace_roots.as_ref()?;
+        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
             return None;
         }
-        Some(rel_path.to_string_lossy().to_string())
+        let walked =
+            if path.is_absolute() { path.to_path_buf() } else { roots.workspace().join(path) };
+        roots.root_of(&walked, &canonical_spelling(&walked))
     }
 
     /// Mark one workspace `.bsl` file's stored graph context stale, so a later
@@ -1154,10 +1190,10 @@ impl SearchEngine {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<bool, SearchError> {
-        let Some(rel) = self.workspace_rel_bsl(path.as_ref()) else {
+        let Some(key) = self.workspace_file_key(path.as_ref()) else {
             return Ok(false);
         };
-        self.store.mark_context_dirty("code", &rel)?;
+        self.store.mark_context_dirty("code", &key.root_id, &key.path)?;
         Ok(true)
     }
 
@@ -1178,7 +1214,7 @@ impl SearchEngine {
     }
 
     /// The set of paths currently marked context-dirty in `collection`.
-    pub fn context_dirty_paths(&self, collection: &str) -> Result<HashSet<String>, SearchError> {
+    pub fn context_dirty_paths(&self, collection: &str) -> Result<HashSet<FileKey>, SearchError> {
         self.store.context_dirty_paths(collection)
     }
 
@@ -1203,24 +1239,33 @@ impl SearchEngine {
     /// deliberately does NOT reload every embedding or re-persist the sidecar. Returns
     /// whether the path was a workspace `.bsl`.
     pub fn remove_workspace_path(&mut self, path: impl AsRef<Path>) -> Result<bool, SearchError> {
-        let Some(rel) = self.workspace_rel_bsl(path.as_ref()) else {
+        let Some(key) = self.workspace_file_key(path.as_ref()) else {
             return Ok(false);
         };
+        self.remove_workspace_key(&key)?;
+        Ok(true)
+    }
+
+    /// [`Self::remove_workspace_path`] for a caller that already holds the store
+    /// key. A key read back from the store must NOT be re-attributed: its path is
+    /// relative to its own root, and re-deriving it from the workspace would hand
+    /// an extension's file to the configuration and leave the real row in place.
+    pub fn remove_workspace_key(&mut self, key: &FileKey) -> Result<(), SearchError> {
         // Collect the chunk ids before deleting the rows so the exact vectors can be
         // evicted from the live index without a full reload.
-        let chunk_ids = self.store.chunk_ids_for_file("code", &rel)?;
-        self.store.remove_file(&rel, "code")?;
-        self.store.insert_overlay_tombstone(&rel, "code")?;
+        let chunk_ids = self.store.chunk_ids_for_file("code", &key.root_id, &key.path)?;
+        self.store.remove_file(&key.root_id, &key.path, "code")?;
+        self.store.insert_overlay_tombstone(&key.root_id, &key.path, "code")?;
         if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
             cache.enable_watcher_mode();
-            cache.mark_dirty_path(rel.clone());
+            cache.mark_dirty_path(key.clone());
         }
         for id in chunk_ids {
             if let Err(e) = self.index.remove(id) {
                 tracing::debug!(id, "vector index removal skipped: {e}");
             }
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Reconcile the workspace `code` collection against the set of `.bsl` files actually
@@ -1236,21 +1281,23 @@ impl SearchEngine {
         &mut self,
         present_abs: &HashSet<std::path::PathBuf>,
     ) -> Result<usize, SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(0);
         }
-        // Rel spellings of the present files, matching the `code` collection's keying.
-        let present_rel: HashSet<String> =
-            present_abs.iter().filter_map(|p| self.workspace_rel_bsl(p)).collect();
-        let stored: Vec<String> = self
+        // The present files under the same keying the `code` collection uses, so
+        // a file of one root never answers for the same relative path in another.
+        let present: HashSet<FileKey> =
+            present_abs.iter().filter_map(|p| self.workspace_file_key(p)).collect();
+        let stored: Vec<FileKey> = self
             .store
             .all_files_in_collection("code")?
             .into_iter()
-            .map(|(path, _hash)| path)
+            .map(|(key, _hash)| key)
             .collect();
         let mut removed = 0;
-        for path in stored {
-            if !present_rel.contains(&path) && self.remove_workspace_path(&path)? {
+        for key in stored {
+            if !present.contains(&key) {
+                self.remove_workspace_key(&key)?;
                 removed += 1;
             }
         }
@@ -1279,7 +1326,7 @@ impl SearchEngine {
         seq_bound: i64,
     ) -> Result<ContextRefreshStats, SearchError> {
         let mut stats = ContextRefreshStats::default();
-        for path in self.store.context_dirty_paths_bounded("code", seq_bound)? {
+        for key in self.store.context_dirty_paths_bounded("code", seq_bound)? {
             // A render error for ANY method of this path keeps the mark: the failure is
             // transient (the graph DB could not be read), so the next publish must retry
             // the whole path rather than clearing it against a half-failed render. A
@@ -1287,9 +1334,9 @@ impl SearchEngine {
             // gone from the graph) is not an error and clears normally.
             let mut render_failed = false;
             for (id, symbol_name, kind, stored) in
-                self.store.chunks_with_context_for_file("code", &path)?
+                self.store.chunks_with_context_for_file("code", &key.root_id, &key.path)?
             {
-                match provider.try_graph_context(&path, &symbol_name, &kind) {
+                match provider.try_graph_context(&key.path, &symbol_name, &kind) {
                     Ok(rendered) => {
                         if rendered.as_deref() != stored.as_deref() {
                             self.store.set_chunk_graph_context(id, rendered.as_deref())?;
@@ -1301,7 +1348,8 @@ impl SearchEngine {
                     Err(e) => {
                         render_failed = true;
                         tracing::warn!(
-                            path = %path,
+                            root = %key.root_id,
+                            path = %key.path,
                             method = %symbol_name,
                             "graph context render failed; keeping dirty mark for retry: {e}"
                         );
@@ -1311,14 +1359,14 @@ impl SearchEngine {
             if render_failed {
                 continue;
             }
-            self.store.clear_context_dirty_bounded("code", &path, seq_bound)?;
+            self.store.clear_context_dirty_bounded("code", &key.root_id, &key.path, seq_bound)?;
             stats.paths_cleared += 1;
         }
         Ok(stats)
     }
 
     pub fn workspace_overlay_stats(&self) -> Result<Option<WorkspaceOverlayStats>, SearchError> {
-        let Some(workspace_root) = &self.workspace_root else {
+        let Some(roots) = &self.workspace_roots else {
             return Ok(None);
         };
         let mut cache = self
@@ -1332,7 +1380,7 @@ impl SearchEngine {
         {
             cache.refresh_with_manifest(
                 &manifest_fingerprints,
-                workspace_root,
+                roots,
                 None,
                 self.batch_size,
                 &self.store,
@@ -1341,7 +1389,7 @@ impl SearchEngine {
         } else {
             cache.refresh(
                 &self.store,
-                workspace_root,
+                roots,
                 None,
                 self.batch_size,
                 self.workspace_baseline_hash_mode,
@@ -1356,7 +1404,7 @@ impl SearchEngine {
     /// NOT use this (it would serialize all search behind a multi-minute embed) and instead drives
     /// the lock-free [`Self::prime_workspace_overlay_standalone`] + [`Self::publish_workspace_overlay`].
     pub fn prime_workspace_overlay(&self) -> Result<(), SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(());
         }
         let _ = self.workspace_overlay_snapshot(RefreshMode::Embed)?;
@@ -1371,7 +1419,7 @@ impl SearchEngine {
     /// reconciled invariant directly rather than re-deriving it. Flips the same `initialized` flag a
     /// prime would, so the resident-fed incremental reindex (inert until initialized) goes live.
     pub fn initialize_workspace_overlay_clean(&self) -> Result<(), SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(());
         }
         let mut cache = self
@@ -1423,7 +1471,7 @@ impl SearchEngine {
     pub fn prime_workspace_overlay_standalone(
         db_path: &Path,
         embedder_config: EmbedderConfig,
-        workspace_root: &Path,
+        roots: &WorkspaceRoots,
         warm_embeddings: HashMap<String, Vec<f32>>,
         graph_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
     ) -> Result<(RefreshPlan, HashMap<String, Vec<f32>>), SearchError> {
@@ -1454,7 +1502,7 @@ impl SearchEngine {
 
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest_fingerprints,
-            workspace_root,
+            roots,
             &store,
             &warm_embeddings,
             graph_provider.as_deref(),
@@ -1528,7 +1576,7 @@ impl SearchEngine {
         &self,
         plan: RefreshPlan,
         new_embeddings: HashMap<String, Vec<f32>>,
-        dirty_before: &HashMap<String, u64>,
+        dirty_before: &HashMap<FileKey, u64>,
     ) -> Result<(), SearchError> {
         let mut cache = self
             .workspace_overlay_cache
@@ -1542,7 +1590,7 @@ impl SearchEngine {
     /// the flags that pass supersedes, never one the watcher re-marked while the embed was in flight.
     pub fn workspace_overlay_dirty_paths_snapshot(
         &self,
-    ) -> Result<HashMap<String, u64>, SearchError> {
+    ) -> Result<HashMap<FileKey, u64>, SearchError> {
         let cache = self
             .workspace_overlay_cache
             .lock()
@@ -1554,8 +1602,8 @@ impl SearchEngine {
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
-        if self.workspace_root.is_none() {
+    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
+        if self.workspace_roots.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
         let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
@@ -1570,8 +1618,8 @@ impl SearchEngine {
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
-        if self.workspace_root.is_none() {
+    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
+        if self.workspace_roots.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
         let Some(embedder) = &self.embedder else {
@@ -1596,8 +1644,8 @@ impl SearchEngine {
         &self,
         query_embedding: &[f32],
         limit: usize,
-    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
-        if self.workspace_root.is_none() {
+    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
+        if self.workspace_roots.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
         if self.embedder.is_none() {
@@ -1629,7 +1677,7 @@ impl SearchEngine {
         C: SnapshotCatalog,
         S: SnapshotContentStore,
     {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(None);
         }
 
@@ -1647,7 +1695,7 @@ impl SearchEngine {
         baseline: BaselineRef,
         baseline_documents: Vec<crate::IndexedDocument>,
     ) -> Result<Option<ResolvedView>, SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(None);
         }
 
@@ -1740,6 +1788,7 @@ impl SearchEngine {
                 }
                 hits.push(SearchHit {
                     collection: info.collection,
+                    root_id: info.root_id,
                     file_path: info.file_path,
                     symbol_name: info.symbol_name,
                     kind: info.kind,
@@ -1759,7 +1808,7 @@ impl SearchEngine {
         query: &str,
         limit: usize,
     ) -> Result<Option<Vec<SearchHit>>, SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(None);
         }
         let Some(embedder) = &self.embedder else {
@@ -1775,7 +1824,9 @@ impl SearchEngine {
         let query_embedding = embedder.embed(query)?;
         let mut combined =
             self.search_persisted_with_embedding(&query_embedding, limit * 3, Some("code"))?;
-        combined.retain(|hit| !overlay.hidden_paths.contains(&hit.file_path));
+        combined.retain(|hit| {
+            !overlay.hidden_paths.contains(&FileKey::new(&hit.root_id, &hit.file_path))
+        });
         combined.extend(semantic_hits(&overlay, &query_embedding, limit));
         combined.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
         combined.truncate(limit);
@@ -1789,7 +1840,7 @@ impl SearchEngine {
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Option<Vec<SearchHit>>, SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(None);
         }
 
@@ -1801,7 +1852,9 @@ impl SearchEngine {
 
         let mut combined =
             self.search_persisted_with_embedding(query_embedding, limit * 3, Some("code"))?;
-        combined.retain(|hit| !overlay.hidden_paths.contains(&hit.file_path));
+        combined.retain(|hit| {
+            !overlay.hidden_paths.contains(&FileKey::new(&hit.root_id, &hit.file_path))
+        });
         combined.extend(semantic_hits(&overlay, query_embedding, limit));
         combined.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
         combined.truncate(limit);
@@ -1844,6 +1897,7 @@ impl SearchEngine {
                 let score = 1.0 - 1.0 / (1.0 - result.rank as f32);
                 hits.push(SearchHit {
                     collection: info.collection,
+                    root_id: info.root_id,
                     file_path: info.file_path,
                     symbol_name: info.symbol_name,
                     kind: info.kind,
@@ -1863,18 +1917,19 @@ impl SearchEngine {
         query: &str,
         limit: usize,
     ) -> Result<Option<Vec<SearchHit>>, SearchError> {
-        let Some(workspace_root) = &self.workspace_root else {
+        if self.workspace_roots.is_none() {
             return Ok(None);
-        };
+        }
 
-        let _ = workspace_root;
         let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
         if overlay.is_empty() {
             return Ok(None);
         }
 
         let mut combined = self.text_search_persisted(query, limit * 3, Some("code"))?;
-        combined.retain(|hit| !overlay.hidden_paths.contains(&hit.file_path));
+        combined.retain(|hit| {
+            !overlay.hidden_paths.contains(&FileKey::new(&hit.root_id, &hit.file_path))
+        });
         combined.extend(lexical_hits(&overlay, query, limit));
         combined.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
         combined.truncate(limit);
@@ -1892,8 +1947,8 @@ impl SearchEngine {
         &self,
         mode: RefreshMode,
     ) -> Result<WorkspaceOverlayIndex, SearchError> {
-        let workspace_root = self
-            .workspace_root
+        let roots = self
+            .workspace_roots
             .as_ref()
             .ok_or_else(|| SearchError::Index("workspace root is not configured".to_owned()))?;
         let embedder = match mode {
@@ -1912,7 +1967,7 @@ impl SearchEngine {
         {
             cache.refresh_with_manifest(
                 &manifest_fingerprints,
-                workspace_root,
+                roots,
                 embedder,
                 self.batch_size,
                 &self.store,
@@ -1921,7 +1976,7 @@ impl SearchEngine {
         } else {
             cache.refresh(
                 &self.store,
-                workspace_root,
+                roots,
                 embedder,
                 self.batch_size,
                 self.workspace_baseline_hash_mode,
@@ -1951,15 +2006,18 @@ impl SearchEngine {
     ) -> Result<usize, SearchError> {
         use std::collections::{BTreeMap, HashSet};
 
-        let mut grouped = BTreeMap::<String, Vec<crate::IndexedDocument>>::new();
+        let mut grouped = BTreeMap::<FileKey, Vec<crate::IndexedDocument>>::new();
         for document in documents {
-            grouped.entry(document.path.clone()).or_default().push(document.clone());
+            grouped
+                .entry(FileKey::new(&document.root_id, &document.path))
+                .or_default()
+                .push(document.clone());
         }
 
-        let desired_paths: HashSet<&str> = grouped.keys().map(String::as_str).collect();
-        for (existing_path, _) in self.store.all_files_in_collection(collection)? {
-            if !desired_paths.contains(existing_path.as_str()) {
-                self.store.remove_file(&existing_path, collection)?;
+        let desired: HashSet<&FileKey> = grouped.keys().collect();
+        for (existing, _) in self.store.all_files_in_collection(collection)? {
+            if !desired.contains(&existing) {
+                self.store.remove_file(&existing.root_id, &existing.path, collection)?;
             }
         }
 
@@ -1974,7 +2032,7 @@ impl SearchEngine {
         }
 
         let mut indexed = 0usize;
-        for (path, mut file_documents) in grouped {
+        for (key, mut file_documents) in grouped {
             file_documents.sort_by(|lhs, rhs| {
                 (lhs.line_start, lhs.line_end, lhs.symbol_name.as_str()).cmp(&(
                     rhs.line_start,
@@ -1984,7 +2042,9 @@ impl SearchEngine {
             });
 
             let file_hash = normalized_file_hash_for_indexed_documents(&file_documents);
-            if self.store.file_hash(&path)?.as_deref() == Some(file_hash.as_slice()) {
+            if self.store.file_hash(&key.root_id, &key.path)?.as_deref()
+                == Some(file_hash.as_slice())
+            {
                 continue;
             }
 
@@ -2030,7 +2090,8 @@ impl SearchEngine {
             };
 
             self.store.reindex_indexed_documents_in_collection(
-                &path,
+                &key.root_id,
+                &key.path,
                 &file_hash,
                 collection,
                 &file_documents,
@@ -2082,9 +2143,29 @@ impl SearchEngine {
     }
 
     pub fn remove_file(&mut self, rel_path: &str, collection: &str) -> Result<(), SearchError> {
-        self.store.remove_file(rel_path, collection)?;
+        self.store.remove_file(CONFIGURATION_ROOT_ID, rel_path, collection)?;
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(())
+    }
+}
+
+/// The canonical spelling of a path, falling back to the canonical spelling of
+/// its directory when the file itself is gone.
+///
+/// Deletion is the case this exists for: a removed file cannot be canonicalized,
+/// and dropping all the way to the walked spelling would leave attribution
+/// ranking roots by their declared paths alone. A file that lived under a root
+/// reached through an alias would then be removed under a DIFFERENT root's key —
+/// tombstone and all — while its real row stayed behind serving a dead hit.
+fn canonical_spelling(path: &Path) -> std::path::PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+            .map(|parent| parent.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
     }
 }
 
@@ -2110,6 +2191,7 @@ struct FileResult {
 mod tests {
     use super::SearchEngine;
     use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+    use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
     use crate::{BaselineRef, CorpusId, IndexedDocument, SearchError, Snapshot};
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -2304,6 +2386,7 @@ mod tests {
             vec![
                 IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "ChangedModule.bsl".to_owned(),
                     symbol_name: "БазоваяВерсия".to_owned(),
                     kind: "procedure".to_owned(),
@@ -2315,6 +2398,7 @@ mod tests {
                 },
                 IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "StableModule.bsl".to_owned(),
                     symbol_name: "СтабильноИзBaseline".to_owned(),
                     kind: "procedure".to_owned(),
@@ -2405,7 +2489,7 @@ mod tests {
             engine.workspace_overlay_lexical_hits("ЛокальнаяПроцедура", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].symbol_name, "ЛокальнаяПроцедура");
-        assert!(hidden_paths.contains("CommonModule.bsl"));
+        assert!(hidden_paths.contains(&FileKey::configuration("CommonModule.bsl")));
     }
 
     #[test]
@@ -2461,10 +2545,22 @@ mod tests {
         {
             let mut store = Store::open(&db_path).unwrap();
             store
-                .reindex_file("a.bsl", b"ha", &[chunk("Альфа")], Some(std::slice::from_ref(&vec_a)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "a.bsl",
+                    b"ha",
+                    &[chunk("Альфа")],
+                    Some(std::slice::from_ref(&vec_a)),
+                )
                 .unwrap();
             store
-                .reindex_file("b.bsl", b"hb", &[chunk("Бета")], Some(std::slice::from_ref(&vec_b)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "b.bsl",
+                    b"hb",
+                    &[chunk("Бета")],
+                    Some(std::slice::from_ref(&vec_b)),
+                )
                 .unwrap();
         }
 
@@ -2542,7 +2638,7 @@ mod tests {
         let plan =
             crate::workspace_overlay::WorkspaceOverlayCache::plan_full_refresh_from_manifest(
                 &manifest,
-                workspace,
+                &crate::WorkspaceRoots::build(workspace, workspace, &[]).0,
                 engine.store(),
                 &std::collections::HashMap::new(),
                 None,
@@ -2605,6 +2701,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[chunk("Изменённая")],
@@ -2614,6 +2711,7 @@ mod tests {
                 .unwrap();
             store
                 .reindex_file_with_context(
+                    CONFIGURATION_ROOT_ID,
                     "Stable.bsl",
                     b"h2",
                     &[chunk("Стабильная")],
@@ -2624,8 +2722,8 @@ mod tests {
         }
 
         let engine = SearchEngine::fts_only(&db_path).unwrap();
-        engine.store().mark_context_dirty("code", "Owned.bsl").unwrap();
-        engine.store().mark_context_dirty("code", "Stable.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Stable.bsl").unwrap();
         let gen_before = engine.store().embedding_generation().unwrap();
 
         let stats = engine.refresh_dirty_contexts(&Stub, i64::MAX).unwrap();
@@ -2680,6 +2778,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[Chunk {
@@ -2698,14 +2797,17 @@ mod tests {
         }
 
         let engine = SearchEngine::fts_only(&db_path).unwrap();
-        engine.store().mark_context_dirty("code", "Owned.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
 
         let stats = engine.refresh_dirty_contexts(&Failing, i64::MAX).unwrap();
         assert_eq!(stats.paths_cleared, 0, "a failed render clears no path");
         assert_eq!(stats.chunks_updated, 0);
         assert_eq!(stats.cleared_embeddings, 0);
         assert!(
-            engine.context_dirty_paths("code").unwrap().contains("Owned.bsl"),
+            engine
+                .context_dirty_paths("code")
+                .unwrap()
+                .contains(&FileKey::configuration("Owned.bsl")),
             "the mark survives a render failure so the next publish retries it",
         );
     }
@@ -2730,9 +2832,9 @@ mod tests {
 
         // A build captures its start-seq AFTER the first drift marked A, but BEFORE a second
         // drift marks B (as if B's `.xml` landed while this build was already reading disk).
-        engine.store().mark_context_dirty("code", "A.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "A.bsl").unwrap();
         let build_start_seq = engine.mark_seq_handle().load(std::sync::atomic::Ordering::SeqCst);
-        engine.store().mark_context_dirty("code", "B.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "B.bsl").unwrap();
         let next_build_seq = engine.mark_seq_handle().load(std::sync::atomic::Ordering::SeqCst);
         assert!(next_build_seq > build_start_seq, "the later mark got a higher seq");
 
@@ -2741,8 +2843,14 @@ mod tests {
         let stats = engine.refresh_dirty_contexts(&NoContext, build_start_seq).unwrap();
         assert_eq!(stats.paths_cleared, 1, "only the mark at or below the bound is consumed");
         let dirty = engine.context_dirty_paths("code").unwrap();
-        assert!(!dirty.contains("A.bsl"), "A was within the bound and is cleared");
-        assert!(dirty.contains("B.bsl"), "B was stamped after build start and survives");
+        assert!(
+            !dirty.contains(&FileKey::configuration("A.bsl")),
+            "A was within the bound and is cleared"
+        );
+        assert!(
+            dirty.contains(&FileKey::configuration("B.bsl")),
+            "B was stamped after build start and survives"
+        );
 
         // The next build's start-seq covers B, so its publish consumes it.
         let stats = engine.refresh_dirty_contexts(&NoContext, next_build_seq).unwrap();
@@ -2780,6 +2888,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file(
+                    CONFIGURATION_ROOT_ID,
                     "Gone.bsl",
                     b"ha",
                     &[chunk("Ушедшая")],
@@ -2788,6 +2897,7 @@ mod tests {
                 .unwrap();
             store
                 .reindex_file(
+                    CONFIGURATION_ROOT_ID,
                     "Kept.bsl",
                     b"hb",
                     &[chunk("Оставшаяся")],
@@ -2827,7 +2937,11 @@ mod tests {
             "the surviving file is intact",
         );
         assert!(
-            engine.store().overlay_tombstone_paths("code").unwrap().contains("Gone.bsl"),
+            engine
+                .store()
+                .overlay_tombstone_paths("code")
+                .unwrap()
+                .contains(&FileKey::configuration("Gone.bsl")),
             "a tombstone blocks a baseline hit from resurrecting the gone file",
         );
         // The gone file's vector answers nothing; the survivor's still does.
@@ -2852,6 +2966,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "Removed.bsl".to_owned(),
                     symbol_name: "П".to_owned(),
                     kind: "procedure".to_owned(),
@@ -2869,8 +2984,57 @@ mod tests {
 
         let tombstones = engine.store().overlay_tombstone_paths("code").unwrap();
         assert!(
-            tombstones.contains("Removed.bsl"),
+            tombstones.contains(&FileKey::configuration("Removed.bsl")),
             "the deleted path is tombstoned so a baseline hit stays hidden: {tombstones:?}",
+        );
+    }
+
+    /// Two roots whose declared nesting is the reverse of their canonical one: an
+    /// outer root reached through an alias, and an inner root registered under the
+    /// alias's real path. A file deleted there cannot be canonicalized, and ranking
+    /// the roots by their declared spellings alone would pick the outer one — so the
+    /// removal would tombstone a key nobody ever wrote and leave the real row serving
+    /// a dead hit.
+    #[cfg(unix)]
+    #[test]
+    fn a_deletion_reached_through_an_alias_removes_the_row_the_file_lived_under() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        let outer = outside.path().join("outer");
+        let inner = outer.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        let alias = workspace.join("alias");
+        std::os::unix::fs::symlink(&outer, &alias).unwrap();
+
+        let file = inner.join("X.bsl");
+        fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, rejected) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            &[alias.clone(), inner.clone()],
+        );
+        assert!(rejected.is_empty(), "both roots register: {rejected:?}");
+        engine.set_workspace_roots(roots);
+
+        // The file is stored under the root it physically lives in, which is what
+        // the walk would have attributed it to.
+        let lived_under =
+            engine.workspace_file_key(&file).expect("a live file attributes to its own root");
+        engine.store().upsert_file(&lived_under.root_id, &lived_under.path, b"h", "code").unwrap();
+        assert_eq!(engine.file_count().unwrap(), 1);
+
+        fs::remove_file(&file).unwrap();
+        assert!(engine.remove_workspace_path(alias.join("inner/X.bsl")).unwrap());
+
+        assert_eq!(
+            engine.file_count().unwrap(),
+            0,
+            "the row of the root the file lived under is the one removed",
         );
     }
 
@@ -2937,10 +3101,22 @@ mod tests {
         {
             let mut store = Store::open(&db_path).unwrap();
             store
-                .reindex_file("a.bsl", b"ha", &[chunk("Альфа")], Some(std::slice::from_ref(&vec_a)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "a.bsl",
+                    b"ha",
+                    &[chunk("Альфа")],
+                    Some(std::slice::from_ref(&vec_a)),
+                )
                 .unwrap();
             store
-                .reindex_file("b.bsl", b"hb", &[chunk("Бета")], Some(std::slice::from_ref(&vec_b)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "b.bsl",
+                    b"hb",
+                    &[chunk("Бета")],
+                    Some(std::slice::from_ref(&vec_b)),
+                )
                 .unwrap();
         }
 

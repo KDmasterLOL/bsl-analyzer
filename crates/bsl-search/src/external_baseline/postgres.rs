@@ -13,6 +13,7 @@ use crate::ports::{
     BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotContentStore,
     SnapshotPublisher, WorkspaceBaselineManifestStore,
 };
+use crate::workspace_roots::CONFIGURATION_ROOT_ID;
 use postgres::{GenericClient, NoTls, Row, Transaction};
 use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1345,6 +1346,9 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
                 for item in items {
                     documents.push(IndexedDocument {
                         collection: file.collection.clone(),
+                        // The published corpus is built from the configuration
+                        // root alone, so its rows carry no other identity.
+                        root_id: CONFIGURATION_ROOT_ID.to_owned(),
                         path: file.path.clone(),
                         symbol_name: item.symbol_name.clone(),
                         kind: item.kind.clone(),
@@ -1455,6 +1459,7 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
             .into_iter()
             .map(|row| LexicalHit {
                 collection: row.get("collection"),
+                root_id: CONFIGURATION_ROOT_ID.to_owned(),
                 path: row.get("path"),
                 symbol_name: row.get("symbol_name"),
                 kind: row.get("kind"),
@@ -1545,6 +1550,7 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
             .into_iter()
             .map(|row| SemanticHit {
                 collection: row.get("collection"),
+                root_id: CONFIGURATION_ROOT_ID.to_owned(),
                 path: row.get("path"),
                 symbol_name: row.get("symbol_name"),
                 kind: row.get("kind"),
@@ -3398,6 +3404,122 @@ mod tests {
         assert_ne!(fingerprint_file_documents(&documents), fingerprint_file_documents(&changed));
     }
 
+    /// The manifest carries the fingerprint computed here, and the working-tree
+    /// side recomputes its own to decide whether a file differs from the
+    /// baseline. Disagreeing recipes make every file read as locally changed,
+    /// so the whole corpus lives as an overlay delta.
+    ///
+    /// The expected value is pinned from THIS side. Published manifests were
+    /// computed with this recipe, so it is the one that cannot move; a check
+    /// that merely compared the two live functions would be satisfied just as
+    /// well by changing the publisher, which would leave every published
+    /// manifest mismatched and this check green.
+    #[test]
+    fn the_working_tree_recipe_reproduces_the_published_fingerprint() {
+        const PUBLISHED: &str = "4e5ca8d990e5af2764397a6700dc0e46f66141881870dcf946a0829a334e3804";
+        let rel_path = "CommonModules/Модуль/Ext/Module.bsl";
+        let content = "Процедура Первая() Экспорт\nКонецПроцедуры\n\n\
+                       Функция Вторая() Экспорт\n\tВозврат 1;\nКонецФункции\n";
+        // Built through the shared chunk→document builder the overlay uses, so
+        // the two recipes are fed the very same documents and only the recipes
+        // themselves are under test.
+        let documents: Vec<IndexedDocument> = code_chunk::Chunker::chunk(content)
+            .iter()
+            .map(|chunk| {
+                crate::document::indexed_document_for_chunk(
+                    &crate::FileKey::configuration(rel_path),
+                    chunk,
+                    None,
+                )
+            })
+            .collect();
+        assert!(documents.len() > 1, "the fixture must exercise more than one chunk");
+
+        assert_eq!(
+            fingerprint_file_documents(&documents),
+            PUBLISHED,
+            "the published recipe must not move: manifests already carry it"
+        );
+        assert_eq!(
+            crate::workspace_overlay::fingerprint_overlay_documents(&documents, rel_path),
+            PUBLISHED,
+            "the overlay's document recipe must reproduce the published fingerprint"
+        );
+        assert_eq!(
+            crate::workspace_overlay::fingerprint_content(content, rel_path),
+            PUBLISHED,
+            "the from-disk recipe must reproduce the published fingerprint"
+        );
+    }
+
+    /// The behaviour the byte-level pin above exists for: a working tree that
+    /// *is* the published snapshot must report nothing local at all.
+    ///
+    /// The manifest is produced by the publisher's own pipeline — index the
+    /// directory, load the documents, group them by file — instead of by
+    /// calling the working-tree recipe and comparing it with itself. That is
+    /// what makes this able to fail: with the two recipes apart, an untouched
+    /// checkout reports every one of its files as a local change.
+    #[test]
+    fn a_working_tree_equal_to_the_snapshot_has_no_overlay() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let publisher_dir = tempfile::tempdir().unwrap();
+        let workspace = workspace_dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        std::fs::write(&file, "Процедура Базовая() Экспорт\nКонецПроцедуры\n").unwrap();
+        // Two methods on one physical line: their chunks share a line span, so
+        // the publisher's sort puts them in a different order than the chunker
+        // returns them. Ordinary code cannot show that — its line numbers rise
+        // with position, and both orders coincide.
+        std::fs::write(
+            workspace.join("OneLine.bsl"),
+            "Процедура Б() Экспорт КонецПроцедуры Процедура А() Экспорт КонецПроцедуры\n",
+        )
+        .unwrap();
+
+        let mut publisher =
+            crate::SearchEngine::fts_only(&publisher_dir.path().join("baseline.db")).unwrap();
+        publisher.index_directory_fts(workspace).unwrap();
+        let published = publisher.load_indexed_documents(Some("code")).unwrap();
+        let groups = group_documents_by_file(&published);
+        assert_eq!(groups.len(), 2, "the fixture publishes both files");
+
+        let manifest = crate::WorkspaceBaselineManifest {
+            snapshot_id: "snap-1".to_owned(),
+            snapshot_fingerprint: Some("fp-1".to_owned()),
+            files: groups
+                .iter()
+                .map(|group| crate::BaselineManifestFile {
+                    collection: group.collection.clone(),
+                    path: group.path.clone(),
+                    file_fingerprint: group.file_fingerprint.clone(),
+                    document_count: group.documents.len(),
+                    file_object_id: file_object_id_for(&group.collection, &group.file_fingerprint),
+                })
+                .collect(),
+        };
+
+        // A fresh engine per measurement, primed explicitly. `stats` alone never
+        // walks the tree — it is the read-only status path — so on its own it
+        // reports "no local changes" for an edited file just as happily as for
+        // an untouched one.
+        let overlay_files = |db: &str| {
+            let mut engine = crate::SearchEngine::fts_only(&publisher_dir.path().join(db)).unwrap();
+            engine.set_workspace_root(workspace);
+            engine.store().save_baseline_manifest(&manifest).unwrap();
+            engine.prime_workspace_overlay().unwrap();
+            engine.workspace_overlay_stats().unwrap().unwrap().overlay_files
+        };
+
+        assert_eq!(overlay_files("clean.db"), 0, "an untouched checkout has no local changes");
+
+        // Zero above means nothing on its own — an overlay that never scanned
+        // reports the same. Editing the very file the manifest describes must
+        // move it.
+        std::fs::write(&file, "Процедура Базовая() Экспорт\n\tВозврат;\nКонецПроцедуры\n").unwrap();
+        assert_eq!(overlay_files("edited.db"), 1, "an edited file is a local change");
+    }
+
     #[test]
     fn file_object_id_is_stable_for_same_collection_and_fingerprint() {
         let id_a = file_object_id_for("code", "abc");
@@ -3418,6 +3540,7 @@ mod tests {
     ) -> IndexedDocument {
         IndexedDocument {
             collection: collection.to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: path.to_owned(),
             symbol_name: symbol_name.to_owned(),
             kind: "procedure".to_owned(),

@@ -16,6 +16,8 @@ blake3 = "1.8"
 base-db.workspace = true
 bsl-metadata = { path = "../bsl-metadata" }
 stdx.workspace = true
+walkdir.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

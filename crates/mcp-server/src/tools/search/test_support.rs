@@ -51,6 +51,7 @@ pub(super) fn unreachable_workspace_service() -> Arc<ExternalBaselineService> {
 pub(super) fn lexical_hit(path: &str, symbol_name: &str, rank: f32) -> LexicalHit {
     LexicalHit {
         collection: "code".to_owned(),
+        root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
         path: path.to_owned(),
         symbol_name: symbol_name.to_owned(),
         kind: "procedure".to_owned(),
@@ -64,6 +65,7 @@ pub(super) fn lexical_hit(path: &str, symbol_name: &str, rank: f32) -> LexicalHi
 pub(super) fn semantic_hit(path: &str, symbol_name: &str, score: f32) -> SemanticHit {
     SemanticHit {
         collection: "code".to_owned(),
+        root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
         path: path.to_owned(),
         symbol_name: symbol_name.to_owned(),
         kind: "procedure".to_owned(),
@@ -76,6 +78,7 @@ pub(super) fn semantic_hit(path: &str, symbol_name: &str, score: f32) -> Semanti
 pub(super) fn code_hit(file_path: &str, symbol: &str, kind: &str) -> SearchHit {
     SearchHit {
         collection: "code".to_owned(),
+        root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
         file_path: file_path.to_owned(),
         symbol_name: symbol.to_owned(),
         kind: kind.to_owned(),
