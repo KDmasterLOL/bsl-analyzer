@@ -24,13 +24,15 @@ const SINGLE_MODULE_DIRS: &[&str] = &["CommonModules", "WebServices", "HTTPServi
 
 pub fn property_id_for_module(
     dir_name: &str,
-    module_kind: bsl_conventions::ConventionalName,
+    module_kind: Option<bsl_conventions::ConventionalName>,
 ) -> Option<&'static str> {
     use bsl_conventions::ConventionalName as Conv;
+    // В семействах одиночных модулей вид определяет КАТАЛОГ: имя файла тела
+    // исторически не проверялось и не проверяется.
     if SINGLE_MODULE_DIRS.contains(&dir_name) {
         return Some(PROPERTY_MODULE);
     }
-    match module_kind {
+    match module_kind? {
         Conv::Module => Some(PROPERTY_FORM_MODULE),
         Conv::CommandModule => Some(PROPERTY_COMMAND_MODULE),
         Conv::ObjectModule => Some(PROPERTY_OBJECT_MODULE),

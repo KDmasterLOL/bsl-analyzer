@@ -263,9 +263,11 @@ impl ModuleIndex {
                 ],
             );
             if let Some(module_file) = module_file {
-                let property_id =
-                    property_id_for_module(dir_name, bsl_conventions::ConventionalName::Module)
-                        .unwrap_or(crate::constants::PROPERTY_FORM_MODULE);
+                let property_id = property_id_for_module(
+                    dir_name,
+                    Some(bsl_conventions::ConventionalName::Module),
+                )
+                .unwrap_or(crate::constants::PROPERTY_FORM_MODULE);
 
                 let module_id = ModuleId {
                     extension: extension.to_string(),
@@ -348,13 +350,10 @@ impl ModuleIndex {
                 continue;
             }
 
-            let Some(kind) = path
+            let kind = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .and_then(bsl_conventions::conventional_of)
-            else {
-                continue;
-            };
+                .and_then(bsl_conventions::conventional_of);
 
             let property_id = match property_id_for_module(dir_name, kind) {
                 Some(id) => id,
@@ -393,13 +392,10 @@ impl ModuleIndex {
                 continue;
             }
 
-            let Some(kind) = path
+            let kind = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .and_then(bsl_conventions::conventional_of)
-            else {
-                continue;
-            };
+                .and_then(bsl_conventions::conventional_of);
 
             let property_id = match property_id_for_module(dir_name, kind) {
                 Some(id) => id,
@@ -548,6 +544,26 @@ mod case_parity_tests {
         );
     }
 
+    /// В семействах одиночных модулей вид даёт КАТАЛОГ, а не имя файла:
+    /// неконвенционное имя тела остаётся индексируемым, как и раньше.
+    #[test]
+    fn an_unconventional_single_module_file_is_still_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        root_with_config(root, "Configuration.xml");
+        write(
+            &root.join("CommonModules/X.xml"),
+            &object_xml("00000000-0000-0000-0000-000000000004"),
+        );
+        write(&root.join("CommonModules/X/Ext/Custom.bsl"), "//");
+        let index = ModuleIndex::scan(root, &[]).unwrap();
+        assert!(
+            index.module_by_path(&root.join("CommonModules/X/Ext/Custom.bsl")).is_some(),
+            "PROPERTY_MODULE по каталогу, независимо от имени файла"
+        );
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn every_branch_of_the_index_takes_case_variant_conventional_segments() {
         let dir = tempfile::tempdir().unwrap();
@@ -581,6 +597,7 @@ mod case_parity_tests {
         );
     }
 
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn the_command_branch_takes_case_variant_segments() {
         let dir = tempfile::tempdir().unwrap();
