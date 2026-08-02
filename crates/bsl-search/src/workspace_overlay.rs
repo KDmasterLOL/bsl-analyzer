@@ -765,7 +765,12 @@ impl WorkspaceOverlayCache {
             // A live target that is not a source file is positive evidence the SOURCE file is
             // gone: the walk never yields a file whose two spellings disagree on role, so a
             // clean full scan would remove this entry — the point path settles it the same way.
-            if project_model::file_role(&fingerprint.canonical) != project_model::FileRole::Source {
+            // The same goes for a non-regular target spelled `.bsl` (a directory, a FIFO): the
+            // walk yields regular files only, and reading a FIFO would even block.
+            if !metadata.is_file()
+                || project_model::file_role(&fingerprint.canonical)
+                    != project_model::FileRole::Source
+            {
                 self.remove_point_entry(key, baseline_hash.is_some());
                 continue;
             }
@@ -1317,7 +1322,14 @@ impl WorkspaceOverlayCache {
         // was re-marked or failed since, and its stale row must not go back in as "verified" —
         // the mark dies with the process, the row would survive the restart and contradict it.
         let mut updated_persisted = plan.updated_persisted;
-        updated_persisted.retain(|key, _| !self.dirty_paths.contains_key(key));
+        let mut stale_rows: Vec<FileKey> = Vec::new();
+        updated_persisted.retain(|key, _| {
+            let live = self.dirty_paths.contains_key(key);
+            if live {
+                stale_rows.push(key.clone());
+            }
+            !live
+        });
         Self::persist_fingerprint_rows(
             store,
             &plan.snapshot_id,
@@ -1325,6 +1337,13 @@ impl WorkspaceOverlayCache {
             scan_is_clean,
             &plan.read_failures,
         );
+        // The filtered rows must be RETRACTED, not merely unsaved: with the filtered map empty
+        // the guarded replace-save does not run at all, and the stale row would survive intact.
+        if !stale_rows.is_empty() {
+            if let Err(error) = store.delete_overlay_fingerprint_entries(&stale_rows) {
+                tracing::warn!("failed to retract overlay fingerprint rows: {error}");
+            }
+        }
 
         if let Some(embedder) = embedder {
             if !self.embedding_cache.is_empty() {
@@ -1403,8 +1422,12 @@ impl WorkspaceOverlayCache {
                 canonical: crate::workspace_roots::canonical_spelling(&abs_path),
             };
             // A live target that is not a source file is positive evidence the SOURCE file is
-            // gone (see the raw twin above); the row's "verified" claim goes with the entry.
-            if project_model::file_role(&fingerprint.canonical) != project_model::FileRole::Source {
+            // gone (see the raw twin above) — as is a non-regular target spelled `.bsl`; the
+            // row's "verified" claim goes with the entry.
+            if !metadata.is_file()
+                || project_model::file_role(&fingerprint.canonical)
+                    != project_model::FileRole::Source
+            {
                 Self::retract_fingerprint_row(store, &key);
                 self.remove_point_entry(key, baseline_fingerprint.is_some());
                 continue;
@@ -1573,7 +1596,13 @@ fn fingerprint_canonical_matches(
     fingerprint: &FileFingerprint,
     cached: &crate::store::PersistedFingerprint,
 ) -> bool {
-    !cached.canonical.is_empty() && *cached.canonical == *fingerprint.canonical.to_string_lossy()
+    if cached.canonical.is_empty() || cached.canonical.contains('\u{FFFD}') {
+        // Empty: a row from before the column existed. Replacement characters: the lossy
+        // conversion collapses every invalid byte onto one char, so two DIFFERENT non-UTF-8
+        // targets could pass for each other — such a row is never trusted, only re-read.
+        return false;
+    }
+    *cached.canonical == *fingerprint.canonical.to_string_lossy()
 }
 
 fn fingerprint_mtime_matches(
@@ -1677,7 +1706,10 @@ fn root_is_reachable(roots: &WorkspaceRoots, key: &FileKey) -> bool {
     roots
         .entries()
         .find(|(id, _)| *id == key.root_id)
-        .is_some_and(|(_, root)| std::fs::symlink_metadata(root).is_ok())
+        // Follow the root if it is a link: the inode of the link itself proves nothing about
+        // the tree behind it, and a dangling or cycled root link is the walk's "unreadable
+        // root", not the file's deletion.
+        .is_some_and(|(_, root)| std::fs::metadata(root).is_ok())
 }
 
 /// The pure projection of a walk result into overlay terms. Roots may nest, so
@@ -2147,7 +2179,7 @@ mod tests {
         );
     }
 
-    /// A dirty path whose read transiently fails (here a directory shaped like a `.bsl`, so
+    /// A dirty path whose read transiently fails (here invalid UTF-8 in a regular `.bsl`, so
     /// `metadata` succeeds but `read_to_string` errors) must stay in the dirty set for the next
     /// refresh, rather than being silently dropped. Restoring the pre-fix `continue`-drop in
     /// `refresh_dirty_paths_from_manifest` makes this assertion fail.
@@ -2165,7 +2197,7 @@ mod tests {
             .refresh_with_manifest(&manifest, &single_root(workspace), None, 32, &store, true)
             .unwrap();
 
-        fs::create_dir(workspace.join("Broken.bsl")).unwrap();
+        fs::write(workspace.join("Broken.bsl"), [0xff, 0xfe]).unwrap();
         cache.mark_dirty_path(key("Broken.bsl"));
         cache
             .refresh_with_manifest(&manifest, &single_root(workspace), None, 32, &store, false)
@@ -2196,8 +2228,8 @@ mod tests {
             .refresh_with_manifest(&manifest, &single_root(workspace), None, 32, &store, true)
             .unwrap();
 
-        // A directory shaped like a `.bsl`: `metadata` succeeds, `read_to_string` always fails.
-        fs::create_dir(workspace.join("Broken.bsl")).unwrap();
+        // Invalid UTF-8 in a regular `.bsl`: `metadata` succeeds, `read_to_string` always fails.
+        fs::write(workspace.join("Broken.bsl"), [0xff, 0xfe]).unwrap();
         cache.mark_dirty_path(key("Broken.bsl"));
 
         // The first K-1 refreshes keep retrying: the path stays dirty.
@@ -2255,10 +2287,10 @@ mod tests {
             .refresh_with_manifest(&manifest, &single_root(workspace), None, 32, &store, true)
             .unwrap();
 
-        // A directory shaped like a `.bsl`: `metadata` succeeds, `read_to_string` always fails, so
+        // Invalid UTF-8 in a regular `.bsl`: `metadata` succeeds, `read_to_string` always fails, so
         // one healthy reindex records a genuine per-path failure (budget = 1). That seeded count is
         // what the store-error reindex below must leave untouched.
-        fs::create_dir(workspace.join("Broken.bsl")).unwrap();
+        fs::write(workspace.join("Broken.bsl"), [0xff, 0xfe]).unwrap();
         cache.mark_dirty_path(key("Broken.bsl"));
 
         let content = "Процедура П()\nКонецПроцедуры\n";
@@ -4986,6 +5018,119 @@ mod tests {
                 "manifest={use_manifest}: the retargeted link no longer names a source file"
             );
         }
+    }
+
+    /// A registered root that is a symlink onto a vanished target: the link's inode exists, but
+    /// the tree behind it does not — the full walk calls that incomplete coverage, so the point
+    /// path must keep the entry and retry, exactly as for a renamed plain root.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_root_link_keeps_the_point_entry() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let target = workspace.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("A.bsl"), "Процедура Живая()\nКонецПроцедуры").unwrap();
+        let configuration = workspace.join("cf");
+        std::os::unix::fs::symlink(&target, &configuration).unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let (roots, _) = WorkspaceRoots::build(workspace, &configuration, &[]);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents.len(), 1);
+
+        fs::rename(&target, workspace.join("target.saved")).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        let point = cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false);
+        fs::rename(workspace.join("target.saved"), &target).unwrap();
+        point.unwrap();
+
+        assert_eq!(
+            cache.snapshot().lexical_documents.len(),
+            1,
+            "a root whose link target vanished proves nothing about the file"
+        );
+        assert!(cache.dirty_paths_snapshot().contains_key(&key("A.bsl")));
+    }
+
+    /// A source file replaced by a DIRECTORY spelled the same: the walk yields only regular
+    /// files, so the point path must read the replacement as the source file's removal — not
+    /// spin its retry budget on `read_to_string` (a FIFO there would even block it).
+    #[test]
+    fn a_file_replaced_by_a_directory_is_removed_by_the_point_refresh() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Живая()\nКонецПроцедуры").unwrap();
+        let manifest: HashMap<FileKey, String> = HashMap::new();
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents.len(), 1);
+
+        fs::remove_file(&file).unwrap();
+        fs::create_dir(&file).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+
+        assert_eq!(
+            cache.snapshot().lexical_documents.len(),
+            0,
+            "a directory is not a source file; the walk would not yield it"
+        );
+        assert!(
+            !cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "a settled removal consumes its mark instead of burning the retry budget"
+        );
+    }
+
+    /// When the stale-row filter empties the plan's map entirely, the rows it filtered must
+    /// still be retracted: a skipped save would keep exactly the row the filter rejected.
+    #[test]
+    fn a_filtered_out_last_fingerprint_row_is_still_retracted() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, original).unwrap();
+        let manifest =
+            HashMap::from([(key("A.bsl"), super::fingerprint_content(original, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        let dirty_before = cache.dirty_paths_snapshot();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        // Mid-embed the file changes at the same (len, mtime) and gets marked: the plan's only
+        // row is now stale, and the publish must not leave it behind just because the filtered
+        // map came out empty.
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+        fs::write(&file, "Процедура Втораяя()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
+
+        assert!(
+            !store
+                .load_overlay_fingerprint_cache("")
+                .unwrap_or(None)
+                .unwrap_or_default()
+                .contains_key(&key("A.bsl")),
+            "the filtered row must not survive to pass the gate after a restart"
+        );
     }
 
     /// The overlay must not walk the tree itself: the walk policy (which links
