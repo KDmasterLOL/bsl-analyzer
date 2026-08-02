@@ -131,7 +131,7 @@ impl Project {
     fn discover_source_path(root: &Path, config: &ProjectConfig) -> Option<PathBuf> {
         if let Some(ref config_root) = config.configuration_root {
             let path = root.join(config_root);
-            if path.join("Configuration.xml").exists() {
+            if configuration_xml_in(&path).is_some() {
                 tracing::info!(?path, "found configuration from configurationRoot setting");
                 return Some(path);
             } else {
@@ -150,7 +150,7 @@ impl Project {
 
         for pattern in &["src/cf", "Configuration"] {
             let path = root.join(pattern);
-            if path.join("Configuration.xml").exists() {
+            if configuration_xml_in(&path).is_some() {
                 tracing::info!(?path, pattern, "found configuration using common pattern");
                 return Some(path);
             }
@@ -269,7 +269,7 @@ impl Project {
                             path,
                         });
                     }
-                    if !path.join("Configuration.xml").exists() {
+                    if configuration_xml_in(&path).is_none() {
                         return Err(TopologyError::StructuredNotAnExtension {
                             name: structured.name,
                             path,
@@ -321,7 +321,7 @@ impl Project {
             tracing::warn!(path = %path.display(), "extension path not found, skipping");
             return None;
         }
-        if !path.join("Configuration.xml").exists() {
+        if configuration_xml_in(&path).is_none() {
             tracing::warn!(
                 path = %path.display(),
                 "extension has no Configuration.xml, skipping"
@@ -422,7 +422,7 @@ fn search_configuration_xml_recursive(
         return None;
     }
 
-    if dir.join("Configuration.xml").exists() {
+    if configuration_xml_in(dir).is_some() {
         return Some(dir.to_path_buf());
     }
 
@@ -480,16 +480,23 @@ const EXTENSION_MARKER: &[u8] = b"<ConfigurationExtensionPurpose";
 /// analyzed without its main configuration — the state in which valid calls
 /// into the main configuration's exported common modules are reported as
 /// unresolved.
+/// The root's `Configuration.xml`, in whatever ASCII case the tree spells it.
+fn configuration_xml_in(dir: &Path) -> Option<PathBuf> {
+    bsl_conventions::find_child_ci(
+        dir,
+        bsl_conventions::ConventionalName::ConfigurationXml.canonical(),
+    )
+}
+
 pub fn configuration_kind(root: &Path) -> ConfigurationKind {
     use std::io::Read as _;
 
-    let path = root.join("Configuration.xml");
     // `is_file` before opening, not just to reject a directory: opening a FIFO
     // with no writer blocks forever, and this runs on every project build —
     // including LSP startup, which would never finish.
-    if !path.is_file() {
+    let Some(path) = configuration_xml_in(root).filter(|p| p.is_file()) else {
         return ConfigurationKind::Unknown;
-    }
+    };
     let Ok(file) = std::fs::File::open(&path) else {
         return ConfigurationKind::Unknown;
     };
@@ -1958,6 +1965,32 @@ fn validate_resolved_postgres_url(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod root_probe_case_tests {
+    use super::*;
+
+    #[test]
+    fn a_case_variant_configuration_xml_names_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let cf = dir.path().join("cf");
+        std::fs::create_dir_all(&cf).unwrap();
+        std::fs::write(
+            cf.join("CONFIGURATION.XML"),
+            "<Configuration><ConfigurationExtensionPurpose>Customization             </ConfigurationExtensionPurpose></Configuration>",
+        )
+        .unwrap();
+        assert_eq!(
+            configuration_kind(&cf),
+            ConfigurationKind::Extension,
+            "вид конфигурации читается из CONFIGURATION.XML"
+        );
+        assert!(
+            configuration_xml_in(&cf).is_some(),
+            "каталог с CONFIGURATION.XML опознаётся корнем"
+        );
+    }
 }
 
 #[cfg(test)]

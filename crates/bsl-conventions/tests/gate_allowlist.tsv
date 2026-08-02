@@ -2,7 +2,6 @@
 # Причины: "конструкция" (каноническое написание строится, не сравнивается),
 # "вне-класса" (XML-тег, имя конфига анализатора и т.п.), "сравнение"
 # (inline-сравнение, ещё не переведённое на словарь — сжимающийся фронт).
-crates/bsl-analyzer/src/bin/cli/source_set.rs	Configuration.xml	3	сравнение
 crates/bsl-analyzer/src/reporters/junit.rs	bsl-analyzer.junit.xml	1	вне-класса: имя собственного отчёта анализатора
 crates/bsl-analyzer/src/server.rs	bsl	1	вне-класса: идентификатор источника LSP-диагностик
 crates/bsl-debug/src/constants.rs	CommandModule	1	сравнение
@@ -44,21 +43,11 @@ crates/bsl-metadata/src/enums.rs	SessionModule	1	вне-класса: имя в�
 crates/bsl-metadata/src/enums.rs	ValueManagerModule	1	вне-класса: имя вида модуля в значениях XML
 crates/bsl-metadata/src/enums.rs	WEBServiceModule	1	вне-класса: имя вида модуля в значениях XML
 crates/bsl-metadata/src/event_subscription.rs	CommonModule	1	вне-класса: значение в XML метаданных
-crates/bsl-metadata/src/loader.rs	CommonModules/{}/Ext/Module.bsl	1	сравнение
-crates/bsl-metadata/src/loader.rs	Ext	4	сравнение
-crates/bsl-metadata/src/loader.rs	Ext/Module.bin	1	сравнение
-crates/bsl-metadata/src/loader.rs	Ext/Module.bsl	5	сравнение
-crates/bsl-metadata/src/loader.rs	Predefined.xml	2	сравнение
-crates/bsl-metadata/src/loader.rs	Rights.xml	2	сравнение
-crates/bsl-metadata/src/loader.rs	xml	19	сравнение
-crates/bsl-metadata/src/loader.rs	{name}.xml	2	сравнение
-crates/bsl-metadata/src/loader.rs	{}.xml	6	сравнение
 crates/bsl-metadata/src/metadata_object.rs	CommonModule	1	вне-класса: имя XML-тега
 crates/bsl-metadata/src/module_path.rs	Ext	1	сравнение
 crates/bsl-metadata/src/scheduled_job.rs	CommonModule	1	вне-класса: значение в XML метаданных
 crates/bsl-metadata/src/xml_parser/form.rs	Commands	1	вне-класса: имя XML-элемента, XML регистрозависим
 crates/bsl-metadata/src/xml_parser/form.rs	Form	4	вне-класса: имя XML-элемента, XML регистрозависим
-crates/bsl-metadata/src/xml_parser/form.rs	Form.xml	1	сравнение
 crates/bsl-metadata/src/xml_parser/form.rs	{}.xml	1	сравнение
 crates/bsl-metadata/src/xml_parser/http_service.rs	HTTPServices/{}/Ext/Module.bsl	1	сравнение
 crates/bsl-metadata/src/xml_parser/predefined_parser.rs	Failed to parse Predefined.xml	1	вне-класса: текст сообщения об ошибке
@@ -68,7 +57,6 @@ crates/bsl-types/src/display.rs	CommonModule	1	вне-класса: отобра
 crates/hir-ty/src/platform_type_name.rs	xml	1	вне-класса: тег имени платформенного типа
 crates/hir-ty/src/subtype.rs	CommonModule	1	вне-класса: имя типа в решётке подтипов
 crates/hir/src/definition.rs	Module	1	вне-класса: отображаемое имя вида определения
-crates/ide-db/src/database.rs	Configuration.xml	1	сравнение
 crates/ide-db/src/database.rs	Found configuration root via Configuration.xml	1	вне-класса: текст лога
 crates/ide-db/src/metadata.rs	CommonModule	1	вне-класса: метка вида модуля в диагностическом логе
 crates/ide-diagnostics/src/handlers/missed_required_parameter.rs	{}/{}/Ext/ManagerModule.bsl	1	сравнение
@@ -92,10 +80,6 @@ crates/ide-diagnostics/src/runner.rs	ProtectedModule	1	вне-класса: ко
 crates/ide/src/goto_definition.rs	{name}.xml	1	сравнение
 crates/ide/src/goto_definition.rs	{}.xml	1	сравнение
 crates/ide/src/symbol_info/form.rs	Form	1	вне-класса: английское имя идентификатора BSL «Форма»
-crates/mcp-server/src/tools/metadata.rs	Ext	1	сравнение
-crates/mcp-server/src/tools/metadata.rs	Form.xml	1	сравнение
-crates/mcp-server/src/tools/metadata.rs	Forms	1	сравнение
-crates/project-model/src/lib.rs	Configuration.xml	6	сравнение
 crates/bsl-analyzer/src/bench/discover.rs	form	2	вне-класса: метка категории бенча
 crates/bsl-analyzer/src/bin/cli/contract.rs	commands	1	вне-класса: имя раздела контракта CLI
 crates/bsl-metadata/src/metadata_object.rs	commonmodule	1	вне-класса: двуязычное имя вида MDO

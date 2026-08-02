@@ -408,6 +408,7 @@ dependencies = [
 name = "bsl-metadata"
 version = "0.2.66"
 dependencies = [
+ "bsl-conventions",
  "bsl-platform",
  "intern",
  "rayon",

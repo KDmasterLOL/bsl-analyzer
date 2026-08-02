@@ -5341,3 +5341,19 @@ fn warming_loads_the_attributed_root_of_a_service_module() {
 
     std::fs::remove_dir_all(&ws).ok();
 }
+
+#[test]
+fn a_case_variant_configuration_xml_names_the_configuration_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("cf");
+    std::fs::create_dir_all(root.join("Catalogs/X/Ext")).unwrap();
+    std::fs::write(root.join("CONFIGURATION.XML"), "<Configuration/>").unwrap();
+    let module = root.join("Catalogs/X/Ext/ObjectModule.bsl");
+    std::fs::write(&module, "").unwrap();
+    let db = crate::RootDatabaseImpl::default();
+    assert_eq!(
+        db.find_configuration_root(&module),
+        Some(root.clone()),
+        "корень опознан по CONFIGURATION.XML"
+    );
+}

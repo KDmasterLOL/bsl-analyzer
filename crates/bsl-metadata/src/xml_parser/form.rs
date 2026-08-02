@@ -257,17 +257,29 @@ pub fn parse_form_from_bsl_path(bsl_path: &std::path::Path) -> Result<Form> {
             ))
         })?;
 
-    let ext_form_xml_path =
-        bsl_path.parent().and_then(|p| p.parent()).map(|p| p.join("Form.xml")).ok_or_else(
-            || {
-                crate::error::MetadataError::InvalidFormat(format!(
-                    "Cannot build Ext/Form.xml path from: {}",
-                    bsl_path.display()
-                ))
-            },
-        )?;
+    let ext_form_xml_path = bsl_path
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| {
+            bsl_conventions::find_child_ci(
+                p,
+                bsl_conventions::ConventionalName::FormXml.canonical(),
+            )
+            .unwrap_or_else(|| p.join(bsl_conventions::ConventionalName::FormXml.canonical()))
+        })
+        .ok_or_else(|| {
+            crate::error::MetadataError::InvalidFormat(format!(
+                "Cannot build Ext/Form.xml path from: {}",
+                bsl_path.display()
+            ))
+        })?;
 
-    let metadata_xml_path = forms_dir.join(format!("{}.xml", form_name));
+    let metadata_xml_path = bsl_conventions::find_child_stem_exact(
+        &forms_dir,
+        form_name,
+        bsl_conventions::XML_EXTENSION,
+    )
+    .unwrap_or_else(|| forms_dir.join(format!("{}.xml", form_name)));
 
     let ext_form_xml = std::fs::read_to_string(&ext_form_xml_path).map_err(|e| {
         crate::error::MetadataError::InvalidFormat(format!(

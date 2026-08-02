@@ -179,7 +179,7 @@ impl SourceSetArgs {
         // `is_file`, not `exists`: a directory (or a fifo) named
         // `Configuration.xml` satisfies mere existence, and the root would be
         // accepted as a configuration it cannot possibly be.
-        if !candidate.join("Configuration.xml").is_file() {
+        if root_configuration_xml(&candidate).is_none() {
             // The config file's own key degrades to auto-discovery here; a flag
             // must not, or the command would quietly analyze whichever
             // configuration the search happens to find instead of the named one.
@@ -357,7 +357,17 @@ fn split_extension_value(
 }
 
 fn is_extension_dir(root: &Path, rel: &str) -> bool {
-    root.join(rel).join("Configuration.xml").is_file()
+    root_configuration_xml(&root.join(rel)).is_some()
+}
+
+/// The directory's `Configuration.xml` as a real file, in whatever ASCII case
+/// the tree spells it.
+fn root_configuration_xml(dir: &Path) -> Option<std::path::PathBuf> {
+    bsl_conventions::find_child_ci(
+        dir,
+        bsl_conventions::ConventionalName::ConfigurationXml.canonical(),
+    )
+    .filter(|p| p.is_file())
 }
 
 /// Where a resolved source-set field actually came from. Reported per field
@@ -393,7 +403,7 @@ pub fn configuration_root_provider(
         return SourceProvider::Cli;
     }
     match config_root {
-        Some(value) if project_root.join(value).join("Configuration.xml").exists() => {
+        Some(value) if root_configuration_xml(&project_root.join(value)).is_some() => {
             SourceProvider::ConfigFile
         }
         _ => SourceProvider::AutoDiscovery,
@@ -417,6 +427,19 @@ pub fn extensions_provider(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_case_variant_configuration_xml_satisfies_root_probes() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("CONFIGURATION.XML"), "<x/>").unwrap();
+        assert!(
+            super::root_configuration_xml(&base).is_some(),
+            "явный --configuration-root на каталог с CONFIGURATION.XML проходит валидацию"
+        );
+        assert!(super::is_extension_dir(dir.path(), "base"));
+    }
+
     use super::*;
     use tempfile::tempdir;
 

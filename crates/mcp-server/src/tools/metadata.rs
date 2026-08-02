@@ -752,7 +752,14 @@ pub fn get_form_structure(
         McpError::invalid_params(format!("Неизвестный тип объекта: {object_type}"), None)
     })?;
 
-    let forms_dir = root.join(type_dir).join(object_name).join("Forms");
+    let type_root =
+        bsl_conventions::find_child_ci(root, type_dir).unwrap_or_else(|| root.join(type_dir));
+    let object_dir = type_root.join(object_name);
+    let forms_dir = bsl_conventions::find_child_ci(
+        &object_dir,
+        bsl_conventions::ConventionalName::Forms.canonical(),
+    )
+    .unwrap_or_else(|| object_dir.join(bsl_conventions::ConventionalName::Forms.canonical()));
     forms_in_container(&forms_dir, form_name, &format!("{object_type}.{object_name}"))
 }
 
@@ -772,7 +779,19 @@ fn forms_in_container(
     }
 
     if let Some(fname) = form_name {
-        let form_xml_path = container.join(fname).join("Ext").join("Form.xml");
+        let form_dir = container.join(fname);
+        let form_xml_path = bsl_conventions::resolve_chain_ci(
+            &form_dir,
+            &[
+                bsl_conventions::ConventionalName::Ext.canonical(),
+                bsl_conventions::ConventionalName::FormXml.canonical(),
+            ],
+        )
+        .unwrap_or_else(|| {
+            form_dir
+                .join(bsl_conventions::ConventionalName::Ext.canonical())
+                .join(bsl_conventions::ConventionalName::FormXml.canonical())
+        });
         if !form_xml_path.exists() {
             return Err(McpError::invalid_params(
                 format!("Форма не найдена: {}", form_xml_path.display()),
@@ -1485,5 +1504,18 @@ mod tests {
             !is_resolvable_object_type("НеизвестныйТип"),
             "a genuinely unknown type must not be classified resolvable (no wasted force-scan)",
         );
+    }
+}
+
+#[cfg(test)]
+mod form_probe_case_tests {
+    #[test]
+    fn a_case_variant_form_xml_is_found_by_the_tool_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let container = dir.path().join("Forms");
+        std::fs::create_dir_all(container.join("Ф/EXT")).unwrap();
+        std::fs::write(container.join("Ф/EXT/FORM.XML"), "<Form/>").unwrap();
+        let result = super::forms_in_container(&container, Some("Ф"), "Тест");
+        assert!(result.is_ok(), "форма с EXT/FORM.XML читается: {result:?}");
     }
 }

@@ -1930,8 +1930,12 @@ impl RootDatabaseImpl {
                 return Some(current.to_path_buf());
             }
 
-            let config_xml = current.join("Configuration.xml");
-            if config_xml.is_file() {
+            let config_xml = bsl_conventions::find_child_ci(
+                current,
+                bsl_conventions::ConventionalName::ConfigurationXml.canonical(),
+            )
+            .filter(|p| p.is_file());
+            if config_xml.is_some() {
                 tracing::debug!(?current, "Found configuration root via Configuration.xml");
                 return Some(current.to_path_buf());
             }
