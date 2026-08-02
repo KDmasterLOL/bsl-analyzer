@@ -1276,6 +1276,11 @@ impl SearchEngine {
         self.store.insert_overlay_tombstone(&key.root_id, &key.path, "code")?;
         if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
             cache.enable_watcher_mode();
+            // The store rows are gone, so the deletion is proven: drop the overlay entry at
+            // once — the point refresh would read a root that vanished WITH the file as
+            // "unreachable, retry" and leave a ghost entry. The mark still re-checks the disk:
+            // if the event lied, the next point pass republishes the live file.
+            cache.remove_known_deleted(key);
             cache.mark_dirty_path(key.clone());
         }
         for id in chunk_ids {
@@ -3276,6 +3281,29 @@ mod tests {
             0,
             "a live directory target is not a source; the walked key owns the row"
         );
+    }
+
+    /// A deletion PROVEN by the removal channel must drop the cached overlay entry even when
+    /// the whole root vanished with the file: the point refresh would read the dead root as
+    /// "unreachable, retry" and leave a ghost entry serving hits forever.
+    #[test]
+    fn removing_a_file_under_a_vanished_root_drops_its_overlay_entry() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::write(configuration.join("A.bsl"), "Процедура Локальная()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(workspace, &configuration, &[]);
+        engine.set_workspace_roots(roots);
+        engine.prime_workspace_overlay().unwrap();
+        assert_eq!(engine.text_search("Локальная", 10, Some("code")).unwrap().len(), 1);
+
+        fs::rename(&configuration, workspace.join("cf.saved")).unwrap();
+        engine.remove_workspace_path(configuration.join("A.bsl")).unwrap();
+        let hits = engine.text_search("Локальная", 10, Some("code")).unwrap();
+        assert!(hits.is_empty(), "a proven removal must not leave a ghost entry: {hits:?}");
     }
 
     /// A symlink spelled `.bsl` whose target is not a BSL source is not a source

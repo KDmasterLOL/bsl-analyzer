@@ -83,6 +83,10 @@ pub struct RefreshPlan {
     seen_keys: HashSet<FileKey>,
     /// Seen files whose read failed during planning: proven present, contents unknown.
     read_failures: HashSet<FileKey>,
+    /// Seen files the planning phase skipped by a persisted-row hit — never read. The publish
+    /// must not consume a live dirty mark for such a key: planning runs off-lock and cannot
+    /// see the marks, and a mark is positive evidence the row must not have been trusted.
+    gate_skipped: HashSet<FileKey>,
 }
 
 impl RefreshPlan {
@@ -279,6 +283,16 @@ impl WorkspaceOverlayCache {
 
     pub fn enable_watcher_mode(&mut self) {
         self.watcher_mode = true;
+    }
+
+    /// Drop a key's overlay entry for a deletion PROVEN by the caller (its store rows are
+    /// already gone). The point refresh cannot be trusted to settle this one: when the whole
+    /// root vanished together with the file, it reads the dead root as "unreachable, retry"
+    /// and would leave a ghost entry serving hits forever. The caller keeps the dirty mark, so
+    /// if the deletion event lied and the file is alive, the next point pass republishes it.
+    pub fn remove_known_deleted(&mut self, key: &FileKey) {
+        self.entries.remove(key);
+        self.hidden_paths.remove(key);
     }
 
     /// Whether the last full publication ran over an incomplete scan and withheld its removals,
@@ -527,8 +541,12 @@ impl WorkspaceOverlayCache {
             let baseline_hash = baseline_files.get(&file.key);
 
             let mut should_remove_cached_entry = false;
+            let key_is_marked = self.dirty_paths.contains_key(&file.key);
             if let Some(entry) = self.entries.get_mut(&file.key) {
-                if entry.fingerprint == file.fingerprint {
+                // A marked key skips the equal-fingerprint gate: the mark is positive evidence
+                // the fingerprint must not be trusted (an edit can leave (len, mtime,
+                // canonical) unchanged), so the file is re-read below.
+                if !key_is_marked && entry.fingerprint == file.fingerprint {
                     if baseline_hash.is_some_and(|stored_hash| stored_hash == &entry.file_hash) {
                         should_remove_cached_entry = true;
                     } else {
@@ -781,34 +799,10 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
-            if let Some(entry) = self.entries.get_mut(&key) {
-                if entry.fingerprint == fingerprint {
-                    if baseline_hash.is_some_and(|stored_hash| stored_hash == &entry.file_hash) {
-                        self.entries.remove(&key);
-                        self.hidden_paths.remove(&key);
-                    } else {
-                        if baseline_hash.is_some() {
-                            self.hidden_paths.insert(key.clone());
-                        } else {
-                            self.hidden_paths.remove(&key);
-                        }
-                        if entry.vector_documents.is_empty() {
-                            // ReuseOnly passes `embedder = None`: this attaches any cached
-                            // vectors and leaves the rest lexical-only. Embed (warmup) fills
-                            // the gaps via the remote embedder.
-                            entry.vector_documents = build_overlay_vectors(
-                                embedder,
-                                batch_size,
-                                &entry.lexical_documents,
-                                &entry.embedding_inputs,
-                                &mut self.embedding_cache,
-                            )?;
-                        }
-                    }
-                    continue;
-                }
-            }
-
+            // No equal-fingerprint fast path here: every key in this loop carries a dirty
+            // mark, and the mark is positive evidence the fingerprint must not be trusted —
+            // an edit at unchanged (len, mtime, canonical) would otherwise be consumed
+            // silently. The price is one read per honest no-op watcher ping.
             let content = match std::fs::read_to_string(&abs_path) {
                 Ok(content) => content,
                 Err(_) => {
@@ -918,8 +912,12 @@ impl WorkspaceOverlayCache {
             let baseline_fingerprint = manifest_fingerprints.get(&file.key);
 
             let mut should_remove_cached_entry = false;
+            let key_is_marked = self.dirty_paths.contains_key(&file.key);
             if let Some(entry) = self.entries.get_mut(&file.key) {
-                if entry.fingerprint == file.fingerprint {
+                // A marked key skips the equal-fingerprint gate: the mark is positive evidence
+                // the fingerprint must not be trusted (an edit can leave (len, mtime,
+                // canonical) unchanged), so the file is re-read below.
+                if !key_is_marked && entry.fingerprint == file.fingerprint {
                     let local_fp =
                         fingerprint_overlay_documents(&entry.lexical_documents, &file.key.path);
                     if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
@@ -950,7 +948,8 @@ impl WorkspaceOverlayCache {
             }
 
             if let Some(cached) = persisted.get(&file.key) {
-                if cached.file_size == file.fingerprint.len
+                if !key_is_marked
+                    && cached.file_size == file.fingerprint.len
                     && fingerprint_mtime_matches(file.fingerprint.modified, cached)
                     && fingerprint_canonical_matches(&file.fingerprint, cached)
                 {
@@ -1105,6 +1104,7 @@ impl WorkspaceOverlayCache {
         let mut entries: Vec<(FileKey, PlannedEntry)> = Vec::new();
         let mut missing_embeddings: HashMap<String, String> = HashMap::new();
         let mut read_failures: HashSet<FileKey> = HashSet::new();
+        let mut gate_skipped: HashSet<FileKey> = HashSet::new();
 
         for file in &workspace_files {
             seen_keys.insert(file.key.clone());
@@ -1120,6 +1120,7 @@ impl WorkspaceOverlayCache {
                     if baseline_fingerprint
                         .is_some_and(|stored| stored == &cached.content_fingerprint)
                     {
+                        gate_skipped.insert(file.key.clone());
                         continue;
                     }
                 }
@@ -1198,6 +1199,7 @@ impl WorkspaceOverlayCache {
             scan_canonical_fallbacks,
             seen_keys,
             read_failures,
+            gate_skipped,
         })
     }
 
@@ -1294,7 +1296,12 @@ impl WorkspaceOverlayCache {
             if self.dirty_paths.get(key) != Some(seq) {
                 continue;
             }
+            // A gate-skipped key was never read: its mark (set before the plan was even
+            // built) is evidence the trusted row was stale, and consuming it here would lose
+            // the edit with nothing left to deliver it. The mark survives, the stale-row
+            // filter below retracts the row, and the next point pass re-reads the file.
             let processed = !plan.read_failures.contains(key)
+                && !plan.gate_skipped.contains(key)
                 && (scan_is_clean || plan.seen_keys.contains(key));
             if processed {
                 self.dirty_paths.remove(key);
@@ -1458,47 +1465,10 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
-            let entry_fingerprint_matches =
-                self.entries.get(&key).is_some_and(|entry| entry.fingerprint == fingerprint);
-            if entry_fingerprint_matches {
-                // Even the no-read fast path must settle the row: the mark that brought the key
-                // here may be the leftover obligation of a FAILED retraction after a re-read at
-                // this very fingerprint, and consuming the mark without the retraction would
-                // leave the stale row vouching forever. Failure keeps the mark once more.
-                if !Self::retract_fingerprint_row(store, &key) {
-                    self.retain_dirty_after_failure(
-                        key.clone(),
-                        prior_failures,
-                        "row retraction failed",
-                    );
-                }
-                let entry = self.entries.get_mut(&key).expect("presence was just checked");
-                let local_fp = fingerprint_overlay_documents(&entry.lexical_documents, &key.path);
-                if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
-                    self.entries.remove(&key);
-                    self.hidden_paths.remove(&key);
-                } else {
-                    if baseline_fingerprint.is_some() {
-                        self.hidden_paths.insert(key.clone());
-                    } else {
-                        self.hidden_paths.remove(&key);
-                    }
-                    if entry.vector_documents.is_empty() {
-                        // ReuseOnly passes `embedder = None`: this attaches any cached
-                        // vectors and leaves the rest lexical-only. Embed (warmup) fills
-                        // the gaps via the remote embedder.
-                        entry.vector_documents = build_overlay_vectors(
-                            embedder,
-                            batch_size,
-                            &entry.lexical_documents,
-                            &entry.embedding_inputs,
-                            &mut self.embedding_cache,
-                        )?;
-                    }
-                }
-                continue;
-            }
-
+            // No equal-fingerprint fast path here: every key in this loop carries a dirty
+            // mark, and the mark is positive evidence the fingerprint must not be trusted —
+            // an edit at unchanged (len, mtime, canonical) would otherwise be consumed
+            // silently. The read path below also settles the persisted row either way.
             let content = match std::fs::read_to_string(&abs_path) {
                 Ok(content) => content,
                 Err(_) => {
@@ -5281,12 +5251,11 @@ mod tests {
         assert!(!cache.dirty_paths_snapshot().contains_key(&key("A.bsl")));
     }
 
-    /// The retraction obligation left by a FAILED retract must be honoured even when the retry
-    /// lands in the equal-fingerprint fast path: the re-published entry matches the file, the
-    /// branch reads nothing — but the mark that brought the key here says the row is stale,
-    /// and consuming the mark without the retraction would leave the false row forever.
+    /// The retraction obligation left by a FAILED retract must be honoured by the retried
+    /// pass: the mark that survived the failure brings the key back, the pass re-reads it
+    /// (marked keys have no fast path) and settles the retraction before consuming the mark.
     #[test]
-    fn a_failed_retraction_is_retried_through_the_equal_fingerprint_path() {
+    fn a_failed_retraction_is_retried_on_the_next_pass() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let file = workspace.join("A.bsl");
@@ -5339,6 +5308,151 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the edit survives the restart");
+    }
+
+    /// A dirty mark is positive evidence the fingerprint must not be trusted: an edit at
+    /// unchanged `(len, mtime, canonical)` with a watcher mark must be re-read by the POINT
+    /// paths instead of being consumed through the equal-fingerprint fast path.
+    #[test]
+    fn a_marked_key_at_equal_stat_is_reread_by_point_refreshes() {
+        for use_manifest in [false, true] {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path();
+            let file = workspace.join("A.bsl");
+            let original = "Процедура Первая()\nКонецПроцедуры";
+            fs::write(&file, original).unwrap();
+            let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+            let baseline = HashMap::from([(key("A.bsl"), b"baseline-differs".to_vec())]);
+            let roots = single_root(workspace);
+            let store = Store::open(&workspace.join("search.db")).unwrap();
+            let mut cache = WorkspaceOverlayCache::default();
+            cache.enable_watcher_mode();
+            if use_manifest {
+                cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+            } else {
+                let gone = key("A.bsl");
+                store.upsert_file(&gone.root_id, &gone.path, &baseline[&gone], "code").unwrap();
+                cache
+                    .refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true)
+                    .unwrap();
+            }
+            assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "Первая");
+
+            let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+            fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+            fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+            cache.mark_dirty_path(key("A.bsl"));
+            if use_manifest {
+                cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+            } else {
+                cache
+                    .refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, false)
+                    .unwrap();
+            }
+            assert_eq!(
+                cache.snapshot().lexical_documents[0].symbol_name,
+                "Вторая",
+                "manifest={use_manifest}: the mark outranks the equal fingerprint"
+            );
+        }
+    }
+
+    /// The same evidence must outrank the equal-fingerprint entry gate of the IN-PLACE full
+    /// refreshes — the raw entry check and the manifest persisted-row gate alike.
+    #[test]
+    fn a_marked_key_at_equal_stat_is_reread_by_full_refreshes() {
+        // Raw arm: the equal in-memory entry must not shadow the marked edit.
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, original).unwrap();
+        let baseline = HashMap::from([(key("A.bsl"), b"baseline-differs".to_vec())]);
+        let roots = single_root(workspace);
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.full_refresh(&baseline, &roots, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "Первая");
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.full_refresh(&baseline, &roots, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        assert_eq!(
+            cache.snapshot().lexical_documents[0].symbol_name,
+            "Вторая",
+            "raw: the mark outranks the equal entry fingerprint"
+        );
+
+        // Manifest arm: the persisted-row gate must not shadow the marked edit either.
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, original).unwrap();
+        let manifest =
+            HashMap::from([(key("A.bsl"), super::fingerprint_content(original, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents.len(), 0, "baseline-equal at first");
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        assert_eq!(
+            cache.snapshot().lexical_documents.len(),
+            1,
+            "manifest: the mark outranks the persisted-row gate"
+        );
+        assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "Вторая");
+    }
+
+    /// The PLANNED path cannot read the mark set (it plans off-lock), so its publish must not
+    /// CONSUME a live mark for a key the plan skipped by the persisted-row gate: the mark and
+    /// the retracted row stay, and the next point pass delivers the edit.
+    #[test]
+    fn a_published_plan_leaves_gate_skipped_marked_keys_dirty() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, original).unwrap();
+        let manifest =
+            HashMap::from([(key("A.bsl"), super::fingerprint_content(original, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        // The edit and its mark land BEFORE the plan is built: the plan's gate skips the key
+        // by the stale row, and only the surviving mark can save the edit.
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        let dirty_before = cache.dirty_paths_snapshot();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
+
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "a gate-skipped marked key must not be consumed by the publish"
+        );
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert_eq!(
+            cache.snapshot().lexical_documents[0].symbol_name,
+            "Вторая",
+            "the surviving mark delivers the edit on the next point pass"
+        );
     }
 
     /// The overlay must not walk the tree itself: the walk policy (which links
