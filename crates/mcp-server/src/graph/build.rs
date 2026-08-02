@@ -174,6 +174,7 @@ impl GraphState {
                         fingerprint: built.fp_pre,
                         stale: false,
                         reload: ReloadState::Idle,
+                        force_stale: built.force_stale,
                     });
                     inner.status = GraphStatus::Ready { files: built.files };
                 }
@@ -369,6 +370,7 @@ impl GraphState {
                         fingerprint: fp,
                         stale: false,
                         reload: ReloadState::Idle,
+                        force_stale,
                     });
                     inner.status = GraphStatus::Ready { files };
                 }
@@ -422,6 +424,7 @@ impl GraphState {
             fingerprint,
             stale: false,
             reload: ReloadState::Idle,
+            force_stale: false,
         });
         inner.status = GraphStatus::Ready { files };
         drop(inner);
@@ -486,6 +489,7 @@ impl GraphState {
                 stale: true,
                 // Pre-claimed: the catch-up spawned below owns the one reload slot.
                 reload: ReloadState::Running,
+                force_stale: false,
             });
             inner.status = GraphStatus::Ready { files };
         }
@@ -1013,7 +1017,6 @@ mod tests {
         let graph = GraphState::for_workspace(root.to_path_buf());
         graph.ensure_loading();
         wait_ready(&graph);
-        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert_eq!(
             meta_string(&graph_db_path(root), "force_stale"),
@@ -1021,6 +1024,31 @@ mod tests {
             "an unreadable empty subtree leaves the fingerprints equal — only the \
              scan verdict can catch it"
         );
+        // While the subtree stays hidden, the marker must NOT drive a rebuild
+        // loop: every rebuild would come out unclean again.
+        {
+            let snap = graph.snapshot().expect("ready graph snapshots");
+            let fresh = graph.freshness(&snap);
+            assert!(fresh.stale, "a force_stale build is served as stale");
+            assert_eq!(fresh.reload, "none", "an unclean scan must not chase its own tail");
+        }
+
+        // Once the tree heals, the SAME fingerprints plus a clean scan retire the
+        // incoherent build with exactly one fresh rebuild.
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        *lock_recover(&graph.scan) = None;
+        let claimed = {
+            let snap = graph.snapshot().expect("ready graph snapshots");
+            graph.freshness(&snap).reload == "running"
+        };
+        assert!(claimed, "recovery must schedule the clean rebuild the marker was waiting for");
+        for _ in 0..300 {
+            if meta_string(&graph_db_path(root), "force_stale") == "0" {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the recovery rebuild never published a clean snapshot");
     }
 
     /// The positive control for the verdict wiring: a healthy tree publishes clean.

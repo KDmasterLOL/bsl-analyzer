@@ -56,6 +56,25 @@ pub(super) struct Published {
     pub(super) generation: u64,
     pub(super) fingerprint: crate::graph_db::GraphFp,
     pub(super) reload: ReloadState,
+    /// The published build's coherence marker: it straddled a disk write or was
+    /// built over an incomplete scan, so it never was a faithful snapshot. A
+    /// fingerprint comparison alone cannot retire it — the incomplete-scan case
+    /// leaves the fingerprints EQUAL — so the reload decision must read it.
+    pub(super) force_stale: bool,
+}
+
+impl Published {
+    /// Whether disk state warrants a fresh build: the tree moved past this build's
+    /// fingerprint, or this build never was coherent (`force_stale`) and the
+    /// current scan is CLEAN — an unclean scan must not trigger the rebuild, or a
+    /// chronically unreadable subtree would rebuild in a loop, each build unclean
+    /// again. Recovery (the subtree becomes readable) rebuilds exactly once.
+    pub(super) fn wants_reload(&self, disk: Option<(crate::graph_db::GraphFp, bool)>) -> bool {
+        match disk {
+            Some((fp, scan_clean)) => fp != self.fingerprint || (self.force_stale && scan_clean),
+            None => false,
+        }
+    }
 }
 
 /// Everything mutable about the published graph, guarded by a single mutex. Locks
@@ -539,8 +558,13 @@ impl GraphState {
     ) {
         *lock_recover(&self.scan) = None;
         let mut inner = lock_recover(&self.inner);
-        inner.published =
-            Some(Published { generation, fingerprint, stale: false, reload: ReloadState::Idle });
+        inner.published = Some(Published {
+            generation,
+            fingerprint,
+            stale: false,
+            reload: ReloadState::Idle,
+            force_stale: false,
+        });
         inner.status = GraphStatus::Ready { files };
     }
 
@@ -622,13 +646,12 @@ impl GraphState {
         if !self.may_build() {
             return false;
         }
-        let disk_fp = self.current_disk_fp();
+        let disk = self.current_disk_fp();
         let mut inner = lock_recover(&self.inner);
         let Some(published) = inner.published.as_mut() else {
             return false;
         };
-        let drifted = disk_fp.map(|fp| fp != published.fingerprint).unwrap_or(false);
-        if drifted && published.reload != ReloadState::Running {
+        if published.wants_reload(disk) && published.reload != ReloadState::Running {
             published.reload = ReloadState::Running;
             true
         } else {
@@ -1003,6 +1026,7 @@ mod tests {
                 fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Idle,
+                force_stale: false,
             });
         }
         graph.pending_nudge.store(true, Ordering::SeqCst);
@@ -1038,6 +1062,7 @@ mod tests {
                 fingerprint: crate::graph_db::GraphFp { files: 1, topology: 1 },
                 stale: false,
                 reload: ReloadState::Idle,
+                force_stale: false,
             });
         }
         assert!(!graph.drift_pending(), "a clean published graph has no pending drift");
@@ -1075,6 +1100,7 @@ mod tests {
                 fingerprint: crate::graph_db::GraphFp { files: 1, topology: 1 },
                 stale: true,
                 reload: ReloadState::Failed("catch-up failed".to_owned()),
+                force_stale: false,
             });
             inner.status = GraphStatus::Ready { files: 1 };
         }
@@ -1106,6 +1132,7 @@ mod tests {
                 fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Idle,
+                force_stale: false,
             });
         }
         assert!(graph.claim_reload_slot(), "the first claim wins on drift");
@@ -1141,6 +1168,7 @@ mod tests {
                 fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Running,
+                force_stale: false,
             });
         }
         assert_eq!(graph.nudge_rebuild(), NudgeOutcome::NoOp);
