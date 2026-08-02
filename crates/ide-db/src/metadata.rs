@@ -1726,10 +1726,14 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         }
     }
 
-    if let Some(forms_idx) = parts.iter().position(|&p| conventional_of(p) == Some(Conv::Forms)) {
-        if parts.len() >= forms_idx + 5 && form_suffix(&parts) {
-            return Some(bsl_metadata::ModuleType::FormModule);
-        }
+    // Позиция структурная, как у зеркала в hir-def: `Forms` стоит ровно перед
+    // именем формы (`…/Forms/<Форма>/Ext/Form/Module.bsl`), иначе посторонний
+    // каталог `forms` выше по дереву объявил бы форму, которой нет.
+    if parts.len() >= 7
+        && conventional_of(parts[parts.len() - 5]) == Some(Conv::Forms)
+        && form_suffix(&parts)
+    {
+        return Some(bsl_metadata::ModuleType::FormModule);
     }
 
     // Everything else lives in a collection, and the shape of that path has exactly

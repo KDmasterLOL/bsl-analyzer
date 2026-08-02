@@ -739,7 +739,9 @@ pub fn get_form_structure(
     // not `<TypeDir>/<object>/Forms/<Form>`, so it takes a distinct path and no `object_name`.
     // `to_lowercase` (not `eq_ignore_ascii_case`) so the Cyrillic alias folds case too.
     if matches!(object_type.to_lowercase().as_str(), "commonform" | "общаяформа") {
-        return forms_in_container(&root.join("CommonForms"), form_name, "ОбщаяФорма");
+        let common_forms = bsl_conventions::find_child_ci(root, "CommonForms")
+            .unwrap_or_else(|| root.join("CommonForms"));
+        return forms_in_container(&common_forms, form_name, "ОбщаяФорма");
     }
 
     let object_name = object_name.ok_or_else(|| {

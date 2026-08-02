@@ -262,29 +262,79 @@ fn balanced(bytes: &[u8], open_at: usize, open: u8, close: u8) -> Option<((usize
 /// Whether this attribute makes its item TEST-ONLY: `cfg(test)` or
 /// `cfg(all(test, …))`. `cfg(not(test))`, `cfg(any(test, …))` and
 /// `cfg_attr(test, …)` all leave the item in production builds, so their
+/// Walk back from an attribute's `#` over any directly preceding attributes,
+/// so `#[path = …]` written before `#[cfg(test)]` is inside the window.
+fn attribute_run_start(source: &str, attr_start: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut pos = attr_start;
+    loop {
+        let mut i = pos;
+        while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        if i == 0 || bytes[i - 1] != b']' {
+            return pos;
+        }
+        let Some(open) = source[..i].rfind("#[") else { return pos };
+        pos = open;
+    }
+}
+
+/// Fold `..` components of a `#[path]` target so the exclusion compares equal
+/// to the walker's spelling of the same file.
+fn normalize_rel(rel: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rel.split('/') {
+        match part {
+            "." | "" => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
+}
+
 /// regions must stay in the scan.
 fn is_test_only_cfg(attr_text: &str) -> bool {
     let normalized: String = attr_text.chars().filter(|c| !c.is_whitespace()).collect();
-    normalized == "cfg(test)"
-        || (normalized.starts_with("cfg(all(") && has_word(&normalized, "test"))
+    let Some(inner) = normalized.strip_prefix("cfg(").and_then(|s| s.strip_suffix(")")) else {
+        return false;
+    };
+    predicate_requires_test(inner)
 }
 
-fn has_word(text: &str, word: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut from = 0;
-    while let Some(found) = text[from..].find(word) {
-        let start = from + found;
-        let end = start + word.len();
-        let left_ok =
-            start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
-        let right_ok =
-            end == bytes.len() || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
-        if left_ok && right_ok {
-            return true;
-        }
-        from = end;
+/// Whether a cfg predicate can only be true under `test`: the bare word, or an
+/// `all(...)` with at least one top-level conjunct that itself requires test.
+/// `not(...)`/`any(...)` never require it.
+fn predicate_requires_test(pred: &str) -> bool {
+    if pred == "test" {
+        return true;
     }
-    false
+    let Some(inner) = pred.strip_prefix("all(").and_then(|s| s.strip_suffix(")")) else {
+        return false;
+    };
+    split_top_level(inner).any(predicate_requires_test)
+}
+
+fn split_top_level(s: &str) -> impl Iterator<Item = &str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts.into_iter()
 }
 
 /// Is this literal shaped like a conventional name?
@@ -307,14 +357,9 @@ fn is_conventional_shape(text: &str) -> bool {
     }
     // Bare module stems the way the debugger compares them after
     // `file_stem()`: alphabetic, `…Module` in any ASCII case — a ci comparison
-    // spells the literal however it likes. The bare word `module` itself is a
-    // graph node kind, not a stem, hence the length cut plus the one canonical
-    // spelling the debugger's table actually uses.
-    if text == "Module"
-        || (lower.ends_with("module")
-            && lower.len() > "module".len()
-            && text.bytes().all(|b| b.is_ascii_alphabetic()))
-    {
+    // spells the literal however it likes; unrelated same-spelling words go to
+    // the allowlist as out-of-class rows.
+    if lower.ends_with("module") && text.bytes().all(|b| b.is_ascii_alphabetic()) {
         return true;
     }
     false
@@ -400,16 +445,21 @@ fn test_module_names(source: &str, masked: &str, regions: &[(usize, usize)]) -> 
             continue;
         }
         // A `#[path = "…"]` on the declaration points the module at an
-        // arbitrary file; the masked text blanks string contents, so the
-        // spelling comes from the ORIGINAL source at the same offsets.
-        let region_src = &source[start..end.min(source.len())];
+        // arbitrary file — then the TARGET is the excluded file, and the module
+        // name means nothing on disk. The attribute may precede `#[cfg(test)]`,
+        // so the search window extends back over the whole attribute run. The
+        // masked text blanks string contents, so the spelling comes from the
+        // ORIGINAL source at the same offsets.
+        let window_start = attribute_run_start(source, start);
+        let region_src = &source[window_start..end.min(source.len())];
         if let Some(p) = region_src.find("path") {
             let after = &region_src[p..];
             if let (Some(q1), Some(_)) = (after.find('"'), after.find('=')) {
                 if let Some(q2) = after[q1 + 1..].find('"') {
                     let target = &after[q1 + 1..q1 + 1 + q2];
                     if let Some(stem) = target.strip_suffix(".rs") {
-                        names.push(stem.to_string());
+                        names.push(normalize_rel(stem));
+                        continue;
                     }
                 }
             }

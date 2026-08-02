@@ -486,6 +486,7 @@ fn configuration_xml_in(dir: &Path) -> Option<PathBuf> {
         dir,
         bsl_conventions::ConventionalName::ConfigurationXml.canonical(),
     )
+    .filter(|p| p.is_file())
 }
 
 pub fn configuration_kind(root: &Path) -> ConfigurationKind {
@@ -494,7 +495,7 @@ pub fn configuration_kind(root: &Path) -> ConfigurationKind {
     // `is_file` before opening, not just to reject a directory: opening a FIFO
     // with no writer blocks forever, and this runs on every project build —
     // including LSP startup, which would never finish.
-    let Some(path) = configuration_xml_in(root).filter(|p| p.is_file()) else {
+    let Some(path) = configuration_xml_in(root) else {
         return ConfigurationKind::Unknown;
     };
     let Ok(file) = std::fs::File::open(&path) else {

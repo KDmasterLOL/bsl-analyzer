@@ -124,6 +124,7 @@ mod form_path_mirror_tests {
             "Catalogs/C/Ext/ObjectModule.bsl",
             "CommonModules/X/Ext/Module.bsl",
             "Catalogs/C/Forms/F/Ext/Form/Другой.bsl",
+            "tmp/forms/X/Ext/Form/Module.bsl",
         ];
         for path in paths {
             let hir_says = hir::parse_form_module_path(path).is_some();

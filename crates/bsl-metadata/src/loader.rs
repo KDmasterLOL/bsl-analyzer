@@ -441,7 +441,11 @@ fn load_common_modules_parallel(dir: &Path) -> Vec<crate::common_module::CommonM
                     .unwrap_or(found.as_path())
                     .to_string_lossy()
                     .replace('\\', "/");
-                let uri = format!("CommonModules/{}/{}", name, suffix);
+                // Сегмент коллекции — тоже реальное написание: `dir` пришёл из
+                // пробы каталога коллекции.
+                let collection =
+                    dir.file_name().and_then(|n| n.to_str()).unwrap_or("CommonModules");
+                let uri = format!("{}/{}/{}", collection, name, suffix);
                 module = crate::common_module::CommonModule::builder()
                     .uuid(*module.uuid())
                     .name(module.name())
@@ -1455,7 +1459,8 @@ fn load_http_services_parallel(dir: &Path) -> Vec<crate::http_service::HTTPServi
                     .unwrap_or(found.as_path())
                     .to_string_lossy()
                     .replace('\\', "/");
-                service.set_uri(format!("HTTPServices/{}/{}", name, suffix));
+                let collection = dir.file_name().and_then(|n| n.to_str()).unwrap_or("HTTPServices");
+                service.set_uri(format!("{}/{}/{}", collection, name, suffix));
             }
             Some(service)
         })
@@ -1493,7 +1498,8 @@ fn load_web_services_parallel(dir: &Path) -> Vec<crate::web_service::WebService>
                     .unwrap_or(found.as_path())
                     .to_string_lossy()
                     .replace('\\', "/");
-                service.set_uri(format!("WebServices/{}/{}", name, suffix));
+                let collection = dir.file_name().and_then(|n| n.to_str()).unwrap_or("WebServices");
+                service.set_uri(format!("{}/{}/{}", collection, name, suffix));
             }
             Some(service)
         })
@@ -3015,15 +3021,15 @@ mod case_parity_tests {
     #[test]
     fn full_load_takes_a_case_variant_module_and_keeps_its_spelling_in_uri() {
         let root = temp_root("load");
-        write(&root.join("CommonModules/X.xml"), COMMON_XML);
-        write(&root.join("CommonModules/X/EXT/MODULE.BSL"), "// тело");
+        write(&root.join("COMMONMODULES/X.xml"), COMMON_XML);
+        write(&root.join("COMMONMODULES/X/EXT/MODULE.BSL"), "// тело");
         let config = load_from_directory(&root).unwrap();
         let module = config.common_modules().iter().find(|m| m.name() == "X").unwrap();
         use crate::traits::Module as _;
         assert_eq!(
             module.uri(),
-            Some("CommonModules/X/EXT/MODULE.BSL"),
-            "URI несёт РЕАЛЬНОЕ написание найденного пути"
+            Some("COMMONMODULES/X/EXT/MODULE.BSL"),
+            "URI несёт РЕАЛЬНОЕ написание найденного пути, включая сегмент коллекции"
         );
     }
 }
