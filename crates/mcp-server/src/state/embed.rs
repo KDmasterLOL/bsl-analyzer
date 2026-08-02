@@ -188,6 +188,27 @@ impl SharedState {
             )
         })
     }
+    /// The outcome of one warmup pass, from what its plan proved. A pass whose scan left
+    /// something unseen (`unreadable`, `canonical_fallbacks`) or whose reads failed may not
+    /// speak for the whole tree: reporting `NoLocalDiffs`/`Synced` then would claim a
+    /// completeness nobody verified, so those are reserved for a fully-verified pass.
+    fn warmup_outcome(
+        plan_empty: bool,
+        overlay_files: usize,
+        embedded: usize,
+        unreadable: usize,
+        canonical_fallbacks: usize,
+        read_failures: usize,
+    ) -> OverlayWarmupState {
+        if unreadable > 0 || canonical_fallbacks > 0 || read_failures > 0 {
+            OverlayWarmupState::Incomplete { unreadable, canonical_fallbacks, read_failures }
+        } else if plan_empty {
+            OverlayWarmupState::NoLocalDiffs
+        } else {
+            OverlayWarmupState::Synced { overlay_files, embedded }
+        }
+    }
+
     pub(super) fn run_overlay_warmup(
         search_engine: &SharedSearchEngine,
         overlay_warmup: &Arc<Mutex<OverlayWarmupState>>,
@@ -293,10 +314,14 @@ impl SharedState {
         };
 
         // Capture plan stats BEFORE `plan`/`new_embeddings` are consumed by the publish below, so
-        // the warmup outcome can report how many local files were embedded (and how many chunks).
+        // the warmup outcome can report how many local files were embedded (and how many chunks)
+        // — and, for an incomplete pass, exactly how much the pass could not vouch for.
         let plan_empty = plan.is_empty();
         let overlay_files = plan.overlay_file_count();
         let embedded = new_embeddings.len();
+        let scan_unreadable = plan.scan_unreadable();
+        let scan_canonical_fallbacks = plan.scan_canonical_fallbacks();
+        let read_failures = plan.read_failure_count();
 
         // Brief lock to publish the merged result atomically.
         match search_engine.lock() {
@@ -305,11 +330,14 @@ impl SharedState {
                     match engine.publish_workspace_overlay(plan, new_embeddings, &dirty_before) {
                         Ok(()) => {
                             tracing::info!("workspace overlay semantic warmup complete");
-                            let outcome = if plan_empty {
-                                OverlayWarmupState::NoLocalDiffs
-                            } else {
-                                OverlayWarmupState::Synced { overlay_files, embedded }
-                            };
+                            let outcome = Self::warmup_outcome(
+                                plan_empty,
+                                overlay_files,
+                                embedded,
+                                scan_unreadable,
+                                scan_canonical_fallbacks,
+                                read_failures,
+                            );
                             Self::set_overlay_warmup_state(overlay_warmup, outcome);
                         }
                         Err(error) => {
@@ -665,6 +693,138 @@ mod tests {
             .expect("graph database carries its freshness token")
             .1
             .topology
+    }
+
+    /// Field-by-field transfer into the outcome: the enum-variant check alone cannot tell
+    /// correctly-carried numbers from zeros, and `NoLocalDiffs`/`Synced` stay reserved for a
+    /// fully-verified pass.
+    #[test]
+    fn warmup_outcome_carries_the_exact_numbers() {
+        use crate::state::OverlayWarmupState;
+        match SharedState::warmup_outcome(true, 0, 0, 2, 1, 2) {
+            OverlayWarmupState::Incomplete { unreadable, canonical_fallbacks, read_failures } => {
+                assert_eq!((unreadable, canonical_fallbacks, read_failures), (2, 1, 2))
+            }
+            other => panic!("expected Incomplete, got {other:?}"),
+        }
+        assert!(matches!(
+            SharedState::warmup_outcome(true, 0, 0, 0, 0, 1),
+            OverlayWarmupState::Incomplete { read_failures: 1, .. }
+        ));
+        assert!(matches!(
+            SharedState::warmup_outcome(true, 0, 0, 0, 0, 0),
+            OverlayWarmupState::NoLocalDiffs
+        ));
+        assert!(matches!(
+            SharedState::warmup_outcome(false, 2, 5, 0, 0, 0),
+            OverlayWarmupState::Synced { overlay_files: 2, embedded: 5 }
+        ));
+    }
+
+    /// A warmup pass that could not SEE or READ everything must report `Incomplete` with the
+    /// pass's own numbers — never `NoLocalDiffs`: an empty plan from an incomplete pass proves
+    /// nothing about the working tree, and the numbers must travel from the plan, not be zeros.
+    #[cfg(unix)]
+    #[test]
+    fn an_incomplete_warmup_pass_reports_incomplete_not_no_diffs() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let closed = workspace.join("closed");
+        std::fs::create_dir(&closed).unwrap();
+        std::fs::write(closed.join("Hidden.bsl"), "Процедура Скрытая()\nКонецПроцедуры").unwrap();
+        let broken = workspace.join("Broken.bsl");
+        std::fs::write(&broken, "Процедура Ломкая()\nКонецПроцедуры").unwrap();
+
+        let mut engine =
+            SearchEngine::new(&workspace.join("search.db"), mock_semantic_config(&mock)).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let overlay_warmup = Arc::new(Mutex::new(crate::state::OverlayWarmupState::Pending));
+
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&closed).is_ok() {
+            // Running as root: permissions cannot hide anything.
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        SharedState::run_overlay_warmup(&engine_arc, &overlay_warmup);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let outcome = overlay_warmup.lock().unwrap().clone();
+        match outcome {
+            crate::state::OverlayWarmupState::Incomplete {
+                unreadable,
+                canonical_fallbacks,
+                read_failures,
+            } => assert_eq!(
+                (unreadable, canonical_fallbacks, read_failures),
+                (1, 0, 1),
+                "the outcome carries the pass's own numbers"
+            ),
+            other => panic!("an incomplete pass must say so, got {other:?}"),
+        }
+    }
+
+    /// A CLEAN scan with an unread seen file is still not `NoLocalDiffs`: the file is proven
+    /// present with unknown contents, so the outcome is `Incomplete` and the key stays dirty
+    /// for the retry.
+    #[cfg(unix)]
+    #[test]
+    fn an_unread_file_on_a_clean_scan_reports_incomplete_and_stays_dirty() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let broken = workspace.join("Broken.bsl");
+        std::fs::write(&broken, "Процедура Ломкая()\nКонецПроцедуры").unwrap();
+
+        let mut engine =
+            SearchEngine::new(&workspace.join("search.db"), mock_semantic_config(&mock)).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let overlay_warmup = Arc::new(Mutex::new(crate::state::OverlayWarmupState::Pending));
+
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&broken).is_ok() {
+            std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        SharedState::run_overlay_warmup(&engine_arc, &overlay_warmup);
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let outcome = overlay_warmup.lock().unwrap().clone();
+        match outcome {
+            crate::state::OverlayWarmupState::Incomplete {
+                unreadable,
+                canonical_fallbacks,
+                read_failures,
+            } => assert_eq!((unreadable, canonical_fallbacks, read_failures), (0, 0, 1)),
+            other => panic!("an unread file must not read as no-diffs, got {other:?}"),
+        }
+        let dirty = engine_arc
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .workspace_overlay_dirty_paths_snapshot()
+            .unwrap();
+        assert!(
+            dirty.keys().any(|key| key.path == "Broken.bsl"),
+            "the unread key stays dirty for the retry: {dirty:?}"
+        );
     }
 
     /// The re-embed kick: after a context refresh NULLs a chunk's embedding, the kick's

@@ -87,9 +87,27 @@ pub struct RefreshPlan {
 
 impl RefreshPlan {
     /// Whether the planning scan may speak for the whole tree — same verdict as
-    /// [`ScannedFiles::clean`].
-    fn scan_is_clean(&self) -> bool {
+    /// [`ScannedFiles::clean`]. A caller reporting the warmup outcome must not call an unclean
+    /// plan's emptiness "no local diffs": the scan may simply not have seen the diffs.
+    pub fn scan_is_clean(&self) -> bool {
         self.scan_unreadable == 0 && self.scan_canonical_fallbacks == 0
+    }
+
+    /// How much of the tree the planning scan could not read (see
+    /// [`project_model::SourceSet::unreadable`]).
+    pub fn scan_unreadable(&self) -> usize {
+        self.scan_unreadable
+    }
+
+    /// How many files the planning scan walked without a physical spelling (see
+    /// [`project_model::SourceSet::canonical_fallbacks`]).
+    pub fn scan_canonical_fallbacks(&self) -> usize {
+        self.scan_canonical_fallbacks
+    }
+
+    /// How many seen files the planning phase failed to read: proven present, contents unknown.
+    pub fn read_failure_count(&self) -> usize {
+        self.read_failures.len()
     }
 
     /// The distinct `(embedding_key, embedding_input)` pairs Phase B must embed.
@@ -4591,6 +4609,38 @@ mod tests {
             fs::write(&broken, format!("Процедура Раз{round}()\nКонецПроцедуры")).unwrap();
             cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
         }
+    }
+
+    /// The plan's completeness accessors carry the exact walk counters and the exact number of
+    /// failed reads: a consumer reports "incomplete warmup" from these, and a zeroed field
+    /// there would be indistinguishable from a complete pass.
+    #[cfg(unix)]
+    #[test]
+    fn a_plan_reports_its_scan_counters_and_read_failures() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let broken = workspace.join("Broken.bsl");
+        fs::write(&broken, "Процедура Ломкая()\nКонецПроцедуры").unwrap();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let scanned = scanned_with(&[(&key("Broken.bsl"), &broken)], 2, 1);
+        if !deny_access(&broken) {
+            return;
+        }
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest_scanned(
+            &HashMap::new(),
+            scanned,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        restore_access(&broken);
+        assert!(!plan.scan_is_clean());
+        assert_eq!(
+            (plan.scan_unreadable(), plan.scan_canonical_fallbacks(), plan.read_failure_count()),
+            (2, 1, 1),
+            "each completeness field crosses the accessor unchanged"
+        );
     }
 
     /// The overlay must not walk the tree itself: the walk policy (which links

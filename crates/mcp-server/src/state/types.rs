@@ -31,6 +31,12 @@ pub(crate) enum OverlayWarmupState {
     NoLocalDiffs,
     /// Completed; embedded `embedded` chunks across `overlay_files` locally-changed files.
     Synced { overlay_files: usize, embedded: usize },
+    /// Completed, but the pass could not vouch for the whole tree: the scan left `unreadable`
+    /// subtrees unread or walked `canonical_fallbacks` files without a physical spelling, or
+    /// `read_failures` seen files could not be read. What WAS seen is published and serving;
+    /// removals were withheld and stale entries may linger until a clean pass. Deliberately not
+    /// `Failed`: the overlay is live, and `Failed`'s restart advice would be wrong here.
+    Incomplete { unreadable: usize, canonical_fallbacks: usize, read_failures: usize },
     /// Prime or publish failed. The baseline semantic index still serves; local edits are not
     /// reflected semantically until the next MCP restart retries the warmup.
     Failed(String),

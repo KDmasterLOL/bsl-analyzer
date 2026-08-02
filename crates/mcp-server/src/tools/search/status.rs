@@ -720,6 +720,9 @@ fn write_summary_block(
                 OverlayWarmupState::Synced { overlay_files, embedded } => format!(
                     "{overlay_files} locally-changed file(s) indexed ({embedded} chunks); their [S] reflects local edits."
                 ),
+                OverlayWarmupState::Incomplete { unreadable, canonical_fallbacks, read_failures } => format!(
+                    "built from an INCOMPLETE pass ({unreadable} unreadable subtree(s), {canonical_fallbacks} unresolved spelling(s), {read_failures} unread file(s)); what was seen is serving, local edits keep applying incrementally, and stale entries may linger until a clean rescan."
+                ),
                 OverlayWarmupState::Failed(reason) => format!(
                     "not built (warmup failed: {reason}); [S] still served by the baseline. Restart MCP to retry overlay embedding."
                 ),
@@ -729,7 +732,7 @@ fn write_summary_block(
         let _ = writeln!(out, "  Local overlay semantic: {overlay_line}");
         let _ = writeln!(
             out,
-            "  Note: local-only edits are searchable lexically immediately; their semantic index is (re)built at MCP startup."
+            "  Note: local-only edits are searchable lexically immediately; their semantic index is (re)built at MCP startup (an incomplete pass is caught up the same way)."
         );
     }
 
@@ -1056,6 +1059,31 @@ mod tests {
         assert!(failed.contains("warmup failed: embedder timeout: global"));
         let synced = run(OverlayWarmupState::Synced { overlay_files: 2, embedded: 5 });
         assert!(synced.contains("2 locally-changed file(s) indexed (5 chunks)"));
+
+        // An incomplete pass names its numbers and does not borrow Failed's restart advice; the
+        // unconditional Note line itself must mention the catch-up — asserting on THAT line,
+        // because neither the compiler nor the branch test above would notice the Note
+        // regressing to its old wording.
+        let incomplete = run(OverlayWarmupState::Incomplete {
+            unreadable: 3,
+            canonical_fallbacks: 1,
+            read_failures: 2,
+        });
+        assert!(
+            incomplete.contains(
+                "INCOMPLETE pass (3 unreadable subtree(s), 1 unresolved spelling(s), 2 unread file(s))"
+            ),
+            "{incomplete}"
+        );
+        assert!(!incomplete.contains("Restart MCP to retry"), "not Failed's advice");
+        let note = incomplete
+            .lines()
+            .find(|line| line.trim_start().starts_with("Note:"))
+            .expect("the Note line is unconditional in overlay mode");
+        assert!(
+            note.contains("an incomplete pass is caught up the same way"),
+            "the Note itself names the catch-up: {note}"
+        );
     }
 
     #[test]
