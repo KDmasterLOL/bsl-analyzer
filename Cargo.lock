@@ -3218,6 +3218,7 @@ dependencies = [
  "chrono",
  "expect-test",
  "libc",
+ "rayon",
  "serde",
  "serde_json",
  "stdx",

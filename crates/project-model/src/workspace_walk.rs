@@ -51,6 +51,25 @@ pub struct WalkOutcome {
     /// directory or each file was resolved, so a gate on the cache needs the count of
     /// the operation itself.
     pub canonicalizations: usize,
+    /// How many files kept their WALKED spelling because no canonicalisation
+    /// succeeded. Identity is degraded for such a file: its key cannot be matched
+    /// against a canonical listing, so a caller comparing two walks must treat this
+    /// walk as suspect even when `unreadable` is zero.
+    pub canonical_fallbacks: usize,
+}
+
+impl WalkOutcome {
+    /// Fold another walk's results into this one. Files keep their arrival order;
+    /// every error class is a plain sum — none of the counters depends on which
+    /// walk saw the error.
+    pub fn absorb(&mut self, other: WalkOutcome) {
+        self.files.extend(other.files);
+        self.unreadable += other.unreadable;
+        self.loops += other.loops;
+        self.dangling += other.dangling;
+        self.canonicalizations += other.canonicalizations;
+        self.canonical_fallbacks += other.canonical_fallbacks;
+    }
 }
 
 /// Walk every root, yielding each source or metadata file once per way the walk reached
@@ -64,57 +83,76 @@ pub fn walk_workspace_roots(roots: &[PathBuf]) -> WalkOutcome {
 }
 
 fn walk_one_root(root: &Path, outcome: &mut WalkOutcome) {
+    walk_tree(root, root, outcome);
+}
+
+/// Walk the tree at `start`, attributing every file to `root`. The two differ when a
+/// partitioned scan descends a subtree in isolation: the walk starts at the subtree,
+/// but the file still belongs to the workspace root the caller passed.
+///
+/// Siblings are visited in name order, so the sequence of files is a property of the
+/// tree, not of the file system's directory-entry order — callers assign ids by this
+/// sequence and compare it across scans.
+pub(crate) fn walk_tree(start: &Path, root: &Path, outcome: &mut WalkOutcome) {
     let mut dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
-    for entry in walkdir::WalkDir::new(root).follow_links(true) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                classify_walk_error(&e, outcome);
-                continue;
-            }
-        };
-        // Following links, so this is the TARGET's type: a link to a directory is not
-        // a file, and a directory named `Foo.bsl` never becomes one.
-        if !entry.file_type().is_file() {
-            continue;
+    for entry in walkdir::WalkDir::new(start).follow_links(true).sort_by_file_name() {
+        match entry {
+            Ok(entry) => process_file_entry(&entry, root, &mut dir_cache, outcome),
+            Err(e) => classify_walk_error(&e, outcome),
         }
-        let walked = entry.path();
-        // The role has to hold for BOTH spellings. Taking a file whose canonical name
-        // alone qualifies would produce a key no walk of the target's root can rebuild,
-        // and taking one whose walked name alone qualifies would produce a key the
-        // point-update path rejects by suffix — the two together are the only files
-        // every path in the system agrees about.
-        let role = file_role(walked);
-        if role == FileRole::Ignored {
-            continue;
-        }
-        let canonical = canonical_path(walked, entry.path_is_symlink(), &mut dir_cache, outcome);
-        if file_role(&canonical) != role {
-            continue;
-        }
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            // The file was reachable a moment ago and is not now: the walk saw less
-            // than the tree holds, which is exactly what `unreadable` means.
-            Err(_) => {
-                outcome.unreadable += 1;
-                continue;
-            }
-        };
-        outcome.files.push(WalkedFile {
-            root: root.to_path_buf(),
-            role,
-            walked: walked.to_path_buf(),
-            canonical,
-            metadata,
-        });
     }
+}
+
+/// The per-entry half of the walk policy: role for both spellings, canonicalisation
+/// through the per-directory cache, metadata of the target. Shared by the deep walk
+/// and the shallow partitioning pass so the two can never classify a file differently.
+pub(crate) fn process_file_entry(
+    entry: &walkdir::DirEntry,
+    root: &Path,
+    dir_cache: &mut HashMap<PathBuf, PathBuf>,
+    outcome: &mut WalkOutcome,
+) {
+    // Following links, so this is the TARGET's type: a link to a directory is not
+    // a file, and a directory named `Foo.bsl` never becomes one.
+    if !entry.file_type().is_file() {
+        return;
+    }
+    let walked = entry.path();
+    // The role has to hold for BOTH spellings. Taking a file whose canonical name
+    // alone qualifies would produce a key no walk of the target's root can rebuild,
+    // and taking one whose walked name alone qualifies would produce a key the
+    // point-update path rejects by suffix — the two together are the only files
+    // every path in the system agrees about.
+    let role = file_role(walked);
+    if role == FileRole::Ignored {
+        return;
+    }
+    let canonical = canonical_path(walked, entry.path_is_symlink(), dir_cache, outcome);
+    if file_role(&canonical) != role {
+        return;
+    }
+    let metadata = match entry.metadata() {
+        Ok(metadata) => metadata,
+        // The file was reachable a moment ago and is not now: the walk saw less
+        // than the tree holds, which is exactly what `unreadable` means.
+        Err(_) => {
+            outcome.unreadable += 1;
+            return;
+        }
+    };
+    outcome.files.push(WalkedFile {
+        root: root.to_path_buf(),
+        role,
+        walked: walked.to_path_buf(),
+        canonical,
+        metadata,
+    });
 }
 
 /// Sort a walk error into the three classes that mean different things to a caller.
 /// Only `unreadable` says the file list is short; treating either of the other two that
 /// way would let one dead link or one benign loop block reconciliation forever.
-fn classify_walk_error(error: &walkdir::Error, outcome: &mut WalkOutcome) {
+pub(crate) fn classify_walk_error(error: &walkdir::Error, outcome: &mut WalkOutcome) {
     // The root itself. Whatever went wrong, everything under it is hidden, so an empty
     // list here is not a full walk — not even when the root is a link into nothing.
     if error.depth() == 0 {
@@ -221,7 +259,13 @@ fn canonical_path(
 
 fn canonicalize_counted(path: &Path, outcome: &mut WalkOutcome) -> PathBuf {
     outcome.canonicalizations += 1;
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        // This is the ONE place a walked spelling substitutes for a canonical one:
+        // the earlier parent-resolution failure merely re-routed here, so counting
+        // it too would report two fallbacks for one degraded file.
+        outcome.canonical_fallbacks += 1;
+        path.to_path_buf()
+    })
 }
 
 /// Whether a path is a link whose target cannot exist, as opposed to one whose target
@@ -286,6 +330,20 @@ mod tests {
 
         assert_eq!(outcome.files.len(), 2);
         assert_eq!((outcome.unreadable, outcome.loops, outcome.dangling), (0, 0, 0));
+        assert_eq!(outcome.canonical_fallbacks, 0);
+    }
+
+    #[test]
+    fn a_failed_canonicalisation_counts_one_fallback_not_two() {
+        let mut outcome = WalkOutcome::default();
+        let mut cache = HashMap::new();
+        // Both the parent and the file itself fail to canonicalise: the parent
+        // failure only re-routes to the whole-file attempt, so exactly ONE walked
+        // spelling substitutes for a canonical one.
+        let path = Path::new("/nonexistent-bsl-analyzer-probe/dir/File.bsl");
+        let resolved = canonical_path(path, false, &mut cache, &mut outcome);
+        assert_eq!(resolved, path);
+        assert_eq!(outcome.canonical_fallbacks, 1, "one degraded file, one fallback");
     }
 
     #[cfg(unix)]

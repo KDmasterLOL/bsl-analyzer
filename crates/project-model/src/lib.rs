@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod extension_topology;
 pub mod file_role;
+pub mod source_set;
 pub mod workspace_walk;
 pub use extension_topology::{
     ExtensionNode, ExtensionNodeSpec, ExtensionTopology, NodeId, TopologyError,
@@ -15,6 +16,7 @@ pub use file_role::{
     file_role, is_bsl_source_path, is_common_module_body_path, is_metadata_path,
     is_substrate_listed_body_path, FileRole, METADATA_WATCHED_EXTENSIONS, SOURCE_EXTENSIONS,
 };
+pub use source_set::SourceSet;
 pub use workspace_walk::{walk_workspace_roots, WalkOutcome, WalkedFile};
 
 /// A config file exists but cannot be read or parsed. Deliberately not folded
