@@ -209,6 +209,29 @@ fn links_form_a_cycle(path: &Path) -> bool {
     false
 }
 
+/// Whether ANY component of `path` is a symlink whose chain provably cycles — the
+/// point-lookup counterpart of the walk's loop classification. `links_form_a_cycle`
+/// alone answers only for the path it is handed: for a file under a cycled DIRECTORY
+/// (`D -> D` above `D/M.bsl`) its identity step canonicalises the parent, which is the
+/// very call the kernel refuses, and it conservatively says "not a cycle". The walk,
+/// however, classifies `D` itself as a benign loop and never yields the file — so a
+/// point lookup that stopped at the final component would disagree with the walk and
+/// keep a row the walk-driven reconcile removes. Checking each component keeps the two
+/// answers the same. A long but finite chain still reads as NOT a cycle, on any
+/// component: behind it there is a live file.
+pub fn path_crosses_a_link_cycle(path: &Path) -> bool {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        let is_link = std::fs::symlink_metadata(&prefix)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink());
+        if is_link && links_form_a_cycle(&prefix) {
+            return true;
+        }
+    }
+    false
+}
+
 /// A path's identity for cycle detection: its directory resolved for real, plus its own
 /// name. `None` when the directory cannot be resolved, which leaves the caller with the
 /// conservative answer rather than a guess.
@@ -451,6 +474,50 @@ mod tests {
             "a cycle the OS rejects before walkdir sees an ancestor is still a cycle"
         );
         assert_eq!(walked_names(&outcome), vec!["Live.bsl"]);
+    }
+
+    /// The point-lookup predicate must agree with the walk on every shape of cycle: a
+    /// cycled ANCESTOR directory hides the file from the walk (a benign loop, nothing
+    /// yielded), so a point lookup of the file must call it a cycle too — while a link
+    /// that merely chains too far is a live file on both sides.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_under_a_cycled_directory_crosses_a_link_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("Live.bsl"), "");
+        std::os::unix::fs::symlink("D", dir.path().join("D")).unwrap();
+
+        let outcome = walk(dir.path());
+        assert!(outcome.loops > 0, "the walk classifies the cycled directory as a loop");
+        assert!(
+            super::path_crosses_a_link_cycle(&dir.path().join("D/M.bsl")),
+            "a component-wise check sees the cycle the final component hides"
+        );
+        assert!(
+            super::path_crosses_a_link_cycle(&dir.path().join("D")),
+            "the cycled link itself is a cycle"
+        );
+        assert!(
+            !super::path_crosses_a_link_cycle(&dir.path().join("Live.bsl")),
+            "a plain live file crosses nothing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_long_finite_chain_does_not_cross_a_link_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = dir.path().join("Target.bsl");
+        write(&target, "");
+        for hop in (0..64).rev() {
+            let link = dir.path().join(format!("chain{hop}.bsl"));
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            target = link;
+        }
+        assert!(
+            !super::path_crosses_a_link_cycle(&target),
+            "a finite chain hides a live file; calling it a cycle would drop the file"
+        );
     }
 
     #[cfg(unix)]

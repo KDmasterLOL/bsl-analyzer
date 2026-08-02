@@ -7,7 +7,7 @@ use crate::store::Store;
 use crate::workspace_roots::{FileKey, WorkspaceRoots};
 use code_chunk::Chunker;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -180,6 +180,15 @@ struct RawBaseline<'a> {
     hash_mode: BaselineHashMode,
 }
 
+/// The manifest baseline for a dirty-path refresh: the published fingerprints plus the store whose
+/// persisted fingerprint rows the refresh must keep truthful. Bundled so
+/// [`WorkspaceOverlayCache::refresh_dirty_paths_from_manifest`] stays within the argument-count
+/// lint.
+struct ManifestBaseline<'a> {
+    fingerprints: &'a HashMap<FileKey, String>,
+    store: &'a Store,
+}
+
 /// The baseline a snapshot-fed dirty reindex resolves through the store before it touches the dirty
 /// set. Owning the loaded value (rather than dispatching inline) lets the fallible store reads run
 /// FIRST, so a store error propagates with every dirty flag still intact.
@@ -342,7 +351,7 @@ impl WorkspaceOverlayCache {
             DirtyBaseline::Manifest(manifest_fingerprints) => self
                 .refresh_dirty_paths_from_manifest(
                     keys,
-                    &manifest_fingerprints,
+                    ManifestBaseline { fingerprints: &manifest_fingerprints, store },
                     roots,
                     None,
                     batch_size,
@@ -388,7 +397,7 @@ impl WorkspaceOverlayCache {
                 let dirty: Vec<FileKey> = self.dirty_paths.drain().map(|(key, _)| key).collect();
                 self.refresh_dirty_paths_from_manifest(
                     dirty,
-                    manifest_fingerprints,
+                    ManifestBaseline { fingerprints: manifest_fingerprints, store },
                     roots,
                     embedder,
                     batch_size,
@@ -404,7 +413,7 @@ impl WorkspaceOverlayCache {
             let dirty: Vec<FileKey> = self.dirty_paths.drain().map(|(key, _)| key).collect();
             self.refresh_dirty_paths_from_manifest(
                 dirty,
-                manifest_fingerprints,
+                ManifestBaseline { fingerprints: manifest_fingerprints, store },
                 roots,
                 embedder,
                 batch_size,
@@ -563,6 +572,13 @@ impl WorkspaceOverlayCache {
                     hidden_paths.insert(key.clone());
                 }
             }
+            // A failed read proves nothing about the baseline, so the key's prior hiding
+            // survives the whole-replace — un-hiding would serve two versions at once.
+            for key in &read_failures {
+                if self.hidden_paths.contains(key) {
+                    hidden_paths.insert(key.clone());
+                }
+            }
             self.hidden_paths = hidden_paths;
         } else {
             self.merge_partial_hidden(&seen_keys, &read_failures, &hidden_paths);
@@ -594,9 +610,11 @@ impl WorkspaceOverlayCache {
     }
 
     /// The shared tail of an in-place full publication: dirty marks are cleared ONLY for keys the
-    /// pass actually processed — a key it failed to read stays dirty for the retry, and a key an
-    /// unclean scan never saw stays dirty because nothing about it was proven — and the rescan
-    /// flag records whether removals were withheld.
+    /// pass actually processed — a key it failed to read goes into the bounded retry budget, and
+    /// a key an unclean scan never saw stays dirty because nothing about it was proven — and the
+    /// rescan flag records whether removals were withheld. Each failed read is warned about HERE,
+    /// by the publication itself: the budget helper only warns when the budget runs out, and a
+    /// full publication that could not read a seen file must be visible in the log at once.
     fn finish_full_publication(
         &mut self,
         scan_is_clean: bool,
@@ -609,7 +627,56 @@ impl WorkspaceOverlayCache {
             self.dirty_paths
                 .retain(|key, _| !seen_keys.contains(key) || read_failures.contains(key));
         }
+        for key in read_failures {
+            tracing::warn!(
+                root = %key.root_id,
+                path = %key.path,
+                "full overlay refresh could not read a seen file; keeping its previous version \
+                 and retrying"
+            );
+            let prior_failures = self.dirty_failures.remove(key).unwrap_or(0);
+            self.dirty_paths.remove(key);
+            self.retain_dirty_after_failure(key.clone(), prior_failures, "read failed");
+        }
         self.full_rescan_pending = !scan_is_clean;
+    }
+
+    /// Remove a point-refresh key that is PROVABLY gone: the entry goes, and the baseline copy
+    /// (when there is one) is hidden, exactly as a clean full scan would settle it.
+    fn remove_point_entry(&mut self, key: FileKey, has_baseline: bool) {
+        self.entries.remove(&key);
+        if has_baseline {
+            self.hidden_paths.insert(key);
+        } else {
+            self.hidden_paths.remove(&key);
+        }
+    }
+
+    /// Persist the fingerprint rows a full publication verified. A row asserts "this file was
+    /// verified against the manifest", so the table must end up holding exactly what THIS pass
+    /// proved: the replace-save runs even over an unclean scan — an unseen file may have changed
+    /// at the same size and mtime, and its surviving row would skip the re-read after a restart;
+    /// losing a row costs one extra read on the next clean pass, a false hit costs a lost edit —
+    /// and a read-failed key's row is retracted explicitly, because with nothing else updated on
+    /// a clean scan the emptiness guard would keep the whole stale table.
+    fn persist_fingerprint_rows(
+        store: &Store,
+        snapshot_id: &str,
+        updated: &HashMap<FileKey, crate::store::PersistedFingerprint>,
+        scan_is_clean: bool,
+        read_failures: &HashSet<FileKey>,
+    ) {
+        if !updated.is_empty() || !scan_is_clean {
+            if let Err(error) = store.save_overlay_fingerprint_cache(snapshot_id, updated) {
+                tracing::warn!("failed to persist overlay fingerprint cache: {error}");
+            }
+        }
+        if !read_failures.is_empty() {
+            let keys: Vec<FileKey> = read_failures.iter().cloned().collect();
+            if let Err(error) = store.delete_overlay_fingerprint_entries(&keys) {
+                tracing::warn!("failed to retract overlay fingerprint rows: {error}");
+            }
+        }
     }
 
     fn refresh_dirty_paths(
@@ -632,26 +699,21 @@ impl WorkspaceOverlayCache {
             // value to `retain_dirty_after_failure` on failure, keeping the streak consecutive.
             let prior_failures = self.dirty_failures.remove(&key).unwrap_or(0);
             let baseline_hash = baseline_files.get(&key);
-            // A key whose root is no longer registered resolves to nothing; it
-            // is treated exactly like a file gone from disk, which is what it is
-            // for this overlay.
-            let abs_path = roots.resolve(&key);
-
-            if !abs_path.as_ref().is_some_and(|path| path.exists()) {
-                self.entries.remove(&key);
-                if baseline_hash.is_some() {
-                    self.hidden_paths.insert(key);
-                } else {
-                    self.hidden_paths.remove(&key);
-                }
+            // A key whose root is no longer registered resolves to nothing; that is a change of
+            // composition, not a filesystem error, and it settles like a deletion.
+            let Some(abs_path) = roots.resolve(&key) else {
+                self.remove_point_entry(key, baseline_hash.is_some());
                 continue;
-            }
-            let abs_path = abs_path.expect("existence was just checked on Some");
+            };
 
             let metadata = match std::fs::metadata(&abs_path) {
                 Ok(metadata) => metadata,
-                Err(_) => {
-                    retry.push((key, prior_failures, "stat failed"));
+                Err(error) => {
+                    if point_target_is_absent(&error, &abs_path) {
+                        self.remove_point_entry(key, baseline_hash.is_some());
+                    } else {
+                        retry.push((key, prior_failures, "stat failed"));
+                    }
                     continue;
                 }
             };
@@ -899,19 +961,26 @@ impl WorkspaceOverlayCache {
                     hidden_paths.insert(key.clone());
                 }
             }
+            // A failed read proves nothing about the baseline, so the key's prior hiding
+            // survives the whole-replace — un-hiding would serve two versions at once.
+            for key in &read_failures {
+                if self.hidden_paths.contains(key) {
+                    hidden_paths.insert(key.clone());
+                }
+            }
             self.hidden_paths = hidden_paths;
         } else {
             self.merge_partial_hidden(&seen_keys, &read_failures, &hidden_paths);
         }
         self.finish_full_publication(scan_is_clean, &seen_keys, &read_failures);
 
-        if !updated_persisted.is_empty() {
-            if let Err(error) =
-                store.save_overlay_fingerprint_cache(&manifest_snapshot_id, &updated_persisted)
-            {
-                tracing::warn!("failed to persist overlay fingerprint cache: {error}");
-            }
-        }
+        Self::persist_fingerprint_rows(
+            store,
+            &manifest_snapshot_id,
+            &updated_persisted,
+            scan_is_clean,
+            &read_failures,
+        );
 
         if let Some(embedder) = embedder {
             if !self.embedding_cache.is_empty() {
@@ -1115,8 +1184,22 @@ impl WorkspaceOverlayCache {
         }
 
         if scan_is_clean {
+            // The whole-replace must still carry over what the plan could not read: a failed
+            // read proves nothing, so the prior entry keeps serving and its hiding stays —
+            // dropping either would serve the baseline version of contents nobody verified.
+            for key in &plan.read_failures {
+                if let Some(prior) = self.entries.remove(key) {
+                    entries.insert(key.clone(), prior);
+                }
+            }
+            let mut hidden_paths = plan.hidden_paths;
+            for key in &plan.read_failures {
+                if self.hidden_paths.contains(key) {
+                    hidden_paths.insert(key.clone());
+                }
+            }
             self.entries = entries;
-            self.hidden_paths = plan.hidden_paths;
+            self.hidden_paths = hidden_paths;
         } else {
             // The plan may not speak for what its scan did not see, so it publishes as a merge:
             // planned entries land, a seen key the plan proved baseline-equal (no entry, no read
@@ -1159,13 +1242,27 @@ impl WorkspaceOverlayCache {
         self.full_rescan_pending = !scan_is_clean;
         self.initialized = true;
 
-        if !plan.updated_persisted.is_empty() {
-            if let Err(error) =
-                store.save_overlay_fingerprint_cache(&plan.snapshot_id, &plan.updated_persisted)
-            {
-                tracing::warn!("failed to persist overlay fingerprint cache: {error}");
-            }
+        // The warn belongs HERE and not in the planning phase: phase A publishes nothing, and
+        // the message must stand next to the fact that an incomplete result went live.
+        for key in &plan.read_failures {
+            tracing::warn!(
+                root = %key.root_id,
+                path = %key.path,
+                "published overlay plan could not read a seen file; keeping its previous \
+                 version and retrying"
+            );
+            let prior_failures = self.dirty_failures.remove(key).unwrap_or(0);
+            self.dirty_paths.remove(key);
+            self.retain_dirty_after_failure(key.clone(), prior_failures, "read failed");
         }
+
+        Self::persist_fingerprint_rows(
+            store,
+            &plan.snapshot_id,
+            &plan.updated_persisted,
+            scan_is_clean,
+            &plan.read_failures,
+        );
 
         if let Some(embedder) = embedder {
             if !self.embedding_cache.is_empty() {
@@ -1197,42 +1294,44 @@ impl WorkspaceOverlayCache {
     fn refresh_dirty_paths_from_manifest(
         &mut self,
         dirty_keys: Vec<FileKey>,
-        manifest_fingerprints: &HashMap<FileKey, String>,
+        baseline: ManifestBaseline<'_>,
         roots: &WorkspaceRoots,
         embedder: Option<&Embedder>,
         batch_size: usize,
         snapshots: &HashMap<FileKey, ModuleSnapshot>,
     ) -> Result<(), SearchError> {
+        let ManifestBaseline { fingerprints: manifest_fingerprints, store } = baseline;
         // A path whose stat/read transiently fails is re-marked dirty (carrying its
         // consecutive-failure count) so the next refresh retries it — bounded by
         // [`MAX_DIRTY_REFRESH_FAILURES`] — rather than being silently dropped.
         let mut retry: Vec<(FileKey, u32, &'static str)> = Vec::new();
+        // Keys whose persisted fingerprint row must be retracted: a stat or read failure leaves
+        // the contents unverified, and while the in-memory dirty mark dies with the process, the
+        // row would survive a restart and vouch "verified" — the next full plan would skip the
+        // re-read forever.
+        let mut invalidated_rows: Vec<FileKey> = Vec::new();
 
         for key in dirty_keys {
             // Removing the count here clears it on success (the common path) and hands the prior
             // value to `retain_dirty_after_failure` on failure, keeping the streak consecutive.
             let prior_failures = self.dirty_failures.remove(&key).unwrap_or(0);
             let baseline_fingerprint = manifest_fingerprints.get(&key);
-            // A key whose root is no longer registered resolves to nothing; it
-            // is treated exactly like a file gone from disk, which is what it is
-            // for this overlay.
-            let abs_path = roots.resolve(&key);
-
-            if !abs_path.as_ref().is_some_and(|path| path.exists()) {
-                self.entries.remove(&key);
-                if baseline_fingerprint.is_some() {
-                    self.hidden_paths.insert(key);
-                } else {
-                    self.hidden_paths.remove(&key);
-                }
+            // A key whose root is no longer registered resolves to nothing; that is a change of
+            // composition, not a filesystem error, and it settles like a deletion.
+            let Some(abs_path) = roots.resolve(&key) else {
+                self.remove_point_entry(key, baseline_fingerprint.is_some());
                 continue;
-            }
-            let abs_path = abs_path.expect("existence was just checked on Some");
+            };
 
             let metadata = match std::fs::metadata(&abs_path) {
                 Ok(metadata) => metadata,
-                Err(_) => {
-                    retry.push((key, prior_failures, "stat failed"));
+                Err(error) => {
+                    if point_target_is_absent(&error, &abs_path) {
+                        self.remove_point_entry(key, baseline_fingerprint.is_some());
+                    } else {
+                        invalidated_rows.push(key.clone());
+                        retry.push((key, prior_failures, "stat failed"));
+                    }
                     continue;
                 }
             };
@@ -1272,6 +1371,7 @@ impl WorkspaceOverlayCache {
             let content = match std::fs::read_to_string(&abs_path) {
                 Ok(content) => content,
                 Err(_) => {
+                    invalidated_rows.push(key.clone());
                     retry.push((key, prior_failures, "read failed"));
                     continue;
                 }
@@ -1309,6 +1409,11 @@ impl WorkspaceOverlayCache {
             self.entries.insert(key, entry);
         }
 
+        if !invalidated_rows.is_empty() {
+            if let Err(error) = store.delete_overlay_fingerprint_entries(&invalidated_rows) {
+                tracing::warn!("failed to retract overlay fingerprint rows: {error}");
+            }
+        }
         for (key, prior_failures, reason) in retry {
             self.retain_dirty_after_failure(key, prior_failures, reason);
         }
@@ -1472,6 +1577,18 @@ fn scan_workspace_files(roots: &WorkspaceRoots) -> ScannedFiles {
         "workspace overlay scan"
     );
     scanned
+}
+
+/// Whether a failed `metadata` call PROVES the point-refresh target is gone. `NotFound` and
+/// `NotADirectory` (a parent directory replaced by a file) are the kernel saying so outright; a
+/// symlink cycle anywhere in the path is proven by walking the chain — the shared walk
+/// classifies such a file as a benign loop and never yields it, so the point answer must agree
+/// with the full scan. Anything else — permissions, I/O, or a merely LONG link chain behind
+/// which a live file sits (a bare `ELOOP` proves nothing) — reads as a live file the caller
+/// keeps and retries.
+fn point_target_is_absent(error: &std::io::Error, path: &Path) -> bool {
+    matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)
+        || project_model::path_crosses_a_link_cycle(path)
 }
 
 /// The pure projection of a walk result into overlay terms. Roots may nest, so
@@ -3461,6 +3578,737 @@ mod tests {
         .unwrap();
         cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
         assert!(!cache.needs_full_rescan(), "a published clean plan clears it");
+    }
+
+    /// Runs `f` under a thread-local subscriber capturing WARN-and-up output; returns the
+    /// closure's result and the captured lines. `bsl-search` sets no global dispatcher, so the
+    /// scoped default reliably owns every event the closure emits.
+    fn warns_during<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(buf.clone())
+            .without_time()
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        (result, String::from_utf8_lossy(&bytes).lines().map(str::to_owned).collect())
+    }
+
+    /// Closes `path` with mode 000 and reports whether that actually revokes access —
+    /// under root it cannot, and the caller skips the scenario.
+    #[cfg(unix)]
+    fn deny_access(path: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        if path.is_dir() {
+            fs::read_dir(path).is_err()
+        } else {
+            fs::read(path).is_err()
+        }
+    }
+
+    #[cfg(unix)]
+    fn restore_access(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if path.is_dir() { 0o755 } else { 0o644 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// A seen file whose read fails keeps its previous entry and its hiding, gets a retryable
+    /// dirty mark, and the publication says so out loud — the old silent `continue` stranded
+    /// the stale entry with no trace and no retry.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_failure_during_full_refresh_keeps_the_entry_and_warns() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let edited = workspace.join("Edited.bsl");
+        fs::write(&edited, "Процедура Изменённая()\nКонецПроцедуры").unwrap();
+        let baseline = HashMap::from([(key("Edited.bsl"), b"baseline-differs".to_vec())]);
+        let roots = single_root(workspace);
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.full_refresh(&baseline, &roots, None, 32, BaselineHashMode::RawFileBytes).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "Изменённая");
+        assert!(cache.snapshot().hidden_paths.contains(&key("Edited.bsl")));
+
+        // Two steps: first MOVE the fingerprint (a bare chmod leaves `(len, mtime)` alone and
+        // the equal-fingerprint branch would skip the read entirely), then revoke access.
+        fs::write(&edited, "Процедура ИзменённаяЕщёРаз()\nКонецПроцедуры").unwrap();
+        if !deny_access(&edited) {
+            return;
+        }
+        let (result, warns) = warns_during(|| {
+            cache.full_refresh(&baseline, &roots, None, 32, BaselineHashMode::RawFileBytes)
+        });
+        restore_access(&edited);
+        result.unwrap();
+
+        let overlay = cache.snapshot();
+        assert_eq!(
+            overlay.lexical_documents[0].symbol_name, "Изменённая",
+            "the previous version survives the failed read"
+        );
+        assert!(overlay.hidden_paths.contains(&key("Edited.bsl")), "its hiding survives");
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("Edited.bsl")),
+            "the key is marked for a bounded retry"
+        );
+        assert!(warns.iter().any(|l| l.contains("Edited.bsl")), "the publication warns: {warns:?}");
+    }
+
+    /// The same protection on the manifest-driven full refresh.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_failure_during_manifest_refresh_keeps_the_entry_and_warns() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let edited = workspace.join("Edited.bsl");
+        fs::write(&edited, "Процедура Изменённая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(key("Edited.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "Изменённая");
+
+        fs::write(&edited, "Процедура ИзменённаяЕщёРаз()\nКонецПроцедуры").unwrap();
+        if !deny_access(&edited) {
+            return;
+        }
+        let (result, warns) =
+            warns_during(|| cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store));
+        restore_access(&edited);
+        result.unwrap();
+
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents[0].symbol_name, "Изменённая");
+        assert!(overlay.hidden_paths.contains(&key("Edited.bsl")));
+        assert!(cache.dirty_paths_snapshot().contains_key(&key("Edited.bsl")));
+        assert!(warns.iter().any(|l| l.contains("Edited.bsl")), "{warns:?}");
+    }
+
+    /// On the planned path the failure happens in phase A, which publishes nothing — so phase A
+    /// stays silent and `publish_plan` emits exactly one warn per failed key, next to the fact
+    /// that an incomplete result went live. The prior entry and its hiding survive the
+    /// whole-replace publication.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_failure_survives_a_published_plan_with_one_warn() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let edited = workspace.join("Edited.bsl");
+        fs::write(&edited, "Процедура Изменённая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(key("Edited.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "Изменённая");
+        assert!(cache.snapshot().hidden_paths.contains(&key("Edited.bsl")));
+
+        fs::write(&edited, "Процедура ИзменённаяЕщёРаз()\nКонецПроцедуры").unwrap();
+        if !deny_access(&edited) {
+            return;
+        }
+        let (plan, plan_warns) = warns_during(|| {
+            WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+                &manifest,
+                &roots,
+                &store,
+                &HashMap::new(),
+                None,
+            )
+            .unwrap()
+        });
+        assert!(
+            !plan_warns.iter().any(|l| l.contains("Edited.bsl")),
+            "phase A publishes nothing and stays silent: {plan_warns:?}"
+        );
+        let (result, publish_warns) = warns_during(|| {
+            cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store)
+        });
+        restore_access(&edited);
+        result.unwrap();
+
+        let overlay = cache.snapshot();
+        assert_eq!(
+            overlay.lexical_documents[0].symbol_name, "Изменённая",
+            "the entry survives the publication"
+        );
+        assert!(overlay.hidden_paths.contains(&key("Edited.bsl")), "its hiding survives");
+        assert!(cache.dirty_paths_snapshot().contains_key(&key("Edited.bsl")));
+        assert_eq!(
+            publish_warns.iter().filter(|l| l.contains("Edited.bsl")).count(),
+            1,
+            "exactly one warn, at the moment the incomplete result goes live: {publish_warns:?}"
+        );
+    }
+
+    /// The persisted fingerprint row of a read-failed file claims "verified against the
+    /// manifest" — after a failed read the claim must be retracted even when NOTHING else was
+    /// read (an empty update map used to skip the save entirely), and retracting it must not
+    /// take the verified neighbour's row with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_failure_drops_its_fingerprint_row_on_the_manifest_path() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let broken = workspace.join("Broken.bsl");
+        fs::write(&broken, "Процедура Ломкая()\nКонецПроцедуры").unwrap();
+        let alive = workspace.join("Alive.bsl");
+        fs::write(&alive, "Процедура Живая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([
+            (key("Broken.bsl"), "manifest-differs".to_owned()),
+            (key("Alive.bsl"), "manifest-differs-too".to_owned()),
+        ]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert_eq!(rows.len(), 2, "both reads succeeded, both rows persisted");
+
+        fs::write(&broken, "Процедура ЛомкаяЕщёРаз()\nКонецПроцедуры").unwrap();
+        if !deny_access(&broken) {
+            return;
+        }
+        let result = cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store);
+        restore_access(&broken);
+        result.unwrap();
+        let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert!(!rows.contains_key(&key("Broken.bsl")), "the failed read retracts its row");
+        assert!(rows.contains_key(&key("Alive.bsl")), "the verified neighbour keeps its row");
+
+        // Single-row leg: with the only file failing, the update map is empty and a guarded
+        // save would silently keep the stale row.
+        let solo_dir = tempdir().unwrap();
+        let solo_ws = solo_dir.path();
+        let solo = solo_ws.join("Solo.bsl");
+        fs::write(&solo, "Процедура Одна()\nКонецПроцедуры").unwrap();
+        let solo_manifest = HashMap::from([(key("Solo.bsl"), "manifest-differs".to_owned())]);
+        let solo_roots = single_root(solo_ws);
+        let solo_store = Store::open(&solo_ws.join("search.db")).unwrap();
+        let mut solo_cache = WorkspaceOverlayCache::default();
+        solo_cache
+            .full_refresh_from_manifest(&solo_manifest, &solo_roots, None, 32, &solo_store)
+            .unwrap();
+        assert_eq!(
+            solo_store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            1
+        );
+        fs::write(&solo, "Процедура ОднаЕщёРаз()\nКонецПроцедуры").unwrap();
+        if !deny_access(&solo) {
+            return;
+        }
+        let result = solo_cache.full_refresh_from_manifest(
+            &solo_manifest,
+            &solo_roots,
+            None,
+            32,
+            &solo_store,
+        );
+        restore_access(&solo);
+        result.unwrap();
+        let rows =
+            solo_store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert!(
+            !rows.contains_key(&key("Solo.bsl")),
+            "an empty update map must not shield the stale row"
+        );
+    }
+
+    /// The same 2×2 matrix legs through the planned publication — an independent save site.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_failure_drops_its_fingerprint_row_on_the_planned_path() {
+        let plan_and_publish = |manifest: &HashMap<FileKey, String>,
+                                roots: &WorkspaceRoots,
+                                store: &Store,
+                                cache: &mut WorkspaceOverlayCache| {
+            let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+                manifest,
+                roots,
+                store,
+                &HashMap::new(),
+                None,
+            )
+            .unwrap();
+            cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, store).unwrap();
+        };
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let broken = workspace.join("Broken.bsl");
+        fs::write(&broken, "Процедура Ломкая()\nКонецПроцедуры").unwrap();
+        let alive = workspace.join("Alive.bsl");
+        fs::write(&alive, "Процедура Живая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([
+            (key("Broken.bsl"), "manifest-differs".to_owned()),
+            (key("Alive.bsl"), "manifest-differs-too".to_owned()),
+        ]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        plan_and_publish(&manifest, &roots, &store, &mut cache);
+        assert_eq!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            2
+        );
+
+        fs::write(&broken, "Процедура ЛомкаяЕщёРаз()\nКонецПроцедуры").unwrap();
+        if !deny_access(&broken) {
+            return;
+        }
+        plan_and_publish(&manifest, &roots, &store, &mut cache);
+        restore_access(&broken);
+        let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert!(!rows.contains_key(&key("Broken.bsl")), "the failed read retracts its row");
+        assert!(rows.contains_key(&key("Alive.bsl")), "the verified neighbour keeps its row");
+
+        let solo_dir = tempdir().unwrap();
+        let solo_ws = solo_dir.path();
+        let solo = solo_ws.join("Solo.bsl");
+        fs::write(&solo, "Процедура Одна()\nКонецПроцедуры").unwrap();
+        let solo_manifest = HashMap::from([(key("Solo.bsl"), "manifest-differs".to_owned())]);
+        let solo_roots = single_root(solo_ws);
+        let solo_store = Store::open(&solo_ws.join("search.db")).unwrap();
+        let mut solo_cache = WorkspaceOverlayCache::default();
+        plan_and_publish(&solo_manifest, &solo_roots, &solo_store, &mut solo_cache);
+        fs::write(&solo, "Процедура ОднаЕщёРаз()\nКонецПроцедуры").unwrap();
+        if !deny_access(&solo) {
+            return;
+        }
+        plan_and_publish(&solo_manifest, &solo_roots, &solo_store, &mut solo_cache);
+        restore_access(&solo);
+        let rows =
+            solo_store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert!(!rows.contains_key(&key("Solo.bsl")), "an empty update map must not shield it");
+    }
+
+    /// A POINT refresh that fails to read a file must retract that file's persisted row too:
+    /// the dirty mark knows the file changed but dies with the process, while the row would
+    /// survive the restart and vouch "verified" for contents nobody read — the next full plan
+    /// would then skip the read forever. The verified neighbour's row survives the retraction.
+    #[cfg(unix)]
+    #[test]
+    fn a_point_read_failure_retracts_its_fingerprint_row_across_restart() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let swapped = workspace.join("Swapped.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&swapped, original).unwrap();
+        let neighbour = workspace.join("Neighbour.bsl");
+        fs::write(&neighbour, "Процедура Соседняя()\nКонецПроцедуры").unwrap();
+        // Both files match the manifest: no overlay entries, but both fingerprint rows persist.
+        let manifest = HashMap::from([
+            (key("Swapped.bsl"), super::fingerprint_content(original, "Swapped.bsl")),
+            (
+                key("Neighbour.bsl"),
+                super::fingerprint_content("Процедура Соседняя()\nКонецПроцедуры", "Neighbour.bsl"),
+            ),
+        ]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            2
+        );
+
+        // Swap the contents at the SAME (len, mtime): only the retracted row makes the next
+        // full plan re-read the file.
+        let mtime = fs::metadata(&swapped).unwrap().modified().unwrap();
+        fs::write(&swapped, "Процедура Втораяя()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&swapped).unwrap().set_modified(mtime).unwrap();
+        if !deny_access(&swapped) {
+            return;
+        }
+        cache.mark_dirty_path(key("Swapped.bsl"));
+        let result = cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false);
+        restore_access(&swapped);
+        result.unwrap();
+
+        let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert!(
+            !rows.contains_key(&key("Swapped.bsl")),
+            "the unread file's row must not claim it was verified"
+        );
+        assert!(rows.contains_key(&key("Neighbour.bsl")), "the neighbour's row survives");
+
+        // "Restart": a fresh plan must re-read the swapped file and see the new contents.
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 1, "the swap is visible after the restart");
+    }
+
+    /// The stat branch of the point refresh leaves the contents just as unverified as the read
+    /// branch, so it must retract the row the same way.
+    #[cfg(unix)]
+    #[test]
+    fn a_point_stat_failure_retracts_its_fingerprint_row_across_restart() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let closed = workspace.join("closed");
+        fs::create_dir(&closed).unwrap();
+        let swapped = closed.join("Swapped.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&swapped, original).unwrap();
+        let manifest = HashMap::from([(
+            key("closed/Swapped.bsl"),
+            super::fingerprint_content(original, "closed/Swapped.bsl"),
+        )]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            1
+        );
+
+        let mtime = fs::metadata(&swapped).unwrap().modified().unwrap();
+        fs::write(&swapped, "Процедура Втораяя()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&swapped).unwrap().set_modified(mtime).unwrap();
+        if !deny_access(&closed) {
+            return;
+        }
+        cache.mark_dirty_path(key("closed/Swapped.bsl"));
+        let result = cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false);
+        restore_access(&closed);
+        result.unwrap();
+
+        let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert!(
+            !rows.contains_key(&key("closed/Swapped.bsl")),
+            "a stat failure leaves the contents unverified; the row must go"
+        );
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 1, "the swap is visible after the restart");
+    }
+
+    /// An unclean FULL publication must not leave unseen keys' rows behind either: the row of a
+    /// file the scan never reached would survive a restart and vouch for contents that changed
+    /// meanwhile. Losing a row costs one extra read on the next clean pass; a false hit costs a
+    /// lost edit — the replace-save keeps only what this pass actually verified.
+    #[test]
+    fn an_unclean_manifest_publication_drops_unseen_fingerprint_rows() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let unseen = workspace.join("Unseen.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&unseen, original).unwrap();
+        let seen = workspace.join("Seen.bsl");
+        fs::write(&seen, "Процедура Видимая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([
+            (key("Unseen.bsl"), super::fingerprint_content(original, "Unseen.bsl")),
+            (
+                key("Seen.bsl"),
+                super::fingerprint_content("Процедура Видимая()\nКонецПроцедуры", "Seen.bsl"),
+            ),
+        ]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        assert_eq!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            2
+        );
+
+        let mtime = fs::metadata(&unseen).unwrap().modified().unwrap();
+        fs::write(&unseen, "Процедура Втораяя()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&unseen).unwrap().set_modified(mtime).unwrap();
+        cache
+            .full_refresh_from_manifest_scanned(
+                &manifest,
+                scanned_with(&[(&key("Seen.bsl"), &seen)], 1, 0),
+                None,
+                32,
+                &store,
+            )
+            .unwrap();
+        let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert!(!rows.contains_key(&key("Unseen.bsl")), "the unverified row is dropped");
+        assert!(rows.contains_key(&key("Seen.bsl")), "the verified row survives");
+
+        // Single-row leg: an unclean scan that saw NOTHING leaves an empty update map, and a
+        // guarded save would keep the whole stale table.
+        let solo_dir = tempdir().unwrap();
+        let solo_ws = solo_dir.path();
+        let solo = solo_ws.join("Solo.bsl");
+        let solo_content = "Процедура Одна()\nКонецПроцедуры";
+        fs::write(&solo, solo_content).unwrap();
+        let solo_manifest = HashMap::from([(
+            key("Solo.bsl"),
+            super::fingerprint_content(solo_content, "Solo.bsl"),
+        )]);
+        let solo_roots = single_root(solo_ws);
+        let solo_store = Store::open(&solo_ws.join("search.db")).unwrap();
+        let mut solo_cache = WorkspaceOverlayCache::default();
+        solo_cache
+            .full_refresh_from_manifest(&solo_manifest, &solo_roots, None, 32, &solo_store)
+            .unwrap();
+        assert_eq!(
+            solo_store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            1
+        );
+        solo_cache
+            .full_refresh_from_manifest_scanned(
+                &solo_manifest,
+                scanned_with(&[], 1, 0),
+                None,
+                32,
+                &solo_store,
+            )
+            .unwrap();
+        assert!(
+            solo_store
+                .load_overlay_fingerprint_cache("")
+                .unwrap_or(None)
+                .unwrap_or_default()
+                .is_empty(),
+            "nothing was verified, nothing may stay claimed"
+        );
+    }
+
+    /// The same unseen-row policy through the planned publication.
+    #[test]
+    fn an_unclean_published_plan_drops_unseen_fingerprint_rows() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let unseen = workspace.join("Unseen.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&unseen, original).unwrap();
+        let seen = workspace.join("Seen.bsl");
+        fs::write(&seen, "Процедура Видимая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([
+            (key("Unseen.bsl"), super::fingerprint_content(original, "Unseen.bsl")),
+            (
+                key("Seen.bsl"),
+                super::fingerprint_content("Процедура Видимая()\nКонецПроцедуры", "Seen.bsl"),
+            ),
+        ]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        assert_eq!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            2
+        );
+
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest_scanned(
+            &manifest,
+            scanned_with(&[(&key("Seen.bsl"), &seen)], 1, 0),
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert!(!rows.contains_key(&key("Unseen.bsl")), "the unverified row is dropped");
+        assert!(rows.contains_key(&key("Seen.bsl")), "the verified row survives");
+
+        let solo_dir = tempdir().unwrap();
+        let solo_ws = solo_dir.path();
+        let solo = solo_ws.join("Solo.bsl");
+        let solo_content = "Процедура Одна()\nКонецПроцедуры";
+        fs::write(&solo, solo_content).unwrap();
+        let solo_manifest = HashMap::from([(
+            key("Solo.bsl"),
+            super::fingerprint_content(solo_content, "Solo.bsl"),
+        )]);
+        let solo_roots = single_root(solo_ws);
+        let solo_store = Store::open(&solo_ws.join("search.db")).unwrap();
+        let mut solo_cache = WorkspaceOverlayCache::default();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &solo_manifest,
+            &solo_roots,
+            &solo_store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        solo_cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &solo_store).unwrap();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest_scanned(
+            &solo_manifest,
+            scanned_with(&[], 1, 0),
+            &solo_store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        solo_cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &solo_store).unwrap();
+        assert!(
+            solo_store
+                .load_overlay_fingerprint_cache("")
+                .unwrap_or(None)
+                .unwrap_or_default()
+                .is_empty(),
+            "nothing was verified, nothing may stay claimed"
+        );
+    }
+
+    /// The point refresh distinguishes "the file is provably gone" (remove the entry) from
+    /// "the file is alive but unreachable right now" (keep everything, retry with a budget).
+    /// Provably gone: NotFound, a directory replaced by a file, a proven symlink cycle — final
+    /// or in an ancestor, agreeing with the walk. Alive: a permission error, and a long but
+    /// FINITE link chain (`ELOOP` alone is not proof of a cycle). The raw and the manifest
+    /// implementations answer independently, so both are exercised.
+    #[cfg(unix)]
+    #[test]
+    fn a_point_refresh_removes_proven_absence_and_keeps_live_files_raw() {
+        point_absence_matrix(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_point_refresh_removes_proven_absence_and_keeps_live_files_manifest() {
+        point_absence_matrix(true);
+    }
+
+    #[cfg(unix)]
+    fn point_absence_matrix(use_manifest: bool) {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let body = |name: &str| format!("Процедура {name}()\nКонецПроцедуры");
+
+        fs::write(workspace.join("Gone.bsl"), body("Удалённая")).unwrap();
+        fs::create_dir(workspace.join("dir")).unwrap();
+        fs::write(workspace.join("dir/Inside.bsl"), body("ВКаталоге")).unwrap();
+        fs::write(workspace.join("SelfLoop.bsl"), body("Закольцованная")).unwrap();
+        fs::create_dir(workspace.join("anc")).unwrap();
+        fs::write(workspace.join("anc/Under.bsl"), body("ПодЦиклом")).unwrap();
+        fs::create_dir(workspace.join("perm")).unwrap();
+        fs::write(workspace.join("perm/Kept.bsl"), body("Недоступная")).unwrap();
+        fs::write(workspace.join("Chain.bsl"), body("Цепочечная")).unwrap();
+
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let roots = single_root(workspace);
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        let manifest: HashMap<FileKey, String> =
+            HashMap::from([(key("Gone.bsl"), "manifest-differs".to_owned())]);
+        // The raw arm resolves its baseline through the store, so the baseline row lives there.
+        let gone = key("Gone.bsl");
+        store.upsert_file(&gone.root_id, &gone.path, b"baseline-differs", "code").unwrap();
+        if use_manifest {
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        } else {
+            cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
+        }
+        assert_eq!(cache.snapshot().lexical_documents.len(), 6, "all six files indexed");
+
+        // Provably gone, four shapes.
+        fs::remove_file(workspace.join("Gone.bsl")).unwrap();
+        fs::remove_dir_all(workspace.join("dir")).unwrap();
+        fs::write(workspace.join("dir"), "не каталог").unwrap();
+        fs::remove_file(workspace.join("SelfLoop.bsl")).unwrap();
+        std::os::unix::fs::symlink("SelfLoop.bsl", workspace.join("SelfLoop.bsl")).unwrap();
+        fs::remove_dir_all(workspace.join("anc")).unwrap();
+        std::os::unix::fs::symlink("anc", workspace.join("anc")).unwrap();
+        // Alive but unreachable, two shapes.
+        if !deny_access(&workspace.join("perm")) {
+            return;
+        }
+        fs::remove_file(workspace.join("Chain.bsl")).unwrap();
+        let mut target = outside.path().join("Target.bsl");
+        fs::write(&target, body("Цепочечная")).unwrap();
+        for hop in (0..64).rev() {
+            let link = outside.path().join(format!("chain{hop}"));
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            target = link;
+        }
+        std::os::unix::fs::symlink(&target, workspace.join("Chain.bsl")).unwrap();
+
+        for path in [
+            "Gone.bsl",
+            "dir/Inside.bsl",
+            "SelfLoop.bsl",
+            "anc/Under.bsl",
+            "perm/Kept.bsl",
+            "Chain.bsl",
+        ] {
+            cache.mark_dirty_path(key(path));
+        }
+        let result = if use_manifest {
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false)
+        } else {
+            cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, false)
+        };
+        restore_access(&workspace.join("perm"));
+        result.unwrap();
+
+        let overlay = cache.snapshot();
+        let mut names: Vec<&str> =
+            overlay.lexical_documents.iter().map(|d| d.symbol_name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["Недоступная", "Цепочечная"],
+            "proven absence removes, live-but-unreachable keeps"
+        );
+        assert!(
+            overlay.hidden_paths.contains(&key("Gone.bsl")),
+            "a provably deleted baseline file is hidden"
+        );
+        let dirty = cache.dirty_paths_snapshot();
+        assert!(dirty.contains_key(&key("perm/Kept.bsl")), "unreachable keys stay marked");
+        assert!(dirty.contains_key(&key("Chain.bsl")));
+        assert!(!dirty.contains_key(&key("Gone.bsl")), "removals consume their mark");
     }
 
     /// The overlay must not walk the tree itself: the walk policy (which links

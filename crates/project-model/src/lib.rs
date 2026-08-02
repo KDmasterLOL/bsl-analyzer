@@ -17,7 +17,9 @@ pub use file_role::{
     is_substrate_listed_body_path, FileRole, METADATA_WATCHED_EXTENSIONS, SOURCE_EXTENSIONS,
 };
 pub use source_set::SourceSet;
-pub use workspace_walk::{walk_workspace_roots, WalkOutcome, WalkedFile};
+pub use workspace_walk::{
+    path_crosses_a_link_cycle, walk_workspace_roots, WalkOutcome, WalkedFile,
+};
 
 /// A config file exists but cannot be read or parsed. Deliberately not folded
 /// into a default config: a broken file silently reverting to auto-discovery

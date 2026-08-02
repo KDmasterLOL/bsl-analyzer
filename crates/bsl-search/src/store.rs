@@ -2182,6 +2182,20 @@ impl Store {
         Ok(())
     }
 
+    /// Drop exactly these keys' fingerprint rows, leaving every other row alone. A row asserts
+    /// "this file was verified against the manifest", so the caller that failed to stat or read a
+    /// file must retract the claim for THAT file without wiping the verified neighbours — a
+    /// table-wide delete here would cost a full re-read of the workspace on the next plan.
+    pub fn delete_overlay_fingerprint_entries(&self, keys: &[FileKey]) -> Result<(), SearchError> {
+        let mut stmt = self
+            .conn
+            .prepare("DELETE FROM overlay_fingerprint_cache WHERE root_id = ?1 AND path = ?2")?;
+        for key in keys {
+            stmt.execute(params![key.root_id, key.path])?;
+        }
+        Ok(())
+    }
+
     pub fn load_overlay_embedding_cache(
         &self,
         model_id: &str,
