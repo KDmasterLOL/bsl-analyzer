@@ -73,9 +73,25 @@ pub struct RefreshPlan {
     /// Distinct `embedding_key -> embedding input` pairs that have no warm-cache vector; these are
     /// the inputs Phase B embeds. The key is the hash of the embedding input (the semantic key).
     missing_embeddings: HashMap<String, String>,
+    /// See [`ScannedFiles::unreadable`]: how much of the tree the planning scan could not read.
+    scan_unreadable: usize,
+    /// See [`ScannedFiles::canonical_fallbacks`]: files whose physical spelling is unknown.
+    scan_canonical_fallbacks: usize,
+    /// Every key the planning scan saw, whether or not it produced a planned entry. Publication
+    /// needs the distinction: a seen key without an entry was PROVEN baseline-equal, an unseen key
+    /// was proven nothing.
+    seen_keys: HashSet<FileKey>,
+    /// Seen files whose read failed during planning: proven present, contents unknown.
+    read_failures: HashSet<FileKey>,
 }
 
 impl RefreshPlan {
+    /// Whether the planning scan may speak for the whole tree — same verdict as
+    /// [`ScannedFiles::clean`].
+    fn scan_is_clean(&self) -> bool {
+        self.scan_unreadable == 0 && self.scan_canonical_fallbacks == 0
+    }
+
     /// The distinct `(embedding_key, embedding_input)` pairs Phase B must embed.
     pub fn missing_embeddings(&self) -> &HashMap<String, String> {
         &self.missing_embeddings
@@ -140,6 +156,12 @@ pub struct WorkspaceOverlayCache {
     dirty_failures: HashMap<FileKey, u32>,
     watcher_mode: bool,
     initialized: bool,
+    /// The last full publication ran over a scan that could not vouch for the whole tree, so its
+    /// removals were withheld and only a future CLEAN full scan can catch up. The dispatchers
+    /// honour it by taking the full-scan arm even in watcher mode; a clean full publication
+    /// clears it. (A read failure of a seen file is NOT this: the file list was complete, and the
+    /// per-key dirty mark already drives the retry.)
+    full_rescan_pending: bool,
     /// How many overlay entries have been (re)built from a resident-provided shared parse, rather
     /// than a self-parsed disk read. A cumulative observability counter — proves the resident-fed
     /// path actually fires — reset only by [`Self::clear`].
@@ -224,6 +246,14 @@ impl WorkspaceOverlayCache {
 
     pub fn enable_watcher_mode(&mut self) {
         self.watcher_mode = true;
+    }
+
+    /// Whether the last full publication ran over an incomplete scan and withheld its removals,
+    /// leaving the overlay waiting for a clean full scan to catch up. The dispatchers already
+    /// honour this on the next cold-scan-allowed refresh; the accessor is for a caller deciding
+    /// whether to drive one.
+    pub fn needs_full_rescan(&self) -> bool {
+        self.full_rescan_pending
     }
 
     pub fn mark_dirty_path(&mut self, key: FileKey) {
@@ -346,7 +376,7 @@ impl WorkspaceOverlayCache {
         allow_cold_scan: bool,
     ) -> Result<(), SearchError> {
         if allow_cold_scan {
-            if !self.initialized || !self.watcher_mode {
+            if !self.initialized || !self.watcher_mode || self.full_rescan_pending {
                 self.full_refresh_from_manifest(
                     manifest_fingerprints,
                     roots,
@@ -400,7 +430,7 @@ impl WorkspaceOverlayCache {
         if allow_cold_scan {
             let baseline_files: HashMap<FileKey, Vec<u8>> =
                 store.all_files_in_collection("code")?.into_iter().collect();
-            if !self.initialized || !self.watcher_mode {
+            if !self.initialized || !self.watcher_mode || self.full_rescan_pending {
                 self.full_refresh(&baseline_files, roots, embedder, batch_size, hash_mode)?;
             } else if !self.dirty_paths.is_empty() {
                 let dirty: Vec<FileKey> = self.dirty_paths.drain().map(|(key, _)| key).collect();
@@ -441,9 +471,23 @@ impl WorkspaceOverlayCache {
         batch_size: usize,
         hash_mode: BaselineHashMode,
     ) -> Result<(), SearchError> {
-        let workspace_files = scan_workspace_files(roots).files;
+        let scanned = scan_workspace_files(roots);
+        self.full_refresh_scanned(baseline_files, scanned, embedder, batch_size, hash_mode)
+    }
+
+    fn full_refresh_scanned(
+        &mut self,
+        baseline_files: &HashMap<FileKey, Vec<u8>>,
+        scanned: ScannedFiles,
+        embedder: Option<&Embedder>,
+        batch_size: usize,
+        hash_mode: BaselineHashMode,
+    ) -> Result<(), SearchError> {
+        let scan_is_clean = scanned.clean();
+        let workspace_files = scanned.files;
         let mut seen_keys = HashSet::new();
         let mut hidden_paths = HashSet::new();
+        let mut read_failures: HashSet<FileKey> = HashSet::new();
 
         for file in workspace_files {
             seen_keys.insert(file.key.clone());
@@ -481,7 +525,12 @@ impl WorkspaceOverlayCache {
 
             let content = match std::fs::read_to_string(&file.abs_path) {
                 Ok(content) => content,
-                Err(_) => continue,
+                Err(_) => {
+                    // Proven present, contents unknown: the key must stay dirty so a later
+                    // refresh retries it.
+                    read_failures.insert(file.key.clone());
+                    continue;
+                }
             };
             let file_hash = compute_file_hash(&content, hash_mode);
             if baseline_hash.is_some_and(|stored_hash| stored_hash == &file_hash) {
@@ -507,17 +556,60 @@ impl WorkspaceOverlayCache {
             self.entries.insert(file.key, entry);
         }
 
-        self.entries.retain(|key, _| seen_keys.contains(key));
+        if scan_is_clean {
+            self.entries.retain(|key, _| seen_keys.contains(key));
+            for key in baseline_files.keys() {
+                if !seen_keys.contains(key) {
+                    hidden_paths.insert(key.clone());
+                }
+            }
+            self.hidden_paths = hidden_paths;
+        } else {
+            self.merge_partial_hidden(&seen_keys, &read_failures, &hidden_paths);
+        }
+        self.finish_full_publication(scan_is_clean, &seen_keys, &read_failures);
+        Ok(())
+    }
 
-        for key in baseline_files.keys() {
-            if !seen_keys.contains(key) {
-                hidden_paths.insert(key.clone());
+    /// The hidden-path merge of an unclean full publication: only a SEEN key may change its
+    /// hiding — the scan proved something about it — while an unseen key keeps its prior state,
+    /// because absence from an incomplete scan proves nothing. A seen-but-unread key is skipped
+    /// too: un-hiding on a failed read would serve the baseline and the stale overlay both.
+    fn merge_partial_hidden(
+        &mut self,
+        seen_keys: &HashSet<FileKey>,
+        read_failures: &HashSet<FileKey>,
+        fresh_hidden: &HashSet<FileKey>,
+    ) {
+        for key in seen_keys {
+            if read_failures.contains(key) {
+                continue;
+            }
+            if fresh_hidden.contains(key) {
+                self.hidden_paths.insert(key.clone());
+            } else {
+                self.hidden_paths.remove(key);
             }
         }
+    }
 
-        self.hidden_paths = hidden_paths;
-        self.dirty_paths.clear();
-        Ok(())
+    /// The shared tail of an in-place full publication: dirty marks are cleared ONLY for keys the
+    /// pass actually processed — a key it failed to read stays dirty for the retry, and a key an
+    /// unclean scan never saw stays dirty because nothing about it was proven — and the rescan
+    /// flag records whether removals were withheld.
+    fn finish_full_publication(
+        &mut self,
+        scan_is_clean: bool,
+        seen_keys: &HashSet<FileKey>,
+        read_failures: &HashSet<FileKey>,
+    ) {
+        if scan_is_clean {
+            self.dirty_paths.retain(|key, _| read_failures.contains(key));
+        } else {
+            self.dirty_paths
+                .retain(|key, _| !seen_keys.contains(key) || read_failures.contains(key));
+        }
+        self.full_rescan_pending = !scan_is_clean;
     }
 
     fn refresh_dirty_paths(
@@ -647,6 +739,24 @@ impl WorkspaceOverlayCache {
         batch_size: usize,
         store: &Store,
     ) -> Result<(), SearchError> {
+        let scanned = scan_workspace_files(roots);
+        self.full_refresh_from_manifest_scanned(
+            manifest_fingerprints,
+            scanned,
+            embedder,
+            batch_size,
+            store,
+        )
+    }
+
+    fn full_refresh_from_manifest_scanned(
+        &mut self,
+        manifest_fingerprints: &HashMap<FileKey, String>,
+        scanned: ScannedFiles,
+        embedder: Option<&Embedder>,
+        batch_size: usize,
+        store: &Store,
+    ) -> Result<(), SearchError> {
         let manifest_snapshot_id = store
             .load_baseline_manifest()
             .ok()
@@ -677,10 +787,12 @@ impl WorkspaceOverlayCache {
             }
         }
 
-        let workspace_files = scan_workspace_files(roots).files;
+        let scan_is_clean = scanned.clean();
+        let workspace_files = scanned.files;
         let mut seen_keys = HashSet::new();
         let mut hidden_paths = HashSet::new();
         let mut updated_persisted = HashMap::new();
+        let mut read_failures: HashSet<FileKey> = HashSet::new();
 
         for file in &workspace_files {
             seen_keys.insert(file.key.clone());
@@ -735,7 +847,12 @@ impl WorkspaceOverlayCache {
 
             let content = match std::fs::read_to_string(&file.abs_path) {
                 Ok(content) => content,
-                Err(_) => continue,
+                Err(_) => {
+                    // Proven present, contents unknown: the key must stay dirty so a later
+                    // refresh retries it.
+                    read_failures.insert(file.key.clone());
+                    continue;
+                }
             };
             let file_hash = normalized_file_hash_for_content(&content);
             let local_fp = fingerprint_content(&content, &file.key.path);
@@ -775,16 +892,18 @@ impl WorkspaceOverlayCache {
             self.entries.insert(file.key.clone(), entry);
         }
 
-        self.entries.retain(|key, _| seen_keys.contains(key));
-
-        for key in manifest_fingerprints.keys() {
-            if !seen_keys.contains(key) {
-                hidden_paths.insert(key.clone());
+        if scan_is_clean {
+            self.entries.retain(|key, _| seen_keys.contains(key));
+            for key in manifest_fingerprints.keys() {
+                if !seen_keys.contains(key) {
+                    hidden_paths.insert(key.clone());
+                }
             }
+            self.hidden_paths = hidden_paths;
+        } else {
+            self.merge_partial_hidden(&seen_keys, &read_failures, &hidden_paths);
         }
-
-        self.hidden_paths = hidden_paths;
-        self.dirty_paths.clear();
+        self.finish_full_publication(scan_is_clean, &seen_keys, &read_failures);
 
         if !updated_persisted.is_empty() {
             if let Err(error) =
@@ -823,6 +942,23 @@ impl WorkspaceOverlayCache {
         warm_embeddings: &HashMap<String, Vec<f32>>,
         graph_context: Option<&dyn GraphContextProvider>,
     ) -> Result<RefreshPlan, SearchError> {
+        let scanned = scan_workspace_files(roots);
+        Self::plan_full_refresh_from_manifest_scanned(
+            manifest_fingerprints,
+            scanned,
+            store,
+            warm_embeddings,
+            graph_context,
+        )
+    }
+
+    fn plan_full_refresh_from_manifest_scanned(
+        manifest_fingerprints: &HashMap<FileKey, String>,
+        scanned: ScannedFiles,
+        store: &Store,
+        warm_embeddings: &HashMap<String, Vec<f32>>,
+        graph_context: Option<&dyn GraphContextProvider>,
+    ) -> Result<RefreshPlan, SearchError> {
         let snapshot_id = store
             .load_baseline_manifest()
             .ok()
@@ -832,12 +968,15 @@ impl WorkspaceOverlayCache {
         let persisted =
             store.load_overlay_fingerprint_cache(&snapshot_id).unwrap_or(None).unwrap_or_default();
 
-        let workspace_files = scan_workspace_files(roots).files;
+        let scan_unreadable = scanned.unreadable;
+        let scan_canonical_fallbacks = scanned.canonical_fallbacks;
+        let workspace_files = scanned.files;
         let mut seen_keys = HashSet::new();
         let mut hidden_paths = HashSet::new();
         let mut updated_persisted = HashMap::new();
         let mut entries: Vec<(FileKey, PlannedEntry)> = Vec::new();
         let mut missing_embeddings: HashMap<String, String> = HashMap::new();
+        let mut read_failures: HashSet<FileKey> = HashSet::new();
 
         for file in &workspace_files {
             seen_keys.insert(file.key.clone());
@@ -859,7 +998,13 @@ impl WorkspaceOverlayCache {
 
             let content = match std::fs::read_to_string(&file.abs_path) {
                 Ok(content) => content,
-                Err(_) => continue,
+                Err(_) => {
+                    // A seen-but-unread file is proven present with unknown contents; the
+                    // publication keeps its prior state and retries, so the plan must carry the
+                    // failure rather than silently plan nothing for the key.
+                    read_failures.insert(file.key.clone());
+                    continue;
+                }
             };
             let file_hash = normalized_file_hash_for_content(&content);
             let local_fp = fingerprint_content(&content, &file.key.path);
@@ -903,9 +1048,13 @@ impl WorkspaceOverlayCache {
             ));
         }
 
-        for key in manifest_fingerprints.keys() {
-            if !seen_keys.contains(key) {
-                hidden_paths.insert(key.clone());
+        // Absence from an incomplete scan proves nothing, so only a clean scan may read "not
+        // seen" as "deleted from disk" and hide the baseline copy.
+        if scan_unreadable == 0 && scan_canonical_fallbacks == 0 {
+            for key in manifest_fingerprints.keys() {
+                if !seen_keys.contains(key) {
+                    hidden_paths.insert(key.clone());
+                }
             }
         }
 
@@ -915,6 +1064,10 @@ impl WorkspaceOverlayCache {
             hidden_paths,
             updated_persisted,
             missing_embeddings,
+            scan_unreadable,
+            scan_canonical_fallbacks,
+            seen_keys,
+            read_failures,
         })
     }
 
@@ -933,6 +1086,7 @@ impl WorkspaceOverlayCache {
         embedder: Option<&Embedder>,
         store: &Store,
     ) -> Result<(), SearchError> {
+        let scan_is_clean = plan.scan_is_clean();
         for (embedding_key, embedding) in new_embeddings {
             self.embedding_cache.insert(embedding_key, embedding);
         }
@@ -960,17 +1114,49 @@ impl WorkspaceOverlayCache {
             );
         }
 
-        self.entries = entries;
-        self.hidden_paths = plan.hidden_paths;
+        if scan_is_clean {
+            self.entries = entries;
+            self.hidden_paths = plan.hidden_paths;
+        } else {
+            // The plan may not speak for what its scan did not see, so it publishes as a merge:
+            // planned entries land, a seen key the plan proved baseline-equal (no entry, no read
+            // failure) is removed and un-hidden, and everything unseen keeps its prior state.
+            let planned_keys: HashSet<FileKey> = entries.keys().cloned().collect();
+            for (key, entry) in entries {
+                self.entries.insert(key, entry);
+            }
+            for key in &plan.seen_keys {
+                if plan.read_failures.contains(key) {
+                    continue;
+                }
+                if !planned_keys.contains(key) {
+                    self.entries.remove(key);
+                }
+                if plan.hidden_paths.contains(key) {
+                    self.hidden_paths.insert(key.clone());
+                } else {
+                    self.hidden_paths.remove(key);
+                }
+            }
+        }
         // Clear only the dirty flags this full refresh superseded. A path is superseded only if it
         // has not been re-marked since the snapshot (same sequence): a watcher edit that landed
         // during the lock-free embed bumps the sequence (or adds a new path), so it survives and a
         // later refresh re-embeds it. A blanket clear would silently drop an edit made mid-pass.
+        // On top of the sequence check, only a PROCESSED key is superseded: a key the pass failed
+        // to read stays dirty for the retry, and a key an unclean scan never saw stays dirty
+        // because nothing about it was proven.
         for (key, seq) in dirty_before {
-            if self.dirty_paths.get(key) == Some(seq) {
+            if self.dirty_paths.get(key) != Some(seq) {
+                continue;
+            }
+            let processed = !plan.read_failures.contains(key)
+                && (scan_is_clean || plan.seen_keys.contains(key));
+            if processed {
                 self.dirty_paths.remove(key);
             }
         }
+        self.full_rescan_pending = !scan_is_clean;
         self.initialized = true;
 
         if !plan.updated_persisted.is_empty() {
@@ -1247,8 +1433,21 @@ struct ScannedFiles {
     files: Vec<WorkspaceFileState>,
     /// See [`project_model::SourceSet::unreadable`]: coverage is incomplete.
     unreadable: usize,
+    /// See [`project_model::SourceSet::loops`]: benign, coverage complete.
+    loops: usize,
+    /// See [`project_model::SourceSet::dangling`]: benign, coverage complete.
+    dangling: usize,
     /// See [`project_model::SourceSet::canonical_fallbacks`]: identity is degraded.
     canonical_fallbacks: usize,
+}
+
+impl ScannedFiles {
+    /// Whether `files` may speak for the whole tree — the same verdict as
+    /// [`project_model::SourceSet::clean`]: loops and dangling links leave
+    /// coverage complete, so they deliberately do not count.
+    fn clean(&self) -> bool {
+        self.unreadable == 0 && self.canonical_fallbacks == 0
+    }
 }
 
 /// Every source file of every registered root, each under the key it is stored
@@ -1257,13 +1456,21 @@ fn scan_workspace_files(roots: &WorkspaceRoots) -> ScannedFiles {
     let declared: Vec<PathBuf> = roots.entries().map(|(_, root)| root.to_path_buf()).collect();
     let set = project_model::SourceSet::scan(&declared);
     let scanned = scanned_files_from(roots, &set);
-    if scanned.unreadable > 0 || scanned.canonical_fallbacks > 0 {
+    if !scanned.clean() {
         tracing::warn!(
             unreadable = scanned.unreadable,
             canonical_fallbacks = scanned.canonical_fallbacks,
             "workspace overlay scan did not cover the whole tree"
         );
     }
+    tracing::debug!(
+        files = scanned.files.len(),
+        unreadable = scanned.unreadable,
+        loops = scanned.loops,
+        dangling = scanned.dangling,
+        canonical_fallbacks = scanned.canonical_fallbacks,
+        "workspace overlay scan"
+    );
     scanned
 }
 
@@ -1294,7 +1501,13 @@ fn scanned_files_from(roots: &WorkspaceRoots, set: &project_model::SourceSet) ->
             },
         });
     }
-    ScannedFiles { files, unreadable: set.unreadable, canonical_fallbacks: set.canonical_fallbacks }
+    ScannedFiles {
+        files,
+        unreadable: set.unreadable,
+        loops: set.loops,
+        dangling: set.dangling,
+        canonical_fallbacks: set.canonical_fallbacks,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2662,6 +2875,592 @@ mod tests {
 
         assert_eq!(documents.len(), 1, "the linked subtree belongs to the universe");
         assert_eq!(documents[0].symbol_name, "ЗаКаталожнойСсылкой");
+    }
+
+    /// A hand-built scan result: the files the walk "saw", each stat'ed from
+    /// disk, plus the completeness counters under test.
+    fn scanned_with(
+        seen: &[(&FileKey, &Path)],
+        unreadable: usize,
+        canonical_fallbacks: usize,
+    ) -> super::ScannedFiles {
+        let files = seen
+            .iter()
+            .map(|(key, path)| {
+                let metadata = fs::metadata(path).unwrap();
+                super::WorkspaceFileState {
+                    key: (*key).clone(),
+                    abs_path: path.to_path_buf(),
+                    fingerprint: super::FileFingerprint {
+                        len: metadata.len(),
+                        modified: metadata.modified().ok(),
+                    },
+                }
+            })
+            .collect();
+        super::ScannedFiles { files, unreadable, loops: 0, dangling: 0, canonical_fallbacks }
+    }
+
+    /// A workspace with one baseline-divergent file (an overlay entry hiding its
+    /// baseline) and one baseline-equal file (no entry, nothing hidden), fully
+    /// refreshed once so the cache holds that state.
+    fn cache_with_edited_and_clean(
+        workspace: &Path,
+    ) -> (WorkspaceOverlayCache, HashMap<FileKey, Vec<u8>>) {
+        fs::write(workspace.join("Edited.bsl"), "Процедура Изменённая()\nКонецПроцедуры").unwrap();
+        let clean_content = "Процедура Прежняя()\nКонецПроцедуры";
+        fs::write(workspace.join("Clean.bsl"), clean_content).unwrap();
+        let baseline = HashMap::from([
+            (key("Edited.bsl"), b"baseline-differs".to_vec()),
+            (
+                key("Clean.bsl"),
+                super::compute_file_hash(clean_content, BaselineHashMode::RawFileBytes),
+            ),
+        ]);
+        let mut cache = WorkspaceOverlayCache::default();
+        cache
+            .full_refresh(
+                &baseline,
+                &single_root(workspace),
+                None,
+                32,
+                BaselineHashMode::RawFileBytes,
+            )
+            .unwrap();
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents.len(), 1, "only the edited file diverges");
+        assert!(overlay.hidden_paths.contains(&key("Edited.bsl")));
+        assert!(!overlay.hidden_paths.contains(&key("Clean.bsl")));
+        (cache, baseline)
+    }
+
+    /// An unclean scan proves nothing about what it did not see: the unseen
+    /// entry survives, its baseline stays hidden, and the unseen baseline-equal
+    /// file does not become hidden — absence is not evidence of deletion.
+    #[test]
+    fn an_unclean_scan_keeps_the_unseen_entry_and_hides_nothing_new() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let (mut cache, baseline) = cache_with_edited_and_clean(workspace);
+
+        cache
+            .full_refresh_scanned(
+                &baseline,
+                scanned_with(&[], 1, 0),
+                None,
+                32,
+                BaselineHashMode::RawFileBytes,
+            )
+            .unwrap();
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents.len(), 1, "the unseen entry survives");
+        assert!(overlay.hidden_paths.contains(&key("Edited.bsl")), "its baseline stays hidden");
+        assert!(
+            !overlay.hidden_paths.contains(&key("Clean.bsl")),
+            "an unseen live file must not become hidden"
+        );
+        assert!(cache.needs_full_rescan(), "withheld removals demand a clean rescan");
+    }
+
+    /// The same protection on the manifest-driven full refresh — an independent
+    /// implementation of the same reconciliation.
+    #[test]
+    fn an_unclean_scan_keeps_the_unseen_entry_on_the_manifest_path() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        fs::write(workspace.join("Edited.bsl"), "Процедура Изменённая()\nКонецПроцедуры").unwrap();
+        let clean_content = "Процедура Прежняя()\nКонецПроцедуры";
+        fs::write(workspace.join("Clean.bsl"), clean_content).unwrap();
+        let manifest = HashMap::from([
+            (key("Edited.bsl"), "manifest-differs".to_owned()),
+            (key("Clean.bsl"), super::fingerprint_content(clean_content, "Clean.bsl")),
+        ]);
+        let mut cache = WorkspaceOverlayCache::default();
+        cache
+            .full_refresh_from_manifest(&manifest, &single_root(workspace), None, 32, &store)
+            .unwrap();
+        assert_eq!(cache.snapshot().lexical_documents.len(), 1);
+        assert!(cache.snapshot().hidden_paths.contains(&key("Edited.bsl")));
+
+        cache
+            .full_refresh_from_manifest_scanned(
+                &manifest,
+                scanned_with(&[], 1, 0),
+                None,
+                32,
+                &store,
+            )
+            .unwrap();
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents.len(), 1, "the unseen entry survives");
+        assert!(overlay.hidden_paths.contains(&key("Edited.bsl")), "its baseline stays hidden");
+        assert!(
+            !overlay.hidden_paths.contains(&key("Clean.bsl")),
+            "an unseen live file must not become hidden"
+        );
+        assert!(cache.needs_full_rescan());
+    }
+
+    /// The planned path publishes through a merge when the scan was unclean: the
+    /// unmatched prior entry and the prior hidings survive, while a seen key the
+    /// plan proved baseline-equal is removed and un-hidden.
+    #[test]
+    fn an_unclean_plan_merges_instead_of_replacing() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        fs::write(workspace.join("Edited.bsl"), "Процедура Изменённая()\nКонецПроцедуры").unwrap();
+        let returned = workspace.join("Returned.bsl");
+        fs::write(&returned, "Процедура Вернулась()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([
+            (key("Edited.bsl"), "manifest-differs".to_owned()),
+            (key("Returned.bsl"), "manifest-differs-too".to_owned()),
+        ]);
+        let roots = single_root(workspace);
+        let mut cache = WorkspaceOverlayCache::default();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        assert_eq!(cache.snapshot().lexical_documents.len(), 2, "both files diverge");
+
+        // `Returned.bsl` goes back to its baseline; the unclean scan sees ONLY it.
+        fs::write(&returned, "Процедура ПоБазлайну()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([
+            (key("Edited.bsl"), "manifest-differs".to_owned()),
+            (
+                key("Returned.bsl"),
+                super::fingerprint_content(
+                    "Процедура ПоБазлайну()\nКонецПроцедуры",
+                    "Returned.bsl",
+                ),
+            ),
+        ]);
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest_scanned(
+            &manifest,
+            scanned_with(&[(&key("Returned.bsl"), &returned)], 1, 0),
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        let overlay = cache.snapshot();
+        let names: Vec<&str> =
+            overlay.lexical_documents.iter().map(|d| d.symbol_name.as_str()).collect();
+        assert_eq!(names, vec!["Изменённая"], "unseen entry kept, baseline-equal seen key removed");
+        assert!(
+            overlay.hidden_paths.contains(&key("Edited.bsl")),
+            "the unseen hiding survives the merge"
+        );
+        assert!(
+            !overlay.hidden_paths.contains(&key("Returned.bsl")),
+            "a seen key proven baseline-equal is un-hidden"
+        );
+        assert!(cache.needs_full_rescan());
+    }
+
+    /// A degraded identity (`canonical_fallbacks`) is the same "may not speak
+    /// for the tree" verdict as an unreadable subtree.
+    #[test]
+    fn canonical_fallbacks_also_withhold_removals() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let (mut cache, baseline) = cache_with_edited_and_clean(workspace);
+
+        cache
+            .full_refresh_scanned(
+                &baseline,
+                scanned_with(&[], 0, 1),
+                None,
+                32,
+                BaselineHashMode::RawFileBytes,
+            )
+            .unwrap();
+        assert_eq!(cache.snapshot().lexical_documents.len(), 1, "the unseen entry survives");
+        assert!(cache.needs_full_rescan());
+    }
+
+    /// Loops and dangling links leave coverage complete: a scan with only those
+    /// is clean, so a genuinely-deleted file is removed and its baseline hidden,
+    /// exactly as before.
+    #[test]
+    fn loops_and_dangling_links_do_not_withhold_removals() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let (mut cache, baseline) = cache_with_edited_and_clean(workspace);
+
+        let benign = super::ScannedFiles {
+            files: Vec::new(),
+            unreadable: 0,
+            loops: 2,
+            dangling: 3,
+            canonical_fallbacks: 0,
+        };
+        cache
+            .full_refresh_scanned(&baseline, benign, None, 32, BaselineHashMode::RawFileBytes)
+            .unwrap();
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents.len(), 0, "a clean scan removes the deleted entry");
+        assert!(
+            overlay.hidden_paths.contains(&key("Edited.bsl")),
+            "the deleted file's baseline is hidden"
+        );
+        assert!(
+            overlay.hidden_paths.contains(&key("Clean.bsl")),
+            "every baseline key absent from a clean scan is hidden"
+        );
+        assert!(!cache.needs_full_rescan(), "a clean scan leaves nothing to catch up");
+    }
+
+    /// Positive evidence still acts during an unclean publication: a seen file
+    /// back at its baseline is removed and un-hidden, a seen changed file is
+    /// re-chunked.
+    #[test]
+    fn an_unclean_scan_still_applies_what_it_saw() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let returned = workspace.join("Returned.bsl");
+        let changed = workspace.join("Changed.bsl");
+        fs::write(&returned, "Процедура Вернулась()\nКонецПроцедуры").unwrap();
+        fs::write(&changed, "Процедура Старая()\nКонецПроцедуры").unwrap();
+        let baseline_content = "Процедура ПоБазлайну()\nКонецПроцедуры";
+        let baseline = HashMap::from([
+            (
+                key("Returned.bsl"),
+                super::compute_file_hash(baseline_content, BaselineHashMode::RawFileBytes),
+            ),
+            (key("Changed.bsl"), b"baseline-differs".to_vec()),
+        ]);
+        let mut cache = WorkspaceOverlayCache::default();
+        cache
+            .full_refresh(
+                &baseline,
+                &single_root(workspace),
+                None,
+                32,
+                BaselineHashMode::RawFileBytes,
+            )
+            .unwrap();
+        assert_eq!(cache.snapshot().lexical_documents.len(), 2, "both diverge at first");
+
+        fs::write(&returned, baseline_content).unwrap();
+        fs::write(&changed, "Процедура Новая()\nКонецПроцедуры").unwrap();
+        cache
+            .full_refresh_scanned(
+                &baseline,
+                scanned_with(
+                    &[(&key("Returned.bsl"), &returned), (&key("Changed.bsl"), &changed)],
+                    1,
+                    0,
+                ),
+                None,
+                32,
+                BaselineHashMode::RawFileBytes,
+            )
+            .unwrap();
+        let overlay = cache.snapshot();
+        let names: Vec<&str> =
+            overlay.lexical_documents.iter().map(|d| d.symbol_name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Новая"],
+            "the returned file is removed, the changed one re-chunked"
+        );
+        assert!(
+            !overlay.hidden_paths.contains(&key("Returned.bsl")),
+            "returning to baseline un-hides it even on an unclean scan"
+        );
+        assert!(overlay.hidden_paths.contains(&key("Changed.bsl")));
+    }
+
+    /// After an unclean publication the dirty set is EXACTLY the unprocessed
+    /// keys: a successfully-refreshed seen key is cleared, a seen-but-unread key
+    /// stays, an unseen key stays. All three sides matter: keeping everything
+    /// would re-process healthy keys forever, clearing everything loses the
+    /// stale ones.
+    #[test]
+    fn an_unclean_full_refresh_clears_exactly_the_processed_dirty_keys() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let processed = workspace.join("Processed.bsl");
+        fs::write(&processed, "Процедура Обработана()\nКонецПроцедуры").unwrap();
+        // A directory shaped like a `.bsl`: stat succeeds, reading fails.
+        let broken = workspace.join("Broken.bsl");
+        fs::create_dir(&broken).unwrap();
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.mark_dirty_path(key("Processed.bsl"));
+        cache.mark_dirty_path(key("Broken.bsl"));
+        cache.mark_dirty_path(key("Unseen.bsl"));
+        cache
+            .full_refresh_scanned(
+                &HashMap::new(),
+                scanned_with(
+                    &[(&key("Processed.bsl"), &processed), (&key("Broken.bsl"), &broken)],
+                    1,
+                    0,
+                ),
+                None,
+                32,
+                BaselineHashMode::RawFileBytes,
+            )
+            .unwrap();
+        let mut dirty: Vec<String> =
+            cache.dirty_paths_snapshot().keys().map(|k| k.path.clone()).collect();
+        dirty.sort();
+        assert_eq!(
+            dirty,
+            vec!["Broken.bsl".to_owned(), "Unseen.bsl".to_owned()],
+            "exactly the unread and the unseen keys stay dirty"
+        );
+    }
+
+    /// The same exactness on the manifest-driven full refresh.
+    #[test]
+    fn an_unclean_manifest_refresh_clears_exactly_the_processed_dirty_keys() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let processed = workspace.join("Processed.bsl");
+        fs::write(&processed, "Процедура Обработана()\nКонецПроцедуры").unwrap();
+        let broken = workspace.join("Broken.bsl");
+        fs::create_dir(&broken).unwrap();
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.mark_dirty_path(key("Processed.bsl"));
+        cache.mark_dirty_path(key("Broken.bsl"));
+        cache.mark_dirty_path(key("Unseen.bsl"));
+        cache
+            .full_refresh_from_manifest_scanned(
+                &HashMap::new(),
+                scanned_with(
+                    &[(&key("Processed.bsl"), &processed), (&key("Broken.bsl"), &broken)],
+                    1,
+                    0,
+                ),
+                None,
+                32,
+                &store,
+            )
+            .unwrap();
+        let mut dirty: Vec<String> =
+            cache.dirty_paths_snapshot().keys().map(|k| k.path.clone()).collect();
+        dirty.sort();
+        assert_eq!(dirty, vec!["Broken.bsl".to_owned(), "Unseen.bsl".to_owned()]);
+    }
+
+    /// And on the planned path: `publish_plan` clears a superseded dirty flag
+    /// only for keys the plan actually processed.
+    #[test]
+    fn an_unclean_published_plan_clears_exactly_the_processed_dirty_keys() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let processed = workspace.join("Processed.bsl");
+        fs::write(&processed, "Процедура Обработана()\nКонецПроцедуры").unwrap();
+        let broken = workspace.join("Broken.bsl");
+        fs::create_dir(&broken).unwrap();
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.mark_dirty_path(key("Processed.bsl"));
+        cache.mark_dirty_path(key("Broken.bsl"));
+        cache.mark_dirty_path(key("Unseen.bsl"));
+        let dirty_before = cache.dirty_paths_snapshot();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest_scanned(
+            &HashMap::new(),
+            scanned_with(
+                &[(&key("Processed.bsl"), &processed), (&key("Broken.bsl"), &broken)],
+                1,
+                0,
+            ),
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
+        let mut dirty: Vec<String> =
+            cache.dirty_paths_snapshot().keys().map(|k| k.path.clone()).collect();
+        dirty.sort();
+        assert_eq!(dirty, vec!["Broken.bsl".to_owned(), "Unseen.bsl".to_owned()]);
+    }
+
+    /// Field-by-field transfer of every walk counter through the adapter: an
+    /// end-to-end stand can only make `unreadable` non-zero (permissions), so a
+    /// dropped counter would otherwise be invisible.
+    #[test]
+    fn the_mapping_carries_every_walk_counter() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("M.bsl");
+        fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
+        let set = project_model::SourceSet {
+            files: vec![project_model::WalkedFile {
+                root: dir.path().to_path_buf(),
+                role: project_model::FileRole::Source,
+                walked: file.clone(),
+                canonical: file.clone(),
+                metadata: fs::metadata(&file).unwrap(),
+            }],
+            unreadable: 2,
+            loops: 3,
+            dangling: 4,
+            canonicalizations: 6,
+            canonical_fallbacks: 5,
+        };
+        let scanned = super::scanned_files_from(&single_root(dir.path()), &set);
+        assert_eq!(scanned.files.len(), 1);
+        assert_eq!(
+            (scanned.unreadable, scanned.loops, scanned.dangling, scanned.canonical_fallbacks),
+            (2, 3, 4, 5),
+            "each counter crosses the adapter unchanged"
+        );
+    }
+
+    /// A pending rescan forces the full-scan arm through BOTH dispatchers even
+    /// in initialized watcher mode, and a clean full scan clears it; with the
+    /// flag down, watcher mode keeps not rescanning.
+    #[test]
+    fn a_pending_rescan_forces_the_full_arm_of_the_raw_dispatcher() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("A.bsl"), "Процедура П()\nКонецПроцедуры").unwrap();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let roots = single_root(workspace);
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
+
+        cache
+            .full_refresh_scanned(
+                &HashMap::new(),
+                scanned_with(&[], 1, 0),
+                None,
+                32,
+                BaselineHashMode::RawFileBytes,
+            )
+            .unwrap();
+        assert!(cache.needs_full_rescan());
+        let before = project_model::source_set::scans_performed_on_thread();
+        cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
+        assert_eq!(
+            project_model::source_set::scans_performed_on_thread() - before,
+            1,
+            "the pending flag forces the full arm"
+        );
+        assert!(!cache.needs_full_rescan(), "the clean full scan caught up");
+        let before = project_model::source_set::scans_performed_on_thread();
+        cache.refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true).unwrap();
+        assert_eq!(
+            project_model::source_set::scans_performed_on_thread() - before,
+            0,
+            "flag down, watcher mode: no rescan"
+        );
+    }
+
+    /// The manifest dispatcher is an independent condition; the flag must force
+    /// it too.
+    #[test]
+    fn a_pending_rescan_forces_the_full_arm_of_the_manifest_dispatcher() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("A.bsl"), "Процедура П()\nКонецПроцедуры").unwrap();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let roots = single_root(workspace);
+        let manifest: HashMap<FileKey, String> = HashMap::new();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        cache
+            .full_refresh_from_manifest_scanned(
+                &manifest,
+                scanned_with(&[], 1, 0),
+                None,
+                32,
+                &store,
+            )
+            .unwrap();
+        assert!(cache.needs_full_rescan());
+        let before = project_model::source_set::scans_performed_on_thread();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(
+            project_model::source_set::scans_performed_on_thread() - before,
+            1,
+            "the pending flag forces the full arm"
+        );
+        assert!(!cache.needs_full_rescan());
+        let before = project_model::source_set::scans_performed_on_thread();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(project_model::source_set::scans_performed_on_thread() - before, 0);
+    }
+
+    /// The flag is raised by an unclean publication of EVERY full path and
+    /// cleared by a clean one — a flag wired to one path of three would leave
+    /// its callers blind.
+    #[test]
+    fn every_unclean_full_publication_raises_the_rescan_flag() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let roots = single_root(workspace);
+        let manifest: HashMap<FileKey, String> = HashMap::new();
+        let mut cache = WorkspaceOverlayCache::default();
+
+        cache
+            .full_refresh_scanned(
+                &HashMap::new(),
+                scanned_with(&[], 1, 0),
+                None,
+                32,
+                BaselineHashMode::RawFileBytes,
+            )
+            .unwrap();
+        assert!(cache.needs_full_rescan(), "raw full refresh");
+        cache
+            .full_refresh(&HashMap::new(), &roots, None, 32, BaselineHashMode::RawFileBytes)
+            .unwrap();
+        assert!(!cache.needs_full_rescan(), "a clean raw refresh clears it");
+
+        cache
+            .full_refresh_from_manifest_scanned(
+                &manifest,
+                scanned_with(&[], 0, 1),
+                None,
+                32,
+                &store,
+            )
+            .unwrap();
+        assert!(cache.needs_full_rescan(), "manifest full refresh");
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        assert!(!cache.needs_full_rescan(), "a clean manifest refresh clears it");
+
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest_scanned(
+            &manifest,
+            scanned_with(&[], 1, 0),
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        assert!(cache.needs_full_rescan(), "published unclean plan");
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        assert!(!cache.needs_full_rescan(), "a published clean plan clears it");
     }
 
     /// The overlay must not walk the tree itself: the walk policy (which links

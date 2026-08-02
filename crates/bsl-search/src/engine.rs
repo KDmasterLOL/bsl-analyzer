@@ -1399,6 +1399,17 @@ impl SearchEngine {
         Ok(Some(cache.stats()))
     }
 
+    /// Whether the overlay's last full publication ran over an incomplete scan and withheld its
+    /// removals, so only a future clean full scan can catch up. Read-only: takes the cache lock,
+    /// refreshes nothing.
+    pub fn workspace_overlay_needs_full_rescan(&self) -> Result<bool, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.needs_full_rescan())
+    }
+
     /// In-engine overlay prime that may embed inline (holds the engine lock for its duration).
     /// Reserved for the no-baseline / local paths and tests; the PostgresRemoteOverlay warmup must
     /// NOT use this (it would serialize all search behind a multi-minute embed) and instead drives
@@ -3180,6 +3191,46 @@ mod tests {
         engine.prime_workspace_overlay().unwrap();
         let before = engine.text_search("ТолькоЧерезСсылку", 10, Some("code")).unwrap();
         assert!(before.is_empty(), "a .txt is not a BSL source file: {before:?}");
+    }
+
+    /// End-to-end through a REAL walk: a subtree that loses read permission
+    /// makes the scan unclean, and the indexed file inside it survives instead
+    /// of being read as deleted. The policy and the walker are each tested on
+    /// their own; this leg catches the adapter between them dropping a counter.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_subtree_does_not_erase_its_indexed_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let closed = workspace.join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::write(closed.join("Hidden.bsl"), "Процедура ЗаЗакрытымКаталогом()\nКонецПроцедуры")
+            .unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        engine.prime_workspace_overlay().unwrap();
+        let hits = engine.text_search("ЗаЗакрытымКаталогом", 10, Some("code")).unwrap();
+        assert_eq!(hits.len(), 1, "the file is indexed while readable");
+
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&closed).is_ok() {
+            // Running as root: permissions cannot make the subtree unreadable.
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let rescan = engine.prime_workspace_overlay();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        rescan.unwrap();
+
+        let hits = engine.text_search("ЗаЗакрытымКаталогом", 10, Some("code")).unwrap();
+        assert_eq!(hits.len(), 1, "an unreadable subtree is not evidence of deletion");
+        assert!(
+            engine.workspace_overlay_needs_full_rescan().unwrap(),
+            "the unclean prime leaves the overlay waiting for a clean rescan"
+        );
     }
 
     /// A cold overlay prime is exactly one walk of the workspace, and an
