@@ -398,6 +398,20 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.resolve_vfs_path(source_root_id, vfs_path)
     }
 
+    fn resolve_vfs_path_ci(
+        &self,
+        source_root_id: base_db::SourceRootId,
+        candidate: &std::path::Path,
+        tail_modes: &[bsl_conventions::SegmentMatch],
+    ) -> Option<FileId> {
+        base_db::resolve_vfs_path_ci_query(
+            self.db,
+            self.db.source_root_input(source_root_id),
+            candidate.to_string_lossy().into_owned(),
+            tail_modes,
+        )
+    }
+
     fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId> {
         let config_path_input = self.configuration_path_input?;
         let config_root = config_path_input.path(self.db);

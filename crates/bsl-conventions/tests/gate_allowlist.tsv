@@ -60,19 +60,9 @@ crates/hir/src/definition.rs	Module	1	вне-класса: отображаем�
 crates/ide-db/src/database.rs	Found configuration root via Configuration.xml	1	вне-класса: текст лога
 crates/ide-db/src/metadata.rs	CommonModule	1	вне-класса: метка вида модуля в диагностическом логе
 crates/ide-diagnostics/src/handlers/missed_required_parameter.rs	{}/{}/Ext/ManagerModule.bsl	1	сравнение
-crates/ide-diagnostics/src/handlers/missing_event_subscription_handler.rs	/Ext/SessionModule.bsl	1	сравнение
-crates/ide-diagnostics/src/handlers/missing_event_subscription_handler.rs	\\Ext\\SessionModule.bsl	1	сравнение
-crates/ide-diagnostics/src/handlers/ordinary_app_support.rs	/Ext/SessionModule.bsl	1	сравнение
-crates/ide-diagnostics/src/handlers/ordinary_app_support.rs	\\Ext\\SessionModule.bsl	1	сравнение
-crates/ide-diagnostics/src/handlers/protected_module.rs	/Ext/SessionModule.bsl	1	сравнение
-crates/ide-diagnostics/src/handlers/protected_module.rs	\\Ext\\SessionModule.bsl	1	сравнение
 crates/ide-diagnostics/src/handlers/redundant_access_to_object.rs	checkFormModule	1	вне-класса: имя параметра диагностики
 crates/ide-diagnostics/src/handlers/redundant_access_to_object.rs	checkObjectModule	1	вне-класса: имя параметра диагностики
 crates/ide-diagnostics/src/handlers/redundant_access_to_object.rs	checkRecordSetModule	1	вне-класса: имя параметра диагностики
-crates/ide-diagnostics/src/handlers/scheduled_job_handler.rs	/Ext/SessionModule.bsl	1	сравнение
-crates/ide-diagnostics/src/handlers/scheduled_job_handler.rs	\\Ext\\SessionModule.bsl	1	сравнение
-crates/ide-diagnostics/src/handlers/set_permissions_for_new_objects.rs	/Ext/ManagedApplicationModule.bsl	1	сравнение
-crates/ide-diagnostics/src/handlers/set_permissions_for_new_objects.rs	\\Ext\\ManagedApplicationModule.bsl	1	сравнение
 crates/ide-diagnostics/src/handlers/typo.rs	xml	1	вне-класса: словарь опечаток
 crates/ide-diagnostics/src/handlers/unused_local_method.rs	checkObjectModule	1	вне-класса: имя параметра диагностики
 crates/ide-diagnostics/src/runner.rs	ExecuteExternalCodeInCommonModule	1	вне-класса: код диагностики

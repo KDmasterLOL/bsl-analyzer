@@ -139,6 +139,26 @@ pub fn configuration_path_for_file<'db>(
     ))
 }
 
+/// Resolve the constructed base-module candidate: exactly first, then with the
+/// module-path grammar's per-component case policy — the candidate carries the
+/// EXTENSION's spelling of the conventional segments, while the base file may
+/// spell them differently. Name positions stay exact (НУ-2).
+fn resolve_pair_candidate(
+    db: &dyn RootDatabase,
+    source_root: base_db::SourceRootId,
+    roots: &[(Option<String>, std::path::PathBuf)],
+    base_path: &std::path::Path,
+) -> Option<vfs::FileId> {
+    let candidate = base_path.to_string_lossy().into_owned();
+    let base_root = roots.iter().find_map(|(label, p)| label.is_none().then_some(p))?;
+    let modes = base_path
+        .strip_prefix(base_root)
+        .ok()
+        .and_then(|rel| hir::module_path_segment_modes(&rel.to_string_lossy()))
+        .unwrap_or_default();
+    base_db::resolve_vfs_path_ci_query(db, db.source_root_input(source_root), candidate, &modes)
+}
+
 /// The effective `&ИзменениеИКонтроль` module identity for an extension module file, or
 /// `None` when the file is not an extension module, has no resolvable base counterpart, or
 /// carries no usable change-and-validate splice (in which case ordinary analysis applies).
@@ -158,8 +178,7 @@ pub fn effective_target<'db>(
     let base_path = hir::pair_base_module_path(&roots, &ext_path)?;
 
     let source_root = db.file_source_root_input(ext_file).source_root_id(db);
-    let vfs_path = vfs::VfsPath::new(base_path.to_string_lossy().into_owned());
-    let base_file = db.resolve_vfs_path(source_root, &vfs_path)?;
+    let base_file = resolve_pair_candidate(db, source_root, &roots, &base_path)?;
 
     let eid = hir::EffectiveModuleId::new(db, base_file, ext_file);
     hir::effective_module_text(db, eid)?;
@@ -185,8 +204,7 @@ pub fn weaving_target<'db>(
     let base_path = hir::pair_base_module_path(&roots, &ext_path)?;
 
     let source_root = db.file_source_root_input(ext_file).source_root_id(db);
-    let vfs_path = vfs::VfsPath::new(base_path.to_string_lossy().into_owned());
-    let base_file = db.resolve_vfs_path(source_root, &vfs_path)?;
+    let base_file = resolve_pair_candidate(db, source_root, &roots, &base_path)?;
 
     if base_file == ext_file {
         return None;

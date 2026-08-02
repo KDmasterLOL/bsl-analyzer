@@ -203,6 +203,7 @@ dependencies = [
 name = "base-db"
 version = "0.2.66"
 dependencies = [
+ "bsl-conventions",
  "dashmap",
  "expect-test",
  "parser",
@@ -1970,6 +1971,7 @@ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 name = "ide"
 version = "0.2.66"
 dependencies = [
+ "bsl-conventions",
  "bsl-metadata",
  "bsl-platform",
  "code-chunk",
@@ -2057,6 +2059,7 @@ version = "0.2.66"
 dependencies = [
  "base-db",
  "bsl-config",
+ "bsl-conventions",
  "bsl-metadata",
  "bsl-platform",
  "expect-test",

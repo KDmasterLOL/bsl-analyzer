@@ -52,7 +52,8 @@ pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, Con
 pub use configs::ConfigsDatabase;
 pub use item_tree::ItemTree;
 pub use module_index::{
-    module_key_for_path, parse_form_module_path, FormKey, ModuleIndex, ModuleKey,
+    module_key_for_path, module_path_segment_modes, parse_form_module_path, FormKey, ModuleIndex,
+    ModuleKey,
 };
 pub use name::Name;
 pub use name_usage_index::{

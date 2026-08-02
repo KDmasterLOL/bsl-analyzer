@@ -65,7 +65,10 @@ fn is_session_module(ctx: &DiagnosticsContext) -> bool {
         Some(path) => path,
         None => return false,
     };
-    file_path.ends_with("/Ext/SessionModule.bsl") || file_path.ends_with("\\Ext\\SessionModule.bsl")
+    bsl_conventions::path_ends_with_ext_child(
+        &file_path,
+        bsl_conventions::ConventionalName::SessionModule,
+    )
 }
 
 fn get_diagnostic_range(ctx: &DiagnosticsContext) -> TextRange {

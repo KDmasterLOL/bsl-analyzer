@@ -442,6 +442,32 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
     None
 }
 
+/// Per-component match modes for a module path RELATIVE to a configuration
+/// root, by the dump grammar: conventional positions fold, NAME positions
+/// (object, form, command) stay exact — even an object named `Ext` keeps its
+/// case. `None` means the layout is not a module path this grammar knows; the
+/// caller then resolves exactly, the historical behaviour.
+pub fn module_path_segment_modes(rel: &str) -> Option<Vec<bsl_conventions::SegmentMatch>> {
+    use bsl_conventions::{conventional_of, ConventionalName as Conv, SegmentMatch as M};
+    let normalized = rel.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').collect();
+    let at = |i: usize, name: Conv| conventional_of(parts[i]) == Some(name);
+    match parts.len() {
+        2 if at(0, Conv::Ext) => Some(vec![M::Ci, M::Ci]),
+        4 if at(2, Conv::Ext) => Some(vec![M::Ci, M::Exact, M::Ci, M::Ci]),
+        5 if at(2, Conv::Ext) && at(3, Conv::Form) => {
+            Some(vec![M::Ci, M::Exact, M::Ci, M::Ci, M::Ci])
+        }
+        6 if at(2, Conv::Commands) && at(4, Conv::Ext) => {
+            Some(vec![M::Ci, M::Exact, M::Ci, M::Exact, M::Ci, M::Ci])
+        }
+        7 if at(2, Conv::Forms) && at(4, Conv::Ext) && at(5, Conv::Form) => {
+            Some(vec![M::Ci, M::Exact, M::Ci, M::Exact, M::Ci, M::Ci, M::Ci])
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

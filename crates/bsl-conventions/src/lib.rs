@@ -221,3 +221,50 @@ mod tests {
         assert_eq!(ConventionalName::Ext.canonical_stem(), "Ext");
     }
 }
+
+/// How one path component of a CONSTRUCTED candidate matches a real component.
+/// The caller decides per position — deriving the mode from the spelling would
+/// swallow an object legally named `Ext`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentMatch {
+    /// An object/form/command NAME: its case is significant.
+    Exact,
+    /// A wholly conventional segment (`Ext`, `Forms`, `Module.bsl`, a
+    /// collection directory): ASCII-case-insensitive.
+    Ci,
+    /// A `{name}.{ext}` file built from an object name: the stem is exact,
+    /// only the extension folds.
+    StemExactExtCi,
+}
+
+impl SegmentMatch {
+    /// Whether a real path component satisfies this mode against the
+    /// constructed candidate component.
+    pub fn matches(self, real: &str, candidate: &str) -> bool {
+        match self {
+            SegmentMatch::Exact => real == candidate,
+            SegmentMatch::Ci => real.eq_ignore_ascii_case(candidate),
+            SegmentMatch::StemExactExtCi => {
+                match (real.rsplit_once('.'), candidate.rsplit_once('.')) {
+                    (Some((real_stem, real_ext)), Some((cand_stem, cand_ext))) => {
+                        real_stem == cand_stem && real_ext.eq_ignore_ascii_case(cand_ext)
+                    }
+                    (None, None) => real == candidate,
+                    _ => false,
+                }
+            }
+        }
+    }
+}
+
+/// Whether the path's tail is `…/Ext/<name>` in any ASCII case, with either
+/// separator — the way diagnostics classify a module by its final segments.
+/// The `Ext` HERE is positional: two segments from the end is the service
+/// level, so an object named `Ext` (one level higher) cannot match.
+pub fn path_ends_with_ext_child(path: &str, name: ConventionalName) -> bool {
+    let mut segments = path.rsplit(['/', '\\']);
+    let (Some(last), Some(prev)) = (segments.next(), segments.next()) else {
+        return false;
+    };
+    conventional_of(last) == Some(name) && conventional_of(prev) == Some(ConventionalName::Ext)
+}

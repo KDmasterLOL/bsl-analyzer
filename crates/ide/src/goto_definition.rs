@@ -6,7 +6,7 @@ use hir::{
 };
 use ide_db::{base_db::METADATA_SOURCE_ROOT, RootDatabase};
 use syntax::{ast, ast::AstNode, SyntaxKind, TextRange, TextSize};
-use vfs::{FileId, VfsPath};
+use vfs::FileId;
 
 use crate::{NavigationTarget, SymbolKind};
 
@@ -57,16 +57,21 @@ fn resolve_metadata_reference_xml_file<DB: RootDatabase>(
 ) -> Option<FileId> {
     let candidates = metadata_reference_xml_relative_paths(db, from_file_id, kind, name);
     let source_root_id = db.file_source_root_input(from_file_id).source_root_id(db);
-    for relative in &candidates {
+    for (relative, modes) in &candidates {
         for (_config_name, config_root) in db.all_config_paths() {
-            let candidate = VfsPath::from(config_root.join(relative));
+            let candidate = config_root.join(relative).to_string_lossy().into_owned();
             for (idx, candidate_source_root) in
                 [source_root_id, METADATA_SOURCE_ROOT].into_iter().enumerate()
             {
                 if idx == 1 && candidate_source_root == source_root_id {
                     continue;
                 }
-                if let Some(file_id) = db.resolve_vfs_path(candidate_source_root, &candidate) {
+                if let Some(file_id) = ide_db::base_db::resolve_vfs_path_ci_query(
+                    db,
+                    db.source_root_input(candidate_source_root),
+                    candidate.clone(),
+                    modes,
+                ) {
                     return Some(file_id);
                 }
             }
@@ -80,8 +85,13 @@ fn metadata_reference_xml_relative_paths<DB: RootDatabase>(
     from_file_id: FileId,
     kind: MetadataReferenceKind,
     name: &str,
-) -> Vec<PathBuf> {
-    let flat = |dir: &str| PathBuf::from(dir).join(format!("{name}.xml"));
+) -> Vec<(PathBuf, Vec<bsl_conventions::SegmentMatch>)> {
+    use bsl_conventions::SegmentMatch as M;
+    // Каталог — конвенционный (ci), а `{name}` — имя объекта: стебель точный,
+    // регистронезависимо только расширение.
+    let flat = |dir: &str| {
+        (PathBuf::from(dir).join(format!("{name}.xml")), vec![M::Ci, M::StemExactExtCi])
+    };
     match kind {
         MetadataReferenceKind::Role => vec![flat("Roles")],
         MetadataReferenceKind::EventSubscription => vec![flat("EventSubscriptions")],
@@ -102,7 +112,15 @@ fn metadata_reference_xml_relative_paths<DB: RootDatabase>(
                 subsystems.iter().map(|subsystem| subsystem.as_ref()),
                 name,
             ) {
-                candidates.push(nested);
+                // Каждый уровень: `Subsystems` — конвенционный, имя предка —
+                // точное; последний компонент — имя со свободным расширением.
+                let levels = nested.components().count() / 2;
+                let mut modes = Vec::with_capacity(levels * 2);
+                for _ in 0..levels.saturating_sub(1) {
+                    modes.extend([M::Ci, M::Exact]);
+                }
+                modes.extend([M::Ci, M::StemExactExtCi]);
+                candidates.push((nested, modes));
             }
             candidates.push(flat("Subsystems"));
             candidates
@@ -1001,14 +1019,15 @@ mod tests {
             "Дочерняя",
         );
 
+        let just_paths: Vec<&PathBuf> = paths.iter().map(|(p, _)| p).collect();
         assert_eq!(
-            paths,
+            just_paths,
             vec![
-                PathBuf::from("Subsystems")
+                &PathBuf::from("Subsystems")
                     .join("Родитель")
                     .join("Subsystems")
                     .join("Дочерняя.xml"),
-                PathBuf::from("Subsystems").join("Дочерняя.xml"),
+                &PathBuf::from("Subsystems").join("Дочерняя.xml"),
             ]
         );
     }

@@ -434,3 +434,62 @@ fn sibling_extension_caller_sees_base_but_not_foreign_added_method() {
          got {unresolved:?}",
     );
 }
+
+/// Пара base/расширение, где написание конвенционных сегментов у расширения
+/// отличается регистром: связывание обязано найти нижнерегистровую базу.
+fn setup_with_rel_paths(base_rel: &str, ext_rel: &str) -> Fixture {
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("src/cf");
+    let ext_root = temp.path().join("src/cfe/X");
+    std::fs::create_dir_all(&main_root).unwrap();
+    std::fs::create_dir_all(&ext_root).unwrap();
+    std::mem::forget(temp);
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_root.clone()),
+    ]);
+
+    let main_file = FileId(0);
+    let ext_file = FileId(1);
+    let mut file_set = FileSet::default();
+    file_set.insert(main_file, VfsPath::new(main_root.join(base_rel).to_string_lossy().as_ref()));
+    file_set.insert(ext_file, VfsPath::new(ext_root.join(ext_rel).to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(0));
+    db.set_file_source_root(ext_file, SourceRootId(0));
+    db.set_file_text(main_file, BASE);
+    db.set_file_text(ext_file, EXT);
+
+    Fixture { analysis: Analysis::from_database(db), main_file, ext_file }
+}
+
+#[test]
+fn a_case_variant_extension_module_pairs_to_its_base() {
+    let fx =
+        setup_with_rel_paths("CommonModules/М/Ext/Module.bsl", "CommonModules/М/EXT/MODULE.BSL");
+    let db = fx.analysis.database();
+    assert!(
+        ide_db::effective_target(db, fx.ext_file).is_some(),
+        "конвенционные сегменты расширения в верхнем регистре связываются с базой"
+    );
+    assert!(
+        ide_db::weaving_target(db, fx.ext_file).is_some(),
+        "обе независимые функции связывания обязаны видеть пару"
+    );
+}
+
+/// Позиция имени объекта — точная: модуль объекта `м` не связывается с базовым
+/// объектом `М`, даже когда всё остальное совпадает.
+#[test]
+fn an_object_name_case_variant_never_pairs() {
+    let fx =
+        setup_with_rel_paths("CommonModules/М/Ext/Module.bsl", "CommonModules/м/Ext/Module.bsl");
+    let db = fx.analysis.database();
+    assert!(
+        ide_db::effective_target(db, fx.ext_file).is_none(),
+        "объект м — не объект М: регистр имени значим"
+    );
+    assert!(ide_db::weaving_target(db, fx.ext_file).is_none());
+}

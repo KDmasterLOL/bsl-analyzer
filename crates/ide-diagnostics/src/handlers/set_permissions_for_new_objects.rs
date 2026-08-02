@@ -50,8 +50,10 @@ fn is_managed_application_module(ctx: &DiagnosticsContext) -> bool {
         None => return false,
     };
 
-    file_path.ends_with("/Ext/ManagedApplicationModule.bsl")
-        || file_path.ends_with("\\Ext\\ManagedApplicationModule.bsl")
+    bsl_conventions::path_ends_with_ext_child(
+        &file_path,
+        bsl_conventions::ConventionalName::ManagedApplicationModule,
+    )
 }
 
 fn get_allowed_roles(ctx: &DiagnosticsContext) -> FxHashSet<String> {

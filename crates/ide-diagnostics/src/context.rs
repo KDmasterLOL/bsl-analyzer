@@ -267,6 +267,15 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.resolve_vfs_path(source_root_id, vfs_path))
     }
 
+    pub fn resolve_vfs_path_ci(
+        &self,
+        source_root_id: base_db::SourceRootId,
+        candidate: &std::path::Path,
+        tail_modes: &[bsl_conventions::SegmentMatch],
+    ) -> Option<vfs::FileId> {
+        self.query(|p| p.resolve_vfs_path_ci(source_root_id, candidate, tail_modes))
+    }
+
     pub fn resolve_qualified_path(
         &self,
         module_name: &hir::Name,

@@ -192,14 +192,18 @@ fn find_manager_module_file(
     };
 
     let manager_module_path = format!("{}/{}/Ext/ManagerModule.bsl", english_plural, mdo_name);
+    // Конвенционные позиции кандидата регистронезависимы; `mdo_name` — имя
+    // объекта, его позиция точная.
+    use bsl_conventions::SegmentMatch as M;
+    let modes = [M::Ci, M::Exact, M::Ci, M::Ci];
 
     for visible in ctx.visible_configurations() {
         if !visible.config.configuration.has_metadata_object(mdo_type, mdo_name) {
             continue;
         }
         let full_path = visible.root.join(&manager_module_path);
-        let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
-        if let Some(file_id) = ctx.resolve_vfs_path(base_db::SourceRootId(0), &vfs_path) {
+        if let Some(file_id) = ctx.resolve_vfs_path_ci(base_db::SourceRootId(0), &full_path, &modes)
+        {
             return Some(file_id);
         }
         tracing::warn!(

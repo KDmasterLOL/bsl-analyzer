@@ -322,6 +322,20 @@ pub trait AnalysisProvider {
 
     fn resolve_vfs_path(&self, source_root_id: SourceRootId, vfs_path: &VfsPath) -> Option<FileId>;
 
+    /// [`Self::resolve_vfs_path`] for a CONSTRUCTED candidate: the last
+    /// `tail_modes.len()` components match by the caller's case policy (see
+    /// `bsl_conventions::SegmentMatch`). The default is the exact lookup —
+    /// a provider without a file universe cannot widen it.
+    fn resolve_vfs_path_ci(
+        &self,
+        source_root_id: SourceRootId,
+        candidate: &std::path::Path,
+        _tail_modes: &[bsl_conventions::SegmentMatch],
+    ) -> Option<FileId> {
+        let vfs_path = VfsPath::new(candidate.to_string_lossy().into_owned());
+        self.resolve_vfs_path(source_root_id, &vfs_path)
+    }
+
     fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId>;
 
     fn method_effect_summary(&self, _method: MethodId) -> Arc<EffectSummary> {
