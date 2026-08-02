@@ -73,7 +73,9 @@ pub(crate) fn scan_stats_over_roots(roots: &[PathBuf]) -> Vec<FileStat> {
 
 /// A cheap fingerprint of the workspace identity: the order-independent fold of
 /// every graph-relevant file's `(path, mtime, len)` plus the extension-topology
-/// hash. Cache reuse compares it for an exact whole-workspace match.
+/// hash. Test-side wrapper — production callers scan a universe explicitly and
+/// fold it with [`fingerprint_of`], so the verdict of the same scan stays in hand.
+#[cfg(test)]
 pub(super) fn workspace_fingerprint(workspace_root: &Path) -> crate::graph_db::GraphFp {
     workspace_fingerprint_over(&super::input::ProjectSnapshot::load(workspace_root))
 }
@@ -88,14 +90,23 @@ pub(super) fn workspace_fingerprint(workspace_root: &Path) -> crate::graph_db::G
 pub(crate) fn workspace_fingerprint_over(
     project: &super::input::ProjectSnapshot,
 ) -> crate::graph_db::GraphFp {
-    let mut entries: Vec<(String, u128, u64)> = scan_stats_over_roots(&project.scan_roots)
-        .into_iter()
-        .map(|s| (s.path, s.mtime, s.len))
-        .collect();
+    fingerprint_of(&scan_stats_over_roots(&project.scan_roots), &project.configs)
+}
+
+/// The fold over ALREADY-SCANNED stats — the piece of the fingerprint an operation
+/// can compute from a shared universe instead of paying another walk. The fold is
+/// order-independent (rows are sorted here), so any projection of the same scan
+/// folds to the same value.
+pub(crate) fn fingerprint_of(
+    stats: &[FileStat],
+    configs: &ide::WorkspaceConfigsSnapshot,
+) -> crate::graph_db::GraphFp {
+    let mut entries: Vec<(String, u128, u64)> =
+        stats.iter().map(|s| (s.path.clone(), s.mtime, s.len)).collect();
     entries.sort();
     crate::graph_db::GraphFp {
         files: super::snapshot::fold_fingerprint_entries(&entries),
-        topology: topology_u64(&project.configs),
+        topology: topology_u64(configs),
     }
 }
 

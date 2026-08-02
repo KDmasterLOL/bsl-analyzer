@@ -16,6 +16,39 @@ use vfs::FileId;
 
 use super::scan::FileStat;
 
+/// One traversal of the scan roots, projected into every shape the graph's passes
+/// consume. Passes handed the same instance provably share one universe: the
+/// enumeration a build lowers, the stats its `files` table persists and the
+/// fingerprint its bracket compares all come from the same walk, so no pass can
+/// see a tree another pass did not.
+pub(crate) struct ScannedUniverse {
+    /// The `.bsl` enumeration — see [`bsl_files_from`].
+    pub(crate) files: Vec<(FileId, PathBuf)>,
+    /// The `.bsl` + `.xml` stats rows — see [`file_stats_from`].
+    pub(crate) stats: Vec<FileStat>,
+    clean: bool,
+}
+
+impl ScannedUniverse {
+    /// One walk, all projections.
+    pub(crate) fn scan(roots: &[PathBuf]) -> ScannedUniverse {
+        let set = SourceSet::scan(roots);
+        ScannedUniverse {
+            files: bsl_files_from(&set),
+            stats: file_stats_from(&set),
+            clean: set.clean(),
+        }
+    }
+
+    /// Whether the walk behind these projections may speak for the whole tree —
+    /// see [`SourceSet::clean`]. A publication over an unclean universe must not
+    /// claim a coherent snapshot, and a cache must not be adopted as fresh
+    /// against one.
+    pub(crate) fn clean(&self) -> bool {
+        self.clean
+    }
+}
+
 /// The graph's historical extension predicate: EXACT lowercase spelling, judged on
 /// the walked path. The shared walker itself matches extensions case-insensitively;
 /// widening the graph's universe to agree with it also changes every consumer that

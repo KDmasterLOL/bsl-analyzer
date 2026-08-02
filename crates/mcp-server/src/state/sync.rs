@@ -1037,8 +1037,11 @@ mod tests {
         // Build + publish the graph so the reverse lookup has real inbound edges to read.
         let out = crate::cache::graph_db_path(&workspace);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let sync_project = crate::graph::ProjectSnapshot::load(&workspace);
+        let sync_universe = crate::graph::universe::ScannedUniverse::scan(&sync_project.scan_roots);
         let summary = crate::graph_db::build_graph_database(
-            &crate::graph::ProjectSnapshot::load(&workspace),
+            &sync_project,
+            &sync_universe,
             &out,
             100,
             &crate::graph_db::GraphMeta {

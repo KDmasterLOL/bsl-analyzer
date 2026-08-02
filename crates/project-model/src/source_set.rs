@@ -58,6 +58,7 @@ impl SourceSet {
     /// one traversal of the tree and emits exactly one `workspace_scan` event —
     /// callers count those events to prove an operation walked once.
     pub fn scan(roots: &[PathBuf]) -> SourceSet {
+        SCANS_ON_THREAD.with(|c| c.set(c.get() + 1));
         let _span = tracing::info_span!("workspace_scan", roots = roots.len()).entered();
         let mut outcome = WalkOutcome::default();
         let mut slots: Vec<Slot> = Vec::new();
@@ -109,6 +110,20 @@ impl SourceSet {
         );
         set
     }
+}
+
+thread_local! {
+    static SCANS_ON_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many workspace scans THIS thread has performed — the observable behind
+/// walk-count gates: an operation that shares one scan across its passes shows
+/// exactly the expected count here, and a pass that quietly walks on its own is
+/// one extra. Thread-local on purpose: a scan is initiated on the operation's own
+/// thread, and a process-wide count would let concurrent operations (or parallel
+/// tests) pollute each other's readings.
+pub fn scans_performed_on_thread() -> usize {
+    SCANS_ON_THREAD.with(|c| c.get())
 }
 
 /// One position in the sorted top-level sequence of a root: either a file taken by

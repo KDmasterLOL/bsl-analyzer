@@ -93,8 +93,11 @@ pub(super) fn write_extension_config(root: &Path, depends_on: bool) {
 pub(super) fn seed_cache(root: &Path, fingerprint: crate::graph_db::GraphFp) {
     let out = graph_db_path(root);
     fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let project = crate::graph::ProjectSnapshot::load(root);
+    let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
     build_graph_database(
-        &crate::graph::ProjectSnapshot::load(root),
+        &project,
+        &universe,
         &out,
         GRAPH_BUILD_BATCH,
         &crate::graph_db::GraphMeta {
