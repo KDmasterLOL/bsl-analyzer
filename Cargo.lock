@@ -359,6 +359,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsl-conventions"
+version = "0.2.66"
+dependencies = [
+ "expect-test",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
 name = "bsl-debug"
 version = "0.2.66"
 dependencies = [

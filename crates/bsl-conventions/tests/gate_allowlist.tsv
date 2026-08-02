@@ -1,0 +1,158 @@
+# Учёт литералов конвенционных имён вне словаря: файл, литерал, счёт, причина.
+# Причины: "конструкция" (каноническое написание строится, не сравнивается),
+# "вне-класса" (XML-тег, имя конфига анализатора и т.п.), "сравнение"
+# (inline-сравнение, ещё не переведённое на словарь — сжимающийся фронт).
+crates/bsl-analyzer/src/bench/discover.rs	ManagerModule.bsl	1	сравнение
+crates/bsl-analyzer/src/bench/discover.rs	ObjectModule.bsl	1	сравнение
+crates/bsl-analyzer/src/bin/cli/analyze.rs	bsl	1	сравнение
+crates/bsl-analyzer/src/bin/cli/deps.rs	bsl	1	сравнение
+crates/bsl-analyzer/src/bin/cli/source_set.rs	Configuration.xml	3	сравнение
+crates/bsl-analyzer/src/reporters/junit.rs	bsl-analyzer.junit.xml	1	вне-класса: имя собственного отчёта анализатора
+crates/bsl-analyzer/src/server.rs	bsl	1	вне-класса: идентификатор источника LSP-диагностик
+crates/bsl-debug/src/constants.rs	CommandModule	1	сравнение
+crates/bsl-debug/src/constants.rs	ExternalConnectionModule	1	сравнение
+crates/bsl-debug/src/constants.rs	ManagedApplicationModule	1	сравнение
+crates/bsl-debug/src/constants.rs	ManagerModule	1	сравнение
+crates/bsl-debug/src/constants.rs	Module	1	сравнение
+crates/bsl-debug/src/constants.rs	ObjectModule	1	сравнение
+crates/bsl-debug/src/constants.rs	OrdinaryApplicationModule	1	сравнение
+crates/bsl-debug/src/constants.rs	RecordSetModule	1	сравнение
+crates/bsl-debug/src/constants.rs	SessionModule	1	сравнение
+crates/bsl-debug/src/constants.rs	ValueManagerModule	1	сравнение
+crates/bsl-debug/src/module_index.rs	CommandModule.bsl	1	сравнение
+crates/bsl-debug/src/module_index.rs	Commands	1	сравнение
+crates/bsl-debug/src/module_index.rs	Configuration.xml	2	сравнение
+crates/bsl-debug/src/module_index.rs	Ext	5	сравнение
+crates/bsl-debug/src/module_index.rs	Form	1	сравнение
+crates/bsl-debug/src/module_index.rs	Forms	1	сравнение
+crates/bsl-debug/src/module_index.rs	Module	1	сравнение
+crates/bsl-debug/src/module_index.rs	Module.bsl	1	сравнение
+crates/bsl-debug/src/module_index.rs	bsl	2	сравнение
+crates/bsl-debug/src/module_index.rs	xml	2	сравнение
+crates/bsl-debug/src/types/xml.rs	ConfigModule	2	вне-класса: значение поля DAP-протокола
+crates/bsl-debug/src/types/xml.rs	ExtensionModule	2	вне-класса: значение поля DAP-протокола
+crates/bsl-launcher/src/cache.rs	bin	1	вне-класса: каталог кэша лаунчера
+crates/bsl-metadata/src/enums.rs	ApplicationModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	CommandModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	CommonModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	ExternalConnectionModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	FormModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	HTTPServiceModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	IntegrationServiceModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	ManagedApplicationModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	ManagerModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	ObjectModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	OrdinaryApplicationModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	RecordSetModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	SessionModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	ValueManagerModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/enums.rs	WEBServiceModule	1	вне-класса: имя вида модуля в значениях XML
+crates/bsl-metadata/src/event_subscription.rs	CommonModule	1	вне-класса: значение в XML метаданных
+crates/bsl-metadata/src/loader.rs	CommonModules/{}/Ext/Module.bsl	1	сравнение
+crates/bsl-metadata/src/loader.rs	Ext	4	сравнение
+crates/bsl-metadata/src/loader.rs	Ext/Module.bin	1	сравнение
+crates/bsl-metadata/src/loader.rs	Ext/Module.bsl	5	сравнение
+crates/bsl-metadata/src/loader.rs	Predefined.xml	2	сравнение
+crates/bsl-metadata/src/loader.rs	Rights.xml	2	сравнение
+crates/bsl-metadata/src/loader.rs	xml	19	сравнение
+crates/bsl-metadata/src/loader.rs	{name}.xml	2	сравнение
+crates/bsl-metadata/src/loader.rs	{}.xml	6	сравнение
+crates/bsl-metadata/src/metadata_object.rs	CommonModule	1	вне-класса: имя XML-тега
+crates/bsl-metadata/src/module_path.rs	Ext	1	сравнение
+crates/bsl-metadata/src/scheduled_job.rs	CommonModule	1	вне-класса: значение в XML метаданных
+crates/bsl-metadata/src/xml_parser/form.rs	Commands	1	вне-класса: имя XML-элемента, XML регистрозависим
+crates/bsl-metadata/src/xml_parser/form.rs	Form	4	вне-класса: имя XML-элемента, XML регистрозависим
+crates/bsl-metadata/src/xml_parser/form.rs	Form.xml	1	сравнение
+crates/bsl-metadata/src/xml_parser/form.rs	{}.xml	1	сравнение
+crates/bsl-metadata/src/xml_parser/http_service.rs	HTTPServices/{}/Ext/Module.bsl	1	сравнение
+crates/bsl-metadata/src/xml_parser/predefined_parser.rs	Failed to parse Predefined.xml	1	вне-класса: текст сообщения об ошибке
+crates/bsl-metadata/src/xml_parser/web_service.rs	WebServices/{}/Ext/Module.bsl	1	сравнение
+crates/bsl-search/examples/chunk_stats.rs	bsl	1	сравнение
+crates/bsl-search/src/context.rs	CommandModule.bsl	1	сравнение
+crates/bsl-search/src/context.rs	Commands	1	сравнение
+crates/bsl-search/src/context.rs	Ext	1	сравнение
+crates/bsl-search/src/context.rs	ExternalConnectionModule.bsl	1	сравнение
+crates/bsl-search/src/context.rs	FormModule.bsl	1	сравнение
+crates/bsl-search/src/context.rs	Forms	1	сравнение
+crates/bsl-search/src/context.rs	ManagedApplicationModule.bsl	1	сравнение
+crates/bsl-search/src/context.rs	ManagerModule.bsl	1	сравнение
+crates/bsl-search/src/context.rs	Module.bsl	1	сравнение
+crates/bsl-search/src/context.rs	ObjectModule.bsl	1	сравнение
+crates/bsl-search/src/context.rs	OrdinaryApplicationModule.bsl	1	сравнение
+crates/bsl-search/src/context.rs	RecordSetModule.bsl	1	сравнение
+crates/bsl-search/src/context.rs	SessionModule.bsl	1	сравнение
+crates/bsl-search/src/context.rs	ValueManagerModule.bsl	1	сравнение
+crates/bsl-search/src/engine.rs	bsl	4	сравнение
+crates/bsl-search/src/workspace_overlay.rs	bsl	1	сравнение
+crates/bsl-types/src/display.rs	CommonModule	1	вне-класса: отображаемое имя типа
+crates/hir-def/src/module_index.rs	Ext	1	сравнение
+crates/hir-def/src/module_index.rs	Form	1	сравнение
+crates/hir-def/src/module_index.rs	Forms	1	сравнение
+crates/hir-def/src/module_index.rs	ManagerModule.bsl	1	сравнение
+crates/hir-def/src/module_index.rs	Module.bsl	1	сравнение
+crates/hir-def/src/module_index.rs	managermodule.bsl	1	сравнение
+crates/hir-def/src/module_index.rs	module.bsl	1	сравнение
+crates/hir-def/src/module_index.rs	objectmodule.bsl	2	сравнение
+crates/hir-def/src/module_index.rs	recordsetmodule.bsl	2	сравнение
+crates/hir-def/src/workspace.rs	.bsl	1	сравнение
+crates/hir-ty/src/platform_type_name.rs	xml	1	вне-класса: тег имени платформенного типа
+crates/hir-ty/src/subtype.rs	CommonModule	1	вне-класса: имя типа в решётке подтипов
+crates/hir/src/definition.rs	Module	1	вне-класса: отображаемое имя вида определения
+crates/ide-db/src/database.rs	Configuration.xml	1	сравнение
+crates/ide-db/src/database.rs	Found configuration root via Configuration.xml	1	вне-класса: текст лога
+crates/ide-db/src/metadata.rs	ApplicationModule.bsl	1	сравнение
+crates/ide-db/src/metadata.rs	CommandModule.bsl	2	сравнение
+crates/ide-db/src/metadata.rs	CommonModule	1	вне-класса: метка вида модуля в диагностическом логе
+crates/ide-db/src/metadata.rs	Ext	4	сравнение
+crates/ide-db/src/metadata.rs	ExternalConnectionModule.bsl	1	сравнение
+crates/ide-db/src/metadata.rs	Form	2	сравнение
+crates/ide-db/src/metadata.rs	Forms	1	сравнение
+crates/ide-db/src/metadata.rs	ManagedApplicationModule.bsl	1	сравнение
+crates/ide-db/src/metadata.rs	ManagerModule.bsl	2	сравнение
+crates/ide-db/src/metadata.rs	Module.bsl	6	сравнение
+crates/ide-db/src/metadata.rs	ObjectModule.bsl	2	сравнение
+crates/ide-db/src/metadata.rs	OrdinaryApplicationModule.bsl	1	сравнение
+crates/ide-db/src/metadata.rs	RecordSetModule.bsl	2	сравнение
+crates/ide-db/src/metadata.rs	SessionModule.bsl	1	сравнение
+crates/ide-db/src/metadata.rs	ValueManagerModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/missed_required_parameter.rs	{}/{}/Ext/ManagerModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/missing_event_subscription_handler.rs	/Ext/SessionModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/missing_event_subscription_handler.rs	\\Ext\\SessionModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/ordinary_app_support.rs	/Ext/SessionModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/ordinary_app_support.rs	\\Ext\\SessionModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/protected_module.rs	/Ext/SessionModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/protected_module.rs	\\Ext\\SessionModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/redundant_access_to_object.rs	checkFormModule	1	вне-класса: имя параметра диагностики
+crates/ide-diagnostics/src/handlers/redundant_access_to_object.rs	checkObjectModule	1	вне-класса: имя параметра диагностики
+crates/ide-diagnostics/src/handlers/redundant_access_to_object.rs	checkRecordSetModule	1	вне-класса: имя параметра диагностики
+crates/ide-diagnostics/src/handlers/scheduled_job_handler.rs	/Ext/SessionModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/scheduled_job_handler.rs	\\Ext\\SessionModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/set_permissions_for_new_objects.rs	/Ext/ManagedApplicationModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/set_permissions_for_new_objects.rs	\\Ext\\ManagedApplicationModule.bsl	1	сравнение
+crates/ide-diagnostics/src/handlers/typo.rs	xml	1	вне-класса: словарь опечаток
+crates/ide-diagnostics/src/handlers/unused_local_method.rs	checkObjectModule	1	вне-класса: имя параметра диагностики
+crates/ide-diagnostics/src/runner.rs	ExecuteExternalCodeInCommonModule	1	вне-класса: код диагностики
+crates/ide-diagnostics/src/runner.rs	ProtectedModule	1	вне-класса: код диагностики
+crates/ide/src/goto_definition.rs	{name}.xml	1	сравнение
+crates/ide/src/goto_definition.rs	{}.xml	1	сравнение
+crates/ide/src/symbol_info/form.rs	Form	1	вне-класса: английское имя идентификатора BSL «Форма»
+crates/mcp-server/src/diagnostics_state/drift.rs	.xml	4	сравнение
+crates/mcp-server/src/drift_classify.rs	.bsl	1	сравнение
+crates/mcp-server/src/drift_classify.rs	.xml	1	сравнение
+crates/mcp-server/src/graph/build.rs	.bsl	1	сравнение
+crates/mcp-server/src/graph/scan.rs	.xml	1	сравнение
+crates/mcp-server/src/graph/snapshot.rs	bsl	1	сравнение
+crates/mcp-server/src/graph/snapshot.rs	xml	1	сравнение
+crates/mcp-server/src/graph/universe.rs	bsl	3	сравнение
+crates/mcp-server/src/graph/universe.rs	xml	2	сравнение
+crates/mcp-server/src/state/sync.rs	Configuration.xml	1	сравнение
+crates/mcp-server/src/state/sync.rs	bsl	4	сравнение
+crates/mcp-server/src/tools/metadata.rs	Ext	1	сравнение
+crates/mcp-server/src/tools/metadata.rs	Form.xml	1	сравнение
+crates/mcp-server/src/tools/metadata.rs	Forms	1	сравнение
+crates/project-model/src/file_role.rs	Ext	1	сравнение
+crates/project-model/src/file_role.rs	Module.bsl	1	сравнение
+crates/project-model/src/file_role.rs	bsl	1	сравнение
+crates/project-model/src/file_role.rs	xml	1	сравнение
+crates/project-model/src/lib.rs	Configuration.xml	6	сравнение
+crates/vcs/src/lib.rs	bsl	1	сравнение

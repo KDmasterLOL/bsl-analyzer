@@ -21,6 +21,7 @@ lexer = { path = "crates/lexer" }
 parser-error = { path = "crates/parser-error" }
 base-db = { path = "crates/base-db" }
 bsl-config = { path = "crates/bsl-config" }
+bsl-conventions = { path = "crates/bsl-conventions" }
 bsl-metadata = { path = "crates/bsl-metadata" }
 bsl-platform = { path = "crates/bsl-platform" }
 bsl-types = { path = "crates/bsl-types" }
