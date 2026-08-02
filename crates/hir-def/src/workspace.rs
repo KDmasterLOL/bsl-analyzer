@@ -1,5 +1,6 @@
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+use stdx::case::CaseExt;
 use tracing::debug;
 use vfs::{FileId, FileSet};
 
@@ -111,23 +112,24 @@ fn module_name_from_path(path: &str) -> Option<Name> {
 
     debug!(path = %path_str, "Extracting module name from path");
 
-    if let Some(pos) = path_str.find("CommonModules/").or_else(|| path_str.find("ОбщиеМодули/"))
-    {
-        let after_common = if path_str[pos..].starts_with("CommonModules/") {
-            &path_str[pos + "CommonModules/".len()..]
-        } else {
-            &path_str[pos + "ОбщиеМодули/".len()..]
-        };
-
-        if let Some(slash_pos) = after_common.find('/') {
-            let module_name = &after_common[..slash_pos];
-            debug!(module_name, "Extracted from CommonModules path");
-            return Some(Name::new(module_name));
+    let mut segments = path_str.split('/');
+    while let Some(segment) = segments.next() {
+        if segment.eq_ignore_ascii_case("CommonModules") || segment.fold_lower() == "общиемодули"
+        {
+            if let Some(module_name) = segments.next() {
+                if segments.next().is_some() {
+                    debug!(module_name, "Extracted from CommonModules path");
+                    return Some(Name::new(module_name));
+                }
+            }
+            break;
         }
     }
 
     if let Some(filename) = path_str.rsplit('/').next() {
-        if let Some(name_without_ext) = filename.strip_suffix(".bsl") {
+        if bsl_conventions::str_has_extension(filename, bsl_conventions::BSL_EXTENSION) {
+            let name_without_ext =
+                &filename[..filename.len() - bsl_conventions::BSL_EXTENSION.len() - 1];
             debug!(module_name = name_without_ext, "Extracted from filename");
             return Some(Name::new(name_without_ext));
         }

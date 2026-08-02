@@ -11,17 +11,26 @@ pub fn file_path_to_module_path(rel_path: &str) -> String {
     let mut i = 0;
     while i < parts.len() {
         if let Some(ru_type) = metadata_type_ru(parts[i]) {
+            use bsl_conventions::{conventional_of, ConventionalName as Conv};
             result_parts.push(ru_type.to_owned());
+            // `parts[i + 1]` — позиция ИМЕНИ объекта: сравнение с `Ext` здесь
+            // точное сознательно, объект может называться `EXT` и остаётся собой.
             if i + 1 < parts.len() && parts[i + 1] != "Ext" {
                 result_parts.push(parts[i + 1].to_owned());
                 i += 2;
 
-                if i < parts.len() && parts[i] == "Forms" && i + 1 < parts.len() {
+                if i < parts.len()
+                    && conventional_of(parts[i]) == Some(Conv::Forms)
+                    && i + 1 < parts.len()
+                {
                     result_parts.push("Форма".to_owned());
                     result_parts.push(parts[i + 1].to_owned());
                     i += 2;
                 }
-                if i < parts.len() && parts[i] == "Commands" && i + 1 < parts.len() {
+                if i < parts.len()
+                    && conventional_of(parts[i]) == Some(Conv::Commands)
+                    && i + 1 < parts.len()
+                {
                     result_parts.push("Команда".to_owned());
                     result_parts.push(parts[i + 1].to_owned());
                     i += 2;
@@ -45,51 +54,55 @@ pub fn file_path_to_module_path(rel_path: &str) -> String {
 }
 
 fn metadata_type_ru(dir_name: &str) -> Option<&'static str> {
-    match dir_name {
-        "Documents" => Some("Документ"),
-        "Catalogs" => Some("Справочник"),
-        "CommonModules" => Some("ОбщийМодуль"),
-        "DataProcessors" => Some("Обработка"),
-        "Reports" => Some("Отчет"),
-        "InformationRegisters" => Some("РегистрСведений"),
-        "AccumulationRegisters" => Some("РегистрНакопления"),
-        "AccountingRegisters" => Some("РегистрБухгалтерии"),
-        "CalculationRegisters" => Some("РегистрРасчета"),
-        "Enums" => Some("Перечисление"),
-        "Constants" => Some("Константа"),
-        "ChartsOfCharacteristicTypes" => Some("ПланВидовХарактеристик"),
-        "ChartsOfAccounts" => Some("ПланСчетов"),
-        "ChartsOfCalculationTypes" => Some("ПланВидовРасчета"),
-        "BusinessProcesses" => Some("БизнесПроцесс"),
-        "Tasks" => Some("Задача"),
-        "ExchangePlans" => Some("ПланОбмена"),
-        "WebServices" => Some("WebСервис"),
-        "HTTPServices" => Some("HTTPСервис"),
-        "FilterCriteria" => Some("КритерийОтбора"),
-        "SettingsStorages" => Some("ХранилищеНастроек"),
-        "FunctionalOptions" => Some("ФункциональнаяОпция"),
-        "CommonForms" => Some("ОбщаяФорма"),
-        "CommonCommands" => Some("ОбщаяКоманда"),
-        "SessionParameters" => Some("ПараметрСеанса"),
-        "Sequences" => Some("Последовательность"),
-        "DocumentJournals" => Some("ЖурналДокументов"),
-        _ => None,
-    }
+    // Английские имена коллекций выгрузки; регистр не значим. Двуязычная
+    // эквивалентность (русские коллекции) — политика спеки модульных путей,
+    // сюда не тянется: таблица покрывает только английскую раскладку.
+    const TABLE: &[(&str, &str)] = &[
+        ("Documents", "Документ"),
+        ("Catalogs", "Справочник"),
+        ("CommonModules", "ОбщийМодуль"),
+        ("DataProcessors", "Обработка"),
+        ("Reports", "Отчет"),
+        ("InformationRegisters", "РегистрСведений"),
+        ("AccumulationRegisters", "РегистрНакопления"),
+        ("AccountingRegisters", "РегистрБухгалтерии"),
+        ("CalculationRegisters", "РегистрРасчета"),
+        ("Enums", "Перечисление"),
+        ("Constants", "Константа"),
+        ("ChartsOfCharacteristicTypes", "ПланВидовХарактеристик"),
+        ("ChartsOfAccounts", "ПланСчетов"),
+        ("ChartsOfCalculationTypes", "ПланВидовРасчета"),
+        ("BusinessProcesses", "БизнесПроцесс"),
+        ("Tasks", "Задача"),
+        ("ExchangePlans", "ПланОбмена"),
+        ("WebServices", "WebСервис"),
+        ("HTTPServices", "HTTPСервис"),
+        ("FilterCriteria", "КритерийОтбора"),
+        ("SettingsStorages", "ХранилищеНастроек"),
+        ("FunctionalOptions", "ФункциональнаяОпция"),
+        ("CommonForms", "ОбщаяФорма"),
+        ("CommonCommands", "ОбщаяКоманда"),
+        ("SessionParameters", "ПараметрСеанса"),
+        ("Sequences", "Последовательность"),
+        ("DocumentJournals", "ЖурналДокументов"),
+    ];
+    TABLE.iter().find(|(k, _)| k.eq_ignore_ascii_case(dir_name)).map(|(_, v)| *v)
 }
 
 fn module_type_ru(file_name: &str) -> Option<&'static str> {
-    match file_name {
-        "ObjectModule.bsl" => Some("МодульОбъекта"),
-        "ManagerModule.bsl" => Some("МодульМенеджера"),
-        "FormModule.bsl" => Some("МодульФормы"),
-        "Module.bsl" => Some("Модуль"),
-        "CommandModule.bsl" => Some("МодульКоманды"),
-        "RecordSetModule.bsl" => Some("МодульНабораЗаписей"),
-        "ValueManagerModule.bsl" => Some("МодульМенеджераЗначения"),
-        "SessionModule.bsl" => Some("МодульСеанса"),
-        "ExternalConnectionModule.bsl" => Some("МодульВнешнегоСоединения"),
-        "ManagedApplicationModule.bsl" => Some("МодульУправляемогоПриложения"),
-        "OrdinaryApplicationModule.bsl" => Some("МодульОбычногоПриложения"),
+    use bsl_conventions::ConventionalName as Conv;
+    match bsl_conventions::conventional_of(file_name)? {
+        Conv::ObjectModule => Some("МодульОбъекта"),
+        Conv::ManagerModule => Some("МодульМенеджера"),
+        Conv::FormModule => Some("МодульФормы"),
+        Conv::Module => Some("Модуль"),
+        Conv::CommandModule => Some("МодульКоманды"),
+        Conv::RecordSetModule => Some("МодульНабораЗаписей"),
+        Conv::ValueManagerModule => Some("МодульМенеджераЗначения"),
+        Conv::SessionModule => Some("МодульСеанса"),
+        Conv::ExternalConnectionModule => Some("МодульВнешнегоСоединения"),
+        Conv::ManagedApplicationModule => Some("МодульУправляемогоПриложения"),
+        Conv::OrdinaryApplicationModule => Some("МодульОбычногоПриложения"),
         _ => None,
     }
 }
@@ -97,6 +110,54 @@ fn module_type_ru(file_name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_case_variant_spelling_maps_like_its_canonical_twin() {
+        for (variant, canonical) in [
+            (
+                "Documents/Реализация/EXT/OBJECTMODULE.BSL",
+                "Documents/Реализация/Ext/ObjectModule.bsl",
+            ),
+            (
+                "CATALOGS/Товары/FORMS/Ф/Ext/FormModule.bsl",
+                "Catalogs/Товары/Forms/Ф/Ext/FormModule.bsl",
+            ),
+            ("CommonModules/Общий/EXT/MODULE.BSL", "CommonModules/Общий/Ext/Module.bsl"),
+        ] {
+            assert_eq!(
+                file_path_to_module_path(variant),
+                file_path_to_module_path(canonical),
+                "{variant}"
+            );
+        }
+    }
+
+    /// Позиция после коллекции — ИМЯ объекта: объект, названный `EXT`, остаётся
+    /// в semantic text под своим именем в любом регистре.
+    #[test]
+    fn an_object_named_ext_keeps_its_name() {
+        assert_eq!(
+            file_path_to_module_path("Catalogs/EXT/Ext/ObjectModule.bsl"),
+            "Справочник.EXT.МодульОбъекта"
+        );
+    }
+
+    /// Таблица по словарю: верхнерегистровое написание каждого конвенционного
+    /// имени модуля даёт тот же ответ, что каноническое (включая None).
+    #[test]
+    fn every_dictionary_module_name_maps_case_insensitively() {
+        for &name in bsl_conventions::ConventionalName::ALL {
+            let canonical = name.canonical();
+            if !canonical.ends_with(".bsl") {
+                continue;
+            }
+            assert_eq!(
+                module_type_ru(&canonical.to_ascii_uppercase()),
+                module_type_ru(canonical),
+                "{canonical}"
+            );
+        }
+    }
 
     #[test]
     fn document_object_module() {

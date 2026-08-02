@@ -3983,3 +3983,80 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod form_twin_tests {
+    use super::super::test_support::{sample_workspace, write};
+    use super::GRAPH_BUILD_BATCH;
+    use crate::graph_db::build_graph_database;
+    use rusqlite::Connection;
+    use std::path::Path;
+
+    fn build(root: &Path, out: &Path) {
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            &project,
+            &universe,
+            out,
+            GRAPH_BUILD_BATCH,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files: 0,
+                built_at: "t".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn shape(out: &Path) -> (i64, i64, Vec<(String, String)>) {
+        let conn = Connection::open(out).unwrap();
+        let nodes: i64 = conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0)).unwrap();
+        let edges: i64 = conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0)).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name, qualified FROM nodes WHERE name = 'ПриОткрытии' ORDER BY id")
+            .unwrap();
+        let form_nodes = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        (nodes, edges, form_nodes)
+    }
+
+    /// Дерево с форменным модулем `Module.BSL` собирается в тот же граф, что его
+    /// нижнерегистровый близнец: узлы, рёбра и квалифицированное имя форменного
+    /// обработчика совпадают.
+    #[test]
+    fn a_case_variant_form_module_builds_the_same_graph_shape() {
+        let body = "&НаКлиенте\nПроцедура ПриОткрытии() Сервер.Считать();\nКонецПроцедуры";
+        let lower = tempfile::tempdir().unwrap();
+        sample_workspace(lower.path());
+        write(lower.path(), "Catalogs/C/Forms/F/Ext/Form/Module.bsl", body);
+        let lower_out = lower.path().join("out/graph.db");
+        build(lower.path(), &lower_out);
+
+        let upper = tempfile::tempdir().unwrap();
+        sample_workspace(upper.path());
+        write(upper.path(), "Catalogs/C/Forms/F/Ext/Form/Module.BSL", body);
+        let upper_out = upper.path().join("out/graph.db");
+        build(upper.path(), &upper_out);
+
+        let (lower_nodes, lower_edges, lower_form) = shape(&lower_out);
+        let (upper_nodes, upper_edges, upper_form) = shape(&upper_out);
+
+        // Положительный контроль: форменный обработчик действительно в графе.
+        assert!(!lower_form.is_empty(), "обработчик формы обязан быть узлом графа");
+        assert_eq!(lower_nodes, upper_nodes, "число узлов");
+        assert_eq!(lower_edges, upper_edges, "число рёбер");
+        // Квалификация здесь путевая (метаданных в фикстуре нет), а написание
+        // самого файла у близнецов и ДОЛЖНО отличаться — сравниваем структуру
+        // с точностью до ASCII-регистра пути.
+        let fold = |v: Vec<(String, String)>| -> Vec<(String, String)> {
+            v.into_iter().map(|(n, q)| (n, q.to_ascii_lowercase())).collect()
+        };
+        assert_eq!(fold(lower_form), fold(upper_form), "квалификация форменного обработчика");
+    }
+}

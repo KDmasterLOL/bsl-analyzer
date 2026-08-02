@@ -381,22 +381,29 @@ pub struct FormKey {
 /// Parse a form module path into its owner + form name, or `None` if the path is
 /// not a managed form module. Mirrors the authoritative detection in
 /// `ide-db/src/metadata.rs` (managed-form suffix `…/Ext/Form/Module.bsl`),
-/// including its exact-case service-folder matching: a path this parser accepts but
-/// `metadata.rs` would not loads no `module_metadata.form`, so matching its casing
-/// keeps the form pass from claiming a form whose metadata never loads.
+/// including its service-folder matching policy (`bsl_conventions`, ASCII-ci):
+/// a path this parser accepts but `metadata.rs` would not loads no
+/// `module_metadata.form`, so sharing one policy keeps the form pass from
+/// claiming a form whose metadata never loads.
 pub fn parse_form_module_path(path: &str) -> Option<FormKey> {
+    use bsl_conventions::{conventional_of, ConventionalName as Conv};
     let normalized = path.replace('\\', "/");
     let parts: Vec<&str> = normalized.split('/').collect();
     let n = parts.len();
-    if n < 5 || parts[n - 1] != "Module.bsl" || parts[n - 2] != "Form" || parts[n - 3] != "Ext" {
+    if n < 5
+        || conventional_of(parts[n - 1]) != Some(Conv::Module)
+        || conventional_of(parts[n - 2]) != Some(Conv::Form)
+        || conventional_of(parts[n - 3]) != Some(Conv::Ext)
+    {
         return None;
     }
     let form_name = parts[n - 4].to_string();
     let container = parts[n - 5];
-    if container == "CommonForms" || container == "ОбщиеФормы" {
+    if container.eq_ignore_ascii_case("CommonForms") || container.fold_lower() == "общиеформы"
+    {
         return Some(FormKey { owner: None, form_name });
     }
-    if container == "Forms" && n >= 7 {
+    if conventional_of(container) == Some(Conv::Forms) && n >= 7 {
         let object = parts[n - 6].to_string();
         let mdo_type = module_path_type_from_segment(parts[n - 7])?.to_mdo_type()?;
         return Some(FormKey { owner: Some((mdo_type, object)), form_name });
@@ -405,10 +412,9 @@ pub fn parse_form_module_path(path: &str) -> Option<FormKey> {
 }
 
 fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKind)> {
+    use bsl_conventions::ConventionalName as Conv;
     let parts: Vec<&str> = path.split('/').collect();
-    let path_lower = path.fold_lower();
-    let is_manager_module =
-        parts.last().is_some_and(|file_name| file_name.eq_ignore_ascii_case("ManagerModule.bsl"));
+    let file_kind = parts.last().copied().and_then(bsl_conventions::conventional_of);
 
     // Structure comes from the shared specification; the spelling table stays
     // here, because this index accepts `Ё` variants the metadata builder does not.
@@ -419,19 +425,18 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
     let name = split.object_name.to_string();
 
     if mod_type == ModulePathType::CommonModule {
-        if path_lower.ends_with("module.bsl")
-            && !path_lower.ends_with("managermodule.bsl")
-            && !path_lower.ends_with("objectmodule.bsl")
-            && !path_lower.ends_with("recordsetmodule.bsl")
-        {
+        if file_kind == Some(Conv::Module) {
             return Some((mod_type, name, ModuleFileKind::Common));
         }
-    } else if is_manager_module {
-        return Some((mod_type, name, ModuleFileKind::Manager));
-    } else if path_lower.ends_with("objectmodule.bsl") {
-        return Some((mod_type, name, ModuleFileKind::Object));
-    } else if path_lower.ends_with("recordsetmodule.bsl") {
-        return Some((mod_type, name, ModuleFileKind::RecordSet));
+    } else {
+        match file_kind {
+            Some(Conv::ManagerModule) => return Some((mod_type, name, ModuleFileKind::Manager)),
+            Some(Conv::ObjectModule) => return Some((mod_type, name, ModuleFileKind::Object)),
+            Some(Conv::RecordSetModule) => {
+                return Some((mod_type, name, ModuleFileKind::RecordSet))
+            }
+            _ => {}
+        }
     }
 
     None
@@ -439,6 +444,22 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_case_variant_form_module_path_is_still_a_form() {
+        let key = super::parse_form_module_path("Catalogs/C/Forms/F/EXT/FORM/MODULE.BSL")
+            .expect("регистровый близнец форменного пути распознаётся");
+        assert_eq!(key.form_name, "F");
+    }
+
+    /// Позиция имени формы и объекта — имена, их регистр значим и сохраняется.
+    #[test]
+    fn form_and_object_names_keep_their_case() {
+        let key = super::parse_form_module_path("Catalogs/ТОВАРЫ/Forms/ФОРМА/Ext/Form/Module.bsl")
+            .expect("нижнерегистровые сервисные сегменты с именами в любом регистре");
+        assert_eq!(key.form_name, "ФОРМА");
+        assert_eq!(key.owner.as_ref().map(|(_, o)| o.as_str()), Some("ТОВАРЫ"));
+    }
+
     /// Имя объекта может совпадать с именем коллекции. Тип берётся по позиции в
     /// жёсткой форме `<Коллекция>/<Имя>/Ext/<Модуль>.bsl`, иначе обход с конца
     /// принимает имя объекта за тип и индексирует модуль под именем `Ext`.

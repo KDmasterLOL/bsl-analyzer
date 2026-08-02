@@ -1674,6 +1674,7 @@ version = "0.2.66"
 dependencies = [
  "base-db",
  "bsl-config",
+ "bsl-conventions",
  "bsl-metadata",
  "bsl-platform",
  "bsl-types",
@@ -2020,6 +2021,7 @@ version = "0.2.66"
 dependencies = [
  "base-db",
  "bsl-config",
+ "bsl-conventions",
  "bsl-metadata",
  "bsl-platform",
  "bsl-types",

@@ -1691,42 +1691,43 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         return None;
     }
 
-    if parts.len() >= 2 && parts[parts.len() - 2] == "Ext" {
-        match parts[parts.len() - 1] {
-            "ManagedApplicationModule.bsl" => {
+    use bsl_conventions::{conventional_of, ConventionalName as Conv};
+    let last_kind = conventional_of(parts[parts.len() - 1]);
+    if parts.len() >= 2 && conventional_of(parts[parts.len() - 2]) == Some(Conv::Ext) {
+        match last_kind {
+            Some(Conv::ManagedApplicationModule) => {
                 return Some(bsl_metadata::ModuleType::ManagedApplicationModule);
             }
-            "OrdinaryApplicationModule.bsl" => {
+            Some(Conv::OrdinaryApplicationModule) => {
                 return Some(bsl_metadata::ModuleType::OrdinaryApplicationModule);
             }
-            "ApplicationModule.bsl" => {
+            Some(Conv::ApplicationModule) => {
                 return Some(bsl_metadata::ModuleType::ApplicationModule);
             }
-            "SessionModule.bsl" => return Some(bsl_metadata::ModuleType::SessionModule),
-            "ExternalConnectionModule.bsl" => {
+            Some(Conv::SessionModule) => return Some(bsl_metadata::ModuleType::SessionModule),
+            Some(Conv::ExternalConnectionModule) => {
                 return Some(bsl_metadata::ModuleType::ExternalConnectionModule);
             }
             _ => {}
         }
     }
 
-    if let Some(idx) = parts.iter().rposition(|&p| p == "CommonForms" || p == "ОбщиеФормы")
+    let form_suffix = |parts: &[&str]| {
+        conventional_of(parts[parts.len() - 1]) == Some(Conv::Module)
+            && conventional_of(parts[parts.len() - 2]) == Some(Conv::Form)
+            && conventional_of(parts[parts.len() - 3]) == Some(Conv::Ext)
+    };
+    if let Some(idx) = parts
+        .iter()
+        .rposition(|&p| p.eq_ignore_ascii_case("CommonForms") || p.fold_lower() == "общиеформы")
     {
-        if parts.len() == idx + 5
-            && parts[parts.len() - 1] == "Module.bsl"
-            && parts[parts.len() - 2] == "Form"
-            && parts[parts.len() - 3] == "Ext"
-        {
+        if parts.len() == idx + 5 && form_suffix(&parts) {
             return Some(bsl_metadata::ModuleType::FormModule);
         }
     }
 
-    if let Some(forms_idx) = parts.iter().position(|&p| p == "Forms") {
-        if parts.len() >= forms_idx + 5
-            && parts[parts.len() - 1] == "Module.bsl"
-            && parts[parts.len() - 2] == "Form"
-            && parts[parts.len() - 3] == "Ext"
-        {
+    if let Some(forms_idx) = parts.iter().position(|&p| conventional_of(p) == Some(Conv::Forms)) {
+        if parts.len() >= forms_idx + 5 && form_suffix(&parts) {
             return Some(bsl_metadata::ModuleType::FormModule);
         }
     }
@@ -1748,15 +1749,16 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
     // still object/manager modules, and the file name says so; what the unknown
     // collection costs is the shape evidence, so the SERVICE level has to supply it.
     // Without either the path is just a file that happens to be named `ObjectModule.bsl`.
-    let has_service_level = parts.len() >= 2 && parts[parts.len() - 2].eq_ignore_ascii_case("Ext");
+    let has_service_level =
+        parts.len() >= 2 && conventional_of(parts[parts.len() - 2]) == Some(Conv::Ext);
     if has_service_level && parts.len() >= 4 {
-        return match parts[parts.len() - 1] {
-            "ObjectModule.bsl" => Some(bsl_metadata::ModuleType::ObjectModule),
-            "ManagerModule.bsl" => Some(bsl_metadata::ModuleType::ManagerModule),
+        return match last_kind {
+            Some(Conv::ObjectModule) => Some(bsl_metadata::ModuleType::ObjectModule),
+            Some(Conv::ManagerModule) => Some(bsl_metadata::ModuleType::ManagerModule),
             // A record set too: four of its eight owners — sequences,
             // recalculations, an external data source's tables and cubes — are not
             // in `MdoType`, and this branch is where their paths land.
-            "RecordSetModule.bsl" => Some(bsl_metadata::ModuleType::RecordSetModule),
+            Some(Conv::RecordSetModule) => Some(bsl_metadata::ModuleType::RecordSetModule),
             _ => None,
         };
     }
@@ -1808,37 +1810,39 @@ fn collection_module_type(
     // A collection holds one kind of object, but not one FILE: the dump puts a
     // command module next to an object module. The file name has to be named
     // explicitly everywhere, or a sibling `.bsl` inherits a type it has no claim to.
+    use bsl_conventions::{conventional_of, ConventionalName as Conv};
+    let file_kind = conventional_of(module_file);
     match collection {
-        ModuleCollection::CommonModules if module_file == "Module.bsl" => {
+        ModuleCollection::CommonModules if file_kind == Some(Conv::Module) => {
             Some(ModuleType::CommonModule)
         }
-        ModuleCollection::HttpServices if module_file == "Module.bsl" => {
+        ModuleCollection::HttpServices if file_kind == Some(Conv::Module) => {
             Some(ModuleType::HTTPServiceModule)
         }
-        ModuleCollection::WebServices if module_file == "Module.bsl" => {
+        ModuleCollection::WebServices if file_kind == Some(Conv::Module) => {
             Some(ModuleType::WebServiceModule)
         }
-        ModuleCollection::IntegrationServices if module_file == "Module.bsl" => {
+        ModuleCollection::IntegrationServices if file_kind == Some(Conv::Module) => {
             Some(ModuleType::IntegrationServiceModule)
         }
-        ModuleCollection::CommonCommands if module_file == "CommandModule.bsl" => {
+        ModuleCollection::CommonCommands if file_kind == Some(Conv::CommandModule) => {
             Some(ModuleType::CommandModule)
         }
-        ModuleCollection::Commands if module_file == "CommandModule.bsl" => {
+        ModuleCollection::Commands if file_kind == Some(Conv::CommandModule) => {
             Some(ModuleType::CommandModule)
         }
         // A constant owns a module no other collection has.
         ModuleCollection::Mdo(bsl_metadata::MdoType::Constant)
-            if module_file == "ValueManagerModule.bsl" =>
+            if file_kind == Some(Conv::ValueManagerModule) =>
         {
             Some(ModuleType::ValueManagerModule)
         }
-        ModuleCollection::Mdo(mdo) => match module_file {
-            "ObjectModule.bsl" => Some(ModuleType::ObjectModule),
-            "ManagerModule.bsl" => Some(ModuleType::ManagerModule),
+        ModuleCollection::Mdo(mdo) => match file_kind {
+            Some(Conv::ObjectModule) => Some(ModuleType::ObjectModule),
+            Some(Conv::ManagerModule) => Some(ModuleType::ManagerModule),
             // A record set belongs to a register and to nothing else — the same
             // list `build_module_metadata` uses to load a register owner.
-            "RecordSetModule.bsl" if mdo.is_register() => Some(ModuleType::RecordSetModule),
+            Some(Conv::RecordSetModule) if mdo.is_register() => Some(ModuleType::RecordSetModule),
             _ => None,
         },
         ModuleCollection::CommonModules
@@ -2093,6 +2097,46 @@ pub(crate) fn find_integration_service_by_path(
 
 #[cfg(test)]
 mod tests {
+    /// Таблица по словарю: для каждого конвенционного имени файла модуля
+    /// верхнерегистровый путь классифицируется как канонический близнец.
+    /// Полнота пар сверяется с перечислением словаря, а не с памятью.
+    #[test]
+    fn every_dictionary_module_name_classifies_case_insensitively() {
+        let pairs = [
+            ("CommonModules/X/Ext/Module.bsl", true),
+            ("Catalogs/X/Ext/ObjectModule.bsl", true),
+            ("Catalogs/X/Ext/ManagerModule.bsl", true),
+            ("Catalogs/X/Forms/F/Ext/Form/Module.bsl", true),
+            ("CommonCommands/C/Ext/CommandModule.bsl", true),
+            ("InformationRegisters/X/Ext/RecordSetModule.bsl", true),
+            ("Constants/X/Ext/ValueManagerModule.bsl", true),
+            ("Ext/SessionModule.bsl", true),
+            ("Ext/ExternalConnectionModule.bsl", true),
+            ("Ext/ManagedApplicationModule.bsl", true),
+            ("Ext/OrdinaryApplicationModule.bsl", true),
+            ("Ext/ApplicationModule.bsl", true),
+            // Раскладки EDT в дампе конфигуратора нет: плоское имя формы этот
+            // классификатор не принимал и не принимает — ни в одном регистре.
+            ("Catalogs/X/Forms/F/Ext/FormModule.bsl", false),
+        ];
+        for &name in bsl_conventions::ConventionalName::ALL {
+            let canonical = name.canonical();
+            if !canonical.ends_with(".bsl") {
+                continue;
+            }
+            assert!(
+                pairs.iter().any(|(p, _)| p.ends_with(canonical)),
+                "в таблице нет пары для {canonical}"
+            );
+        }
+        for (path, classified) in pairs {
+            let canonical = get_module_type_from_uri(path);
+            assert_eq!(canonical.is_some(), classified, "{path}");
+            let upper = path.to_ascii_uppercase();
+            assert_eq!(get_module_type_from_uri(&upper), canonical, "{upper}");
+        }
+    }
+
     /// Имя объекта может совпадать с именем коллекции (`Справочник.Константы`).
     /// Форма пути жёсткая — `<Коллекция>/<Имя>/Ext/<Модуль>.bsl`, поэтому тип
     /// берётся по позиции, а не поиском последнего похожего сегмента: иначе имя

@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bsl-conventions.workspace = true
 stdx.workspace = true
 cfg-types.workspace = true
 base-db.workspace = true
