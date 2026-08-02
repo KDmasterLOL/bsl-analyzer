@@ -1179,7 +1179,16 @@ impl SearchEngine {
         }
         let walked =
             if path.is_absolute() { path.to_path_buf() } else { roots.workspace().join(path) };
-        roots.root_of(&walked, &crate::workspace_roots::canonical_spelling(&walked))
+        let canonical = crate::workspace_roots::canonical_spelling(&walked);
+        // A `.bsl`-spelled link may resolve to a non-source target. A key under the target's
+        // root would be one that is FORBIDDEN to exist (the walk drops such files), so canonical
+        // attribution is meaningless there; the walked spelling is the only key the file could
+        // ever have been indexed under — the key a removal must reach.
+        if project_model::file_role(&canonical) == project_model::FileRole::Source {
+            roots.root_of(&walked, &canonical)
+        } else {
+            roots.root_of(&walked, &walked)
+        }
     }
 
     /// Mark one workspace `.bsl` file's stored graph context stale, so a later
@@ -3142,6 +3151,39 @@ mod tests {
         );
         let hits_b = engine.search_with_embedding(&vec_b, 5, None).unwrap();
         assert_eq!(hits_b.first().map(|h| h.symbol_name.as_str()), Some("Бета"));
+    }
+
+    /// A `.bsl`-spelled link resolving to a non-source target keeps its key under the WALKED
+    /// spelling: a key under the target's root is forbidden to exist (the walk drops such
+    /// files), and the walked key is the only one the file could have been indexed under — the
+    /// one a removal must reach.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_non_source_target_keys_by_its_walked_spelling() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let target = extension.join("Target.txt");
+        fs::write(&target, "не исходник").unwrap();
+        let alias = configuration.join("Alias.bsl");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        engine.set_workspace_roots(roots);
+        let key = engine.workspace_file_key(&alias).expect("the walked spelling is a .bsl");
+        assert_eq!(
+            (key.root_id.as_str(), key.path.as_str()),
+            (crate::CONFIGURATION_ROOT_ID, "Alias.bsl"),
+            "attribution must not follow the non-source target into its root"
+        );
     }
 
     /// A symlink spelled `.bsl` whose target is not a BSL source is not a source

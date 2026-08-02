@@ -762,6 +762,13 @@ impl WorkspaceOverlayCache {
                 modified: metadata.modified().ok(),
                 canonical: crate::workspace_roots::canonical_spelling(&abs_path),
             };
+            // A live target that is not a source file is positive evidence the SOURCE file is
+            // gone: the walk never yields a file whose two spellings disagree on role, so a
+            // clean full scan would remove this entry — the point path settles it the same way.
+            if project_model::file_role(&fingerprint.canonical) != project_model::FileRole::Source {
+                self.remove_point_entry(key, baseline_hash.is_some());
+                continue;
+            }
 
             if let Some(entry) = self.entries.get_mut(&key) {
                 if entry.fingerprint == fingerprint {
@@ -1395,6 +1402,13 @@ impl WorkspaceOverlayCache {
                 modified: metadata.modified().ok(),
                 canonical: crate::workspace_roots::canonical_spelling(&abs_path),
             };
+            // A live target that is not a source file is positive evidence the SOURCE file is
+            // gone (see the raw twin above); the row's "verified" claim goes with the entry.
+            if project_model::file_role(&fingerprint.canonical) != project_model::FileRole::Source {
+                Self::retract_fingerprint_row(store, &key);
+                self.remove_point_entry(key, baseline_fingerprint.is_some());
+                continue;
+            }
 
             if let Some(entry) = self.entries.get_mut(&key) {
                 if entry.fingerprint == fingerprint {
@@ -4880,6 +4894,98 @@ mod tests {
             !rows.get(&key("Solo.bsl")).map(|row| row.canonical.as_str()).unwrap_or("").is_empty(),
             "the published re-read heals the row with the real spelling"
         );
+    }
+
+    /// A fresh `.bsl`-spelled link to a NON-source target must not become an overlay entry on
+    /// the point path: the walk drops such files (the roles of the two spellings disagree), and
+    /// the point path must serve the same universe. Both independent implementations.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_non_source_target_is_not_indexed_by_point_refreshes() {
+        for use_manifest in [false, true] {
+            let dir = tempdir().unwrap();
+            let outside = tempdir().unwrap();
+            let workspace = dir.path();
+            let target = outside.path().join("Target.txt");
+            fs::write(&target, "Процедура ТолькоЧерезСсылку()\nКонецПроцедуры").unwrap();
+
+            let store = Store::open(&workspace.join("search.db")).unwrap();
+            let roots = single_root(workspace);
+            let manifest: HashMap<FileKey, String> = HashMap::new();
+            let mut cache = WorkspaceOverlayCache::default();
+            cache.enable_watcher_mode();
+            if use_manifest {
+                cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+            } else {
+                cache
+                    .refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true)
+                    .unwrap();
+            }
+
+            std::os::unix::fs::symlink(&target, workspace.join("Alias.bsl")).unwrap();
+            cache.mark_dirty_path(key("Alias.bsl"));
+            if use_manifest {
+                cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+            } else {
+                cache
+                    .refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, false)
+                    .unwrap();
+            }
+            assert_eq!(
+                cache.snapshot().lexical_documents.len(),
+                0,
+                "manifest={use_manifest}: a .txt target is not a source file"
+            );
+        }
+    }
+
+    /// Retargeting an indexed `.bsl` link onto a NON-source file is positive evidence the
+    /// source is gone: the point refresh removes the entry instead of serving the foreign
+    /// contents. Both independent implementations.
+    #[cfg(unix)]
+    #[test]
+    fn a_retarget_onto_a_non_source_file_removes_the_point_entry() {
+        for use_manifest in [false, true] {
+            let dir = tempdir().unwrap();
+            let outside = tempdir().unwrap();
+            let workspace = dir.path();
+            let source = outside.path().join("Настоящий.bsl");
+            fs::write(&source, "Процедура Настоящая()\nКонецПроцедуры").unwrap();
+            let foreign = outside.path().join("Чужой.txt");
+            fs::write(&foreign, "Процедура Чужая()\nКонецПроцедуры").unwrap();
+            let alias = workspace.join("Alias.bsl");
+            std::os::unix::fs::symlink(&source, &alias).unwrap();
+
+            let store = Store::open(&workspace.join("search.db")).unwrap();
+            let roots = single_root(workspace);
+            let manifest: HashMap<FileKey, String> = HashMap::new();
+            let mut cache = WorkspaceOverlayCache::default();
+            cache.enable_watcher_mode();
+            if use_manifest {
+                cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+            } else {
+                cache
+                    .refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, true)
+                    .unwrap();
+            }
+            assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "Настоящая");
+
+            fs::remove_file(&alias).unwrap();
+            std::os::unix::fs::symlink(&foreign, &alias).unwrap();
+            cache.mark_dirty_path(key("Alias.bsl"));
+            if use_manifest {
+                cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+            } else {
+                cache
+                    .refresh(&store, &roots, None, 32, BaselineHashMode::RawFileBytes, false)
+                    .unwrap();
+            }
+            assert_eq!(
+                cache.snapshot().lexical_documents.len(),
+                0,
+                "manifest={use_manifest}: the retargeted link no longer names a source file"
+            );
+        }
     }
 
     /// The overlay must not walk the tree itself: the walk policy (which links
