@@ -166,6 +166,31 @@ pub struct SearchEngine {
     module_snapshot_source: Option<Arc<dyn ModuleSnapshotSource>>,
 }
 
+/// The overlay retry driver's condition signals, read without side effects by
+/// [`SearchEngine::workspace_overlay_retry_signals`]. Any nonzero/true field means the
+/// overlay owes another Embed pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayRetrySignals {
+    pub initialized: bool,
+    pub needs_full_rescan: bool,
+    pub pending_dirty_paths: usize,
+    pub unembedded_entries: usize,
+    pub unread_keys: usize,
+}
+
+impl OverlayRetrySignals {
+    /// Whether any signal demands a pass: the first pass has not happened, removals were
+    /// withheld or a persist failed, marks await re-embedding, entries lack vectors, or
+    /// proven-present files stayed unread.
+    pub fn demands_a_pass(&self) -> bool {
+        !self.initialized
+            || self.needs_full_rescan
+            || self.pending_dirty_paths > 0
+            || self.unembedded_entries > 0
+            || self.unread_keys > 0
+    }
+}
+
 /// Outcome of [`SearchEngine::refresh_dirty_contexts`]: how many context-dirty paths
 /// were processed (marks cleared) and how many chunks had their context re-rendered
 /// (and embedding cleared) as a result.
@@ -1474,6 +1499,23 @@ impl SearchEngine {
         Ok(cache.unread_keys_count())
     }
 
+    /// The retry driver's condition signals, read STRICTLY without side effects: unlike
+    /// [`Self::workspace_overlay_stats`], no refresh runs — a condition check that drained
+    /// marks or touched the store would itself violate the ownership discipline it serves.
+    pub fn workspace_overlay_retry_signals(&self) -> Result<OverlayRetrySignals, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(OverlayRetrySignals {
+            initialized: cache.is_initialized(),
+            needs_full_rescan: cache.needs_full_rescan(),
+            pending_dirty_paths: cache.dirty_paths_snapshot().len(),
+            unembedded_entries: cache.unembedded_entry_count(),
+            unread_keys: cache.unread_keys_count(),
+        })
+    }
+
     pub fn workspace_overlay_stats(&self) -> Result<Option<WorkspaceOverlayStats>, SearchError> {
         let Some(roots) = &self.workspace_roots else {
             return Ok(None);
@@ -1592,9 +1634,13 @@ impl SearchEngine {
         roots: &WorkspaceRoots,
         warm_embeddings: HashMap<String, Vec<f32>>,
         graph_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
+        should_continue: &dyn Fn() -> bool,
     ) -> Result<(RefreshPlan, HashMap<String, Vec<f32>>), SearchError> {
         let batch_size = EmbeddingExecutionPolicy::default().batch_size();
-        let store = Store::open(db_path)?;
+        // `open_existing`, not `open`: this standalone pass runs while another daemon may own
+        // the workspace, and the migrating constructor could wipe and recreate the owner's
+        // tables on a schema mismatch. A pass has no business migrating anything.
+        let store = Store::open_existing(db_path)?;
         let embedder = Embedder::new(embedder_config);
 
         // Seed the warm cache from the persisted overlay embedding cache so a restart reuses
@@ -1631,6 +1677,7 @@ impl SearchEngine {
             &embedder,
             plan.missing_embeddings(),
             batch_size,
+            should_continue,
         )?;
 
         // Include the warm-reused vectors for the plan's chunks in the published set so Phase C
@@ -1658,6 +1705,7 @@ impl SearchEngine {
         embedder: &Embedder,
         missing: &HashMap<String, String>,
         batch_size: usize,
+        should_continue: &dyn Fn() -> bool,
     ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
         if missing.is_empty() {
             return Ok(HashMap::new());
@@ -1667,6 +1715,14 @@ impl SearchEngine {
         let mut new_embeddings = HashMap::with_capacity(missing.len());
 
         for batch in pairs.chunks(batch_size.max(1)) {
+            // Checked between batches, like the collection embed pass: each batch persists
+            // vectors to the shared store, and a caller that lost the workspace lease must
+            // stop writing over the new owner's rows.
+            if !should_continue() {
+                return Err(SearchError::Embedder(
+                    "overlay embed pass stopped: workspace ownership lost".to_owned(),
+                ));
+            }
             let inputs: Vec<&str> = batch.iter().map(|(_, input)| input.as_str()).collect();
             let embeddings = embedder.embed_batch_interactive(&inputs)?;
 

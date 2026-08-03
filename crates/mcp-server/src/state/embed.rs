@@ -218,6 +218,7 @@ impl SharedState {
     pub(super) fn run_overlay_warmup(
         search_engine: &SharedSearchEngine,
         overlay_warmup: &Arc<Mutex<OverlayWarmupState>>,
+        lease: &crate::workspace_lease::WorkspaceLease,
     ) {
         let cloned = match search_engine.lock() {
             Ok(guard) => match guard.as_ref() {
@@ -301,12 +302,16 @@ impl SharedState {
 
         // Lock-free: plan against a reopened standalone store and embed the missing chunks. The
         // engine mutex is NOT held here, so search/status stay responsive during the remote embed.
+        // Ownership is re-checked between embed batches (the uncached read — the cached
+        // verdict would let a superseded daemon write for up to its TTL after a takeover).
+        let should_continue = || lease.owns_caches_now();
         let primed = SearchEngine::prime_workspace_overlay_standalone(
             &db_path,
             embedder_config,
             &roots,
             warm_cache,
             graph_provider,
+            &should_continue,
         );
         let (plan, new_embeddings) = match primed {
             Ok(result) => result,
@@ -334,7 +339,23 @@ impl SharedState {
         match search_engine.lock() {
             Ok(guard) => match guard.as_ref() {
                 Some(engine) => {
-                    match engine.publish_workspace_overlay(plan, new_embeddings, &dirty_before) {
+                    // Phase C under the REAL fence: fingerprint rows suppress the next
+                    // owner's re-reads after a restart, so a narrow ownership window is not
+                    // enough here — a claim either completes before this write or waits.
+                    let published = lease.with_ownership(|| {
+                        engine.publish_workspace_overlay(plan, new_embeddings, &dirty_before)
+                    });
+                    let Some(published) = published else {
+                        tracing::warn!("overlay warmup: workspace ownership lost at publish");
+                        Self::set_overlay_warmup_state(
+                            overlay_warmup,
+                            OverlayWarmupState::Failed(
+                                "workspace ownership lost at publish".to_owned(),
+                            ),
+                        );
+                        return;
+                    };
+                    match published {
                         Ok(bsl_search::PublishOutcome::Applied { gate_deferred, persist_ok }) => {
                             tracing::info!("workspace overlay semantic warmup complete");
                             // A marked key the plan's gate skipped unread counts as an unread
@@ -782,7 +803,11 @@ mod tests {
             std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
             return;
         }
-        SharedState::run_overlay_warmup(&engine_arc, &overlay_warmup);
+        SharedState::run_overlay_warmup(
+            &engine_arc,
+            &overlay_warmup,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
         std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
 
@@ -830,7 +855,11 @@ mod tests {
             std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
             return;
         }
-        SharedState::run_overlay_warmup(&engine_arc, &overlay_warmup);
+        SharedState::run_overlay_warmup(
+            &engine_arc,
+            &overlay_warmup,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
         std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         let outcome = overlay_warmup.lock().unwrap().clone();

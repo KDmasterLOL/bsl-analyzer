@@ -739,7 +739,7 @@ fn write_summary_block(
         let _ = writeln!(out, "  Local overlay semantic: {overlay_line}");
         let _ = writeln!(
             out,
-            "  Note: local-only edits are searchable lexically immediately; their semantic index is (re)built at MCP startup (an incomplete pass is caught up the same way)."
+            "  Note: local-only edits are searchable lexically immediately; their semantic index is (re)built at MCP startup, and a retry driver catches up incomplete or failed passes automatically (with backoff)."
         );
     }
 
@@ -1089,8 +1089,8 @@ mod tests {
             .find(|line| line.trim_start().starts_with("Note:"))
             .expect("the Note line is unconditional in overlay mode");
         assert!(
-            note.contains("an incomplete pass is caught up the same way"),
-            "the Note itself names the catch-up: {note}"
+            note.contains("a retry driver catches up incomplete or failed passes automatically"),
+            "the Note itself names the automatic catch-up: {note}"
         );
     }
 

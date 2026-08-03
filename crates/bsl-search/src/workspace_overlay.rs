@@ -1782,6 +1782,23 @@ impl WorkspaceOverlayCache {
         self.unread_keys.len()
     }
 
+    /// How many overlay entries are missing at least one vector. A PARTIALLY vectorized entry
+    /// counts too: `build_overlay_vectors` legitimately returns vectors only for the chunks
+    /// with a warm cache hit, so emptiness alone would hide a half-embedded file from the
+    /// retry driver.
+    pub fn unembedded_entry_count(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| entry.vector_documents.len() < entry.embedding_inputs.len())
+            .count()
+    }
+
+    /// Whether the overlay has been initialized by some full pass (or an explicit clean
+    /// init). Read-only: the retry driver's "first pass happened at all" signal.
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
     fn refresh_dirty_paths_from_manifest(
         &mut self,
         dirty_keys: Vec<FileKey>,
@@ -7077,5 +7094,36 @@ mod tests {
                 "the proven deletion's hiding stands"
             );
         }
+    }
+
+    /// A PARTIALLY vectorized entry counts as unembedded: `build_overlay_vectors` returns
+    /// vectors only for warm-cached chunks, so emptiness alone would hide a half-embedded
+    /// file from the retry driver.
+    #[test]
+    fn a_partially_vectorized_entry_counts_as_unembedded() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let two_chunks = "Процедура Первая()\nКонецПроцедуры\nПроцедура Вторая()\nКонецПроцедуры";
+        fs::write(workspace.join("A.bsl"), two_chunks).unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        let missing: Vec<String> = plan.missing_embeddings().keys().cloned().collect();
+        assert_eq!(missing.len(), 2, "two chunks, two missing embeddings");
+
+        // Phase B delivered only ONE of the two vectors (say, the endpoint died mid-pass).
+        let partial = HashMap::from([(missing[0].clone(), vec![1.0f32, 0.0, 0.0])]);
+        cache.publish_plan(plan, partial, &baseline, None, &store).unwrap();
+        assert_eq!(cache.unembedded_entry_count(), 1, "one vector of two is NOT a finished entry");
     }
 }

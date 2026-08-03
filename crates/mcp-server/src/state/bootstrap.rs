@@ -130,11 +130,35 @@ impl SharedState {
             crate::diagnostics_state::ResidentModuleSnapshotSource::new(diagnostics.clone()),
         );
 
+        // The overlay retry driver exists only where an Embed pass exists: Postgres mode
+        // with an embedder. PG without one is the legitimate FTS-only shape — a driver
+        // there would run a `Skipped` pass per tick without ever consuming a signal; the
+        // warmup state is settled up front instead, or `search status` would show
+        // "building..." forever with the direct startup warmup gone.
+        let overlay_retry =
+            if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+                if Self::embedding_config().is_some() {
+                    Some(super::overlay_retry::OverlayRetry::spawn(
+                        Arc::clone(&search_engine),
+                        Arc::clone(&overlay_warmup),
+                        Arc::clone(&semantic_runtime),
+                        workspace_lease.clone(),
+                    ))
+                } else {
+                    Self::set_overlay_warmup_state(
+                        &overlay_warmup,
+                        OverlayWarmupState::Skipped("no embedder configured".to_owned()),
+                    );
+                    None
+                }
+            } else {
+                None
+            };
+
         Self::spawn_workspace_search_init(
             Arc::clone(&search_engine),
             Arc::clone(&index_progress),
             Arc::clone(&semantic_runtime),
-            Arc::clone(&overlay_warmup),
             source_dir.clone(),
             Arc::clone(&watcher_ready),
             baseline.clone(),
@@ -143,6 +167,7 @@ impl SharedState {
             Arc::clone(&embed_flight),
             Arc::clone(&snapshot_source),
             workspace_lease.clone(),
+            overlay_retry.clone(),
         );
 
         Self::spawn_search_sink(
@@ -151,6 +176,7 @@ impl SharedState {
             Arc::clone(&watcher_ready),
             config_path.to_path_buf(),
             graph.clone(),
+            overlay_retry.clone(),
         );
 
         Ok(Self {
@@ -170,6 +196,7 @@ impl SharedState {
             change_hub: Some(change_hub),
             embed_flight,
             workspace_lease,
+            overlay_retry,
         })
     }
 
@@ -182,7 +209,6 @@ impl SharedState {
         search_engine: SharedSearchEngine,
         index_progress: Arc<IndexProgress>,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
-        overlay_warmup: Arc<Mutex<OverlayWarmupState>>,
         workspace_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
         baseline: DeferredBaselineRuntime,
@@ -191,6 +217,7 @@ impl SharedState {
         embed_flight: Arc<EmbedFlight>,
         snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource>,
         lease: crate::workspace_lease::WorkspaceLease,
+        overlay_retry: Option<Arc<super::overlay_retry::OverlayRetry>>,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
@@ -252,6 +279,12 @@ impl SharedState {
                             "workspace search engine initialization failed".to_owned(),
                         ),
                     );
+                    // Terminal for this process: no engine will ever publish, and the
+                    // driver retrying "engine unavailable" forever would only mask the
+                    // failure with an endless OverlaySyncing/backoff cycle.
+                    if let Some(retry) = &overlay_retry {
+                        retry.disarm();
+                    }
                     tracing::warn!("workspace search engine initialization failed");
                     return;
                 };
@@ -358,27 +391,15 @@ impl SharedState {
                     );
                 }
 
+                // The startup warmup goes through the SAME single-flight the retries do:
+                // a direct spawn here would race a driver-triggered publication and let
+                // last-writer-wins install the older plan. The driver owns the semantic
+                // status transitions around each pass; the `!initialized` signal makes the
+                // first pass unconditional.
                 if needs_overlay_warmup {
-                    Self::set_semantic_runtime_status(
-                        &semantic_runtime,
-                        SemanticRuntimeStatus::OverlaySyncing,
-                    );
-                    let search_engine = Arc::clone(&search_engine);
-                    let semantic_runtime = Arc::clone(&semantic_runtime);
-                    let overlay_warmup = Arc::clone(&overlay_warmup);
-                    std::thread::Builder::new()
-                        .name("bsl-search-overlay-warmup".to_owned())
-                        .spawn(move || {
-                            tracing::info!("workspace overlay semantic warmup started");
-                            Self::run_overlay_warmup(&search_engine, &overlay_warmup);
-                            // Semantic stays available via the baseline even when the overlay
-                            // warmup failed; the detailed warmup outcome lives in `overlay_warmup`.
-                            Self::set_semantic_runtime_status(
-                                &semantic_runtime,
-                                SemanticRuntimeStatus::Ready,
-                            );
-                        })
-                        .ok();
+                    if let Some(retry) = &overlay_retry {
+                        retry.kick();
+                    }
                 }
             })
             .ok();
@@ -466,6 +487,7 @@ impl SharedState {
             change_hub: None,
             embed_flight: EmbedFlight::new(),
             workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
+            overlay_retry: None,
         }
     }
 
@@ -487,6 +509,7 @@ impl SharedState {
             change_hub: None,
             embed_flight: EmbedFlight::new(),
             workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
+            overlay_retry: None,
         }
     }
 
@@ -1192,7 +1215,6 @@ impl SharedState {
                 Arc::clone(&self.search_engine),
                 Arc::clone(&self.index_progress),
                 Arc::clone(&self.semantic_runtime),
-                Arc::clone(&self.overlay_warmup),
                 root,
                 watcher_ready,
                 self.baseline.clone(),
@@ -1203,6 +1225,7 @@ impl SharedState {
                     self.diagnostics.clone(),
                 )),
                 self.workspace_lease.clone(),
+                self.overlay_retry.clone(),
             );
         }
     }
@@ -1228,8 +1251,8 @@ impl SharedState {
 mod tests {
     use super::super::test_support::{write_common_module_tree, EnvVarGuard, ENV_LOCK};
     use super::{
-        DiagnosticsState, EmbedFlight, GraphState, OverlayInit, OverlayWarmupState,
-        SemanticRuntimeStatus, SharedState, WorkspaceSearchMode,
+        DiagnosticsState, EmbedFlight, GraphState, OverlayInit, SemanticRuntimeStatus, SharedState,
+        WorkspaceSearchMode,
     };
     use crate::baseline::{
         BaselineBootstrap, BaselineRuntime, ConfiguredBaselineStatus, DeferredBaselineRuntime,
@@ -1296,7 +1319,6 @@ mod tests {
             Arc::new(Mutex::new(None)),
             IndexProgress::new(),
             Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
-            Arc::new(Mutex::new(OverlayWarmupState::Pending)),
             workspace.clone(),
             Arc::new(AtomicBool::new(false)),
             baseline,
@@ -1307,6 +1329,7 @@ mod tests {
                 DiagnosticsState::disabled(),
             )),
             crate::workspace_lease::WorkspaceLease::unmanaged(),
+            None,
         );
 
         for _ in 0..600 {

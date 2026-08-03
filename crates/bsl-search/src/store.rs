@@ -177,6 +177,32 @@ impl Store {
     /// writer) while the overlay watcher keeps writing through the live engine. Without
     /// a timeout a writer that finds the WAL lock held returns `SQLITE_BUSY`
     /// immediately; with it SQLite retries internally for the configured window.
+    /// Open an EXISTING store without migrating anything: pragmas only, schema version
+    /// validated, mismatch is an error. For a standalone pass that may run while another
+    /// daemon owns the workspace — the migrating [`Self::open`] could wipe and recreate the
+    /// owner's tables on a version mismatch, and a pass has no business doing either.
+    /// `seed_mark_seq` still runs: it only raises the in-memory counter floor.
+    pub fn open_existing(path: &Path) -> Result<Self, SearchError> {
+        let conn = Connection::open(path)?;
+        let store = Self { conn, path: path.to_path_buf(), mark_seq: Arc::new(AtomicI64::new(0)) };
+        store.apply_pragmas()?;
+        let stored: Option<String> = store
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| row.get(0))
+            .optional()?;
+        match stored.and_then(|value| value.parse::<i64>().ok()) {
+            Some(version) if version == SCHEMA_VERSION => {}
+            other => {
+                return Err(SearchError::Index(format!(
+                    "store schema mismatch: found {other:?}, need {SCHEMA_VERSION}; \
+                     a migrating open must do this"
+                )));
+            }
+        }
+        store.seed_mark_seq()?;
+        Ok(store)
+    }
+
     fn apply_pragmas(&self) -> Result<(), SearchError> {
         self.conn.execute_batch(
             "PRAGMA journal_mode = WAL;

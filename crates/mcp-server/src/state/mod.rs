@@ -1,5 +1,6 @@
 mod bootstrap;
 mod embed;
+mod overlay_retry;
 mod sync;
 #[cfg(test)]
 mod test_support;
@@ -65,6 +66,9 @@ pub struct SharedState {
     /// This daemon's claim on the workspace's derived caches, held so the serve loop can retire
     /// a superseded backend early. Unmanaged for profiles with no workspace to coordinate over.
     workspace_lease: crate::workspace_lease::WorkspaceLease,
+    /// The overlay retry driver — the one owner of every Embed pass (startup included).
+    /// `None` outside PostgresRemoteOverlay-with-embedder, where no such pass exists.
+    overlay_retry: Option<Arc<overlay_retry::OverlayRetry>>,
 }
 
 #[derive(Clone)]
@@ -231,6 +235,11 @@ impl SharedState {
     pub fn shutdown(&self) {
         self.baseline.shutdown();
         self.diagnostics.shutdown();
+        // The retry driver stops BEFORE the lease is released: its Arc-held worker would
+        // otherwise outlive the handover and publish over the next owner's caches.
+        if let Some(retry) = &self.overlay_retry {
+            retry.stop();
+        }
         // Handing the workspace back on the way out is what keeps a short-lived server (a
         // stdio session, a broker fallback) from demoting a long-running daemon for the whole
         // staleness window just by having started later.

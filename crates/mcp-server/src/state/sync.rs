@@ -27,6 +27,7 @@ impl SharedState {
         watcher_ready: Arc<AtomicBool>,
         watch_root: PathBuf,
         graph: GraphState,
+        overlay_retry: Option<Arc<super::overlay_retry::OverlayRetry>>,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-overlay-watch".to_owned())
@@ -60,6 +61,7 @@ impl SharedState {
                     generation = hub.wait_for_change(generation, Duration::from_secs(30));
                     let batch = hub.drain(cursor);
                     cursor = batch.cursor;
+                    let fresh = !batch.entries.is_empty() || batch.rescan_required;
                     Self::apply_search_drift(
                         &engine,
                         &watch_root,
@@ -67,6 +69,14 @@ impl SharedState {
                         batch.rescan_required,
                         &graph,
                     );
+                    // Only GENUINE drift kicks the retry driver (and resets its backoff):
+                    // this loop also wakes on the bare 30-second timeout with an empty
+                    // batch, and an unconditional kick would zero the backoff each tick.
+                    if fresh {
+                        if let Some(retry) = &overlay_retry {
+                            retry.kick_fresh();
+                        }
+                    }
                 }
             })
             .ok();
@@ -650,6 +660,7 @@ mod tests {
             Arc::clone(&watcher_ready),
             workspace.clone(),
             crate::graph::GraphState::disabled(),
+            None,
         );
 
         // Wait deterministically for the sink to subscribe (observer + sink = 2
