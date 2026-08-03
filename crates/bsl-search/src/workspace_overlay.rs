@@ -250,6 +250,22 @@ enum PointAction {
     BuildFault,
 }
 
+/// What one FULL publication proved, for the shared tail ([`WorkspaceOverlayCache::finish_publication`]):
+/// which keys it saw, which it failed to read, which entry builds faulted, which keys the
+/// planning gate skipped unread, and which mark snapshot it supersedes. The three publication
+/// paths only fill this in; every obligation is applied by the tail.
+struct PublicationVerdict<'a> {
+    scan_is_clean: bool,
+    seen_keys: &'a HashSet<FileKey>,
+    read_failures: &'a HashSet<FileKey>,
+    build_faults: &'a HashSet<FileKey>,
+    gate_skipped: &'a HashSet<FileKey>,
+    /// The planned path's pre-plan mark snapshot (key -> seq); a mark re-bumped since is not
+    /// superseded. `None` for the in-place paths, which run under the lock and supersede
+    /// every live mark they settled.
+    superseded: Option<&'a HashMap<FileKey, u64>>,
+}
+
 /// Consecutive stat/read failures tolerated for a retained dirty path before it is dropped from
 /// the dirty set (with a warning). Bounds the per-query retry of a permanently-unreadable path
 /// (a deleted file, a path shaped like a `.bsl` that is really a directory) to a fixed budget;
@@ -600,6 +616,7 @@ impl WorkspaceOverlayCache {
         let mut seen_keys = HashSet::new();
         let mut hidden_paths = HashSet::new();
         let mut read_failures: HashSet<FileKey> = HashSet::new();
+        let mut build_faults: HashSet<FileKey> = HashSet::new();
 
         for file in workspace_files {
             seen_keys.insert(file.key.clone());
@@ -621,14 +638,22 @@ impl WorkspaceOverlayCache {
                         if entry.vector_documents.is_empty() {
                             // ReuseOnly passes `embedder = None`: this attaches any cached
                             // vectors and leaves the rest lexical-only. Embed (warmup) fills
-                            // the gaps via the remote embedder.
-                            entry.vector_documents = build_overlay_vectors(
+                            // the gaps via the remote embedder. A failed attach leaves the
+                            // entry lexical-only — the content is known and serving, so the
+                            // unembedded-entries signal (not a mark) drives the catch-up.
+                            match build_overlay_vectors(
                                 embedder,
                                 batch_size,
                                 &entry.lexical_documents,
                                 &entry.embedding_inputs,
                                 &mut self.embedding_cache,
-                            )?;
+                            ) {
+                                Ok(vectors) => entry.vector_documents = vectors,
+                                Err(error) => tracing::warn!(
+                                    "failed to attach overlay vectors; keeping the entry \
+                                     lexical-only: {error}"
+                                ),
+                            }
                         }
                         continue;
                     }
@@ -655,7 +680,7 @@ impl WorkspaceOverlayCache {
             }
 
             let provider = self.graph_context_provider.clone();
-            let entry = build_overlay_entry(
+            match build_overlay_entry(
                 &file.key,
                 &content,
                 file.fingerprint,
@@ -665,11 +690,24 @@ impl WorkspaceOverlayCache {
                 &mut self.embedding_cache,
                 provider.as_deref(),
                 None,
-            )?;
-            if baseline_hash.is_some() {
-                hidden_paths.insert(file.key.clone());
+            ) {
+                Ok(entry) => {
+                    if baseline_hash.is_some() {
+                        hidden_paths.insert(file.key.clone());
+                    }
+                    self.entries.insert(file.key, entry);
+                }
+                Err(error) => {
+                    // The key's prior entry and hiding survive (like a failed read): the
+                    // fault is the builder's, and the pass must still reach its tail.
+                    tracing::warn!(
+                        root = %file.key.root_id,
+                        path = %file.key.path,
+                        "failed to build an overlay entry; keeping the previous version: {error}"
+                    );
+                    build_faults.insert(file.key);
+                }
             }
-            self.entries.insert(file.key, entry);
         }
 
         if scan_is_clean {
@@ -679,33 +717,46 @@ impl WorkspaceOverlayCache {
                     hidden_paths.insert(key.clone());
                 }
             }
-            // A failed read proves nothing about the baseline, so the key's prior hiding
-            // survives the whole-replace — un-hiding would serve two versions at once.
-            for key in &read_failures {
+            // A failed read or build proves nothing about the baseline, so the key's prior
+            // hiding survives the whole-replace — changing it would serve two versions at
+            // once, or neither.
+            for key in read_failures.iter().chain(&build_faults) {
                 if self.hidden_paths.contains(key) {
                     hidden_paths.insert(key.clone());
                 }
             }
             self.hidden_paths = hidden_paths;
         } else {
-            self.merge_partial_hidden(&seen_keys, &read_failures, &hidden_paths);
+            self.merge_partial_hidden(&seen_keys, &read_failures, &build_faults, &hidden_paths);
         }
-        self.finish_full_publication(scan_is_clean, &seen_keys, &read_failures, true);
+        let empty_gate = HashSet::new();
+        let verdict = PublicationVerdict {
+            scan_is_clean,
+            seen_keys: &seen_keys,
+            read_failures: &read_failures,
+            build_faults: &build_faults,
+            gate_skipped: &empty_gate,
+            superseded: None,
+        };
+        let to_consume = self.publication_consumption(&verdict);
+        self.finish_publication(&verdict, &to_consume, true);
         Ok(())
     }
 
     /// The hidden-path merge of an unclean full publication: only a SEEN key may change its
     /// hiding — the scan proved something about it — while an unseen key keeps its prior state,
-    /// because absence from an incomplete scan proves nothing. A seen-but-unread key is skipped
-    /// too: un-hiding on a failed read would serve the baseline and the stale overlay both.
+    /// because absence from an incomplete scan proves nothing. A seen-but-unread or
+    /// build-faulted key is skipped too: changing its hiding would serve the baseline and the
+    /// stale overlay both, or neither.
     fn merge_partial_hidden(
         &mut self,
         seen_keys: &HashSet<FileKey>,
         read_failures: &HashSet<FileKey>,
+        build_faults: &HashSet<FileKey>,
         fresh_hidden: &HashSet<FileKey>,
     ) {
         for key in seen_keys {
-            if read_failures.contains(key) {
+            if read_failures.contains(key) || build_faults.contains(key) {
                 continue;
             }
             if fresh_hidden.contains(key) {
@@ -716,39 +767,67 @@ impl WorkspaceOverlayCache {
         }
     }
 
-    /// The shared tail of an in-place full publication: dirty marks are cleared ONLY for keys the
-    /// pass actually processed — a key it failed to read goes into the bounded retry budget, and
-    /// a key an unclean scan never saw stays dirty because nothing about it was proven — and the
-    /// rescan flag records whether removals were withheld. Each failed read is warned about HERE,
-    /// by the publication itself: the budget helper only warns when the budget runs out, and a
-    /// full publication that could not read a seen file must be visible in the log at once.
-    fn finish_full_publication(
+    /// Step 1 of the shared publication tail: which live marks this publication SUPERSEDES —
+    /// and may consume once the persist lands. A key is superseded only if the pass settled
+    /// it (read it, or a clean scan proved it absent) and, on the planned path, only if its
+    /// mark has not been re-bumped since the pre-plan snapshot.
+    fn publication_consumption(&self, verdict: &PublicationVerdict<'_>) -> HashSet<FileKey> {
+        let settled = |key: &FileKey| {
+            !verdict.read_failures.contains(key)
+                && !verdict.build_faults.contains(key)
+                && !verdict.gate_skipped.contains(key)
+                && (verdict.scan_is_clean || verdict.seen_keys.contains(key))
+        };
+        match verdict.superseded {
+            Some(dirty_before) => dirty_before
+                .iter()
+                .filter(|(key, seq)| self.dirty_paths.get(*key) == Some(*seq) && settled(key))
+                .map(|(key, _)| key.clone())
+                .collect(),
+            None => self.dirty_paths.keys().filter(|key| settled(key)).cloned().collect(),
+        }
+    }
+
+    /// The plan's rows minus every key whose mark will remain LIVE after this publication: a
+    /// live mark is positive evidence the row must not be trusted, and the unconditional
+    /// replace-save then drops the key's old row simply by not writing a new one.
+    fn split_rows_by_live_marks(
+        &self,
+        updated: HashMap<FileKey, crate::store::PersistedFingerprint>,
+        to_consume: &HashSet<FileKey>,
+    ) -> HashMap<FileKey, crate::store::PersistedFingerprint> {
+        updated
+            .into_iter()
+            .filter(|(key, _)| !self.dirty_paths.contains_key(key) || to_consume.contains(key))
+            .collect()
+    }
+
+    /// Step 4 of the shared publication tail — the ONLY place a full publication touches the
+    /// marks, the budget and `unread_keys`, for all three paths (raw, manifest, planned).
+    /// Marks are consumed strictly AFTER the persist outcome is known and only on success:
+    /// a consumed mark promises the knowledge reached every carrier including the disk.
+    /// The full tail never charges the bounded point budget — full-pass retries are paced by
+    /// the retry driver's backoff, not by the per-query budget — so a store or read fault
+    /// here can never exhaust a mark.
+    fn finish_publication(
         &mut self,
-        scan_is_clean: bool,
-        seen_keys: &HashSet<FileKey>,
-        read_failures: &HashSet<FileKey>,
+        verdict: &PublicationVerdict<'_>,
+        to_consume: &HashSet<FileKey>,
         persist_ok: bool,
     ) {
-        // A failed persistence step left stale rows on disk: every mark survives, so the pass
-        // that re-read those files is retried once the store recovers — consuming the marks
-        // over rows that still tell the old story would lose the edits across a restart.
         if persist_ok {
-            if scan_is_clean {
-                self.dirty_paths.retain(|key, _| read_failures.contains(key));
-            } else {
-                self.dirty_paths
-                    .retain(|key, _| !seen_keys.contains(key) || read_failures.contains(key));
+            for key in to_consume {
+                self.dirty_paths.remove(key);
             }
         }
-        // A successful publication of a key ends its failure streak: the budget counts
-        // CONSECUTIVE failures, and without this reset unrelated failures spread over time
-        // would add up to a drop.
-        for key in seen_keys {
-            if !read_failures.contains(key) {
+        // A settled key ends its failure streak: the budget counts CONSECUTIVE failures, and
+        // without this reset unrelated failures spread over time would add up to a drop.
+        for key in verdict.seen_keys {
+            if !verdict.read_failures.contains(key) && !verdict.build_faults.contains(key) {
                 self.dirty_failures.remove(key);
             }
         }
-        for key in read_failures {
+        for key in verdict.read_failures {
             tracing::warn!(
                 root = %key.root_id,
                 path = %key.path,
@@ -756,10 +835,26 @@ impl WorkspaceOverlayCache {
                  and retrying"
             );
             let prior_failures = self.dirty_failures.remove(key).unwrap_or(0);
-            self.dirty_paths.remove(key);
-            self.retain_dirty_after_failure(key.clone(), prior_failures, "read failed");
+            self.retain_dirty_uncharged(key.clone(), prior_failures);
+            self.unread_keys.insert(key.clone());
         }
-        self.full_rescan_pending = !scan_is_clean || !persist_ok;
+        for key in verdict.build_faults {
+            let prior_failures = self.dirty_failures.remove(key).unwrap_or(0);
+            self.retain_dirty_uncharged(key.clone(), prior_failures);
+        }
+        // The unread obligation is settled by proof, either way: a read this pass settles it,
+        // and absence from a CLEAN scan proves the file deleted — without the latter a
+        // deleted-after-fault file would keep the retry condition true forever.
+        if verdict.scan_is_clean {
+            self.unread_keys.retain(|key| verdict.read_failures.contains(key));
+        } else {
+            for key in verdict.seen_keys {
+                if !verdict.read_failures.contains(key) {
+                    self.unread_keys.remove(key);
+                }
+            }
+        }
+        self.full_rescan_pending = !verdict.scan_is_clean || !persist_ok;
     }
 
     /// Remove a point-refresh key that is PROVABLY gone: the entry goes, and the baseline copy
@@ -839,26 +934,38 @@ impl WorkspaceOverlayCache {
 
     /// Persist the fingerprint rows a full publication verified. A row asserts "this file was
     /// verified against the manifest", so the table must end up holding exactly what THIS pass
-    /// proved: the replace-save runs even over an unclean scan — an unseen file may have changed
-    /// at the same size and mtime, and its surviving row would skip the re-read after a restart;
-    /// losing a row costs one extra read on the next clean pass, a false hit costs a lost edit —
-    /// and a read-failed key's row is retracted explicitly, because with nothing else updated on
-    /// a clean scan the emptiness guard would keep the whole stale table.
-    /// Returns whether every persistence step LANDED: a failed replace-save or retraction
-    /// leaves stale rows on disk, and the caller must keep the marks of everything this pass
-    /// re-read instead of consuming them over rows that still tell the old story.
+    /// proved — the replace-save runs UNCONDITIONALLY, and an empty result legitimately
+    /// empties the table (the row of an unseen deleted file has no other retraction channel).
+    /// On a failed save the transactional store kept the OLD table, whose superseded rows are
+    /// then retracted point-wise, best effort: the surviving marks die with the process, while
+    /// a row of a same-stat edit would live to suppress the re-read after a restart. A
+    /// read-failed key's row is retracted explicitly either way.
+    /// Returns whether every persistence step LANDED; the caller must not consume any mark
+    /// otherwise.
     fn persist_fingerprint_rows(
         store: &Store,
         snapshot_id: &str,
         updated: &HashMap<FileKey, crate::store::PersistedFingerprint>,
-        scan_is_clean: bool,
         read_failures: &HashSet<FileKey>,
+        consumed: &HashSet<FileKey>,
     ) -> bool {
         let mut ok = true;
-        if !updated.is_empty() || !scan_is_clean {
-            if let Err(error) = store.save_overlay_fingerprint_cache(snapshot_id, updated) {
-                tracing::warn!("failed to persist overlay fingerprint cache: {error}");
-                ok = false;
+        if let Err(error) = store.save_overlay_fingerprint_cache(snapshot_id, updated) {
+            tracing::warn!("failed to persist overlay fingerprint cache: {error}");
+            ok = false;
+            let mut doomed: Vec<FileKey> = consumed.iter().cloned().collect();
+            match store.load_overlay_fingerprint_cache(snapshot_id) {
+                Ok(prior) => doomed.extend(
+                    prior.unwrap_or_default().into_keys().filter(|key| !updated.contains_key(key)),
+                ),
+                Err(error) => {
+                    tracing::warn!("failed to enumerate stale overlay fingerprint rows: {error}");
+                }
+            }
+            if !doomed.is_empty() {
+                if let Err(error) = store.delete_overlay_fingerprint_entries(&doomed) {
+                    tracing::warn!("failed to retract overlay fingerprint rows: {error}");
+                }
             }
         }
         if !read_failures.is_empty() {
@@ -1060,6 +1167,7 @@ impl WorkspaceOverlayCache {
         let mut hidden_paths = HashSet::new();
         let mut updated_persisted = HashMap::new();
         let mut read_failures: HashSet<FileKey> = HashSet::new();
+        let mut build_faults: HashSet<FileKey> = HashSet::new();
 
         for file in &workspace_files {
             seen_keys.insert(file.key.clone());
@@ -1067,11 +1175,24 @@ impl WorkspaceOverlayCache {
 
             let mut should_remove_cached_entry = false;
             let key_is_marked = self.dirty_paths.contains_key(&file.key);
+            // The row a pass proves must reach `updated_persisted` on EVERY settled branch:
+            // the unconditional replace-save writes exactly that map, and a branch that
+            // settles a key without collecting its still-valid row would wipe it.
+            let row_still_matches = |cached: &crate::store::PersistedFingerprint| {
+                cached.file_size == file.fingerprint.len
+                    && fingerprint_mtime_matches(file.fingerprint.modified, cached)
+                    && fingerprint_canonical_matches(&file.fingerprint, cached)
+            };
             if let Some(entry) = self.entries.get_mut(&file.key) {
                 // A marked key skips the equal-fingerprint gate: the mark is positive evidence
                 // the fingerprint must not be trusted (an edit can leave (len, mtime,
                 // canonical) unchanged), so the file is re-read below.
                 if !key_is_marked && entry.fingerprint == file.fingerprint {
+                    if let Some(cached) = persisted.get(&file.key) {
+                        if row_still_matches(cached) {
+                            updated_persisted.insert(file.key.clone(), cached.clone());
+                        }
+                    }
                     let local_fp =
                         fingerprint_overlay_documents(&entry.lexical_documents, &file.key.path);
                     if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
@@ -1083,14 +1204,22 @@ impl WorkspaceOverlayCache {
                         if entry.vector_documents.is_empty() {
                             // ReuseOnly passes `embedder = None`: this attaches any cached
                             // vectors and leaves the rest lexical-only. Embed (warmup) fills
-                            // the gaps via the remote embedder.
-                            entry.vector_documents = build_overlay_vectors(
+                            // the gaps via the remote embedder. A failed attach leaves the
+                            // entry lexical-only — the content is known and serving, so the
+                            // unembedded-entries signal (not a mark) drives the catch-up.
+                            match build_overlay_vectors(
                                 embedder,
                                 batch_size,
                                 &entry.lexical_documents,
                                 &entry.embedding_inputs,
                                 &mut self.embedding_cache,
-                            )?;
+                            ) {
+                                Ok(vectors) => entry.vector_documents = vectors,
+                                Err(error) => tracing::warn!(
+                                    "failed to attach overlay vectors; keeping the entry \
+                                     lexical-only: {error}"
+                                ),
+                            }
                         }
                         continue;
                     }
@@ -1102,11 +1231,7 @@ impl WorkspaceOverlayCache {
             }
 
             if let Some(cached) = persisted.get(&file.key) {
-                if !key_is_marked
-                    && cached.file_size == file.fingerprint.len
-                    && fingerprint_mtime_matches(file.fingerprint.modified, cached)
-                    && fingerprint_canonical_matches(&file.fingerprint, cached)
-                {
+                if !key_is_marked && row_still_matches(cached) {
                     updated_persisted.insert(file.key.clone(), cached.clone());
 
                     if baseline_fingerprint
@@ -1149,7 +1274,7 @@ impl WorkspaceOverlayCache {
             }
 
             let provider = self.graph_context_provider.clone();
-            let entry = build_overlay_entry(
+            match build_overlay_entry(
                 &file.key,
                 &content,
                 file.fingerprint.clone(),
@@ -1159,11 +1284,24 @@ impl WorkspaceOverlayCache {
                 &mut self.embedding_cache,
                 provider.as_deref(),
                 None,
-            )?;
-            if baseline_fingerprint.is_some() {
-                hidden_paths.insert(file.key.clone());
+            ) {
+                Ok(entry) => {
+                    if baseline_fingerprint.is_some() {
+                        hidden_paths.insert(file.key.clone());
+                    }
+                    self.entries.insert(file.key.clone(), entry);
+                }
+                Err(error) => {
+                    // The key's prior entry and hiding survive (like a failed read): the
+                    // fault is the builder's, and the pass must still reach its tail.
+                    tracing::warn!(
+                        root = %file.key.root_id,
+                        path = %file.key.path,
+                        "failed to build an overlay entry; keeping the previous version: {error}"
+                    );
+                    build_faults.insert(file.key.clone());
+                }
             }
-            self.entries.insert(file.key.clone(), entry);
         }
 
         if scan_is_clean {
@@ -1173,25 +1311,37 @@ impl WorkspaceOverlayCache {
                     hidden_paths.insert(key.clone());
                 }
             }
-            // A failed read proves nothing about the baseline, so the key's prior hiding
-            // survives the whole-replace — un-hiding would serve two versions at once.
-            for key in &read_failures {
+            // A failed read or build proves nothing about the baseline, so the key's prior
+            // hiding survives the whole-replace — changing it would serve two versions at
+            // once, or neither.
+            for key in read_failures.iter().chain(&build_faults) {
                 if self.hidden_paths.contains(key) {
                     hidden_paths.insert(key.clone());
                 }
             }
             self.hidden_paths = hidden_paths;
         } else {
-            self.merge_partial_hidden(&seen_keys, &read_failures, &hidden_paths);
+            self.merge_partial_hidden(&seen_keys, &read_failures, &build_faults, &hidden_paths);
         }
+        let empty_gate = HashSet::new();
+        let verdict = PublicationVerdict {
+            scan_is_clean,
+            seen_keys: &seen_keys,
+            read_failures: &read_failures,
+            build_faults: &build_faults,
+            gate_skipped: &empty_gate,
+            superseded: None,
+        };
+        let to_consume = self.publication_consumption(&verdict);
+        let rows = self.split_rows_by_live_marks(updated_persisted, &to_consume);
         let persist_ok = Self::persist_fingerprint_rows(
             store,
             &manifest_snapshot_id,
-            &updated_persisted,
-            scan_is_clean,
+            &rows,
             &read_failures,
+            &to_consume,
         );
-        self.finish_full_publication(scan_is_clean, &seen_keys, &read_failures, persist_ok);
+        self.finish_publication(&verdict, &to_consume, persist_ok);
 
         if let Some(embedder) = embedder {
             if !self.embedding_cache.is_empty() {
@@ -1441,85 +1591,40 @@ impl WorkspaceOverlayCache {
                 }
             }
         }
-        // Clear only the dirty flags this full refresh superseded. A path is superseded only if it
-        // has not been re-marked since the snapshot (same sequence): a watcher edit that landed
-        // during the lock-free embed bumps the sequence (or adds a new path), so it survives and a
-        // later refresh re-embeds it. A blanket clear would silently drop an edit made mid-pass.
-        // On top of the sequence check, only a PROCESSED key is superseded: a key the pass failed
-        // to read stays dirty for the retry, and a key an unclean scan never saw stays dirty
-        // because nothing about it was proven.
-        for (key, seq) in dirty_before {
-            if self.dirty_paths.get(key) != Some(seq) {
-                continue;
-            }
-            // A gate-skipped key was never read: its mark (set before the plan was even
-            // built) is evidence the trusted row was stale, and consuming it here would lose
-            // the edit with nothing left to deliver it. The mark survives, the stale-row
-            // filter below retracts the row, and the next point pass re-reads the file.
-            let processed = !plan.read_failures.contains(key)
-                && !plan.gate_skipped.contains(key)
-                && (scan_is_clean || plan.seen_keys.contains(key));
-            if processed {
-                self.dirty_paths.remove(key);
-            }
-        }
-        self.full_rescan_pending = !scan_is_clean;
         self.initialized = true;
-        // Marked keys the gate skipped unread: their cleanup above deliberately kept the
-        // marks, and the caller reports them as unread files.
-        let gate_deferred =
-            plan.gate_skipped.iter().filter(|key| self.dirty_paths.contains_key(*key)).count();
 
-        // A successful publication of a key ends its failure streak (the budget counts
-        // CONSECUTIVE failures), while a failed read below re-enters it.
-        for key in &plan.seen_keys {
-            if !plan.read_failures.contains(key) {
-                self.dirty_failures.remove(key);
-            }
-        }
-        // The warn belongs HERE and not in the planning phase: phase A publishes nothing, and
-        // the message must stand next to the fact that an incomplete result went live.
-        for key in &plan.read_failures {
-            tracing::warn!(
-                root = %key.root_id,
-                path = %key.path,
-                "published overlay plan could not read a seen file; keeping its previous \
-                 version and retrying"
-            );
-            let prior_failures = self.dirty_failures.remove(key).unwrap_or(0);
-            self.dirty_paths.remove(key);
-            self.retain_dirty_after_failure(key.clone(), prior_failures, "read failed");
-        }
-
-        // The plan's row snapshot is as old as its phase A; a key whose dirty mark is alive NOW
-        // was re-marked or failed since, and its stale row must not go back in as "verified" —
-        // the mark dies with the process, the row would survive the restart and contradict it.
-        let mut updated_persisted = plan.updated_persisted;
-        let mut stale_rows: Vec<FileKey> = Vec::new();
-        updated_persisted.retain(|key, _| {
-            let live = self.dirty_paths.contains_key(key);
-            if live {
-                stale_rows.push(key.clone());
-            }
-            !live
-        });
-        if !Self::persist_fingerprint_rows(
+        // The shared publication tail, in the mandatory order: decide which marks this
+        // publish supersedes, filter the rows a live mark distrusts, persist, and only then
+        // consume — a consumed mark promises the knowledge reached the disk. A key whose mark
+        // was re-bumped since the pre-plan snapshot (a watcher edit mid-embed) is not
+        // superseded; a gate-skipped key was never read, so its mark (set before the plan was
+        // even built) is evidence the trusted row was stale and survives too.
+        let build_faults = HashSet::new();
+        let verdict = PublicationVerdict {
+            scan_is_clean,
+            seen_keys: &plan.seen_keys,
+            read_failures: &plan.read_failures,
+            build_faults: &build_faults,
+            gate_skipped: &plan.gate_skipped,
+            superseded: Some(dirty_before),
+        };
+        let to_consume = self.publication_consumption(&verdict);
+        // The plan's row snapshot is as old as its phase A: a key whose mark stays live has
+        // fresher knowledge than its row, so the row is dropped — the unconditional
+        // replace-save then removes its old copy from the table as well.
+        let rows = self.split_rows_by_live_marks(plan.updated_persisted, &to_consume);
+        let persist_ok = Self::persist_fingerprint_rows(
             store,
             &plan.snapshot_id,
-            &updated_persisted,
-            scan_is_clean,
+            &rows,
             &plan.read_failures,
-        ) {
-            // Stale rows survived on disk; only a future complete pass can settle them.
-            self.full_rescan_pending = true;
-        }
-        // The filtered rows must be RETRACTED, not merely unsaved: with the filtered map empty
-        // the guarded replace-save does not run at all, and the stale row would survive intact.
-        if !stale_rows.is_empty() {
-            if let Err(error) = store.delete_overlay_fingerprint_entries(&stale_rows) {
-                tracing::warn!("failed to retract overlay fingerprint rows: {error}");
-            }
-        }
+            &to_consume,
+        );
+        self.finish_publication(&verdict, &to_consume, persist_ok);
+        // Marked keys the gate skipped unread: the tail deliberately kept their marks, and
+        // the caller reports them as unread files.
+        let gate_deferred =
+            plan.gate_skipped.iter().filter(|key| self.dirty_paths.contains_key(*key)).count();
 
         if let Some(embedder) = embedder {
             if !self.embedding_cache.is_empty() {
@@ -1546,6 +1651,12 @@ impl WorkspaceOverlayCache {
     /// re-marked mid-pass intact (their sequence will have advanced).
     pub fn dirty_paths_snapshot(&self) -> HashMap<FileKey, u64> {
         self.dirty_paths.clone()
+    }
+
+    /// How many keys are proven present but unread (see the `unread_keys` field): a durable
+    /// retry signal for the driver that outlives the bounded point budget.
+    pub fn unread_keys_count(&self) -> usize {
+        self.unread_keys.len()
     }
 
     fn refresh_dirty_paths_from_manifest(
@@ -5982,5 +6093,326 @@ mod tests {
             0,
             "a key outside the baseline has nothing to hide, dead root or not"
         );
+    }
+
+    /// Consuming a mark promises the knowledge reached every carrier INCLUDING the disk: a
+    /// failed replace-save on the planned path must leave the processed keys' marks alive
+    /// (today only the in-place path honours this).
+    #[test]
+    fn a_failed_planned_save_keeps_the_marks_alive() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, original).unwrap();
+        let manifest =
+            HashMap::from([(key("A.bsl"), super::fingerprint_content(original, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let db_path = workspace.join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        let dirty_before = cache.dirty_paths_snapshot();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 1, "the edit is read by the plan");
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_fp_delete BEFORE DELETE ON overlay_fingerprint_cache \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "a failed persist must not consume the processed mark"
+        );
+        assert!(cache.needs_full_rescan(), "stale rows on disk demand a catch-up pass");
+    }
+
+    /// A failed persist never charges the read budget: with prior failures at MAX-1 and both
+    /// the file AND the store refusing, the mark must survive every in-place full pass.
+    #[test]
+    fn a_failed_persist_never_charges_the_read_budget() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, original).unwrap();
+        let manifest =
+            HashMap::from([(key("A.bsl"), super::fingerprint_content(original, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let db_path = workspace.join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        fs::write(&file, [0xff, 0xfe]).unwrap();
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_fp_delete BEFORE DELETE ON overlay_fingerprint_cache \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES + 1) {
+            cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        }
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "the full tail never charges the point budget"
+        );
+        assert_eq!(cache.unread_keys_count(), 1, "the unread file is a durable signal");
+    }
+
+    /// A build fault inside a FULL pass still reaches the publication tail, and the faulted
+    /// key's prior entry AND hiding survive the whole-replace — otherwise the baseline and the
+    /// stale overlay version would serve at once.
+    #[test]
+    fn a_full_pass_build_fault_still_reaches_the_tail() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let unreadable = workspace.join("A.bsl");
+        let faulted = workspace.join("B.bsl");
+        fs::write(&unreadable, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        fs::write(&faulted, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([
+            (key("A.bsl"), "manifest-differs-a".to_owned()),
+            (key("B.bsl"), "manifest-differs-b".to_owned()),
+        ]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert!(cache.snapshot().hidden_paths.contains(&key("B.bsl")));
+
+        fs::write(&unreadable, [0xff, 0xfe]).unwrap();
+        fs::write(&faulted, "Процедура Третья()\nКонецПроцедуры").unwrap();
+        let embedder = super::Embedder::new(crate::EmbedderConfig {
+            base_url: "http://127.0.0.1:1".to_owned(),
+            model: "test-model".to_owned(),
+            dim: Some(3),
+            api_key: None,
+            provider: None,
+        });
+        let result =
+            cache.full_refresh_from_manifest(&manifest, &roots, Some(&embedder), 32, &store);
+        assert!(result.is_ok(), "per-key faults must not abort the full pass");
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "the unreadable file keeps its retry mark"
+        );
+        assert_eq!(cache.unread_keys_count(), 1, "the unreadable file is a durable signal");
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("B.bsl")),
+            "the build-faulted file keeps its retry mark"
+        );
+        let snapshot = cache.snapshot();
+        assert!(
+            snapshot.hidden_paths.contains(&key("B.bsl")),
+            "the faulted key's hiding survives the whole-replace"
+        );
+        assert!(
+            snapshot.lexical_documents.iter().any(|document| document.symbol_name == "Вторая"),
+            "the faulted key's prior entry keeps serving"
+        );
+    }
+
+    /// A clean full plan REPLACES the row table even when it planned nothing: the table must
+    /// hold exactly what the pass proved, so the row of a file deleted while marked cannot
+    /// vouch for a same-stat namesake later.
+    #[test]
+    fn a_clean_empty_plan_retracts_unseen_rows() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Gone.bsl");
+        let first = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, first).unwrap();
+        let manifest = HashMap::from([(key("Gone.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+        assert_eq!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            1,
+            "the warm pass persisted the row"
+        );
+
+        fs::remove_file(&file).unwrap();
+        cache.mark_dirty_path(key("Gone.bsl"));
+        let dirty_before = cache.dirty_paths_snapshot();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
+        assert!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().is_empty(),
+            "the clean replace-save must run even with nothing to write"
+        );
+
+        let second = "Процедура Вторая()\nКонецПроцедуры";
+        fs::write(&file, second).unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        let replan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(replan.overlay_file_count(), 1, "the same-stat namesake is re-read");
+    }
+
+    /// When live marks filter out EVERY planned row, the replace-save still runs: the row of
+    /// an unseen, unmarked key (a deleted file) has no other retraction channel.
+    #[test]
+    fn a_publish_whose_rows_were_all_filtered_still_saves() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let kept = workspace.join("A.bsl");
+        let gone = workspace.join("U.bsl");
+        fs::write(&kept, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        fs::write(&gone, "Процедура Ушедшая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([
+            (key("A.bsl"), "manifest-differs-a".to_owned()),
+            (key("U.bsl"), "manifest-differs-u".to_owned()),
+        ]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
+            2,
+            "the warm pass persisted both rows"
+        );
+
+        fs::remove_file(&gone).unwrap();
+        let dirty_before = cache.dirty_paths_snapshot();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        // A watcher re-mark AFTER the plan was built: the plan's row for A is stale and gets
+        // filtered, leaving the planned row set empty.
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
+        assert!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().is_empty(),
+            "the replace-save runs even with every planned row filtered, killing U's row"
+        );
+    }
+
+    /// A clean full scan extinguishes `unread_keys` for keys it proved ABSENT: without this
+    /// a deleted-after-fault file would keep the retry condition true forever.
+    #[test]
+    fn a_clean_pass_extinguishes_unread_keys_of_deleted_files() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, [0xff, 0xfe]).unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(cache.unread_keys_count(), 1, "the unreadable file is recorded");
+
+        fs::remove_file(&file).unwrap();
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        assert_eq!(
+            cache.unread_keys_count(),
+            0,
+            "absence from a clean scan settles the unread obligation"
+        );
+    }
+
+    /// When the transactional replace-save fails, the OLD table survives intact — including
+    /// the row of a same-stat edit this pass consumed. The tail must retract that row
+    /// point-wise: the surviving mark dies with the process, the row would live to suppress
+    /// the re-read after a restart.
+    #[test]
+    fn a_failed_replace_save_still_retracts_the_consumed_rows() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let first = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, first).unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let db_path = workspace.join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+
+        // A same-stat edit, marked; the plan reads it and its mark is consumed on publish.
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        let dirty_before = cache.dirty_paths_snapshot();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 1, "the marked edit is re-read by the plan");
+
+        // The INSERT of A's fresh row is denied: the replace-save rolls back and the OLD row
+        // (same stat, first content) survives — but the point-wise retraction still works.
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_a_insert BEFORE INSERT ON overlay_fingerprint_cache \
+                 WHEN NEW.path = 'A.bsl' BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
+        assert!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().is_empty(),
+            "the superseded old row must not survive the failed replace-save"
+        );
+        // Restart control: a fresh plan over the same store re-reads the same-stat file.
+        saboteur.execute_batch("DROP TRIGGER deny_a_insert;").unwrap();
+        let replan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(replan.overlay_file_count(), 1, "nothing on disk suppresses the re-read");
     }
 }

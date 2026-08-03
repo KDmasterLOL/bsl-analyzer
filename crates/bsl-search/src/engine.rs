@@ -1463,6 +1463,16 @@ impl SearchEngine {
         self.store.load_baseline_manifest_fingerprints("code")
     }
 
+    /// How many overlay keys are proven present but unread — the durable retry signal that
+    /// outlives the bounded point budget (see `WorkspaceOverlayCache::unread_keys_count`).
+    pub fn workspace_overlay_unread_count(&self) -> Result<usize, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.unread_keys_count())
+    }
+
     pub fn workspace_overlay_stats(&self) -> Result<Option<WorkspaceOverlayStats>, SearchError> {
         let Some(roots) = &self.workspace_roots else {
             return Ok(None);

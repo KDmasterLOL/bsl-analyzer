@@ -2188,25 +2188,32 @@ impl Store {
         manifest_snapshot_id: &str,
         entries: &HashMap<FileKey, PersistedFingerprint>,
     ) -> Result<(), SearchError> {
-        self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO overlay_fingerprint_cache
-             (root_id, path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint,
-              manifest_snapshot_id, canonical)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        )?;
-        for (key, entry) in entries {
-            stmt.execute(params![
-                key.root_id,
-                key.path,
-                entry.file_size as i64,
-                entry.file_mtime_secs,
-                entry.file_mtime_nanos,
-                entry.content_fingerprint,
-                manifest_snapshot_id,
-                entry.canonical,
-            ])?;
+        // One transaction end to end: a failed INSERT rolls the DELETE back too, so `Err`
+        // means "the table is exactly as it was" — a committed half-replacement would leave
+        // survivors telling a story no pass ever proved.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM overlay_fingerprint_cache", [])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO overlay_fingerprint_cache
+                 (root_id, path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint,
+                  manifest_snapshot_id, canonical)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for (key, entry) in entries {
+                stmt.execute(params![
+                    key.root_id,
+                    key.path,
+                    entry.file_size as i64,
+                    entry.file_mtime_secs,
+                    entry.file_mtime_nanos,
+                    entry.content_fingerprint,
+                    manifest_snapshot_id,
+                    entry.canonical,
+                ])?;
+            }
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -2405,6 +2412,48 @@ mod tests {
             1,
             "the neighbouring table survived too"
         );
+    }
+
+    /// The replace-save is one transaction: an INSERT that fails mid-way must leave the table
+    /// in its ORIGINAL state — a committed DELETE with partial inserts would mean `Err` no
+    /// longer implies "nothing changed on disk", and the survivors would tell a half-story.
+    #[test]
+    fn a_failed_replace_save_leaves_the_table_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let row = |fp: &str| PersistedFingerprint {
+            file_size: 1,
+            file_mtime_secs: 1,
+            file_mtime_nanos: 0,
+            content_fingerprint: fp.to_owned(),
+            canonical: String::new(),
+        };
+        store
+            .save_overlay_fingerprint_cache(
+                "snap",
+                &std::collections::HashMap::from([(FileKey::configuration("Old.bsl"), row("old"))]),
+            )
+            .unwrap();
+
+        let saboteur = Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_b_insert BEFORE INSERT ON overlay_fingerprint_cache \
+                 WHEN NEW.path = 'B.bsl' BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        let result = store.save_overlay_fingerprint_cache(
+            "snap",
+            &std::collections::HashMap::from([
+                (FileKey::configuration("A.bsl"), row("a")),
+                (FileKey::configuration("B.bsl"), row("b")),
+            ]),
+        );
+        assert!(result.is_err(), "the denied insert surfaces as an error");
+        let rows = store.load_overlay_fingerprint_cache("snap").unwrap().unwrap_or_default();
+        assert_eq!(rows.len(), 1, "the original table survived intact");
+        assert!(rows.contains_key(&FileKey::configuration("Old.bsl")));
     }
 
     /// A store in the shape the release before composite keys wrote, built with
