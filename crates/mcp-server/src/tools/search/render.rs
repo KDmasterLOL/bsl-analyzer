@@ -234,11 +234,19 @@ pub(super) fn format_code_hits(
             let rank = i + 1;
             let hit = &fused.hit;
             let mut text = String::new();
+            // An extension repeats the configuration's directory layout wholesale, so the same
+            // relative path under two roots is ordinary rather than exotic. The owning root is
+            // therefore part of a hit's identity, not decoration: without it two hits read
+            // identically and a caller cannot tell which file it is looking at. The
+            // configuration's id is the reserved empty string and prints nothing.
+            let root_marker =
+                if hit.root_id.is_empty() { String::new() } else { format!("[{}] ", hit.root_id) };
             let _ = writeln!(
                 text,
-                "#{} [{}] {}:{}-{} :: {} ({})",
+                "#{} [{}] {}{}:{}-{} :: {} ({})",
                 rank,
                 fused.modality.tag(),
+                root_marker,
                 hit.file_path,
                 hit.line_start + 1,
                 hit.line_end,
@@ -248,6 +256,7 @@ pub(super) fn format_code_hits(
             let mut json = json!({
                 "rank": rank,
                 "modality": fused.modality.tag(),
+                "root_id": hit.root_id,
                 "path": hit.file_path,
                 "line_start": hit.line_start + 1,
                 "line_end": hit.line_end,
@@ -421,6 +430,33 @@ mod tests {
     }
 
     #[test]
+    fn hits_from_different_roots_are_told_apart() {
+        // A `cfe` extension repeats the configuration's directory layout wholesale, so the same
+        // relative path under two roots is the normal case, not a corner one. Two hits that read
+        // identically are two hits a caller cannot act on.
+        let mut configuration =
+            code_hit("CommonModules/Общий/Ext/Module.bsl", "Обработать", "procedure");
+        configuration.root_id = String::new();
+        let mut extension =
+            code_hit("CommonModules/Общий/Ext/Module.bsl", "Обработать", "procedure");
+        extension.root_id = "ext-a".to_owned();
+        let hits = vec![
+            FusedHit { hit: configuration, modality: Modality::Lexical },
+            FusedHit { hit: extension, modality: Modality::Lexical },
+        ];
+
+        let out = format_code_hits(&hits, None, None, usize::MAX);
+
+        assert_eq!(out.hits[0]["root_id"], "", "the configuration keeps the reserved empty id");
+        assert_eq!(out.hits[1]["root_id"], "ext-a", "the extension's hit names its root");
+        assert!(
+            out.text.contains("ext-a"),
+            "the human-readable listing distinguishes them too: {}",
+            out.text,
+        );
+    }
+
+    #[test]
     fn code_hit_structure_carries_every_field_the_listing_prints() {
         let mut hit = code_hit("CommonModules/Утилиты/Ext/Module.bsl", "ПроверитьИНН", "procedure");
         hit.text = (1..=7).map(|i| format!("строка {i}")).collect::<Vec<_>>().join("\n");
@@ -435,6 +471,7 @@ mod tests {
             json!({
                 "rank": 1,
                 "modality": "L",
+                "root_id": "",
                 "path": "CommonModules/Утилиты/Ext/Module.bsl",
                 "line_start": 181,
                 "line_end": 201,
@@ -474,6 +511,7 @@ mod tests {
             json!({
                 "rank": 1,
                 "modality": "S",
+                "root_id": "",
                 "path": "CommonModules/М/Ext/Module.bsl",
                 "line_start": 1,
                 "line_end": 1,

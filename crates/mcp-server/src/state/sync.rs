@@ -226,7 +226,7 @@ impl SharedState {
         let workspace_root = {
             let Ok(guard) = engine.lock() else { return false };
             let Some(engine) = guard.as_ref() else { return false };
-            engine.workspace_root().map(Path::to_path_buf)
+            engine.configuration_root().map(Path::to_path_buf)
         };
 
         let mut owned_modules: Vec<PathBuf> = Vec::new();
@@ -867,6 +867,53 @@ mod tests {
         assert!(
             snapshot.keys().any(|key| key.path.ends_with("B.bsl")),
             "the next walk covers the root the table gained: {snapshot:?}",
+        );
+    }
+
+    /// A root `.xml` descriptor can shift any module's graph context, so it marks the whole
+    /// collection. "Root" here means the CONFIGURATION's root — the base every stored relative
+    /// path is spelled against — and it is not the project directory: a configuration commonly
+    /// sits in a subdirectory of it. Comparing against the project directory instead leaves the
+    /// descriptor unrecognised and silently serves the stale context.
+    #[test]
+    fn a_root_xml_of_a_nested_configuration_marks_the_whole_collection() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let configuration = workspace.join("src").join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        let module = configuration.join("CommonModules").join("Общий").join("Ext");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("Module.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+
+        let db_path = dir.path().join("search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(&workspace, &configuration, &[]);
+        engine.set_workspace_roots(roots);
+        engine.index_directory_fts(&configuration).unwrap();
+        assert!(engine.file_count().unwrap() > 0, "the fixture indexes a document");
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let descriptor = configuration.join("Configuration.xml");
+        fs::write(&descriptor, "<Configuration/>").unwrap();
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: descriptor.clone(),
+                raw: descriptor.clone(),
+                kind: ChangeKind::MaybeChanged,
+                seq: 1,
+            }],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let marked = guard.as_ref().unwrap().store().context_dirty_paths("code").unwrap();
+        assert!(
+            !marked.is_empty(),
+            "the configuration's root descriptor marks every document's context",
         );
     }
 

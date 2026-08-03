@@ -2110,6 +2110,16 @@ mod tests {
             init.engine.mark_workspace_path_dirty(&extension_module).unwrap(),
             "a file of a declared extension resolves to a store key",
         );
+
+        // The table's workspace is the project directory, but the base callers resolve a hit's
+        // relative path against is the CONFIGURATION root. Conflating the two sends every
+        // relative path one directory level too high, which shows up as unresolvable graph ids
+        // and unrecognised root descriptors rather than as an error.
+        assert_eq!(
+            init.engine.configuration_root(),
+            Some(workspace.join("src").join("cf").as_path()),
+            "the configuration root stays the base of stored relative paths",
+        );
     }
 
     /// Overlapping roots behave in two DIFFERENT ways, and both must survive the boot: an

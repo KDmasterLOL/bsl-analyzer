@@ -132,7 +132,7 @@ pub(super) fn semantic_code_hits(
         let engine = guard.as_ref().expect("checked is_none above");
         (
             engine.embedder_clone(),
-            engine.workspace_root().map(Path::to_path_buf),
+            engine.configuration_root().map(Path::to_path_buf),
             engine.embedding_model().map(str::to_owned),
             engine.embedding_dimension(),
         )

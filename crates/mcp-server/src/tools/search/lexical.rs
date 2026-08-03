@@ -145,7 +145,7 @@ pub(super) fn lexical_code_hits(
             .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
     };
 
-    let workspace_root = guard.as_ref().and_then(|e| e.workspace_root()).map(Path::to_path_buf);
+    let workspace_root = guard.as_ref().and_then(|e| e.configuration_root()).map(Path::to_path_buf);
     Ok(CodeHits::Ready { hits, workspace_root })
 }
 

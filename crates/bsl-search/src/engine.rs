@@ -867,6 +867,21 @@ impl SearchEngine {
     /// publisher, a reference corpus), and the old contract stands: walk the given directory and
     /// key everything as the configuration.
     fn boot_ingest_files(&self, root: &Path) -> Vec<(FileKey, std::path::PathBuf)> {
+        let walked: Option<Vec<std::path::PathBuf>> = self
+            .workspace_roots
+            .as_ref()
+            .map(|roots| roots.entries().map(|(_, declared)| declared.to_path_buf()).collect());
+        self.boot_ingest_files_over(root, walked.as_deref())
+    }
+
+    /// The same projection over a chosen subset of the roots to WALK. Attribution still consults
+    /// the whole table: roots may nest, so a file found while walking one root can belong to
+    /// another, and keying it by the root the walk entered through would give it a second row.
+    fn boot_ingest_files_over(
+        &self,
+        root: &Path,
+        walk: Option<&[std::path::PathBuf]>,
+    ) -> Vec<(FileKey, std::path::PathBuf)> {
         let Some(roots) = self.workspace_roots.as_ref() else {
             return walkdir::WalkDir::new(root)
                 .into_iter()
@@ -882,9 +897,15 @@ impl SearchEngine {
                 })
                 .collect();
         };
-        let declared: Vec<std::path::PathBuf> =
-            roots.entries().map(|(_, declared)| declared.to_path_buf()).collect();
-        let set = project_model::SourceSet::scan(&declared);
+        let owned: Vec<std::path::PathBuf>;
+        let declared: &[std::path::PathBuf] = match walk {
+            Some(walk) => walk,
+            None => {
+                owned = roots.entries().map(|(_, declared)| declared.to_path_buf()).collect();
+                &owned
+            }
+        };
+        let set = project_model::SourceSet::scan(declared);
         let mut seen = HashSet::new();
         let mut files = Vec::new();
         for file in &set.files {
@@ -995,8 +1016,19 @@ impl SearchEngine {
             .into_iter()
             .map(|(key, _hash)| key.root_id)
             .collect();
+        let Some(roots) = self.workspace_roots.as_ref() else { return Ok(0) };
+        // Only the unindexed roots are WALKED: a warm root must not be traversed, canonicalised
+        // or stat-ed at all, or the per-root skip would cost exactly what it exists to avoid.
+        let cold: Vec<std::path::PathBuf> = roots
+            .entries()
+            .filter(|(id, _)| !indexed_roots.contains(*id))
+            .map(|(_, declared)| declared.to_path_buf())
+            .collect();
+        if cold.is_empty() {
+            return Ok(0);
+        }
         let files: Vec<(FileKey, std::path::PathBuf)> = self
-            .boot_ingest_files(Path::new(""))
+            .boot_ingest_files_over(Path::new(""), Some(&cold))
             .into_iter()
             .filter(|(key, _)| !indexed_roots.contains(&key.root_id))
             .collect();
@@ -1199,8 +1231,13 @@ impl SearchEngine {
         embedder.embed(query)
     }
 
-    pub fn workspace_root(&self) -> Option<&std::path::Path> {
-        self.workspace_roots.as_ref().map(WorkspaceRoots::workspace)
+    /// The CONFIGURATION root: the directory every stored path with the reserved
+    /// configuration id is spelled against, and the base a caller resolves a hit's relative path
+    /// with. Deliberately not the workspace directory of the root table — a configuration
+    /// commonly sits in a subdirectory of the project, and the table's workspace exists to make
+    /// root identifiers relative, not to resolve paths.
+    pub fn configuration_root(&self) -> Option<&std::path::Path> {
+        self.workspace_roots.as_ref().and_then(WorkspaceRoots::configuration)
     }
 
     /// The engine's root table, for a caller that must scan or resolve keys off
@@ -3835,5 +3872,38 @@ mod tests {
             .unwrap_or(None)
             .unwrap_or_default();
         assert!(rows.is_empty(), "the local mode owns no manifest-verified rows");
+    }
+    /// A warm root must not be walked when only the cold ones need ingesting: the per-root skip
+    /// exists to keep a restart cheap, and walking everything and filtering afterwards spends
+    /// exactly what it was meant to save. Attribution still consults the whole table, so a file
+    /// found under one root but owned by another keeps its owner's key.
+    #[test]
+    fn a_subset_walk_visits_only_the_roots_it_was_given() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = dir.path().join("outside-ext");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        fs::write(configuration.join("Тёплый.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+        fs::write(extension.join("Холодный.bsl"), "Процедура Вторая()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        engine.set_workspace_roots(roots);
+
+        let all = engine.boot_ingest_files(&configuration);
+        assert_eq!(all.len(), 2, "the full walk covers both roots: {all:?}");
+
+        let cold_only = engine.boot_ingest_files_over(
+            std::path::Path::new(""),
+            Some(std::slice::from_ref(&extension)),
+        );
+        let names: Vec<String> = cold_only.iter().map(|(key, _)| key.path.clone()).collect();
+        assert_eq!(names, vec!["Холодный.bsl".to_owned()], "only the given root is walked");
     }
 }
