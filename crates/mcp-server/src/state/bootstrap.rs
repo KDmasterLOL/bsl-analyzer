@@ -694,6 +694,10 @@ impl SharedState {
                 watcher_ready,
                 BaselineHashMode::NormalizedChunks,
             );
+            if let Err(error) = engine.set_serves_external_baseline(true) {
+                tracing::warn!("failed to declare the external-baseline mode: {error}");
+                return None;
+            }
 
             let store = engine.store();
             if let Err(error) = store.clear_collection("code") {
@@ -800,6 +804,11 @@ impl SharedState {
             watcher_ready,
             BaselineHashMode::RawFileBytes,
         );
+        // Declaring the local mode also clears inherited fingerprint rows: they claim
+        // "verified against the manifest", which this mode can neither honour nor refresh.
+        if let Err(error) = engine.set_serves_external_baseline(false) {
+            tracing::warn!("failed to clear inherited overlay fingerprint rows: {error}");
+        }
 
         // Fused cold-build: the graph owns the startup build decision. When it builds
         // the graph fresh it streams the search chunks (with graph context) from the

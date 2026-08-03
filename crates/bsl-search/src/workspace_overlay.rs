@@ -176,6 +176,11 @@ pub struct WorkspaceOverlayCache {
     /// retried forever. A fresh [`Self::mark_dirty_path`] (a new watcher event) clears the count,
     /// and a successful refresh drops the entry, so the count is strictly consecutive.
     dirty_failures: HashMap<FileKey, u32>,
+    /// Keys proven PRESENT whose contents could not be read (by either the point path or a
+    /// full pass) and whose settlement therefore never happened. A durable signal distinct
+    /// from the dirty marks: the bounded point budget may drop a mark, but the obligation to
+    /// re-read the file stands until some pass proves the key settled or gone.
+    unread_keys: HashSet<FileKey>,
     watcher_mode: bool,
     initialized: bool,
     /// The last full publication ran over a scan that could not vouch for the whole tree, so its
@@ -219,6 +224,32 @@ enum DirtyBaseline {
     Raw(HashMap<FileKey, Vec<u8>>),
 }
 
+/// One key's point-path result: what the pass PROVED (or failed to prove) about the file,
+/// paired with an orthogonal store flag — a failed row retraction does not erase the file
+/// outcome, it only changes how the mark is retained. [`WorkspaceOverlayCache::settle_point`]
+/// is the single place these are applied to the carriers, so no branch can forget one.
+struct PointSettlement {
+    action: PointAction,
+    /// The key's fingerprint-row obligation did not land (retraction denied); the mark must
+    /// survive WITHOUT charging the file budget, whatever the action was.
+    store_fault: bool,
+}
+
+enum PointAction {
+    /// Read and different from the baseline: a fresh overlay entry.
+    Reindexed { entry: OverlayFileEntry, has_baseline: bool },
+    /// Read and equal to the baseline: the local entry (and any hiding) is lifted.
+    BaselineEqual,
+    /// Proven gone: `NotFound` under a reachable root, a non-file or non-source target, or a
+    /// root no longer registered.
+    ProvenGone { has_baseline: bool },
+    /// stat/read failed: proven nothing, retried on the bounded file budget.
+    FileFault { reason: &'static str },
+    /// The file was read, but building the entry (chunking/embedding) failed: an
+    /// infrastructure fault, not the file's — retried without charging the file budget.
+    BuildFault,
+}
+
 /// Consecutive stat/read failures tolerated for a retained dirty path before it is dropped from
 /// the dirty set (with a warning). Bounds the per-query retry of a permanently-unreadable path
 /// (a deleted file, a path shaped like a `.bsl` that is really a directory) to a fixed budget;
@@ -248,6 +279,7 @@ impl WorkspaceOverlayCache {
         self.hidden_paths.clear();
         self.dirty_paths.clear();
         self.dirty_failures.clear();
+        self.unread_keys.clear();
         self.resident_fed_count = 0;
         self.initialized = false;
         // The withheld removals belonged to the state just discarded; the next build starts
@@ -266,6 +298,7 @@ impl WorkspaceOverlayCache {
         self.hidden_paths.clear();
         self.dirty_paths.clear();
         self.dirty_failures.clear();
+        self.unread_keys.clear();
         self.initialized = true;
         // The caller has PROVEN the store equals the disk, which is exactly what the pending
         // rescan existed to re-establish.
@@ -290,13 +323,19 @@ impl WorkspaceOverlayCache {
     /// root vanished together with the file, it reads the dead root as "unreachable, retry"
     /// and would leave a ghost entry serving hits forever. The caller keeps the dirty mark, so
     /// if the deletion event lied and the file is alive, the next point pass republishes it.
-    pub fn remove_known_deleted(&mut self, key: &FileKey) {
+    pub fn remove_known_deleted(&mut self, key: &FileKey, has_baseline: bool) {
         self.entries.remove(key);
+        self.unread_keys.remove(key);
         // The baseline copy is HIDDEN, not unhidden: for a remote baseline this set is the
         // only filter, and the deleted file would otherwise resurface as a baseline hit the
-        // moment its local entry is gone. A key with no baseline copy hides nothing, and the
-        // next point pass settles the hiding either way.
-        self.hidden_paths.insert(key.clone());
+        // moment its local entry is gone. Hiding takes EVIDENCE of a baseline copy: a key
+        // outside the baseline has nothing to hide, and under a dead root the parasitic
+        // hiding would be unremovable and inflate the deleted-files stat forever.
+        if has_baseline {
+            self.hidden_paths.insert(key.clone());
+        } else {
+            self.hidden_paths.remove(key);
+        }
     }
 
     /// Whether the last full publication ran over an incomplete scan and withheld its removals,
@@ -336,11 +375,12 @@ impl WorkspaceOverlayCache {
         self.dirty_paths.insert(key, self.dirty_seq);
     }
 
-    /// Re-mark a path after a STORE fault (a failed fingerprint-row retraction): the fault is
-    /// not the path's, so the bounded stat/read budget is NOT charged — the streak count goes
-    /// back untouched and the mark simply survives for the retry. Charging the budget would
-    /// let three SQLite hiccups drop the mark and leave the stale row with nothing to retry it.
-    fn retain_dirty_after_store_fault(&mut self, key: FileKey, prior_failures: u32) {
+    /// Re-mark a path after a fault that is NOT the path's own — a failed fingerprint-row
+    /// retraction (store fault) or a failed entry build (embedder fault): the bounded
+    /// stat/read budget is NOT charged — the streak count goes back untouched and the mark
+    /// simply survives for the retry. Charging the budget would let three infrastructure
+    /// hiccups drop the mark and leave the obligation with nothing to retry it.
+    fn retain_dirty_uncharged(&mut self, key: FileKey, prior_failures: u32) {
         if prior_failures > 0 {
             self.dirty_failures.insert(key.clone(), prior_failures);
         }
@@ -364,6 +404,7 @@ impl WorkspaceOverlayCache {
         &mut self,
         roots: &WorkspaceRoots,
         store: &Store,
+        serves_external_baseline: bool,
         batch_size: usize,
         hash_mode: BaselineHashMode,
         snapshots: &HashMap<FileKey, ModuleSnapshot>,
@@ -390,7 +431,15 @@ impl WorkspaceOverlayCache {
         // store error to it would let a few store hiccups exhaust MAX_DIRTY_REFRESH_FAILURES and
         // drop many healthy paths at once. So the keys leave the dirty set only once the baseline is
         // in hand and each path's per-path refresh owns its outcome.
-        let baseline = match store.load_baseline_manifest_fingerprints("code")? {
+        // The manifest leg is MODE-gated, not presence-gated: the persisted manifest is a
+        // warm-cache that survives a mode switch, and a local engine dispatching on its
+        // presence would read its edits against another mode's baseline.
+        let manifest_fingerprints = if serves_external_baseline {
+            store.load_baseline_manifest_fingerprints("code")?
+        } else {
+            None
+        };
+        let baseline = match manifest_fingerprints {
             Some(manifest_fingerprints) => DirtyBaseline::Manifest(manifest_fingerprints),
             None => {
                 DirtyBaseline::Raw(store.all_files_in_collection("code")?.into_iter().collect())
@@ -724,6 +773,56 @@ impl WorkspaceOverlayCache {
         }
     }
 
+    /// The single place a point-path settlement touches the carriers. The classification
+    /// branches in the two dirty loops only DECIDE; every mutation of the entries, the hiding,
+    /// the marks, the budget and `unread_keys` happens here, in one total `match` — so a new
+    /// branch cannot forget an obligation.
+    fn settle_point(&mut self, key: FileKey, settlement: PointSettlement, prior_failures: u32) {
+        let PointSettlement { action, store_fault } = settlement;
+        match action {
+            PointAction::Reindexed { entry, has_baseline } => {
+                if has_baseline {
+                    self.hidden_paths.insert(key.clone());
+                } else {
+                    self.hidden_paths.remove(&key);
+                }
+                self.unread_keys.remove(&key);
+                self.entries.insert(key.clone(), entry);
+                if store_fault {
+                    self.retain_dirty_uncharged(key, prior_failures);
+                }
+            }
+            PointAction::BaselineEqual => {
+                self.entries.remove(&key);
+                self.hidden_paths.remove(&key);
+                self.unread_keys.remove(&key);
+                if store_fault {
+                    self.retain_dirty_uncharged(key, prior_failures);
+                }
+            }
+            PointAction::ProvenGone { has_baseline } => {
+                self.unread_keys.remove(&key);
+                if store_fault {
+                    self.retain_dirty_uncharged(key.clone(), prior_failures);
+                }
+                self.remove_point_entry(key, has_baseline);
+            }
+            PointAction::FileFault { reason } => {
+                // Proven present, contents unknown: the durable signal outlives even a
+                // budget-exhausted mark, so a later full pass still re-reads the file.
+                self.unread_keys.insert(key.clone());
+                if store_fault {
+                    self.retain_dirty_uncharged(key, prior_failures);
+                } else {
+                    self.retain_dirty_after_failure(key, prior_failures, reason);
+                }
+            }
+            PointAction::BuildFault => {
+                self.retain_dirty_uncharged(key, prior_failures);
+            }
+        }
+    }
+
     /// Retract one key's persisted fingerprint row: its "verified against the manifest" claim
     /// did not survive whatever the caller just observed. Returns whether the retraction
     /// LANDED — a caller about to consume the dirty mark must keep it on failure, or the stale
@@ -782,31 +881,42 @@ impl WorkspaceOverlayCache {
         snapshots: &HashMap<FileKey, ModuleSnapshot>,
     ) -> Result<(), SearchError> {
         let RawBaseline { files: baseline_files, hash_mode } = baseline;
-        // A path whose stat/read transiently fails is re-marked dirty (carrying its
-        // consecutive-failure count) so the next refresh retries it — bounded by
-        // [`MAX_DIRTY_REFRESH_FAILURES`] — rather than being silently dropped. The re-mark is
-        // settled AT the failure: a later error in the same batch aborts through `?`, and the
-        // caller has already drained the dirty set, so a deferred re-mark would be lost.
+        // Each drained key CLASSIFIES into a [`PointSettlement`] and settles at once through
+        // [`Self::settle_point`]: a later fault in the same batch never disturbs an earlier
+        // key's obligations, and no per-key fault aborts the loop — the caller has already
+        // drained the dirty set, so an abort would strand every unprocessed mark.
         for key in dirty_keys {
-            // Removing the count here clears it on success (the common path) and hands the prior
-            // value to `retain_dirty_after_failure` on failure, keeping the streak consecutive.
+            // Removing the count here clears it on success (the common path) and hands the
+            // prior value to the settlement, keeping the failure streak consecutive.
             let prior_failures = self.dirty_failures.remove(&key).unwrap_or(0);
             let baseline_hash = baseline_files.get(&key);
+            let has_baseline = baseline_hash.is_some();
             // A key whose root is no longer registered resolves to nothing; that is a change of
             // composition, not a filesystem error, and it settles like a deletion.
             let Some(abs_path) = roots.resolve(&key) else {
-                self.remove_point_entry(key, baseline_hash.is_some());
+                let settlement = PointSettlement {
+                    action: PointAction::ProvenGone { has_baseline },
+                    store_fault: false,
+                };
+                self.settle_point(key, settlement, prior_failures);
                 continue;
             };
 
             let metadata = match std::fs::metadata(&abs_path) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    if point_target_is_absent(&error, &abs_path) && root_is_reachable(roots, &key) {
-                        self.remove_point_entry(key, baseline_hash.is_some());
+                    let action = if point_target_is_absent(&error, &abs_path)
+                        && root_is_reachable(roots, &key)
+                    {
+                        PointAction::ProvenGone { has_baseline }
                     } else {
-                        self.retain_dirty_after_failure(key, prior_failures, "stat failed");
-                    }
+                        PointAction::FileFault { reason: "stat failed" }
+                    };
+                    self.settle_point(
+                        key,
+                        PointSettlement { action, store_fault: false },
+                        prior_failures,
+                    );
                     continue;
                 }
             };
@@ -824,7 +934,11 @@ impl WorkspaceOverlayCache {
                 || project_model::file_role(&fingerprint.canonical)
                     != project_model::FileRole::Source
             {
-                self.remove_point_entry(key, baseline_hash.is_some());
+                let settlement = PointSettlement {
+                    action: PointAction::ProvenGone { has_baseline },
+                    store_fault: false,
+                };
+                self.settle_point(key, settlement, prior_failures);
                 continue;
             }
 
@@ -835,14 +949,21 @@ impl WorkspaceOverlayCache {
             let content = match std::fs::read_to_string(&abs_path) {
                 Ok(content) => content,
                 Err(_) => {
-                    self.retain_dirty_after_failure(key, prior_failures, "read failed");
+                    let settlement = PointSettlement {
+                        action: PointAction::FileFault { reason: "read failed" },
+                        store_fault: false,
+                    };
+                    self.settle_point(key, settlement, prior_failures);
                     continue;
                 }
             };
             let file_hash = compute_file_hash(&content, hash_mode);
             if baseline_hash.is_some_and(|stored_hash| stored_hash == &file_hash) {
-                self.entries.remove(&key);
-                self.hidden_paths.remove(&key);
+                self.settle_point(
+                    key,
+                    PointSettlement { action: PointAction::BaselineEqual, store_fault: false },
+                    prior_failures,
+                );
                 continue;
             }
 
@@ -851,7 +972,7 @@ impl WorkspaceOverlayCache {
             if parse_root.is_some() {
                 self.resident_fed_count += 1;
             }
-            let entry = build_overlay_entry(
+            let action = match build_overlay_entry(
                 &key,
                 &content,
                 fingerprint,
@@ -861,14 +982,18 @@ impl WorkspaceOverlayCache {
                 &mut self.embedding_cache,
                 provider.as_deref(),
                 parse_root,
-            )?;
-
-            if baseline_hash.is_some() {
-                self.hidden_paths.insert(key.clone());
-            } else {
-                self.hidden_paths.remove(&key);
-            }
-            self.entries.insert(key, entry);
+            ) {
+                Ok(entry) => PointAction::Reindexed { entry, has_baseline },
+                Err(error) => {
+                    tracing::warn!(
+                        root = %key.root_id,
+                        path = %key.path,
+                        "failed to build an overlay entry; keeping the mark for a retry: {error}"
+                    );
+                    PointAction::BuildFault
+                }
+            };
+            self.settle_point(key, PointSettlement { action, store_fault: false }, prior_failures);
         }
         Ok(())
     }
@@ -1433,25 +1558,28 @@ impl WorkspaceOverlayCache {
         snapshots: &HashMap<FileKey, ModuleSnapshot>,
     ) -> Result<(), SearchError> {
         let ManifestBaseline { fingerprints: manifest_fingerprints, store } = baseline;
-        // A path whose stat/read transiently fails is re-marked dirty (carrying its
-        // consecutive-failure count) so the next refresh retries it — bounded by
-        // [`MAX_DIRTY_REFRESH_FAILURES`] — rather than being silently dropped. Both obligations
-        // of a failure — the retry re-mark and the retraction of the key's persisted fingerprint
-        // row (it claims "verified", the mark dies with the process, the row would survive the
-        // restart) — are settled AT the failure: a later error in the same batch aborts through
-        // `?`, and the caller has already drained the dirty set.
+        // Each drained key CLASSIFIES into a [`PointSettlement`] and settles at once through
+        // [`Self::settle_point`]. The key's fingerprint-row obligation (the row claims
+        // "verified"; the mark dies with the process, the row would survive the restart) is
+        // executed BEFORE the settlement, and its failure becomes the settlement's store
+        // flag — the mark then survives without the file budget being charged, whatever the
+        // file outcome was. No per-key fault aborts the loop: the caller has already drained
+        // the dirty set, and an abort would strand every unprocessed mark.
         for key in dirty_keys {
-            // Removing the count here clears it on success (the common path) and hands the prior
-            // value to `retain_dirty_after_failure` on failure, keeping the streak consecutive.
+            // Removing the count here clears it on success (the common path) and hands the
+            // prior value to the settlement, keeping the failure streak consecutive.
             let prior_failures = self.dirty_failures.remove(&key).unwrap_or(0);
             let baseline_fingerprint = manifest_fingerprints.get(&key);
+            let has_baseline = baseline_fingerprint.is_some();
             // A key whose root is no longer registered resolves to nothing; that is a change of
             // composition, not a filesystem error, and it settles like a deletion.
             let Some(abs_path) = roots.resolve(&key) else {
-                if !Self::retract_fingerprint_row(store, &key) {
-                    self.retain_dirty_after_store_fault(key.clone(), prior_failures);
-                }
-                self.remove_point_entry(key, baseline_fingerprint.is_some());
+                let store_fault = !Self::retract_fingerprint_row(store, &key);
+                let settlement = PointSettlement {
+                    action: PointAction::ProvenGone { has_baseline },
+                    store_fault,
+                };
+                self.settle_point(key, settlement, prior_failures);
                 continue;
             };
 
@@ -1460,15 +1588,15 @@ impl WorkspaceOverlayCache {
                 Err(error) => {
                     // Whichever way this settles, the row's "verified" claim did not survive
                     // the failed stat.
-                    let retracted = Self::retract_fingerprint_row(store, &key);
-                    if point_target_is_absent(&error, &abs_path) && root_is_reachable(roots, &key) {
-                        if !retracted {
-                            self.retain_dirty_after_store_fault(key.clone(), prior_failures);
-                        }
-                        self.remove_point_entry(key, baseline_fingerprint.is_some());
+                    let store_fault = !Self::retract_fingerprint_row(store, &key);
+                    let action = if point_target_is_absent(&error, &abs_path)
+                        && root_is_reachable(roots, &key)
+                    {
+                        PointAction::ProvenGone { has_baseline }
                     } else {
-                        self.retain_dirty_after_failure(key, prior_failures, "stat failed");
-                    }
+                        PointAction::FileFault { reason: "stat failed" }
+                    };
+                    self.settle_point(key, PointSettlement { action, store_fault }, prior_failures);
                     continue;
                 }
             };
@@ -1484,10 +1612,12 @@ impl WorkspaceOverlayCache {
                 || project_model::file_role(&fingerprint.canonical)
                     != project_model::FileRole::Source
             {
-                if !Self::retract_fingerprint_row(store, &key) {
-                    self.retain_dirty_after_store_fault(key.clone(), prior_failures);
-                }
-                self.remove_point_entry(key, baseline_fingerprint.is_some());
+                let store_fault = !Self::retract_fingerprint_row(store, &key);
+                let settlement = PointSettlement {
+                    action: PointAction::ProvenGone { has_baseline },
+                    store_fault,
+                };
+                self.settle_point(key, settlement, prior_failures);
                 continue;
             }
 
@@ -1498,9 +1628,12 @@ impl WorkspaceOverlayCache {
             let content = match std::fs::read_to_string(&abs_path) {
                 Ok(content) => content,
                 Err(_) => {
-                    // The mark is retained either way, so a failed retraction is retried too.
-                    let _ = Self::retract_fingerprint_row(store, &key);
-                    self.retain_dirty_after_failure(key, prior_failures, "read failed");
+                    let store_fault = !Self::retract_fingerprint_row(store, &key);
+                    let settlement = PointSettlement {
+                        action: PointAction::FileFault { reason: "read failed" },
+                        store_fault,
+                    };
+                    self.settle_point(key, settlement, prior_failures);
                     continue;
                 }
             };
@@ -1508,14 +1641,15 @@ impl WorkspaceOverlayCache {
             // "verified" claim no longer stands whatever the branches below decide: at an
             // unchanged (len, mtime, canonical) the old row would suppress this very result
             // after a restart. A failed retraction keeps the mark for a retried one.
-            if !Self::retract_fingerprint_row(store, &key) {
-                self.retain_dirty_after_store_fault(key.clone(), prior_failures);
-            }
+            let store_fault = !Self::retract_fingerprint_row(store, &key);
             let file_hash = normalized_file_hash_for_content(&content);
             let local_fp = fingerprint_content(&content, &key.path);
             if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
-                self.entries.remove(&key);
-                self.hidden_paths.remove(&key);
+                self.settle_point(
+                    key,
+                    PointSettlement { action: PointAction::BaselineEqual, store_fault },
+                    prior_failures,
+                );
                 continue;
             }
 
@@ -1524,7 +1658,7 @@ impl WorkspaceOverlayCache {
             if parse_root.is_some() {
                 self.resident_fed_count += 1;
             }
-            let entry = build_overlay_entry(
+            let action = match build_overlay_entry(
                 &key,
                 &content,
                 fingerprint,
@@ -1534,14 +1668,18 @@ impl WorkspaceOverlayCache {
                 &mut self.embedding_cache,
                 provider.as_deref(),
                 parse_root,
-            )?;
-
-            if baseline_fingerprint.is_some() {
-                self.hidden_paths.insert(key.clone());
-            } else {
-                self.hidden_paths.remove(&key);
-            }
-            self.entries.insert(key, entry);
+            ) {
+                Ok(entry) => PointAction::Reindexed { entry, has_baseline },
+                Err(error) => {
+                    tracing::warn!(
+                        root = %key.root_id,
+                        path = %key.path,
+                        "failed to build an overlay entry; keeping the mark for a retry: {error}"
+                    );
+                    PointAction::BuildFault
+                }
+            };
+            self.settle_point(key, PointSettlement { action, store_fault }, prior_failures);
         }
 
         Ok(())
@@ -2345,6 +2483,7 @@ mod tests {
             .reindex_dirty_from_snapshots(
                 &single_root(workspace),
                 &store,
+                true,
                 32,
                 BaselineHashMode::NormalizedChunks,
                 &snapshots,
@@ -2372,6 +2511,7 @@ mod tests {
         let result = cache.reindex_dirty_from_snapshots(
             &single_root(workspace),
             &store,
+            true,
             32,
             BaselineHashMode::NormalizedChunks,
             &snapshots,
@@ -4606,9 +4746,9 @@ mod tests {
         assert_eq!(plan.overlay_file_count(), 1, "the swap is re-read and visible");
     }
 
-    /// A stat/read failure's obligations — the retracted row and the budgeted retry mark — must
-    /// be settled AT the failure, not after the batch: a later error in the same batch aborts
-    /// the tail, and the caller has already drained the dirty set.
+    /// A stat/read failure's obligations — the retracted row and the budgeted retry mark — are
+    /// settled AT the failure, and a later build fault in the same batch neither aborts the
+    /// loop nor disturbs them: every drained key owns its own outcome.
     #[cfg(unix)]
     #[test]
     fn a_failure_earlier_in_a_batch_survives_a_later_batch_error() {
@@ -4651,16 +4791,20 @@ mod tests {
             &HashMap::new(),
         );
         restore_access(&broken);
-        assert!(result.is_err(), "the unreachable embedder aborts the batch");
+        assert!(result.is_ok(), "a per-key build fault must not abort the batch");
 
         let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
         assert!(
             !rows.contains_key(&key("Broken.bsl")),
-            "the retraction happened before the batch died"
+            "the retraction happened at the first key's failure"
         );
         assert!(
             cache.dirty_paths_snapshot().contains_key(&key("Broken.bsl")),
-            "the retry mark happened before the batch died"
+            "the retry mark happened at the first key's failure"
+        );
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("New.bsl")),
+            "the build-faulted key stays marked for the retry"
         );
     }
 
@@ -5496,7 +5640,7 @@ mod tests {
 
         // The root vanishes with the file; the removal channel is the only witness.
         fs::remove_file(&file).unwrap();
-        cache.remove_known_deleted(&key("A.bsl"));
+        cache.remove_known_deleted(&key("A.bsl"), true);
         cache.mark_dirty_path(key("A.bsl"));
         assert!(
             cache.snapshot().hidden_paths.contains(&key("A.bsl")),
@@ -5669,6 +5813,174 @@ mod tests {
         assert!(
             !source.to_lowercase().contains(&needle),
             "workspace_overlay.rs must scan through project_model::SourceSet::scan"
+        );
+    }
+
+    /// A combined fault — the file read fails AND the row retraction is denied — is a STORE
+    /// fault first: the mark must survive without the file budget being charged, or three
+    /// such passes drop the mark while the stale row still needs its retry.
+    #[test]
+    fn a_combined_file_and_store_fault_does_not_charge_the_budget() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let original = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, original).unwrap();
+        let manifest =
+            HashMap::from([(key("A.bsl"), super::fingerprint_content(original, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let db_path = workspace.join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        fs::write(&file, [0xff, 0xfe]).unwrap();
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_fp_delete BEFORE DELETE ON overlay_fingerprint_cache \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES + 1) {
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        }
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "a store fault outweighs the read fault: the mark survives unbudgeted"
+        );
+    }
+
+    /// The same combined fault under a DEAD root: the stat fails, the root is unreachable, and
+    /// the retraction is denied. The store fault must still outweigh the file budget — the
+    /// unreadable-root branch is the last one where it used to charge.
+    #[test]
+    fn a_stat_fault_under_a_dead_root_with_a_store_fault_keeps_the_mark() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir(&configuration).unwrap();
+        fs::write(configuration.join("A.bsl"), "Процедура Живая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let (roots, _) = WorkspaceRoots::build(workspace, &configuration, &[]);
+        let db_path = workspace.join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        fs::rename(&configuration, workspace.join("cf.saved")).unwrap();
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_fp_delete BEFORE DELETE ON overlay_fingerprint_cache \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES + 1) {
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        }
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "the denied retraction outweighs the dead-root stat fault"
+        );
+    }
+
+    /// A build failure (the embedder is down) is an infrastructure fault of ONE key: its mark
+    /// survives unbudgeted, and the rest of the batch still settles instead of dying on `?`.
+    #[test]
+    fn a_build_fault_keeps_the_mark_and_settles_the_rest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let changed = workspace.join("A.bsl");
+        let reverted = workspace.join("B.bsl");
+        let b_text = "Процедура Вторая()\nКонецПроцедуры";
+        fs::write(&changed, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        fs::write(&reverted, b_text).unwrap();
+        let manifest = HashMap::from([
+            (key("A.bsl"), "manifest-differs".to_owned()),
+            (key("B.bsl"), super::fingerprint_content(b_text, "B.bsl")),
+        ]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        let embedder = super::Embedder::new(crate::EmbedderConfig {
+            base_url: "http://127.0.0.1:1".to_owned(),
+            model: "test-model".to_owned(),
+            dim: Some(3),
+            api_key: None,
+            provider: None,
+        });
+        let result = cache.refresh_dirty_paths_from_manifest(
+            vec![key("A.bsl"), key("B.bsl")],
+            super::ManifestBaseline { fingerprints: &manifest, store: &store },
+            &roots,
+            Some(&embedder),
+            32,
+            &HashMap::new(),
+        );
+        assert!(result.is_ok(), "one key's build fault must not abort the batch");
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "the build-faulted key stays marked for the retry"
+        );
+        assert!(
+            !cache.dirty_paths_snapshot().contains_key(&key("B.bsl")),
+            "the baseline-equal neighbour settles despite the fault"
+        );
+
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES + 1) {
+            cache
+                .refresh_dirty_paths_from_manifest(
+                    cache.dirty_paths_snapshot().keys().cloned().collect(),
+                    super::ManifestBaseline { fingerprints: &manifest, store: &store },
+                    &roots,
+                    Some(&embedder),
+                    32,
+                    &HashMap::new(),
+                )
+                .unwrap();
+        }
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "an infrastructure fault never eats the file budget"
+        );
+    }
+
+    /// A deletion proven by the caller does NOT get to hide the baseline copy of a key that has
+    /// no baseline copy: with a dead root the parasitic hiding would be unremovable and the
+    /// deleted-files stat inflated forever.
+    #[test]
+    fn a_delete_outside_the_baseline_hides_nothing() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir(&configuration).unwrap();
+        fs::write(configuration.join("A.bsl"), "Процедура Локальная()\nКонецПроцедуры").unwrap();
+        let manifest: HashMap<FileKey, String> = HashMap::new();
+        let (roots, _) = WorkspaceRoots::build(workspace, &configuration, &[]);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(cache.stats().overlay_files, 1, "the local-only file is an overlay entry");
+
+        fs::rename(&configuration, workspace.join("cf.saved")).unwrap();
+        cache.remove_known_deleted(&key("A.bsl"), false);
+        cache.mark_dirty_path(key("A.bsl"));
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES + 1) {
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        }
+        assert_eq!(
+            cache.stats().deleted_files,
+            0,
+            "a key outside the baseline has nothing to hide, dead root or not"
         );
     }
 }

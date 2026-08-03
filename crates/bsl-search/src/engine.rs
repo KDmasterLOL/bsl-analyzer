@@ -148,6 +148,11 @@ pub struct SearchEngine {
     workspace_roots: Option<WorkspaceRoots>,
     workspace_overlay_cache: Mutex<WorkspaceOverlayCache>,
     workspace_baseline_hash_mode: BaselineHashMode,
+    /// Whether this engine serves an EXTERNAL (remote) baseline through the persisted
+    /// manifest. The manifest is a persistent warm-cache that deliberately survives a mode
+    /// switch, so its mere presence proves nothing: every manifest-path dispatch and every
+    /// baseline-evidence decision must consult this flag, not the table.
+    serves_external_baseline: bool,
     /// Optional graph-context provider (dependency-inverted via
     /// [`crate::ports::GraphContextProvider`]). When set, code chunks are enriched
     /// with their outbound graph context before embedding. `None` keeps embeddings
@@ -196,6 +201,7 @@ impl SearchEngine {
             workspace_roots: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
+            serves_external_baseline: false,
             graph_context_provider: None,
             module_snapshot_source: None,
         })
@@ -287,6 +293,7 @@ impl SearchEngine {
             workspace_roots: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
+            serves_external_baseline: false,
             graph_context_provider: None,
             module_snapshot_source: None,
         })
@@ -314,6 +321,7 @@ impl SearchEngine {
             workspace_roots: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
+            serves_external_baseline: false,
             graph_context_provider: None,
             module_snapshot_source: None,
         })
@@ -398,6 +406,7 @@ impl SearchEngine {
         cache.reindex_dirty_from_snapshots(
             roots,
             &self.store,
+            self.serves_external_baseline,
             self.batch_size,
             self.workspace_baseline_hash_mode,
             snapshots,
@@ -1269,6 +1278,31 @@ impl SearchEngine {
     /// relative to its own root, and re-deriving it from the workspace would hand
     /// an extension's file to the configuration and leave the real row in place.
     pub fn remove_workspace_key(&mut self, key: &FileKey) -> Result<(), SearchError> {
+        let has_baseline = match self.dispatched_manifest_fingerprints() {
+            Ok(manifest) => manifest.is_some_and(|m| m.contains_key(key)),
+            Err(error) => {
+                // No evidence, no hiding; the mark set below keeps the retry channel alive.
+                tracing::warn!("failed to load the baseline manifest for a removal: {error}");
+                false
+            }
+        };
+        self.remove_workspace_key_with(key, has_baseline)
+    }
+
+    /// [`Self::remove_workspace_key`] with the baseline evidence already resolved, so a batch
+    /// caller loads the manifest once instead of once per key.
+    fn remove_workspace_key_with(
+        &mut self,
+        key: &FileKey,
+        has_baseline: bool,
+    ) -> Result<(), SearchError> {
+        // The retry obligation comes FIRST: every store operation below can fail, and
+        // returning early without the mark would leave no signal anywhere — not in S, not in
+        // R, not for the retry driver — while the rows still tell the old story.
+        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
+            cache.enable_watcher_mode();
+            cache.mark_dirty_path(key.clone());
+        }
         // Collect the chunk ids before deleting the rows so the exact vectors can be
         // evicted from the live index without a full reload.
         let chunk_ids = self.store.chunk_ids_for_file("code", &key.root_id, &key.path)?;
@@ -1276,20 +1310,18 @@ impl SearchEngine {
         self.store.insert_overlay_tombstone(&key.root_id, &key.path, "code")?;
         // The dead file's fingerprint row must not survive it: the dirty mark dies with the
         // process, and a namesake recreated at the same (len, mtime, canonical) would inherit
-        // the "verified" claim across a restart. On failure the mark below still retries this
+        // the "verified" claim across a restart. On failure the mark above still retries this
         // through the point path.
         if let Err(error) = self.store.delete_overlay_fingerprint_entries(std::slice::from_ref(key))
         {
             tracing::warn!("failed to retract overlay fingerprint row: {error}");
         }
         if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
-            cache.enable_watcher_mode();
             // The store rows are gone, so the deletion is proven: drop the overlay entry at
             // once — the point refresh would read a root that vanished WITH the file as
             // "unreachable, retry" and leave a ghost entry. The mark still re-checks the disk:
             // if the event lied, the next point pass republishes the live file.
-            cache.remove_known_deleted(key);
-            cache.mark_dirty_path(key.clone());
+            cache.remove_known_deleted(key, has_baseline);
         }
         for id in chunk_ids {
             if let Err(e) = self.index.remove(id) {
@@ -1325,10 +1357,19 @@ impl SearchEngine {
             .into_iter()
             .map(|(key, _hash)| key)
             .collect();
+        // One manifest load for the whole batch, not one per removed key.
+        let manifest = match self.dispatched_manifest_fingerprints() {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::warn!("failed to load the baseline manifest for a removal: {error}");
+                None
+            }
+        };
         let mut removed = 0;
         for key in stored {
             if !present.contains(&key) {
-                self.remove_workspace_key(&key)?;
+                let has_baseline = manifest.as_ref().is_some_and(|m| m.contains_key(&key));
+                self.remove_workspace_key_with(&key, has_baseline)?;
                 removed += 1;
             }
         }
@@ -1396,6 +1437,32 @@ impl SearchEngine {
         Ok(stats)
     }
 
+    /// Declare whether this engine serves an external (remote) baseline. `false`
+    /// additionally clears the persisted overlay fingerprint rows: a row claims "verified
+    /// against the manifest", and the raw local mode can neither re-verify nor honour that
+    /// claim — a file changed at the same stat during the local period would be suppressed by
+    /// the inherited row after a switch back. Rows live only under the mode that wrote them.
+    pub fn set_serves_external_baseline(&mut self, serves: bool) -> Result<(), SearchError> {
+        self.serves_external_baseline = serves;
+        if !serves {
+            self.store.clear_overlay_fingerprint_cache()?;
+        }
+        Ok(())
+    }
+
+    /// The manifest fingerprints IF this engine serves an external baseline, `None` otherwise.
+    /// Every manifest-vs-raw dispatch goes through here: the persisted manifest is a
+    /// warm-cache that survives a mode switch, and dispatching on its presence would pin a
+    /// local engine to another mode's baseline.
+    fn dispatched_manifest_fingerprints(
+        &self,
+    ) -> Result<Option<HashMap<FileKey, String>>, SearchError> {
+        if !self.serves_external_baseline {
+            return Ok(None);
+        }
+        self.store.load_baseline_manifest_fingerprints("code")
+    }
+
     pub fn workspace_overlay_stats(&self) -> Result<Option<WorkspaceOverlayStats>, SearchError> {
         let Some(roots) = &self.workspace_roots else {
             return Ok(None);
@@ -1406,9 +1473,7 @@ impl SearchEngine {
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
         // `search status` is a read-only display; it must never trigger the cold full-tree scan,
         // so it uses the same non-cold-scan path as interactive queries.
-        if let Some(manifest_fingerprints) =
-            self.store.load_baseline_manifest_fingerprints("code")?
-        {
+        if let Some(manifest_fingerprints) = self.dispatched_manifest_fingerprints()? {
             cache.refresh_with_manifest(
                 &manifest_fingerprints,
                 roots,
@@ -2006,9 +2071,7 @@ impl SearchEngine {
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
-        if let Some(manifest_fingerprints) =
-            self.store.load_baseline_manifest_fingerprints("code")?
-        {
+        if let Some(manifest_fingerprints) = self.dispatched_manifest_fingerprints()? {
             cache.refresh_with_manifest(
                 &manifest_fingerprints,
                 roots,
@@ -2457,6 +2520,7 @@ mod tests {
         let db_path = workspace.join("bsl-search.db");
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(workspace);
+        engine.set_serves_external_baseline(true).unwrap();
         engine
             .store()
             .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
@@ -2491,6 +2555,7 @@ mod tests {
         let db_path = workspace.join("bsl-search.db");
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(workspace);
+        engine.set_serves_external_baseline(true).unwrap();
         engine
             .store()
             .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
@@ -2637,6 +2702,7 @@ mod tests {
         };
         let mut engine = SearchEngine::semantic_overlay_only(&db_path, config).unwrap();
         engine.set_workspace_root(workspace);
+        engine.set_serves_external_baseline(true).unwrap();
         engine
             .store()
             .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
@@ -3454,5 +3520,170 @@ mod tests {
         engine.prime_workspace_overlay().unwrap();
         let walked = project_model::source_set::scans_performed_on_thread() - before;
         assert_eq!(walked, 0, "an initialized watcher-mode cache must not rescan");
+    }
+
+    /// The removal's retry obligation (the dirty mark) must be set BEFORE the fallible store
+    /// operations: an early failure would otherwise leave no signal anywhere while the rows
+    /// still tell the old story.
+    #[test]
+    fn a_failed_removal_still_leaves_the_retry_mark() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .sync_indexed_documents_in_collection(
+                "code",
+                &[IndexedDocument {
+                    collection: "code".to_owned(),
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                    path: "Removed.bsl".to_owned(),
+                    symbol_name: "П".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 0,
+                    line_end: 1,
+                    text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                    content_hash: "h".to_owned(),
+                    graph_context: None,
+                }],
+                None,
+            )
+            .unwrap();
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_tombstone BEFORE INSERT ON overlay_tombstones \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        let result = engine.remove_workspace_path(workspace.join("Removed.bsl"));
+        assert!(result.is_err(), "the denied tombstone surfaces as an error");
+        assert!(
+            engine
+                .workspace_overlay_dirty_paths_snapshot()
+                .unwrap()
+                .contains_key(&FileKey::configuration("Removed.bsl")),
+            "the retry mark was set before the store failed"
+        );
+    }
+
+    /// An INHERITED manifest (a warm-cache left by a Postgres period) is not baseline
+    /// evidence for a LOCAL engine: a removal must not hide anything on its account.
+    #[test]
+    fn a_local_removal_ignores_an_inherited_manifest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Removed.bsl");
+        let content = "Процедура П()\nКонецПроцедуры";
+        fs::write(&file, content).unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "stale-snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "Removed.bsl".to_owned(),
+                    file_fingerprint: crate::workspace_overlay::fingerprint_content(
+                        content,
+                        "Removed.bsl",
+                    ),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        fs::remove_file(&file).unwrap();
+        assert!(engine.remove_workspace_path(workspace.join("Removed.bsl")).unwrap());
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(stats.deleted_files, 0, "an inherited manifest proves no baseline copy to hide");
+    }
+
+    /// A LOCAL engine's dirty-path refresh reads its edits against the local store rows, not
+    /// against an inherited manifest: an edit that happens to equal the STALE manifest
+    /// fingerprint must still become an overlay entry.
+    #[test]
+    fn a_local_point_refresh_ignores_an_inherited_manifest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        let local = "Процедура Локальная()\nКонецПроцедуры";
+        let edited = "Процедура Правка()\nКонецПроцедуры";
+        fs::write(&file, local).unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.enable_workspace_watcher_mode();
+        engine.prime_workspace_overlay().unwrap();
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "stale-snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "CommonModule.bsl".to_owned(),
+                    file_fingerprint: crate::workspace_overlay::fingerprint_content(
+                        edited,
+                        "CommonModule.bsl",
+                    ),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        fs::write(&file, edited).unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(
+            stats.overlay_files, 1,
+            "the edit differs from the LOCAL baseline and must serve as an overlay entry \
+             even though it equals the stale manifest fingerprint"
+        );
+    }
+
+    /// Declaring the local mode clears inherited fingerprint rows: they claim "verified
+    /// against the manifest", and the raw mode can neither honour nor refresh that claim —
+    /// a same-stat edit during the local period would be suppressed by the row after a
+    /// switch back to the remote mode.
+    #[test]
+    fn declaring_the_local_mode_clears_inherited_fingerprint_rows() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "snap-1",
+                &HashMap::from([(
+                    FileKey::configuration("A.bsl"),
+                    crate::store::PersistedFingerprint {
+                        file_size: 1,
+                        file_mtime_secs: 1,
+                        file_mtime_nanos: 0,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: String::new(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        engine.set_serves_external_baseline(false).unwrap();
+        let rows = engine
+            .store()
+            .load_overlay_fingerprint_cache("snap-1")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        assert!(rows.is_empty(), "the local mode owns no manifest-verified rows");
     }
 }

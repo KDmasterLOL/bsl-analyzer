@@ -3506,6 +3506,7 @@ mod tests {
         let overlay_files = |db: &str| {
             let mut engine = crate::SearchEngine::fts_only(&publisher_dir.path().join(db)).unwrap();
             engine.set_workspace_root(workspace);
+            engine.set_serves_external_baseline(true).unwrap();
             engine.store().save_baseline_manifest(&manifest).unwrap();
             engine.prime_workspace_overlay().unwrap();
             engine.workspace_overlay_stats().unwrap().unwrap().overlay_files
