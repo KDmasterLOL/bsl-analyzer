@@ -684,7 +684,9 @@ impl WorkspaceOverlayCache {
             let baseline_hash = baseline_files.get(&file.key);
 
             let mut should_remove_cached_entry = false;
-            let key_is_marked = self.dirty_paths.contains_key(&file.key);
+            // A live mark OR an unread debt distrusts the fingerprint (see the manifest twin).
+            let key_is_marked =
+                self.dirty_paths.contains_key(&file.key) || self.unread_keys.contains(&file.key);
             if let Some(entry) = self.entries.get_mut(&file.key) {
                 // A marked key skips the equal-fingerprint gate: the mark is positive evidence
                 // the fingerprint must not be trusted (an edit can leave (len, mtime,
@@ -1246,7 +1248,11 @@ impl WorkspaceOverlayCache {
             let baseline_fingerprint = manifest_fingerprints.get(&file.key);
 
             let mut should_remove_cached_entry = false;
-            let key_is_marked = self.dirty_paths.contains_key(&file.key);
+            // A live mark OR an unread debt distrusts every fingerprint: both mean the
+            // content behind the stat is unverified, and after the point budget drops the
+            // mark the debt is the only veto left against a same-stat gate hit.
+            let key_is_marked =
+                self.dirty_paths.contains_key(&file.key) || self.unread_keys.contains(&file.key);
             // The row a pass proves must reach `updated_persisted` on EVERY settled branch:
             // the unconditional replace-save writes exactly that map, and a branch that
             // settles a key without collecting its still-valid row would wipe it.
@@ -7125,5 +7131,58 @@ mod tests {
         let partial = HashMap::from([(missing[0].clone(), vec![1.0f32, 0.0, 0.0])]);
         cache.publish_plan(plan, partial, &baseline, None, &store).unwrap();
         assert_eq!(cache.unembedded_entry_count(), 1, "one vector of two is NOT a finished entry");
+    }
+
+    /// The unread debt VETOES the full pass's equal-fingerprint gates: after the point budget
+    /// is exhausted the debt is the only witness, and a same-stat gate hit would settle the
+    /// key without ever reading it — publishing yesterday's content forever.
+    #[test]
+    fn the_unread_debt_forces_the_full_pass_to_reread() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let first = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, first).unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+
+        // A same-stat corruption exhausts the point budget; the debt survives the marks.
+        fs::write(&file, vec![0xff; first.len()]).unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES + 1) {
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        }
+        assert!(cache.dirty_paths_snapshot().is_empty(), "the budget dropped the mark");
+        assert_eq!(cache.unread_keys_count(), 1, "the debt is the surviving witness");
+
+        // Still unreadable: the full pass must TRY the read (and fail), not gate past it.
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        assert_eq!(
+            cache.unread_keys_count(),
+            1,
+            "a gate hit is not a read; the debt survives the full pass"
+        );
+
+        // Readable again at the same stat: the veto forces the re-read and the fresh content
+        // is published, settling the debt.
+        let second = "Процедура Вторая()\nКонецПроцедуры";
+        fs::write(&file, second).unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+        assert_eq!(cache.unread_keys_count(), 0, "the successful read settles the debt");
+        assert!(
+            cache
+                .snapshot()
+                .lexical_documents
+                .iter()
+                .any(|document| document.symbol_name == "Вторая"),
+            "the same-stat recovery is published, not gated away"
+        );
     }
 }

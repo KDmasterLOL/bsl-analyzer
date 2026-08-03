@@ -828,9 +828,13 @@ impl SharedState {
             BaselineHashMode::RawFileBytes,
         );
         // Declaring the local mode also clears inherited fingerprint rows: they claim
-        // "verified against the manifest", which this mode can neither honour nor refresh.
+        // "verified against the manifest", which this mode can neither honour nor refresh —
+        // a row surviving the local period would suppress a same-stat edit after a switch
+        // back to the same snapshot. A failed clear leaves that lie standing, so the boot
+        // fails closed, exactly like the Postgres branch does on its own failed clears.
         if let Err(error) = engine.set_serves_external_baseline(false) {
             tracing::warn!("failed to clear inherited overlay fingerprint rows: {error}");
+            return None;
         }
 
         // Fused cold-build: the graph owns the startup build decision. When it builds
