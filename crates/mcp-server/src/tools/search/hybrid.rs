@@ -341,7 +341,7 @@ mod tests {
         assert!(text.starts_with("Modality tag per hit:"), "text listing unchanged: {text}");
 
         let body = result.structured_content.as_ref().expect("structured listing");
-        assert_eq!(body["schema_version"], "1");
+        assert_eq!(body["schema_version"], "2");
         let hits = body["hits"].as_array().expect("hits array");
         assert_eq!(hits.len(), body["shown"].as_u64().unwrap() as usize);
         assert_eq!(body["total"], serde_json::json!(hits.len()));

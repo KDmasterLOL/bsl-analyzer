@@ -1304,8 +1304,15 @@ impl SearchEngine {
         if !bsl_conventions::has_extension(path, bsl_conventions::BSL_EXTENSION) {
             return None;
         }
-        let walked =
-            if path.is_absolute() { path.to_path_buf() } else { roots.workspace().join(path) };
+        // A relative path is spelled against the CONFIGURATION root: that is how every stored
+        // path with the reserved id is spelled, and it is the prefix callers strip before
+        // handing one over. The table's workspace exists to make root identifiers relative and
+        // is a directory higher whenever the configuration sits in a subdirectory.
+        let walked = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            roots.configuration().unwrap_or_else(|| roots.workspace()).join(path)
+        };
         let canonical = crate::workspace_roots::canonical_spelling(&walked);
         // A `.bsl`-spelled link may resolve to a non-source target — by role, or by not being
         // a regular file at all (a directory spelled `.bsl`). A key under such a target's root
@@ -3905,5 +3912,31 @@ mod tests {
         );
         let names: Vec<String> = cold_only.iter().map(|(key, _)| key.path.clone()).collect();
         assert_eq!(names, vec!["Холодный.bsl".to_owned()], "only the given root is walked");
+    }
+    /// A relative path handed to the engine is spelled against the CONFIGURATION root — that is
+    /// how every stored path with the reserved id is spelled, and what callers strip before
+    /// handing one over (the graph bridge strips the configuration prefix). Resolving it against
+    /// the table's workspace instead points one directory too high whenever the configuration
+    /// sits in a subdirectory, and the key is then silently not found: the mark is dropped and
+    /// the stale graph context is served on.
+    #[test]
+    fn a_relative_path_is_spelled_against_the_configuration_root() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("src").join("cf");
+        let module = configuration.join("CommonModules").join("Б").join("Ext");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("Module.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(&workspace, &configuration, &[]);
+        engine.set_workspace_roots(roots);
+        engine.index_directory_fts(&configuration).unwrap();
+        assert_eq!(engine.file_count().unwrap(), 1, "the fixture indexes the module");
+
+        let marked = engine
+            .mark_workspace_path_context_dirty("CommonModules/Б/Ext/Module.bsl")
+            .expect("marking a workspace path is not an error");
+        assert!(marked, "a configuration-relative path resolves to its stored key");
     }
 }

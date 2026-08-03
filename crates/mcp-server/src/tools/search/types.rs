@@ -12,7 +12,10 @@ pub(super) const HYBRID_FETCH_MULTIPLIER: usize = 2;
 /// The version of the `search` structured hit contract: the fields of one hit object and the
 /// envelope around the list. Bump it whenever that shape changes — a machine consumer pins
 /// against this, whereas the text listing is a human mirror with no such promise.
-pub(super) const SEARCH_SCHEMA_VERSION: &str = "1";
+///
+/// `2` adds `root_id` to every code hit: with extensions in the index the same relative path
+/// exists under several roots, so the owning root became part of a hit's identity.
+pub(super) const SEARCH_SCHEMA_VERSION: &str = "2";
 
 /// The outcome of producing one modality's code hits, separated from presentation so the
 /// hybrid path can fuse two modalities. Hard policy/terminal failures stay `Err(McpError)`;
