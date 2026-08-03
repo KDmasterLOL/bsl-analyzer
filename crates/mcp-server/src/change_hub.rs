@@ -288,6 +288,75 @@ impl Accumulator {
     }
 }
 
+/// What the hub takes into work, derived from the watch targets themselves.
+///
+/// Two permissions, deliberately separate. A path under a SCAN ROOT may be
+/// recorded, walked and re-watched. A project-config file directly in a config
+/// directory may only be recorded — the name grants no right to walk, or a
+/// directory that merely carries that name would be taken under recursive watch.
+/// The permissions add up: in a flat project the workspace IS the scan root, so a
+/// config-named directory there is walked on the ordinary rule.
+///
+/// Both spellings of every directory are kept. `dedup_targets` decides by the
+/// canonical path while `watcher.watch` receives the raw one, so events arrive
+/// spelled either way and a predicate holding one spelling would discard a whole
+/// tree declared through a symlink.
+#[derive(Debug, Default, Clone)]
+struct Scope {
+    scan_roots: Vec<(PathBuf, PathBuf)>,
+    config_dirs: Vec<(PathBuf, PathBuf)>,
+}
+
+impl Scope {
+    /// Recursive targets are the scan roots; a non-recursive target is there for
+    /// the project-config files that live directly in it (see
+    /// [`watch_targets_for`]). Built from the DESIRED targets, not the armed ones:
+    /// a root that failed to arm is still part of the scope, and its events —
+    /// arriving through a covering target — must not be dropped.
+    fn from_targets(targets: &[WatchTarget]) -> Self {
+        let spellings = |t: &WatchTarget| {
+            (t.path.clone(), t.path.canonicalize().unwrap_or_else(|_| t.path.clone()))
+        };
+        Self {
+            scan_roots: targets.iter().filter(|t| t.recursive).map(spellings).collect(),
+            config_dirs: targets.iter().filter(|t| !t.recursive).map(spellings).collect(),
+        }
+    }
+
+    fn under_any(path: &Path, dirs: &[(PathBuf, PathBuf)]) -> bool {
+        dirs.iter()
+            .any(|(declared, canonical)| path.starts_with(declared) || path.starts_with(canonical))
+    }
+
+    /// Whether a change to `path` may be walked and taken under recursive watch.
+    fn may_walk(&self, path: &Path) -> bool {
+        Self::under_any(path, &self.scan_roots)
+    }
+
+    /// Whether a change to `path` may be recorded for consumers.
+    fn may_record(&self, path: &Path) -> bool {
+        self.may_walk(path) || self.is_project_config(path)
+    }
+
+    /// A project-config file sitting DIRECTLY in a config directory. Decided from
+    /// the name and the parent alone, never from the disk: a deleted config shapes
+    /// the topology just as much as an edited one, and a predicate gated on "the
+    /// file exists" would drop the removal.
+    fn is_project_config(&self, path: &Path) -> bool {
+        let named_like_a_config = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| project_model::CONFIG_FILE_NAMES.contains(&n));
+        if !named_like_a_config {
+            return false;
+        }
+        let Some(parent) = path.parent() else { return false };
+        self.config_dirs
+            .iter()
+            .any(|(declared, canonical)| parent == declared || parent == canonical)
+    }
+}
+
 struct HubInner {
     acc: Mutex<Accumulator>,
     /// Signalled when there is new work to drain, or setup has settled.
@@ -304,6 +373,9 @@ struct HubInner {
     /// can compare a project snapshot's targets against the live set without a
     /// control roundtrip.
     watched_roots: Mutex<Vec<(PathBuf, bool)>>,
+    /// What the hub takes into work. Set before the thread starts (events may
+    /// arrive before setup finishes) and re-derived on every re-arm.
+    scope: Mutex<Scope>,
 }
 
 impl HubInner {
@@ -318,6 +390,14 @@ impl HubInner {
 
     fn lock_acc(&self) -> std::sync::MutexGuard<'_, Accumulator> {
         self.acc.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn scope(&self) -> Scope {
+        self.scope.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    fn set_scope(&self, scope: Scope) {
+        *self.scope.lock().unwrap_or_else(PoisonError::into_inner) = scope;
     }
 
     /// Fold one raw watcher result into the accumulator and return the directories
@@ -342,19 +422,49 @@ impl HubInner {
             acc.events_seen += 1;
         }
 
+        // The scope filter runs BEFORE the branch on event kind, and per PATH
+        // rather than per event. Before, because an unknown kind degrades on the
+        // spot, and one foreign file would otherwise drag every consumer into a
+        // rescan. Per path, because `Modify(Name(Both))` carries the vanished and
+        // the arrived path in one event, and a rename out of a scan root puts them
+        // on opposite sides of the boundary. An event with NO paths is left alone:
+        // an absent path is not evidence that the lost change was out of scope.
+        let scope = self.scope();
+        let paths: Vec<PathBuf> =
+            event.paths.iter().filter(|path| scope.may_record(path)).cloned().collect();
+        if !event.paths.is_empty() && paths.is_empty() {
+            self.wake.notify_all();
+            return Vec::new();
+        }
+
         let mut rewatch: Vec<PathBuf> = Vec::new();
         match event.kind {
             EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
                 let mut records: Vec<(PathBuf, PathBuf, ChangeKind)> = Vec::new();
-                for path in &event.paths {
-                    // A newly created directory needs two things bare recursive
+                for path in &paths {
+                    // A directory that just appeared needs two things bare recursive
                     // watching does not give reliably on Linux: files written into
                     // it before the OS watch arms are lost, and a deep subtree
                     // created in one burst may never be watched. Walking the new
                     // subtree records whatever already exists (stats are truth),
                     // and re-arming a recursive watch covers everything created
                     // afterwards.
-                    if matches!(event.kind, EventKind::Create(_)) {
+                    //
+                    // Appearing is not only `Create`: a directory MOVED into the
+                    // tree arrives as `Modify(Name(To))`, and the files that rode
+                    // along with it fire no events of their own — their path
+                    // changed, they did not. `Name` and not any `Modify`, though: a
+                    // chmod on a large directory would walk it for nothing.
+                    //
+                    // Walking is the narrower permission: a config file is in scope
+                    // by name, but a DIRECTORY carrying that name is still foreign,
+                    // and walking it is the very cost this boundary exists to avoid.
+                    let may_have_appeared = matches!(
+                        event.kind,
+                        EventKind::Create(_)
+                            | EventKind::Modify(notify::event::ModifyKind::Name(_))
+                    );
+                    if may_have_appeared && scope.may_walk(path) {
                         if let Ok(meta) = std::fs::metadata(path) {
                             if meta.is_dir() {
                                 rewatch.push(path.clone());
@@ -439,10 +549,19 @@ fn canonical_for_missing(path: &Path) -> PathBuf {
     }
 }
 
+// Thread-local on purpose: tests run in parallel and a process-global counter
+// would let one case observe another's walks.
+#[cfg(test)]
+thread_local! {
+    static SUBTREE_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Walk a freshly-created directory and record every file already inside it,
 /// canonicalizing the directory once and joining each file's relative path rather
 /// than canonicalizing per file.
 fn collect_subtree(dir: &Path, records: &mut Vec<(PathBuf, PathBuf, ChangeKind)>) {
+    #[cfg(test)]
+    SUBTREE_WALKS.with(|walks| walks.set(walks.get() + 1));
     let base_canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     for entry in WalkDir::new(dir).follow_links(true) {
         let Ok(entry) = entry else { continue };
@@ -548,6 +667,10 @@ impl WorkspaceChangeHub {
             watching: AtomicBool::new(false),
             channel_overflow: AtomicBool::new(false),
             watched_roots: Mutex::new(Vec::new()),
+            // Derived here, not on the hub thread: the watcher callback can fire
+            // before setup finishes, and an empty scope would silently drop those
+            // first events.
+            scope: Mutex::new(Scope::from_targets(&targets)),
         });
         let (tx, rx) = std::sync::mpsc::sync_channel::<HubMsg>(CHANNEL_BOUND);
 
@@ -913,6 +1036,9 @@ fn apply_rearm(
     armed: &mut Vec<(WatchTarget, PathBuf)>,
     new_targets: Vec<WatchTarget>,
 ) -> bool {
+    // Scope follows the DESIRED set, before de-duplication: a target absorbed by a
+    // recursive ancestor is still part of what the hub watches for.
+    inner.set_scope(Scope::from_targets(&new_targets));
     let desired = dedup_targets(new_targets);
     let is_armed = |list: &[(WatchTarget, PathBuf)], t: &WatchTarget, c: &PathBuf| {
         list.iter().any(|(at, ac)| at.recursive == t.recursive && ac == c)
@@ -971,6 +1097,418 @@ mod tests {
 
     fn change_event(kind: EventKind, path: PathBuf) -> Result<Event, notify::Error> {
         Ok(Event { kind, paths: vec![path], attrs: Default::default() })
+    }
+
+    fn event_with_paths(kind: EventKind, paths: Vec<PathBuf>) -> Result<Event, notify::Error> {
+        Ok(Event { kind, paths, attrs: Default::default() })
+    }
+
+    /// A nested project: the workspace holds the config files, the scan root sits
+    /// one level down. This is the layout the scope boundary exists for — a flat
+    /// project, where the workspace IS the scan root, cannot show the difference.
+    struct NestedProject {
+        _dir: tempfile::TempDir,
+        workspace: PathBuf,
+        scan_root: PathBuf,
+    }
+
+    fn nested_project() -> NestedProject {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let scan_root = workspace.join("src");
+        std::fs::create_dir_all(&scan_root).unwrap();
+        NestedProject { _dir: dir, workspace, scan_root }
+    }
+
+    impl NestedProject {
+        fn hub(&self) -> WorkspaceChangeHub {
+            let hub = WorkspaceChangeHub::start_targets(watch_targets_for(
+                &self.workspace,
+                std::slice::from_ref(&self.scan_root),
+            ));
+            assert!(hub.wait_until_watching(Duration::from_secs(5)));
+            hub
+        }
+
+        /// A ready-made directory with one `.bsl` inside, built OUTSIDE the watched
+        /// tree so a later rename into it carries content that never fired an event.
+        fn staged_dir(&self, name: &str) -> PathBuf {
+            let staged = self.workspace.join(format!(".staging-{name}"));
+            std::fs::create_dir_all(&staged).unwrap();
+            std::fs::write(staged.join("Module.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+            staged
+        }
+    }
+
+    fn subtree_walks() -> usize {
+        SUBTREE_WALKS.with(|walks| walks.get())
+    }
+
+    fn entry_names(batch: &DrainBatch) -> Vec<String> {
+        batch.entries.iter().map(|e| e.raw.to_string_lossy().into_owned()).collect()
+    }
+
+    /// The hub takes a path into work only when it belongs to the observed scope.
+    /// A directory OUTSIDE every scan root — the build output or a vendored clone
+    /// that lands next to the sources — must not be walked: `collect_subtree`
+    /// records one entry per file it finds, and a foreign tree larger than the
+    /// accumulator's capacity would push every consumer into a full rescan.
+    #[test]
+    fn a_foreign_directory_is_not_walked() {
+        let project = nested_project();
+        let hub = project.hub();
+        let cursor = hub.subscribe();
+
+        let foreign = project.workspace.join("node_modules");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("index.js"), "x").unwrap();
+        std::fs::write(foreign.join("Module.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+
+        let walks_before = subtree_walks();
+        let rewatch =
+            hub.inner.ingest_event(change_event(EventKind::Create(CreateKind::Folder), foreign));
+
+        assert_eq!(subtree_walks(), walks_before, "a foreign directory is not walked");
+        assert!(rewatch.is_empty(), "and is not handed back for a recursive re-watch");
+        assert!(hub.drain(cursor).entries.is_empty(), "so none of its files reach the accumulator");
+    }
+
+    /// The positive control for the case above: the very same shape INSIDE a scan
+    /// root is walked, re-watched and recorded. Without it, a predicate that
+    /// filtered everything would pass the negative test.
+    #[test]
+    fn a_directory_inside_a_scan_root_is_walked() {
+        let project = nested_project();
+        let hub = project.hub();
+        let cursor = hub.subscribe();
+
+        let owned = project.scan_root.join("CommonModules");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::write(owned.join("Module.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+
+        let walks_before = subtree_walks();
+        let rewatch = hub
+            .inner
+            .ingest_event(change_event(EventKind::Create(CreateKind::Folder), owned.clone()));
+
+        assert_eq!(subtree_walks(), walks_before + 1, "a directory in scope is walked");
+        assert_eq!(rewatch, vec![owned], "and is handed back for a recursive re-watch");
+        assert!(
+            entry_names(&hub.drain(cursor)).iter().any(|p| p.ends_with("Module.bsl")),
+            "its files reach the accumulator"
+        );
+    }
+
+    /// A vanished path outside the scope must not reach the accumulator either.
+    /// `classify_path` returns `None` only for a directory that still EXISTS; a
+    /// gone extension-less path becomes `SubtreeRemoved`, which every consumer
+    /// reads as "reconsider the whole tree".
+    #[test]
+    fn a_foreign_directory_removal_asks_for_no_rescan() {
+        let project = nested_project();
+        let hub = project.hub();
+        let cursor = hub.subscribe();
+
+        let foreign = project.workspace.join("vendor");
+        hub.inner.ingest_event(change_event(EventKind::Remove(RemoveKind::Folder), foreign));
+
+        let batch = hub.drain(cursor);
+        assert!(batch.entries.is_empty(), "a removal outside the scope is not recorded");
+        assert_eq!(hub.health(), Health::Healthy, "and does not degrade the hub");
+    }
+
+    /// Positive control: the same removal INSIDE a scan root still asks consumers
+    /// to reconsider the subtree.
+    #[test]
+    fn a_scan_root_directory_removal_is_recorded() {
+        let project = nested_project();
+        let hub = project.hub();
+        let cursor = hub.subscribe();
+
+        let gone = project.scan_root.join("Catalogs");
+        hub.inner.ingest_event(change_event(EventKind::Remove(RemoveKind::Folder), gone));
+
+        let batch = hub.drain(cursor);
+        assert_eq!(batch.entries.len(), 1, "a removal in scope is recorded");
+        assert_eq!(batch.entries[0].kind, ChangeKind::SubtreeRemoved);
+    }
+
+    /// An unknown event kind is a "we may have missed something" signal, so it
+    /// degrades. But a path outside the scope carries nothing we were watching for,
+    /// and degrading on it lets one foreign file drag every consumer into a scan.
+    #[test]
+    fn an_unknown_event_outside_the_scope_does_not_degrade() {
+        let project = nested_project();
+        let hub = project.hub();
+
+        hub.ingest_for_test(change_event(EventKind::Other, project.workspace.join("stray.tmp")));
+
+        assert_eq!(hub.health(), Health::Healthy);
+    }
+
+    /// Positive control: an unknown event about a path we ARE watching still
+    /// degrades, and so does one that carries no path at all — an absent path is
+    /// not evidence that the lost change was out of scope.
+    #[test]
+    fn an_unknown_event_in_scope_or_without_paths_still_degrades() {
+        let project = nested_project();
+        let hub = project.hub();
+        hub.ingest_for_test(change_event(EventKind::Other, project.scan_root.join("x.bsl")));
+        assert_eq!(hub.health(), Health::Degraded(DegradeReason::UnknownEvent));
+
+        let project = nested_project();
+        let hub = project.hub();
+        hub.ingest_for_test(event_with_paths(EventKind::Other, Vec::new()));
+        assert_eq!(
+            hub.health(),
+            Health::Degraded(DegradeReason::UnknownEvent),
+            "an event with no path proves nothing about scope"
+        );
+    }
+
+    /// An ordinary file outside every scan root is not a config file and not a
+    /// directory — the plainest way to be out of scope, and the one a
+    /// directory-only filter would miss.
+    #[test]
+    fn an_ordinary_file_outside_the_scope_is_not_recorded() {
+        let project = nested_project();
+        let hub = project.hub();
+        let cursor = hub.subscribe();
+
+        let stray = project.workspace.join("notes.tmp");
+        std::fs::write(&stray, "x").unwrap();
+        hub.ingest_for_test(change_event(EventKind::Modify(ModifyKind::Any), stray));
+
+        assert!(hub.drain(cursor).entries.is_empty());
+    }
+
+    /// Every project-config name — not just the TOML one — reaches consumers from
+    /// the workspace directory, even though that directory is not a scan root.
+    /// This is what the non-recursive workspace target exists for.
+    #[test]
+    fn every_config_file_name_in_the_workspace_is_recorded() {
+        for name in project_model::CONFIG_FILE_NAMES {
+            let project = nested_project();
+            let hub = project.hub();
+            let cursor = hub.subscribe();
+
+            let config = project.workspace.join(name);
+            std::fs::write(&config, "{}").unwrap();
+            hub.ingest_for_test(change_event(EventKind::Modify(ModifyKind::Any), config));
+
+            assert!(
+                !hub.drain(cursor).entries.is_empty(),
+                "a change to {name} must reach consumers"
+            );
+        }
+    }
+
+    /// The config predicate reads the NAME and the PARENT, never the disk: a
+    /// deleted config is exactly as topology-shaping as an edited one, and a
+    /// predicate gated on "the file exists" would drop it.
+    #[test]
+    fn every_config_file_removal_in_the_workspace_is_recorded() {
+        for name in project_model::CONFIG_FILE_NAMES {
+            let project = nested_project();
+            let hub = project.hub();
+            let cursor = hub.subscribe();
+
+            let config = project.workspace.join(name);
+            hub.ingest_for_test(change_event(EventKind::Remove(RemoveKind::File), config));
+
+            let batch = hub.drain(cursor);
+            assert_eq!(batch.entries.len(), 1, "the removal of {name} must reach consumers");
+            assert_eq!(batch.entries[0].kind, ChangeKind::MaybeRemoved);
+        }
+    }
+
+    /// The config exception is anchored to the workspace directory. The same name
+    /// deeper down, outside every scan root, is somebody else's file.
+    #[test]
+    fn a_config_name_outside_the_workspace_directory_is_not_recorded() {
+        let project = nested_project();
+        let hub = project.hub();
+        let cursor = hub.subscribe();
+
+        let nested = project.workspace.join("vendor").join(project_model::CONFIG_FILE_NAMES[0]);
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "{}").unwrap();
+        hub.ingest_for_test(change_event(EventKind::Modify(ModifyKind::Any), nested));
+
+        assert!(hub.drain(cursor).entries.is_empty());
+    }
+
+    /// The two permissions add up rather than cancel: a config NAME grants the
+    /// right to record, never the right to walk. A directory carrying that name is
+    /// still a foreign directory.
+    #[test]
+    fn a_directory_named_like_a_config_is_not_walked() {
+        let project = nested_project();
+        let hub = project.hub();
+
+        let trap = project.workspace.join(project_model::CONFIG_FILE_NAMES[0]);
+        std::fs::create_dir_all(&trap).unwrap();
+        std::fs::write(trap.join("payload.tmp"), "x").unwrap();
+
+        let walks_before = subtree_walks();
+        let rewatch =
+            hub.inner.ingest_event(change_event(EventKind::Create(CreateKind::Folder), trap));
+
+        assert_eq!(subtree_walks(), walks_before, "a config-named directory is not walked");
+        assert!(rewatch.is_empty(), "and is not taken under recursive watch");
+    }
+
+    /// Positive control for the case above, and the reason it must be worded
+    /// carefully: in a FLAT project the workspace IS the scan root, so a
+    /// config-named directory sits under a scan root and is walked on the ordinary
+    /// rule. Forbidding it outright would silently drop the contents of a moved
+    /// directory.
+    #[test]
+    fn a_config_named_directory_under_a_scan_root_is_walked() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let hub = WorkspaceChangeHub::start_targets(watch_targets_for(
+            &root,
+            std::slice::from_ref(&root),
+        ));
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+
+        let trap = root.join(project_model::CONFIG_FILE_NAMES[0]);
+        std::fs::create_dir_all(&trap).unwrap();
+        std::fs::write(trap.join("Module.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+
+        let walks_before = subtree_walks();
+        let rewatch = hub
+            .inner
+            .ingest_event(change_event(EventKind::Create(CreateKind::Folder), trap.clone()));
+
+        assert_eq!(subtree_walks(), walks_before + 1, "under a scan root it is walked");
+        assert_eq!(rewatch, vec![trap]);
+    }
+
+    /// A scan root declared through a symlink sends events spelled the DECLARED
+    /// way: `dedup_targets` decides by canonical path but hands `watcher.watch`
+    /// the raw spelling. A predicate comparing against one spelling alone would
+    /// throw the whole tree away.
+    #[cfg(unix)]
+    #[test]
+    fn both_spellings_of_a_scan_root_are_in_scope() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let real = workspace.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = workspace.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let hub = WorkspaceChangeHub::start_targets(watch_targets_for(
+            &workspace,
+            std::slice::from_ref(&link),
+        ));
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+
+        // Two DIFFERENT files, one fed by each spelling: feeding one file twice
+        // would prove nothing, since both spellings coalesce onto a single key and
+        // dropping either would leave the count unchanged.
+        std::fs::write(real.join("Declared.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+        std::fs::write(real.join("Canonical.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+        hub.ingest_for_test(change_event(
+            EventKind::Modify(ModifyKind::Any),
+            link.join("Declared.bsl"),
+        ));
+        hub.ingest_for_test(change_event(
+            EventKind::Modify(ModifyKind::Any),
+            real.join("Canonical.bsl"),
+        ));
+
+        let names = entry_names(&hub.drain(cursor));
+        assert!(
+            names.iter().any(|p| p.ends_with("Declared.bsl")),
+            "the declared spelling — what the watcher actually reports — is in scope"
+        );
+        assert!(names.iter().any(|p| p.ends_with("Canonical.bsl")), "and so is the canonical one");
+    }
+
+    /// A directory MOVED into the tree arrives as `Modify(Name(To))`, never as a
+    /// `Create`. Its files did not change — their path did — so they fire no events
+    /// of their own: unless the arrival itself is walked, nothing in it is ever
+    /// indexed until a full reconcile.
+    #[test]
+    fn a_directory_moved_into_a_scan_root_is_walked() {
+        let project = nested_project();
+        let hub = project.hub();
+        let cursor = hub.subscribe();
+
+        let staged = project.staged_dir("moved");
+        let landed = project.scan_root.join("CommonModules");
+        std::fs::rename(&staged, &landed).unwrap();
+
+        let walks_before = subtree_walks();
+        let rewatch = hub.inner.ingest_event(change_event(
+            EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::To)),
+            landed.clone(),
+        ));
+
+        assert_eq!(subtree_walks(), walks_before + 1, "the arrived directory is walked");
+        assert_eq!(rewatch, vec![landed], "and taken under recursive watch");
+        assert!(
+            entry_names(&hub.drain(cursor)).iter().any(|p| p.ends_with("Module.bsl")),
+            "the content that rode along with it reaches the accumulator"
+        );
+    }
+
+    /// Only `Name` widens the branch. A `chmod` on a directory is a `Modify` too,
+    /// and walking a large tree for it would be pure waste — the plainest wrong
+    /// widening (to any `Modify`) is exactly what this guards against.
+    #[test]
+    fn a_non_rename_modify_of_a_directory_is_not_walked() {
+        let project = nested_project();
+        let hub = project.hub();
+
+        let dir = project.scan_root.join("CommonModules");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Module.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+
+        for kind in [
+            ModifyKind::Metadata(notify::event::MetadataKind::Permissions),
+            ModifyKind::Data(notify::event::DataChange::Any),
+            ModifyKind::Any,
+            ModifyKind::Other,
+        ] {
+            let walks_before = subtree_walks();
+            let rewatch =
+                hub.inner.ingest_event(change_event(EventKind::Modify(kind), dir.clone()));
+            assert_eq!(subtree_walks(), walks_before, "a {kind:?} on a directory is not walked");
+            assert!(rewatch.is_empty(), "and does not take it under recursive watch");
+        }
+    }
+
+    /// A mixed `Name(Both)` carries the vanished path and the arrived one in a
+    /// single event, and a rename out of a scan root puts them on opposite sides
+    /// of the boundary. Filtering per EVENT would let the foreign directory
+    /// through; the filter is per PATH.
+    #[test]
+    fn a_rename_across_the_boundary_filters_each_path() {
+        let project = nested_project();
+        let hub = project.hub();
+        let cursor = hub.subscribe();
+
+        let gone = project.scan_root.join("Catalogs");
+        let landed = project.workspace.join("vendor");
+        std::fs::create_dir_all(&landed).unwrap();
+        std::fs::write(landed.join("Module.bsl"), "Процедура П() КонецПроцедуры").unwrap();
+
+        let walks_before = subtree_walks();
+        let rewatch = hub.inner.ingest_event(event_with_paths(
+            EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Both)),
+            vec![gone.clone(), landed],
+        ));
+
+        assert_eq!(subtree_walks(), walks_before, "the arrived foreign directory is not walked");
+        assert!(rewatch.is_empty());
+        let batch = hub.drain(cursor);
+        assert_eq!(batch.entries.len(), 1, "only the in-scope path is recorded");
+        assert_eq!(batch.entries[0].raw, gone);
     }
 
     #[test]
