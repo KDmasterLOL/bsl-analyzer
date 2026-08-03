@@ -293,6 +293,12 @@ pub enum PublishOutcome {
         /// state diverge from the plan's own counts, and the reported status must describe
         /// what actually serves.
         overlay_files: usize,
+        /// Baseline files locally DELETED as of the applied state (hidden with no entry):
+        /// a local diff even with zero entries — "no local diffs" must not claim otherwise.
+        deleted_files: usize,
+        /// The unread debts as of the applied state: what the pass genuinely failed to
+        /// verify, with the stale plan's out-fenced failures already discounted.
+        unread_keys: usize,
     },
     Superseded,
 }
@@ -915,9 +921,14 @@ impl WorkspaceOverlayCache {
             }
         }
         // A settled key ends its failure streak: the budget counts CONSECUTIVE failures, and
-        // without this reset unrelated failures spread over time would add up to a drop.
+        // without this reset unrelated failures spread over time would add up to a drop. A
+        // FENCED key's streak belongs to a FRESHER settlement — the stale plan's old success
+        // must not erase it.
         for key in verdict.seen_keys {
-            if !verdict.read_failures.contains(key) && !verdict.build_faults.contains(key) {
+            if !verdict.read_failures.contains(key)
+                && !verdict.build_faults.contains(key)
+                && !verdict.fenced.contains(key)
+            {
                 self.dirty_failures.remove(key);
             }
         }
@@ -1779,18 +1790,39 @@ impl WorkspaceOverlayCache {
             &to_consume,
         );
         self.finish_publication(&verdict, &to_consume, persist_ok);
-        // `settled_seq` is deliberately NOT pruned here: another plan with an OLDER fence may
-        // still be in flight (the library does not enforce the driver's single-flight), and
-        // pruning by this plan's fence would hand that older plan the very keys the fence
-        // exists to protect. The map is bounded by the workspace file count (a re-settlement
-        // overwrites its key) and cleared by every wholesale invalidation.
+        // Settlements whose key still CARRIES state (an entry, a hiding, a mark, an unread
+        // debt) are kept even below the fence: another plan with an older fence may still be
+        // in flight (the library does not enforce the driver's single-flight), and pruning
+        // them would hand that plan the very keys the fence protects. A CARRIER-LESS
+        // settlement at or below the fence (a tracelessly deleted key) is pruned — without
+        // this, a workspace rotating unique paths would grow the map with its history, not
+        // its size. Residual: an older overlapping plan may resurrect a traceless deletion
+        // in that narrow window; unreachable under the driver's single-flight.
+        let fence = baseline.fence;
+        self.settled_seq.retain(|key, seq| {
+            *seq > fence
+                || self.entries.contains_key(key)
+                || self.hidden_paths.contains(key)
+                || self.dirty_paths.contains_key(key)
+                || self.unread_keys.contains(key)
+        });
         // Marked keys the gate skipped unread: the tail deliberately kept their marks, and
         // the caller reports them as unread files.
         let gate_deferred = deferred.len();
 
         self.persist_embedding_cache(embedder, store);
 
-        Ok(PublishOutcome::Applied { gate_deferred, persist_ok, overlay_files: self.entries.len() })
+        Ok(PublishOutcome::Applied {
+            gate_deferred,
+            persist_ok,
+            overlay_files: self.entries.len(),
+            deleted_files: self
+                .hidden_paths
+                .iter()
+                .filter(|key| !self.entries.contains_key(*key))
+                .count(),
+            unread_keys: self.unread_keys.len(),
+        })
     }
 
     /// Best-effort save of the merged embedding cache: vectors are value-stable and
@@ -6292,7 +6324,13 @@ mod tests {
             cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
         assert_eq!(
             deferred,
-            super::PublishOutcome::Applied { gate_deferred: 1, persist_ok: true, overlay_files: 0 },
+            super::PublishOutcome::Applied {
+                gate_deferred: 1,
+                persist_ok: true,
+                overlay_files: 0,
+                deleted_files: 0,
+                unread_keys: 0
+            },
             "one marked key was skipped unread by the gate"
         );
 
@@ -6322,7 +6360,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             deferred,
-            super::PublishOutcome::Applied { gate_deferred: 0, persist_ok: true, overlay_files: 1 }
+            super::PublishOutcome::Applied {
+                gate_deferred: 0,
+                persist_ok: true,
+                overlay_files: 1,
+                deleted_files: 0,
+                unread_keys: 0
+            }
         );
     }
 
@@ -7545,6 +7589,124 @@ mod tests {
                 .iter()
                 .any(|document| document.symbol_name == "Вторая"),
             "the recovered content is published, not gated away by the repopulated row"
+        );
+    }
+
+    /// A deletion-only applied state is NOT "no local diffs": the publish outcome carries
+    /// the deletion count, so the caller cannot claim the tree matches the baseline while a
+    /// hidden baseline file is being filtered out.
+    #[test]
+    fn a_deletion_only_publish_reports_the_deletion() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        fs::remove_file(&file).unwrap();
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+            baseline.distrusted(),
+        )
+        .unwrap();
+        let outcome = cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        assert_eq!(
+            outcome,
+            super::PublishOutcome::Applied {
+                gate_deferred: 0,
+                persist_ok: true,
+                overlay_files: 0,
+                deleted_files: 1,
+                unread_keys: 0
+            },
+            "zero entries with a local deletion is still a local diff"
+        );
+    }
+
+    /// A published plan prunes CARRIER-LESS settlements at its fence: a workspace rotating
+    /// unique paths must not grow the fence map with its history. Settlements whose key
+    /// still carries state survive (the overlapping-plans protection).
+    #[test]
+    fn a_publish_prunes_carrierless_settlements() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let manifest: HashMap<FileKey, String> = HashMap::new();
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        for i in 0..100 {
+            cache.remove_known_deleted(&key(&format!("Tmp{i}.bsl")), false);
+        }
+        assert_eq!(cache.settled_seq.len(), 100, "the deletions are fenced while unpublished");
+
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+            baseline.distrusted(),
+        )
+        .unwrap();
+        cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        assert_eq!(
+            cache.settled_seq.len(),
+            0,
+            "traceless keys leave no settlement behind once a newer plan published"
+        );
+    }
+
+    /// A stale plan's old SUCCESS must not erase the failure streak a fresher point
+    /// settlement recorded: the budget belongs to the newest knowledge.
+    #[test]
+    fn a_stale_success_preserves_a_fresher_failure_budget() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+            baseline.distrusted(),
+        )
+        .unwrap();
+
+        // A fresher point failure records one strike after the plan's successful read.
+        fs::write(&file, [0xff, 0xfe]).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert_eq!(cache.dirty_failure_count(&key("A.bsl")), 1);
+
+        cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        assert_eq!(
+            cache.dirty_failure_count(&key("A.bsl")),
+            1,
+            "the stale success must not reset the fresher streak"
         );
     }
 }

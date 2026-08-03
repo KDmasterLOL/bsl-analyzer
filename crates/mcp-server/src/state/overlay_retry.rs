@@ -30,6 +30,10 @@ fn retry_delay(streak: u32) -> Duration {
 }
 
 struct RetryState {
+    /// Bumped by every [`OverlayRetry::kick_fresh`]. A pass captures it before running;
+    /// if it moved while the pass ran, the pass's outcome predates a fresh fact (an engine
+    /// publication, new drift) and must not arm the backoff over it.
+    fresh_epoch: u64,
     /// Consecutive passes that did not end clean; indexes into [`retry_delay`].
     streak: u32,
     /// No pass starts before this instant (backoff gate).
@@ -70,6 +74,7 @@ impl OverlayRetry {
             semantic_runtime,
             lease,
             state: Mutex::new(RetryState {
+                fresh_epoch: 0,
                 streak: 0,
                 next_allowed: Instant::now(),
                 obligation: false,
@@ -91,6 +96,7 @@ impl OverlayRetry {
     /// the backoff resets and the worker wakes.
     pub(crate) fn kick_fresh(&self) {
         if let Ok(mut state) = self.state.lock() {
+            state.fresh_epoch = state.fresh_epoch.wrapping_add(1);
             state.streak = 0;
             state.next_allowed = Instant::now();
         }
@@ -156,6 +162,7 @@ impl OverlayRetry {
             }
             // Run the pass with the state lock RELEASED: a pass embeds for minutes, and
             // kick/disarm/stop must stay responsive meanwhile.
+            let epoch_before = state.fresh_epoch;
             drop(state);
             let outcome = self.run_pass();
             self.passes.fetch_add(1, Ordering::SeqCst);
@@ -163,7 +170,7 @@ impl OverlayRetry {
                 Ok(state) => state,
                 Err(_) => return,
             };
-            self.settle_outcome(&mut state, outcome);
+            self.settle_outcome(&mut state, outcome, epoch_before);
         }
     }
 
@@ -221,7 +228,12 @@ impl OverlayRetry {
         outcome
     }
 
-    fn settle_outcome(&self, state: &mut RetryState, outcome: OverlayWarmupState) {
+    fn settle_outcome(
+        &self,
+        state: &mut RetryState,
+        outcome: OverlayWarmupState,
+        epoch_before: u64,
+    ) {
         match outcome {
             OverlayWarmupState::NoLocalDiffs | OverlayWarmupState::Synced { .. } => {
                 state.streak = 0;
@@ -253,6 +265,13 @@ impl OverlayRetry {
                 state.next_allowed = Instant::now() + retry_delay(state.streak);
             }
         }
+        // A fresh kick landed WHILE the pass ran: its notification found no waiter, and the
+        // arming above would bury it under a backoff. The outcome predates the fresh fact,
+        // so the next check happens immediately.
+        if state.fresh_epoch != epoch_before {
+            state.streak = 0;
+            state.next_allowed = Instant::now();
+        }
     }
 }
 
@@ -279,7 +298,13 @@ mod tests {
     }
 
     fn state() -> RetryState {
-        RetryState { streak: 0, next_allowed: Instant::now(), obligation: false, disarmed: false }
+        RetryState {
+            fresh_epoch: 0,
+            streak: 0,
+            next_allowed: Instant::now(),
+            obligation: false,
+            disarmed: false,
+        }
     }
 
     fn driver_over(engine: SharedSearchEngine, lease: WorkspaceLease) -> Arc<OverlayRetry> {
@@ -315,7 +340,7 @@ mod tests {
         let mut s = state();
         s.streak = 3;
         s.obligation = true;
-        dummy.settle_outcome(&mut s, OverlayWarmupState::NoLocalDiffs);
+        dummy.settle_outcome(&mut s, OverlayWarmupState::NoLocalDiffs, 0);
         assert_eq!((s.streak, s.obligation, s.disarmed), (0, false, false));
 
         let mut s = state();
@@ -327,27 +352,55 @@ mod tests {
                 read_failures: 0,
                 persist_failed: true,
             },
+            0,
         );
         assert_eq!((s.streak, s.obligation, s.disarmed), (1, true, false));
 
         let mut s = state();
-        dummy.settle_outcome(&mut s, OverlayWarmupState::Superseded);
+        dummy.settle_outcome(&mut s, OverlayWarmupState::Superseded, 0);
         assert_eq!((s.streak, s.obligation, s.disarmed), (1, true, false));
 
         let mut s = state();
-        dummy.settle_outcome(&mut s, OverlayWarmupState::Failed("x".to_owned()));
+        dummy.settle_outcome(&mut s, OverlayWarmupState::Failed("x".to_owned()), 0);
         assert_eq!((s.streak, s.obligation, s.disarmed), (1, true, false));
 
         let mut s = state();
-        dummy.settle_outcome(&mut s, OverlayWarmupState::Skipped("engine unavailable".to_owned()));
+        dummy.settle_outcome(
+            &mut s,
+            OverlayWarmupState::Skipped("engine unavailable".to_owned()),
+            0,
+        );
         assert_eq!((s.streak, s.obligation, s.disarmed), (1, true, false), "transient skip");
 
         let mut s = state();
         dummy.settle_outcome(
             &mut s,
             OverlayWarmupState::Skipped("no embedder configured".to_owned()),
+            0,
         );
         assert!(s.disarmed, "terminal skip disarms");
+    }
+
+    /// A fresh kick that lands WHILE a pass runs must not be buried by that pass's stale
+    /// outcome: the settle sees the epoch moved and schedules the next check immediately.
+    #[test]
+    fn a_fresh_kick_during_a_pass_overrides_the_stale_backoff() {
+        let dummy = driver_over(
+            Arc::new(Mutex::new(None)),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
+        dummy.stop();
+        let mut s = state();
+        // The pass captured epoch 4; a kick_fresh bumped it to 5 mid-pass.
+        s.fresh_epoch = 5;
+        dummy.settle_outcome(
+            &mut s,
+            OverlayWarmupState::Skipped("engine unavailable".to_owned()),
+            4,
+        );
+        assert_eq!(s.streak, 0, "the stale outcome must not bury the fresh fact");
+        assert!(s.next_allowed <= Instant::now(), "the next check happens now");
+        assert!(s.obligation, "the obligation itself stands");
     }
 
     /// Concurrent kicks collapse into ONE pass: the worker is the only runner, and after a

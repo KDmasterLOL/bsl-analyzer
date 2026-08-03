@@ -335,8 +335,17 @@ impl SharedState {
         let embedded = new_embeddings.len();
         let scan_unreadable = plan.scan_unreadable();
         let scan_canonical_fallbacks = plan.scan_canonical_fallbacks();
-        let read_failures = plan.read_failure_count();
 
+        // The stop/ownership signal is honoured even when the embed set was EMPTY (the
+        // in-batch checks never ran): a stopped driver must not publish anything.
+        if !lease.owns_caches_now() || !keep_going() {
+            tracing::warn!("overlay warmup: stopped before publish");
+            Self::set_overlay_warmup_state(
+                overlay_warmup,
+                OverlayWarmupState::Failed("workspace ownership lost at publish".to_owned()),
+            );
+            return;
+        }
         // Brief lock to publish the merged result atomically.
         match search_engine.lock() {
             Ok(guard) => match guard.as_ref() {
@@ -362,23 +371,24 @@ impl SharedState {
                             gate_deferred,
                             persist_ok,
                             overlay_files: applied_overlay_files,
+                            deleted_files,
+                            unread_keys,
                         }) => {
                             tracing::info!("workspace overlay semantic warmup complete");
-                            // A marked key the plan's gate skipped unread counts as an unread
-                            // file: the pass did not verify it, and an empty plan built over a
-                            // stale row must not read as "no local diffs". A failed persist
-                            // makes the pass incomplete too — a "clean" outcome would reset
-                            // the retry backoff while stale rows still sit on disk. The file
-                            // count comes from the APPLIED state, not the plan: carried and
-                            // fenced keys make the two diverge, and the status must describe
-                            // what actually serves.
+                            // Every number comes from the APPLIED state, not the plan:
+                            // carried and fenced keys make the two diverge. "No local
+                            // diffs" requires zero entries AND zero local deletions; the
+                            // unread count is the applied one, so an out-fenced stale
+                            // failure no longer inflates `Incomplete`, while a marked key
+                            // the gate skipped unread still counts — the pass did not
+                            // verify it. A failed persist keeps the pass incomplete too.
                             let outcome = Self::warmup_outcome(
-                                applied_overlay_files == 0,
+                                applied_overlay_files == 0 && deleted_files == 0,
                                 applied_overlay_files,
                                 embedded,
                                 scan_unreadable,
                                 scan_canonical_fallbacks,
-                                read_failures + gate_deferred,
+                                unread_keys + gate_deferred,
                                 !persist_ok,
                             );
                             Self::set_overlay_warmup_state(overlay_warmup, outcome);
@@ -776,6 +786,42 @@ mod tests {
             SharedState::warmup_outcome(false, 2, 5, 0, 0, 0, false),
             OverlayWarmupState::Synced { overlay_files: 2, embedded: 5 }
         ));
+    }
+
+    /// A stopped driver must not publish even when the embed set was EMPTY: the in-batch
+    /// stop checks never ran, so the pre-publish check is the only thing standing between a
+    /// shutdown and a post-handover publication.
+    #[test]
+    fn a_stopped_empty_embed_pass_does_not_publish() {
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let mut engine =
+            SearchEngine::new(&workspace.join("search.db"), mock_semantic_config(&mock)).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let overlay_warmup = Arc::new(Mutex::new(crate::state::OverlayWarmupState::Pending));
+
+        SharedState::run_overlay_warmup(
+            &engine_arc,
+            &overlay_warmup,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &|| false,
+        );
+        assert!(
+            !engine_arc
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .workspace_overlay_retry_signals()
+                .unwrap()
+                .initialized,
+            "a stopped pass publishes nothing"
+        );
     }
 
     /// A warmup pass that could not SEE or READ everything must report `Incomplete` with the
