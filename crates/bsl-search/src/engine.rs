@@ -652,14 +652,14 @@ impl SearchEngine {
     /// parsing or graph round-trip happens here — this is purely the storage write.
     pub fn ingest_fused_file(
         &mut self,
-        rel_path: &str,
+        key: &FileKey,
         hash: &[u8],
         chunks: &[crate::Chunk],
         graph_contexts: &[Option<String>],
     ) -> Result<(), SearchError> {
         self.store.reindex_file_with_context(
-            CONFIGURATION_ROOT_ID,
-            rel_path,
+            &key.root_id,
+            &key.path,
             hash,
             chunks,
             None,
@@ -854,6 +854,54 @@ impl SearchEngine {
         Ok(index)
     }
 
+    /// The files a boot ingest must write, each under the key the store knows it by.
+    ///
+    /// With a root table configured, the universe is EVERY registered root, walked once through
+    /// the shared source-set walk, and the key is decided by the same attribution every other
+    /// path uses — the longest matching prefix, not the root the walk entered through. Keying by
+    /// the entered root would give a file under a configuration that some extension contains a
+    /// second row under that extension's id. De-duplication by key is what keeps one file one
+    /// row when roots nest and the walk reaches it twice.
+    ///
+    /// Without a table the caller is not a workspace daemon but a one-shot indexer (the baseline
+    /// publisher, a reference corpus), and the old contract stands: walk the given directory and
+    /// key everything as the configuration.
+    fn boot_ingest_files(&self, root: &Path) -> Vec<(FileKey, std::path::PathBuf)> {
+        let Some(roots) = self.workspace_roots.as_ref() else {
+            return walkdir::WalkDir::new(root)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    bsl_conventions::has_extension(e.path(), bsl_conventions::BSL_EXTENSION)
+                })
+                .map(|e| {
+                    let path = e.into_path();
+                    let rel =
+                        path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+                    (FileKey::configuration(rel), path)
+                })
+                .collect();
+        };
+        let declared: Vec<std::path::PathBuf> =
+            roots.entries().map(|(_, declared)| declared.to_path_buf()).collect();
+        let set = project_model::SourceSet::scan(&declared);
+        let mut seen = HashSet::new();
+        let mut files = Vec::new();
+        for file in &set.files {
+            if file.role != project_model::FileRole::Source {
+                continue;
+            }
+            let Some(key) = roots.root_of(&file.walked, &file.canonical) else {
+                continue;
+            };
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            files.push((key, file.walked.clone()));
+        }
+        files
+    }
+
     /// Index workspace files for *deferred* embedding: chunk each changed file, attach
     /// its graph context via the configured provider, and persist chunk + FTS rows with a
     /// NULL embedding. The vectors are filled later by
@@ -863,18 +911,13 @@ impl SearchEngine {
     /// the synchronous [`Self::index_directory`] would have produced, without blocking on
     /// the embed. Returns the number of files (re)indexed.
     pub fn index_directory_deferred(&mut self, root: &Path) -> Result<usize, SearchError> {
-        let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| bsl_conventions::has_extension(e.path(), bsl_conventions::BSL_EXTENSION))
-            .map(|e| e.into_path())
-            .collect();
+        let bsl_files = self.boot_ingest_files(root);
 
         info!(total_files = bsl_files.len(), "scanning BSL files (deferred embedding)");
 
         let provider = self.graph_context_provider.as_deref();
         let mut indexed = 0;
-        for file_path in &bsl_files {
+        for (key, file_path) in &bsl_files {
             let content = match std::fs::read_to_string(file_path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -884,10 +927,9 @@ impl SearchEngine {
             };
 
             let hash = blake3::hash(content.as_bytes());
-            let rel_path =
-                file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
+            let rel_path = key.path.clone();
 
-            let had_prior = match self.store.file_hash(CONFIGURATION_ROOT_ID, &rel_path)? {
+            let had_prior = match self.store.file_hash(&key.root_id, &rel_path)? {
                 Some(stored_hash) => {
                     if stored_hash == hash.as_bytes() {
                         continue;
@@ -907,7 +949,7 @@ impl SearchEngine {
                 // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
                 // so only prior-stored files are touched.
                 if had_prior {
-                    self.store.remove_file(CONFIGURATION_ROOT_ID, &rel_path, "code")?;
+                    self.store.remove_file(&key.root_id, &rel_path, "code")?;
                     indexed += 1;
                 }
                 continue;
@@ -916,17 +958,12 @@ impl SearchEngine {
             let graph_contexts: Vec<Option<String>> = chunks
                 .iter()
                 .map(|c| {
-                    crate::document::indexed_document_for_chunk(
-                        &FileKey::configuration(&rel_path),
-                        c,
-                        provider,
-                    )
-                    .graph_context
+                    crate::document::indexed_document_for_chunk(key, c, provider).graph_context
                 })
                 .collect();
 
             self.store.reindex_file_with_context(
-                CONFIGURATION_ROOT_ID,
+                &key.root_id,
                 &rel_path,
                 hash.as_bytes(),
                 &chunks,
@@ -941,17 +978,42 @@ impl SearchEngine {
     }
 
     pub fn index_directory_fts(&mut self, root: &Path) -> Result<usize, SearchError> {
-        let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| bsl_conventions::has_extension(e.path(), bsl_conventions::BSL_EXTENSION))
-            .map(|e| e.into_path())
-            .collect();
+        let bsl_files = self.boot_ingest_files(root);
+        self.ingest_files_fts(&bsl_files)
+    }
 
+    /// Index only the registered roots that have no rows at all yet.
+    ///
+    /// A warm store skips re-indexing to keep a restart cheap, but "warm" is a per-ROOT fact: a
+    /// root declared while the daemon was down has nothing stored, and skipping it would leave it
+    /// out of the index until someone edited a file in it. Roots that already have rows are not
+    /// walked, read or hashed here, so the restart stays as cheap as it was.
+    pub fn index_unindexed_roots_fts(&mut self) -> Result<usize, SearchError> {
+        let indexed_roots: HashSet<String> = self
+            .store
+            .all_files_in_collection("code")?
+            .into_iter()
+            .map(|(key, _hash)| key.root_id)
+            .collect();
+        let files: Vec<(FileKey, std::path::PathBuf)> = self
+            .boot_ingest_files(Path::new(""))
+            .into_iter()
+            .filter(|(key, _)| !indexed_roots.contains(&key.root_id))
+            .collect();
+        if files.is_empty() {
+            return Ok(0);
+        }
+        self.ingest_files_fts(&files)
+    }
+
+    fn ingest_files_fts(
+        &mut self,
+        bsl_files: &[(FileKey, std::path::PathBuf)],
+    ) -> Result<usize, SearchError> {
         info!(total_files = bsl_files.len(), "scanning BSL files (FTS-only)");
 
         let mut indexed = 0;
-        for file_path in &bsl_files {
+        for (key, file_path) in bsl_files {
             let content = match std::fs::read_to_string(file_path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -961,10 +1023,9 @@ impl SearchEngine {
             };
 
             let hash = blake3::hash(content.as_bytes());
-            let rel_path =
-                file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
+            let rel_path = key.path.clone();
 
-            let had_prior = match self.store.file_hash(CONFIGURATION_ROOT_ID, &rel_path)? {
+            let had_prior = match self.store.file_hash(&key.root_id, &rel_path)? {
                 Some(stored_hash) => {
                     if stored_hash == hash.as_bytes() {
                         continue;
@@ -984,19 +1045,13 @@ impl SearchEngine {
                 // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
                 // so only prior-stored files are touched.
                 if had_prior {
-                    self.store.remove_file(CONFIGURATION_ROOT_ID, &rel_path, "code")?;
+                    self.store.remove_file(&key.root_id, &rel_path, "code")?;
                     indexed += 1;
                 }
                 continue;
             }
 
-            self.store.reindex_file(
-                CONFIGURATION_ROOT_ID,
-                &rel_path,
-                hash.as_bytes(),
-                &chunks,
-                None,
-            )?;
+            self.store.reindex_file(&key.root_id, &rel_path, hash.as_bytes(), &chunks, None)?;
             indexed += 1;
         }
 

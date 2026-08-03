@@ -701,16 +701,36 @@ struct PublishedBuild {
 /// files.
 struct FusedChunkWriter<'e> {
     engine: &'e mut SearchEngine,
-    /// Canonical, `/`-normalised search source root: derives the stored relative path
-    /// and excludes files outside it (e.g. extension modules the local index omits).
+    /// The engine's root table, cloned so writing through `engine` stays possible while
+    /// attributing paths. Every registered root is indexed, and a file's key is decided by the
+    /// same longest-prefix attribution the rest of the index uses.
+    roots: Option<bsl_search::WorkspaceRoots>,
+    /// Canonical, `/`-normalised search source root. Only used when no root table is
+    /// configured — then the corpus is the configuration alone, as it always was.
     source_prefix: String,
 }
 
 impl<'e> FusedChunkWriter<'e> {
     fn new(engine: &'e mut SearchEngine, source_path: PathBuf) -> Self {
+        let roots = engine.workspace_roots().cloned();
         let source_prefix =
             source_path.canonicalize().unwrap_or(source_path).to_string_lossy().replace('\\', "/");
-        Self { engine, source_prefix }
+        Self { engine, roots, source_prefix }
+    }
+
+    /// The store key of one emitted module, or `None` when it belongs to no registered root.
+    fn key_of(&self, abs: &str) -> Option<bsl_search::FileKey> {
+        let Some(roots) = self.roots.as_ref() else {
+            let prefix = self.source_prefix.trim_end_matches('/');
+            let rel = abs
+                .strip_prefix(prefix)
+                .filter(|rest| rest.starts_with('/'))
+                .map(|s| s.trim_start_matches('/'))?;
+            return (!rel.is_empty()).then(|| bsl_search::FileKey::configuration(rel));
+        };
+        let walked = std::path::Path::new(abs);
+        let canonical = walked.canonicalize().ok()?;
+        roots.root_of(walked, &canonical)
     }
 }
 
@@ -739,21 +759,14 @@ impl ide::FusedChunkSink for FusedChunkWriter<'_> {
             ctxs.push(row.graph_context.clone());
         }
 
-        let prefix = self.source_prefix.trim_end_matches('/');
         for (abs, chunks, ctxs) in &groups {
-            // Require a path-separator boundary after the prefix so a sibling whose name
-            // merely starts with the source dir's string (e.g. `…/cf` vs `…/cf_ext`) is
-            // not mistaken for a file inside the source root.
-            let Some(rel) = abs
-                .strip_prefix(prefix)
-                .filter(|rest| rest.starts_with('/'))
-                .map(|s| s.trim_start_matches('/'))
-            else {
-                continue; // outside the search source root (e.g. an extension module)
-            };
-            if rel.is_empty() {
+            // A module outside every registered root is not this index's business. With a table
+            // configured that means "under no declared root"; without one it means "outside the
+            // configuration", which is the prefix check this used to be — a separator boundary
+            // included, so `…/cf_ext` is never mistaken for a file inside `…/cf`.
+            let Some(key) = self.key_of(abs) else {
                 continue;
-            }
+            };
             let bytes = match std::fs::read(abs) {
                 Ok(b) => b,
                 Err(_) => continue, // unreadable now → leave for the standalone indexer
@@ -772,18 +785,12 @@ impl ide::FusedChunkSink for FusedChunkWriter<'_> {
             // cross-file staleness in the embedding's context rather than re-embed every caller
             // of any changed symbol — embeddings are an approximation and this self-heals on the
             // next edit of the affected file.
-            if self
-                .engine
-                .store()
-                .file_hash(bsl_search::CONFIGURATION_ROOT_ID, rel)
-                .ok()
-                .flatten()
-                .as_deref()
+            if self.engine.store().file_hash(&key.root_id, &key.path).ok().flatten().as_deref()
                 == Some(hash.as_slice())
             {
                 continue;
             }
-            self.engine.ingest_fused_file(rel, &hash, chunks, ctxs)?;
+            self.engine.ingest_fused_file(&key, &hash, chunks, ctxs)?;
         }
         Ok(())
     }
@@ -886,6 +893,83 @@ mod tests {
     use std::fs;
     use std::time::{Duration, UNIX_EPOCH};
     use walkdir::WalkDir;
+
+    /// The fused pass writes the search rows itself, so it must key them the way the rest of the
+    /// index does: a module of a declared extension belongs to that extension, not to the
+    /// configuration and not to nowhere. Dropping it (the old behaviour) leaves the extension out
+    /// of a fused cold boot entirely, and the deletion reconcile cannot put it back — it only
+    /// removes.
+    #[test]
+    fn the_fused_writer_keys_each_module_by_its_own_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = dir.path().join("outside-ext");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let configuration_module = configuration.join("A.bsl");
+        let extension_module = extension.join("B.bsl");
+        fs::write(&configuration_module, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        fs::write(&extension_module, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        let outsider = dir.path().join("nowhere").join("C.bsl");
+        fs::create_dir_all(outsider.parent().unwrap()).unwrap();
+        fs::write(&outsider, "Процедура Третья()\nКонецПроцедуры").unwrap();
+
+        let mut engine = bsl_search::SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let (roots, _rejected) = bsl_search::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        let extension_key = roots
+            .root_of(&extension_module, &extension_module.canonicalize().unwrap())
+            .expect("the extension's module has an owner");
+        engine.set_workspace_roots(roots);
+
+        let row = |path: &std::path::Path, symbol: &str| ide::ChunkRow {
+            path: path.to_string_lossy().replace('\\', "/"),
+            symbol: symbol.to_owned(),
+            kind: bsl_search::ChunkKind::Procedure,
+            is_export: false,
+            annotations: Vec::new(),
+            line_start: 1,
+            line_end: 2,
+            text: format!("Процедура {symbol}()\nКонецПроцедуры"),
+            graph_context: None,
+        };
+        {
+            let mut writer = FusedChunkWriter::new(&mut engine, configuration.clone());
+            ide::FusedChunkSink::emit_chunks(
+                &mut writer,
+                &[
+                    row(&configuration_module, "Первая"),
+                    row(&extension_module, "Вторая"),
+                    row(&outsider, "Третья"),
+                ],
+            )
+            .expect("the sink writes its batch");
+        }
+
+        let rows: Vec<(String, String)> = engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .map(|(key, _hash)| (key.root_id, key.path))
+            .collect();
+        assert!(
+            rows.contains(&(String::new(), "A.bsl".to_owned())),
+            "the configuration's module keeps its key: {rows:?}",
+        );
+        assert!(
+            rows.contains(&(extension_key.root_id.clone(), extension_key.path.clone())),
+            "the extension's module is written under its own root: {rows:?}",
+        );
+        assert!(
+            !rows.iter().any(|(_, path)| path.ends_with("C.bsl")),
+            "a module under no registered root is still not this index's business: {rows:?}",
+        );
+    }
 
     /// End-to-end through `GraphState`: a first use builds the SQLite graph off
     /// the workspace and serves overview/node/neighbors from the opened handle.

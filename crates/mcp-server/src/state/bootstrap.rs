@@ -987,6 +987,18 @@ impl SharedState {
         } else {
             // Warm store: prime handles the while-down EDITS; the reconcile still removes rows for
             // files DELETED while down (a prime only hides them lazily and never from the store).
+            // A root DECLARED while down is neither: it has no rows to refresh and no rows to
+            // remove, so the skip is taken per root and only the unindexed ones are ingested.
+            match engine.index_unindexed_roots_fts() {
+                Ok(indexed) if indexed > 0 => {
+                    tracing::info!(
+                        indexed,
+                        "indexed a source root declared while the daemon was down"
+                    )
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("failed to index a newly declared source root: {e}"),
+            }
             Self::reconcile_boot_store_with_disk(&mut engine);
             OverlayInit::Prime
         };
@@ -2197,6 +2209,205 @@ mod tests {
             ".",
             "a file outside the configuration belongs to the extension that contains it",
         );
+    }
+
+    /// A cold boot must index the declared extensions, not just the configuration — otherwise the
+    /// extension reaches the index only if someone happens to edit it. And it must key each row by
+    /// its own root: a `cfe` extension repeats the configuration's relative paths wholesale, so a
+    /// writer that keys everything as the configuration silently overwrites one file with the
+    /// other and serves one symbol where two exist.
+    #[test]
+    fn a_cold_boot_indexes_every_root_and_keeps_same_named_paths_apart() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let configuration = workspace.join("src").join("cf");
+        let extension = workspace.join("ext-a");
+        for (root, name, symbol) in [
+            (&configuration, "Конфа", "СимволКонфигурации"),
+            (&extension, "Расш", "СимволРасширения"),
+        ] {
+            fs::create_dir_all(root).unwrap();
+            fs::write(
+                root.join("Configuration.xml"),
+                format!("<Configuration><Name>{name}</Name></Configuration>"),
+            )
+            .unwrap();
+            // The SAME relative path under both roots: this is the shape a `cfe` extension has.
+            write_common_module_tree(
+                root,
+                "Общий",
+                &format!("&НаСервере\nФункция {symbol}() Экспорт Возврат 1; КонецФункции\n"),
+            );
+        }
+        fs::write(
+            workspace.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\nextensions = [{ name = \"a\", path = \"ext-a\" }]\n",
+        )
+        .unwrap();
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the local init produces an engine");
+
+        let rows: Vec<(String, String)> = init
+            .engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .map(|(key, _hash)| (key.root_id, key.path))
+            .collect();
+        let module_rows: Vec<&(String, String)> =
+            rows.iter().filter(|(_, path)| path.ends_with("Module.bsl")).collect();
+        assert_eq!(
+            module_rows.len(),
+            2,
+            "the same relative path under two roots is two rows: {rows:?}",
+        );
+        assert!(
+            module_rows.iter().any(|(root_id, _)| root_id == "ext-a"),
+            "the extension's row is keyed by its own root: {rows:?}",
+        );
+
+        for symbol in ["СимволКонфигурации", "СимволРасширения"] {
+            let hits = init.engine.text_search(symbol, 10, Some("code")).unwrap();
+            assert!(!hits.is_empty(), "a cold boot serves {symbol}: {rows:?}");
+        }
+    }
+
+    /// A warm FTS store skips re-indexing entirely — that is what makes a restart cheap. But an
+    /// extension declared while the daemon was down has NO rows at all, and "skip everything"
+    /// would leave it out of the store until someone edits it. The cheap skip must therefore be
+    /// per-root, not global: roots that already have rows stay untouched (the whole point), roots
+    /// with none get indexed.
+    #[test]
+    fn a_warm_store_indexes_a_root_declared_while_it_was_down() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        // No embedder: this is the FTS-only branch, the one that skips a warm store.
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+        let _embedding_model = EnvVarGuard::unset("EMBEDDING_MODEL");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let configuration = workspace.join("src").join("cf");
+        let extension = workspace.join("ext-a");
+        for (root, name, symbol) in [
+            (&configuration, "Конфа", "СимволКонфигурации"),
+            (&extension, "Расш", "СимволРасширения"),
+        ] {
+            fs::create_dir_all(root).unwrap();
+            fs::write(
+                root.join("Configuration.xml"),
+                format!("<Configuration><Name>{name}</Name></Configuration>"),
+            )
+            .unwrap();
+            write_common_module_tree(
+                root,
+                "Общий",
+                &format!("&НаСервере\nФункция {symbol}() Экспорт Возврат 1; КонецФункции\n"),
+            );
+        }
+        // First boot: the extension is not declared yet, so the store warms up on the
+        // configuration alone.
+        fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+        let cold = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the first init produces an engine");
+        assert!(cold.engine.chunk_count().unwrap() > 0, "the first boot warms the store");
+        let configuration_rows = cold.engine.store().all_files_in_collection("code").unwrap();
+        drop(cold);
+
+        // The extension is declared while the daemon is down.
+        fs::write(
+            workspace.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\nextensions = [{ name = \"a\", path = \"ext-a\" }]\n",
+        )
+        .unwrap();
+        let warm = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the warm init produces an engine");
+
+        let rows: Vec<(String, String)> = warm
+            .engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .map(|(key, _hash)| (key.root_id, key.path))
+            .collect();
+        assert!(
+            rows.iter().any(|(root_id, _)| root_id == "ext-a"),
+            "the newly declared root is indexed on the warm boot: {rows:?}",
+        );
+        // The point of the warm branch is that the already-indexed root is NOT rewritten.
+        let warm_configuration: Vec<_> = warm
+            .engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .filter(|(key, _)| key.root_id.is_empty())
+            .collect();
+        assert_eq!(
+            warm_configuration, configuration_rows,
+            "the configuration's rows survive the warm boot untouched",
+        );
+    }
+
+    /// Reaching the store is not the same as reaching the SEMANTIC index: `search_code` serves a
+    /// query from its lexical half whenever the semantic half is empty, so "the symbol is found"
+    /// stays true with zero vectors for the extension. What must hold is that the extension's
+    /// chunks enter the embedding queue — that queue is exactly what the deferred pass drains.
+    /// The vectors themselves are written by the background pass over HTTP and are not built here.
+    #[test]
+    fn a_deferred_boot_queues_the_extension_for_embedding() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        // A configured embedder selects the semantic deferred branch; the URL is never dialed.
+        let _embedding_url = EnvVarGuard::set("EMBEDDING_URL", "http://127.0.0.1:9/v1");
+        let _embedding_model = EnvVarGuard::set("EMBEDDING_MODEL", "test-model");
+
+        let (_dir, workspace) = workspace_with_two_extensions();
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the local init produces an engine");
+        assert!(init.engine.has_semantic(), "a configured embedder selects the semantic branch");
+
+        let pending = init.engine.store().load_pending_embedding_documents("code").unwrap();
+        let queued_roots: Vec<&str> =
+            pending.iter().map(|(_, document)| document.root_id.as_str()).collect();
+        for root_id in ["", "ext-a", "ext-b"] {
+            assert!(
+                queued_roots.contains(&root_id),
+                "root {root_id:?} has chunks waiting for a vector: {queued_roots:?}",
+            );
+        }
+        // Positive control on the count: an empty queue would satisfy a "no root is missing"
+        // check written as a subset test, so the queue must actually hold chunks.
+        assert!(pending.len() >= 3, "one chunk per module at least: {}", pending.len());
     }
 
     /// The negative control for the test above: with nothing declared, the very same file is NOT
