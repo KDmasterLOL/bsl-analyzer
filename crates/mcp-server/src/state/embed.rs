@@ -328,15 +328,18 @@ impl SharedState {
             Ok(guard) => match guard.as_ref() {
                 Some(engine) => {
                     match engine.publish_workspace_overlay(plan, new_embeddings, &dirty_before) {
-                        Ok(()) => {
+                        Ok(gate_deferred) => {
                             tracing::info!("workspace overlay semantic warmup complete");
+                            // A marked key the plan's gate skipped unread counts as an unread
+                            // file: the pass did not verify it, and an empty plan built over a
+                            // stale row must not read as "no local diffs".
                             let outcome = Self::warmup_outcome(
                                 plan_empty,
                                 overlay_files,
                                 embedded,
                                 scan_unreadable,
                                 scan_canonical_fallbacks,
-                                read_failures,
+                                read_failures + gate_deferred,
                             );
                             Self::set_overlay_warmup_state(overlay_warmup, outcome);
                         }

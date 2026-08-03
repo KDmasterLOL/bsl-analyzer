@@ -1274,6 +1274,14 @@ impl SearchEngine {
         let chunk_ids = self.store.chunk_ids_for_file("code", &key.root_id, &key.path)?;
         self.store.remove_file(&key.root_id, &key.path, "code")?;
         self.store.insert_overlay_tombstone(&key.root_id, &key.path, "code")?;
+        // The dead file's fingerprint row must not survive it: the dirty mark dies with the
+        // process, and a namesake recreated at the same (len, mtime, canonical) would inherit
+        // the "verified" claim across a restart. On failure the mark below still retries this
+        // through the point path.
+        if let Err(error) = self.store.delete_overlay_fingerprint_entries(std::slice::from_ref(key))
+        {
+            tracing::warn!("failed to retract overlay fingerprint row: {error}");
+        }
         if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
             cache.enable_watcher_mode();
             // The store rows are gone, so the deletion is proven: drop the overlay entry at
@@ -1606,12 +1614,14 @@ impl SearchEngine {
     /// Phase C: merge the plan and Phase-B embeddings into the live overlay cache under a brief
     /// inner-cache lock, swapping the entry/hidden-path set atomically so a concurrent reader
     /// never sees a half-embedded file. Never holds the lock across an embed.
+    /// Returns how many marked keys the plan's gate skipped unread — see
+    /// [`WorkspaceOverlayCache::publish_plan`].
     pub fn publish_workspace_overlay(
         &self,
         plan: RefreshPlan,
         new_embeddings: HashMap<String, Vec<f32>>,
         dirty_before: &HashMap<FileKey, u64>,
-    ) -> Result<(), SearchError> {
+    ) -> Result<usize, SearchError> {
         let mut cache = self
             .workspace_overlay_cache
             .lock()
@@ -3304,6 +3314,51 @@ mod tests {
         engine.remove_workspace_path(configuration.join("A.bsl")).unwrap();
         let hits = engine.text_search("Локальная", 10, Some("code")).unwrap();
         assert!(hits.is_empty(), "a proven removal must not leave a ghost entry: {hits:?}");
+    }
+
+    /// The proven-removal channel must retract the persisted fingerprint row too: the dirty
+    /// mark dies with the process, and a namesake recreated at the same `(len, mtime,
+    /// canonical)` would inherit the dead file's "verified" claim across a restart.
+    #[test]
+    fn a_proven_removal_retracts_the_fingerprint_row() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Локальная()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        engine.prime_workspace_overlay().unwrap();
+        let key = engine.workspace_file_key(&file).unwrap();
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "",
+                &HashMap::from([(
+                    key.clone(),
+                    crate::store::PersistedFingerprint {
+                        file_size: 1,
+                        file_mtime_secs: 2,
+                        file_mtime_nanos: 3,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: "/spelled".to_owned(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        fs::remove_file(&file).unwrap();
+        engine.remove_workspace_path(&file).unwrap();
+        assert!(
+            !engine
+                .store()
+                .load_overlay_fingerprint_cache("")
+                .unwrap_or(None)
+                .unwrap_or_default()
+                .contains_key(&key),
+            "the dead file's row must not vouch for a future namesake"
+        );
     }
 
     /// A symlink spelled `.bsl` whose target is not a BSL source is not a source
