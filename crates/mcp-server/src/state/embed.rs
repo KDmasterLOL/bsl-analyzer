@@ -199,9 +199,15 @@ impl SharedState {
         unreadable: usize,
         canonical_fallbacks: usize,
         read_failures: usize,
+        persist_failed: bool,
     ) -> OverlayWarmupState {
-        if unreadable > 0 || canonical_fallbacks > 0 || read_failures > 0 {
-            OverlayWarmupState::Incomplete { unreadable, canonical_fallbacks, read_failures }
+        if unreadable > 0 || canonical_fallbacks > 0 || read_failures > 0 || persist_failed {
+            OverlayWarmupState::Incomplete {
+                unreadable,
+                canonical_fallbacks,
+                read_failures,
+                persist_failed,
+            }
         } else if plan_empty {
             OverlayWarmupState::NoLocalDiffs
         } else {
@@ -246,9 +252,10 @@ impl SharedState {
                         }
                     };
                     // Captured here, under the same lock as the warm cache and before the lock-free
-                    // embed: the publish below clears only these, so a watcher edit landing mid-embed
-                    // stays dirty and is re-embedded by a later refresh instead of being lost.
-                    let dirty_before = match engine.workspace_overlay_dirty_paths_snapshot() {
+                    // embed: the publish judges itself against this baseline — marks it may
+                    // consume, and the freshness fence point settlements must out-date to
+                    // survive it.
+                    let dirty_before = match engine.workspace_overlay_publication_baseline() {
                         Ok(dirty) => dirty,
                         Err(error) => {
                             tracing::warn!(
@@ -328,11 +335,13 @@ impl SharedState {
             Ok(guard) => match guard.as_ref() {
                 Some(engine) => {
                     match engine.publish_workspace_overlay(plan, new_embeddings, &dirty_before) {
-                        Ok(gate_deferred) => {
+                        Ok(bsl_search::PublishOutcome::Applied { gate_deferred, persist_ok }) => {
                             tracing::info!("workspace overlay semantic warmup complete");
                             // A marked key the plan's gate skipped unread counts as an unread
                             // file: the pass did not verify it, and an empty plan built over a
-                            // stale row must not read as "no local diffs".
+                            // stale row must not read as "no local diffs". A failed persist
+                            // makes the pass incomplete too — a "clean" outcome would reset
+                            // the retry backoff while stale rows still sit on disk.
                             let outcome = Self::warmup_outcome(
                                 plan_empty,
                                 overlay_files,
@@ -340,8 +349,18 @@ impl SharedState {
                                 scan_unreadable,
                                 scan_canonical_fallbacks,
                                 read_failures + gate_deferred,
+                                !persist_ok,
                             );
                             Self::set_overlay_warmup_state(overlay_warmup, outcome);
+                        }
+                        Ok(bsl_search::PublishOutcome::Superseded) => {
+                            tracing::info!(
+                                "workspace overlay warmup superseded by a concurrent publication"
+                            );
+                            Self::set_overlay_warmup_state(
+                                overlay_warmup,
+                                OverlayWarmupState::Superseded,
+                            );
                         }
                         Err(error) => {
                             tracing::warn!("overlay warmup: publish failed: {error}");
@@ -704,22 +723,27 @@ mod tests {
     #[test]
     fn warmup_outcome_carries_the_exact_numbers() {
         use crate::state::OverlayWarmupState;
-        match SharedState::warmup_outcome(true, 0, 0, 2, 1, 2) {
-            OverlayWarmupState::Incomplete { unreadable, canonical_fallbacks, read_failures } => {
+        match SharedState::warmup_outcome(true, 0, 0, 2, 1, 2, false) {
+            OverlayWarmupState::Incomplete {
+                unreadable,
+                canonical_fallbacks,
+                read_failures,
+                ..
+            } => {
                 assert_eq!((unreadable, canonical_fallbacks, read_failures), (2, 1, 2))
             }
             other => panic!("expected Incomplete, got {other:?}"),
         }
         assert!(matches!(
-            SharedState::warmup_outcome(true, 0, 0, 0, 0, 1),
+            SharedState::warmup_outcome(true, 0, 0, 0, 0, 1, false),
             OverlayWarmupState::Incomplete { read_failures: 1, .. }
         ));
         assert!(matches!(
-            SharedState::warmup_outcome(true, 0, 0, 0, 0, 0),
+            SharedState::warmup_outcome(true, 0, 0, 0, 0, 0, false),
             OverlayWarmupState::NoLocalDiffs
         ));
         assert!(matches!(
-            SharedState::warmup_outcome(false, 2, 5, 0, 0, 0),
+            SharedState::warmup_outcome(false, 2, 5, 0, 0, 0, false),
             OverlayWarmupState::Synced { overlay_files: 2, embedded: 5 }
         ));
     }
@@ -768,6 +792,7 @@ mod tests {
                 unreadable,
                 canonical_fallbacks,
                 read_failures,
+                ..
             } => assert_eq!(
                 (unreadable, canonical_fallbacks, read_failures),
                 (1, 0, 1),
@@ -814,6 +839,7 @@ mod tests {
                 unreadable,
                 canonical_fallbacks,
                 read_failures,
+                ..
             } => assert_eq!((unreadable, canonical_fallbacks, read_failures), (0, 0, 1)),
             other => panic!("an unread file must not read as no-diffs, got {other:?}"),
         }

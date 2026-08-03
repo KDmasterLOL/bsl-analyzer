@@ -72,7 +72,9 @@ pub use publish::{
 pub use resolved_view_search::lexical_hits as lexical_hits_for_resolved_view;
 pub use resolver::{InMemoryResolvedViewResolver, ResolvedView};
 pub use store::{BaselineManifestRecord, ChunkInfo, Store, TextSearchResult};
-pub use workspace_overlay::{BaselineHashMode, RefreshPlan, WorkspaceOverlayStats};
+pub use workspace_overlay::{
+    BaselineHashMode, PublicationBaseline, PublishOutcome, RefreshPlan, WorkspaceOverlayStats,
+};
 pub use workspace_roots::{
     FileKey, RejectedRoot, Rejection, WorkspaceRoots, CONFIGURATION_ROOT_ID,
 };

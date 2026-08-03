@@ -181,6 +181,16 @@ pub struct WorkspaceOverlayCache {
     /// from the dirty marks: the bounded point budget may drop a mark, but the obligation to
     /// re-read the file stands until some pass proves the key settled or gone.
     unread_keys: HashSet<FileKey>,
+    /// The freshness fence: per key, the `dirty_seq` value of its latest POINT settlement
+    /// (any [`PointAction`], plus [`Self::remove_known_deleted`]). A planned publication
+    /// whose Phase A started at fence F must not overwrite a key with `settled_seq > F` on
+    /// any carrier — the point outcome is fresher than the plan.
+    settled_seq: HashMap<FileKey, u64>,
+    /// The `dirty_seq` value of the latest WHOLESALE invalidation (an in-place full
+    /// publication, `clear`, `mark_initialized_clean`, `set_graph_context_provider`). A plan
+    /// whose fence is older than this may not publish at all: the entire state it planned
+    /// against has been replaced.
+    wholesale_seq: u64,
     watcher_mode: bool,
     initialized: bool,
     /// The last full publication ran over a scan that could not vouch for the whole tree, so its
@@ -250,6 +260,25 @@ enum PointAction {
     BuildFault,
 }
 
+/// The pre-plan snapshot a planned publication is judged against in Phase C: the live marks
+/// as of Phase A (key -> sequence) and the freshness fence. Opaque to the caller — captured
+/// under the cache lock by [`WorkspaceOverlayCache::publication_baseline`] and handed back to
+/// [`WorkspaceOverlayCache::publish_plan`].
+#[derive(Debug, Clone)]
+pub struct PublicationBaseline {
+    dirty: HashMap<FileKey, u64>,
+    fence: u64,
+}
+
+/// The outcome of a planned publication. `Superseded` means a wholesale invalidation happened
+/// between Phase A and Phase C: nothing of the plan was applied (only the value-stable
+/// embeddings were merged) and the caller owes a fresh pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    Applied { gate_deferred: usize, persist_ok: bool },
+    Superseded,
+}
+
 /// What one FULL publication proved, for the shared tail ([`WorkspaceOverlayCache::finish_publication`]):
 /// which keys it saw, which it failed to read, which entry builds faulted, which keys the
 /// planning gate skipped unread, and which mark snapshot it supersedes. The three publication
@@ -260,6 +289,9 @@ struct PublicationVerdict<'a> {
     read_failures: &'a HashSet<FileKey>,
     build_faults: &'a HashSet<FileKey>,
     gate_skipped: &'a HashSet<FileKey>,
+    /// Keys with a point settlement FRESHER than the plan's fence: the publication may not
+    /// touch them on any carrier. Empty for the in-place paths (they run under the lock).
+    fenced: &'a HashSet<FileKey>,
     /// The planned path's pre-plan mark snapshot (key -> seq); a mark re-bumped since is not
     /// superseded. `None` for the in-place paths, which run under the lock and supersede
     /// every live mark they settled.
@@ -301,6 +333,7 @@ impl WorkspaceOverlayCache {
         // The withheld removals belonged to the state just discarded; the next build starts
         // from nothing and owes no catch-up scan for it.
         self.full_rescan_pending = false;
+        self.bump_wholesale();
     }
 
     /// Mark the overlay initialized with no entries: the caller has proven the store this overlay
@@ -319,6 +352,7 @@ impl WorkspaceOverlayCache {
         // The caller has PROVEN the store equals the disk, which is exactly what the pending
         // rescan existed to re-establish.
         self.full_rescan_pending = false;
+        self.bump_wholesale();
     }
 
     /// Inject the graph-context provider so overlay chunks are enriched like the
@@ -328,6 +362,9 @@ impl WorkspaceOverlayCache {
         self.entries.clear();
         self.embedding_cache.clear();
         self.initialized = false;
+        // A changed semantic source invalidates everything a plan built without it: an older
+        // plan applied after this would publish documents with the OLD context.
+        self.bump_wholesale();
     }
 
     pub fn enable_watcher_mode(&mut self) {
@@ -340,6 +377,7 @@ impl WorkspaceOverlayCache {
     /// and would leave a ghost entry serving hits forever. The caller keeps the dirty mark, so
     /// if the deletion event lied and the file is alive, the next point pass republishes it.
     pub fn remove_known_deleted(&mut self, key: &FileKey, has_baseline: bool) {
+        self.record_settlement(key);
         self.entries.remove(key);
         self.unread_keys.remove(key);
         // The baseline copy is HIDDEN, not unhidden: for a remote baseline this set is the
@@ -360,6 +398,29 @@ impl WorkspaceOverlayCache {
     /// whether to drive one.
     pub fn needs_full_rescan(&self) -> bool {
         self.full_rescan_pending
+    }
+
+    /// Record a wholesale invalidation on the SAME scale as the marks and settlements: an
+    /// independent counter would be incomparable with a plan's fence, and the supersede check
+    /// would lie whenever `dirty_seq` had already advanced past it.
+    fn bump_wholesale(&mut self) {
+        self.dirty_seq += 1;
+        self.wholesale_seq = self.dirty_seq;
+        self.settled_seq.clear();
+    }
+
+    /// Record a point settlement for the freshness fence (see the `settled_seq` field). Every
+    /// settled action writes it, faults included: after the point budget drops a mark, the
+    /// fence (and `unread_keys`) may be the ONLY witnesses a stale plan must not erase.
+    fn record_settlement(&mut self, key: &FileKey) {
+        self.dirty_seq += 1;
+        self.settled_seq.insert(key.clone(), self.dirty_seq);
+    }
+
+    /// The atomic pre-plan snapshot for a planned publication: the live marks (whose exact
+    /// sequences tell a superseded mark from a re-marked one) and the freshness fence.
+    pub fn publication_baseline(&self) -> PublicationBaseline {
+        PublicationBaseline { dirty: self.dirty_paths.clone(), fence: self.dirty_seq }
     }
 
     pub fn mark_dirty_path(&mut self, key: FileKey) {
@@ -736,10 +797,14 @@ impl WorkspaceOverlayCache {
             read_failures: &read_failures,
             build_faults: &build_faults,
             gate_skipped: &empty_gate,
+            fenced: &empty_gate,
             superseded: None,
         };
         let to_consume = self.publication_consumption(&verdict);
         self.finish_publication(&verdict, &to_consume, true);
+        // An in-place full publication replaces the whole state: any plan whose Phase A
+        // started before this moment must not publish over it.
+        self.bump_wholesale();
         Ok(())
     }
 
@@ -776,6 +841,7 @@ impl WorkspaceOverlayCache {
             !verdict.read_failures.contains(key)
                 && !verdict.build_faults.contains(key)
                 && !verdict.gate_skipped.contains(key)
+                && !verdict.fenced.contains(key)
                 && (verdict.scan_is_clean || verdict.seen_keys.contains(key))
         };
         match verdict.superseded {
@@ -795,10 +861,14 @@ impl WorkspaceOverlayCache {
         &self,
         updated: HashMap<FileKey, crate::store::PersistedFingerprint>,
         to_consume: &HashSet<FileKey>,
+        fenced: &HashSet<FileKey>,
     ) -> HashMap<FileKey, crate::store::PersistedFingerprint> {
         updated
             .into_iter()
-            .filter(|(key, _)| !self.dirty_paths.contains_key(key) || to_consume.contains(key))
+            .filter(|(key, _)| {
+                (!self.dirty_paths.contains_key(key) || to_consume.contains(key))
+                    && !fenced.contains(key)
+            })
             .collect()
     }
 
@@ -846,7 +916,8 @@ impl WorkspaceOverlayCache {
         // and absence from a CLEAN scan proves the file deleted — without the latter a
         // deleted-after-fault file would keep the retry condition true forever.
         if verdict.scan_is_clean {
-            self.unread_keys.retain(|key| verdict.read_failures.contains(key));
+            self.unread_keys
+                .retain(|key| verdict.read_failures.contains(key) || verdict.fenced.contains(key));
         } else {
             for key in verdict.seen_keys {
                 if !verdict.read_failures.contains(key) {
@@ -873,6 +944,7 @@ impl WorkspaceOverlayCache {
     /// the marks, the budget and `unread_keys` happens here, in one total `match` — so a new
     /// branch cannot forget an obligation.
     fn settle_point(&mut self, key: FileKey, settlement: PointSettlement, prior_failures: u32) {
+        self.record_settlement(&key);
         let PointSettlement { action, store_fault } = settlement;
         match action {
             PointAction::Reindexed { entry, has_baseline } => {
@@ -1330,10 +1402,11 @@ impl WorkspaceOverlayCache {
             read_failures: &read_failures,
             build_faults: &build_faults,
             gate_skipped: &empty_gate,
+            fenced: &empty_gate,
             superseded: None,
         };
         let to_consume = self.publication_consumption(&verdict);
-        let rows = self.split_rows_by_live_marks(updated_persisted, &to_consume);
+        let rows = self.split_rows_by_live_marks(updated_persisted, &to_consume, &empty_gate);
         let persist_ok = Self::persist_fingerprint_rows(
             store,
             &manifest_snapshot_id,
@@ -1342,6 +1415,9 @@ impl WorkspaceOverlayCache {
             &to_consume,
         );
         self.finish_publication(&verdict, &to_consume, persist_ok);
+        // An in-place full publication replaces the whole state: any plan whose Phase A
+        // started before this moment must not publish over it.
+        self.bump_wholesale();
 
         if let Some(embedder) = embedder {
             if !self.embedding_cache.is_empty() {
@@ -1520,14 +1596,40 @@ impl WorkspaceOverlayCache {
         &mut self,
         plan: RefreshPlan,
         new_embeddings: HashMap<String, Vec<f32>>,
-        dirty_before: &HashMap<FileKey, u64>,
+        baseline: &PublicationBaseline,
         embedder: Option<&Embedder>,
         store: &Store,
-    ) -> Result<usize, SearchError> {
+    ) -> Result<PublishOutcome, SearchError> {
         let scan_is_clean = plan.scan_is_clean();
         for (embedding_key, embedding) in new_embeddings {
             self.embedding_cache.insert(embedding_key, embedding);
         }
+        // A wholesale invalidation between Phase A and Phase C replaced the entire state the
+        // plan was built against: nothing of the plan may publish. The embeddings above are
+        // value-stable (identical input, identical vector), so merging them is the one thing
+        // an outdated plan is still good for.
+        if baseline.fence < self.wholesale_seq {
+            self.persist_embedding_cache(embedder, store);
+            return Ok(PublishOutcome::Superseded);
+        }
+        // Keys with a POINT settlement fresher than the plan's fence: the plan may not touch
+        // them on any carrier, whatever it read — the point outcome saw a later disk.
+        let fenced: HashSet<FileKey> = self
+            .settled_seq
+            .iter()
+            .filter(|(_, seq)| **seq > baseline.fence)
+            .map(|(key, _)| key.clone())
+            .collect();
+        // Gate-skipped keys with a LIVE mark: the fence cannot protect them (their settlement
+        // may predate it, its row retraction refused), but the live mark is positive evidence
+        // the row the gate trusted was stale — their current state survives too (И-а4 class:
+        // a clean replace would resurrect the row's story over the point result).
+        let deferred: HashSet<FileKey> = plan
+            .gate_skipped
+            .iter()
+            .filter(|key| self.dirty_paths.contains_key(*key))
+            .cloned()
+            .collect();
 
         let mut entries = HashMap::with_capacity(plan.entries.len());
         for (key, planned) in plan.entries {
@@ -1552,17 +1654,24 @@ impl WorkspaceOverlayCache {
             );
         }
 
+        // The keys whose CURRENT state must survive this publication: unread (the plan proved
+        // nothing), fenced (a fresher point settlement), and gate-deferred (a live mark
+        // distrusts the row the gate believed).
+        let carried: HashSet<FileKey> =
+            plan.read_failures.iter().chain(&fenced).chain(&deferred).cloned().collect();
         if scan_is_clean {
-            // The whole-replace must still carry over what the plan could not read: a failed
-            // read proves nothing, so the prior entry keeps serving and its hiding stays —
-            // dropping either would serve the baseline version of contents nobody verified.
-            for key in &plan.read_failures {
+            // The whole-replace must still carry over what the plan may not overwrite: the
+            // prior entry (or its absence) keeps serving and the prior hiding stands — the
+            // plan's version of these keys is either unproven or stale.
+            for key in &carried {
+                entries.remove(key);
                 if let Some(prior) = self.entries.remove(key) {
                     entries.insert(key.clone(), prior);
                 }
             }
             let mut hidden_paths = plan.hidden_paths;
-            for key in &plan.read_failures {
+            for key in &carried {
+                hidden_paths.remove(key);
                 if self.hidden_paths.contains(key) {
                     hidden_paths.insert(key.clone());
                 }
@@ -1575,10 +1684,13 @@ impl WorkspaceOverlayCache {
             // failure) is removed and un-hidden, and everything unseen keeps its prior state.
             let planned_keys: HashSet<FileKey> = entries.keys().cloned().collect();
             for (key, entry) in entries {
+                if carried.contains(&key) {
+                    continue;
+                }
                 self.entries.insert(key, entry);
             }
             for key in &plan.seen_keys {
-                if plan.read_failures.contains(key) {
+                if carried.contains(key) {
                     continue;
                 }
                 if !planned_keys.contains(key) {
@@ -1606,13 +1718,15 @@ impl WorkspaceOverlayCache {
             read_failures: &plan.read_failures,
             build_faults: &build_faults,
             gate_skipped: &plan.gate_skipped,
-            superseded: Some(dirty_before),
+            fenced: &fenced,
+            superseded: Some(&baseline.dirty),
         };
         let to_consume = self.publication_consumption(&verdict);
-        // The plan's row snapshot is as old as its phase A: a key whose mark stays live has
-        // fresher knowledge than its row, so the row is dropped — the unconditional
-        // replace-save then removes its old copy from the table as well.
-        let rows = self.split_rows_by_live_marks(plan.updated_persisted, &to_consume);
+        // The plan's row snapshot is as old as its phase A: a key whose mark stays live (or
+        // whose point settlement out-fenced the plan) has fresher knowledge than its row, so
+        // the row is dropped — the unconditional replace-save then removes its old copy from
+        // the table as well.
+        let rows = self.split_rows_by_live_marks(plan.updated_persisted, &to_consume, &fenced);
         let persist_ok = Self::persist_fingerprint_rows(
             store,
             &plan.snapshot_id,
@@ -1621,11 +1735,22 @@ impl WorkspaceOverlayCache {
             &to_consume,
         );
         self.finish_publication(&verdict, &to_consume, persist_ok);
+        // Settlements at or below the fence are no longer needed: any future plan captures a
+        // later fence, and the wholesale check guards everything older.
+        let fence = baseline.fence;
+        self.settled_seq.retain(|_, seq| *seq > fence);
         // Marked keys the gate skipped unread: the tail deliberately kept their marks, and
         // the caller reports them as unread files.
-        let gate_deferred =
-            plan.gate_skipped.iter().filter(|key| self.dirty_paths.contains_key(*key)).count();
+        let gate_deferred = deferred.len();
 
+        self.persist_embedding_cache(embedder, store);
+
+        Ok(PublishOutcome::Applied { gate_deferred, persist_ok })
+    }
+
+    /// Best-effort save of the merged embedding cache: vectors are value-stable and
+    /// replaceable, so a failed save costs a re-embed, never a lie.
+    fn persist_embedding_cache(&self, embedder: Option<&Embedder>, store: &Store) {
         if let Some(embedder) = embedder {
             if !self.embedding_cache.is_empty() {
                 if let Err(error) = store.save_overlay_embedding_cache(
@@ -1637,8 +1762,6 @@ impl WorkspaceOverlayCache {
                 }
             }
         }
-
-        Ok(gate_deferred)
     }
 
     /// A read-only clone of the embedding cache for the warmup's lock-free Phase B start.
@@ -2698,7 +2821,15 @@ mod tests {
         new_embeddings.insert(embedding_key, vec![0.1_f32, 0.2, 0.3]);
 
         let mut cache = WorkspaceOverlayCache::default();
-        cache.publish_plan(plan, new_embeddings, &HashMap::new(), None, &store).unwrap();
+        cache
+            .publish_plan(
+                plan,
+                new_embeddings,
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 1);
@@ -2756,7 +2887,15 @@ mod tests {
         new_embeddings.insert(keys[1].clone(), vec![0.0_f32, 1.0, 0.0]);
 
         let mut cache = WorkspaceOverlayCache::default();
-        cache.publish_plan(plan, new_embeddings, &HashMap::new(), None, &store).unwrap();
+        cache
+            .publish_plan(
+                plan,
+                new_embeddings,
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.vector_documents.len(), 2, "each chunk keeps its own vector");
@@ -2788,7 +2927,7 @@ mod tests {
         let mut cache = WorkspaceOverlayCache::default();
         cache.mark_dirty_path(key("before.bsl"));
         cache.mark_dirty_path(key("reedited.bsl"));
-        let dirty_before = cache.dirty_paths_snapshot();
+        let dirty_before = cache.publication_baseline();
         // Watcher activity during the lock-free embed window: a brand-new path, plus a re-edit of a
         // path that was already in the snapshot (its sequence advances).
         cache.mark_dirty_path(key("during.bsl"));
@@ -3558,7 +3697,15 @@ mod tests {
             None,
         )
         .unwrap();
-        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
         assert_eq!(cache.snapshot().lexical_documents.len(), 2, "both files diverge");
 
         // `Returned.bsl` goes back to its baseline; the unclean scan sees ONLY it.
@@ -3581,7 +3728,15 @@ mod tests {
             None,
         )
         .unwrap();
-        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
         let overlay = cache.snapshot();
         let names: Vec<&str> =
             overlay.lexical_documents.iter().map(|d| d.symbol_name.as_str()).collect();
@@ -3803,7 +3958,7 @@ mod tests {
         cache.mark_dirty_path(key("Processed.bsl"));
         cache.mark_dirty_path(key("Broken.bsl"));
         cache.mark_dirty_path(key("Unseen.bsl"));
-        let dirty_before = cache.dirty_paths_snapshot();
+        let dirty_before = cache.publication_baseline();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest_scanned(
             &HashMap::new(),
             scanned_with(
@@ -3980,7 +4135,15 @@ mod tests {
             None,
         )
         .unwrap();
-        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
         assert!(cache.needs_full_rescan(), "published unclean plan");
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest,
@@ -3990,7 +4153,15 @@ mod tests {
             None,
         )
         .unwrap();
-        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
         assert!(!cache.needs_full_rescan(), "a published clean plan clears it");
     }
 
@@ -4143,7 +4314,15 @@ mod tests {
             None,
         )
         .unwrap();
-        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
         assert_eq!(cache.snapshot().lexical_documents[0].symbol_name, "Изменённая");
         assert!(cache.snapshot().hidden_paths.contains(&key("Edited.bsl")));
 
@@ -4166,7 +4345,13 @@ mod tests {
             "phase A publishes nothing and stays silent: {plan_warns:?}"
         );
         let (result, publish_warns) = warns_during(|| {
-            cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store)
+            cache.publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
         });
         restore_access(&edited);
         result.unwrap();
@@ -4274,7 +4459,15 @@ mod tests {
                 None,
             )
             .unwrap();
-            cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, store).unwrap();
+            cache
+                .publish_plan(
+                    plan,
+                    HashMap::new(),
+                    &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                    None,
+                    store,
+                )
+                .unwrap();
         };
 
         let dir = tempdir().unwrap();
@@ -4556,7 +4749,15 @@ mod tests {
             None,
         )
         .unwrap();
-        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
         assert_eq!(
             store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().len(),
             2
@@ -4570,7 +4771,15 @@ mod tests {
             None,
         )
         .unwrap();
-        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
         let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
         assert!(!rows.contains_key(&key("Unseen.bsl")), "the unverified row is dropped");
         assert!(rows.contains_key(&key("Seen.bsl")), "the verified row survives");
@@ -4595,7 +4804,15 @@ mod tests {
             None,
         )
         .unwrap();
-        solo_cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &solo_store).unwrap();
+        solo_cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &solo_store,
+            )
+            .unwrap();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest_scanned(
             &solo_manifest,
             scanned_with(&[], 1, 0),
@@ -4604,7 +4821,15 @@ mod tests {
             None,
         )
         .unwrap();
-        solo_cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &solo_store).unwrap();
+        solo_cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &solo_store,
+            )
+            .unwrap();
         assert!(
             solo_store
                 .load_overlay_fingerprint_cache("")
@@ -4812,7 +5037,7 @@ mod tests {
         cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
 
         // Phase A of a slow warmup snapshots the row while the file is still the original.
-        let dirty_before = cache.dirty_paths_snapshot();
+        let dirty_before = cache.publication_baseline();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest,
             &roots,
@@ -5111,7 +5336,15 @@ mod tests {
             None,
         )
         .unwrap();
-        plan_cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &plan_store).unwrap();
+        plan_cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &plan_store,
+            )
+            .unwrap();
         fs::remove_file(&alias).unwrap();
         std::os::unix::fs::symlink(&second, &alias).unwrap();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
@@ -5215,7 +5448,15 @@ mod tests {
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the empty-spelling row must not be trusted");
         let mut cache = WorkspaceOverlayCache::default();
-        cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
+        cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
         let rows = store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
         assert!(
             !rows.get(&key("Solo.bsl")).map(|row| row.canonical.as_str()).unwrap_or("").is_empty(),
@@ -5400,7 +5641,7 @@ mod tests {
         cache.enable_watcher_mode();
         cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
 
-        let dirty_before = cache.dirty_paths_snapshot();
+        let dirty_before = cache.publication_baseline();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest,
             &roots,
@@ -5709,7 +5950,7 @@ mod tests {
         fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
         fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
         cache.mark_dirty_path(key("A.bsl"));
-        let dirty_before = cache.dirty_paths_snapshot();
+        let dirty_before = cache.publication_baseline();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest,
             &roots,
@@ -5886,7 +6127,7 @@ mod tests {
         fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
         fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
         cache.mark_dirty_path(key("A.bsl"));
-        let dirty_before = cache.dirty_paths_snapshot();
+        let dirty_before = cache.publication_baseline();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest,
             &roots,
@@ -5897,7 +6138,11 @@ mod tests {
         .unwrap();
         let deferred =
             cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
-        assert_eq!(deferred, 1, "one marked key was skipped unread by the gate");
+        assert_eq!(
+            deferred,
+            super::PublishOutcome::Applied { gate_deferred: 1, persist_ok: true },
+            "one marked key was skipped unread by the gate"
+        );
 
         // A publish with nothing deferred reports zero.
         cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
@@ -5909,9 +6154,16 @@ mod tests {
             None,
         )
         .unwrap();
-        let deferred =
-            cache.publish_plan(plan, HashMap::new(), &HashMap::new(), None, &store).unwrap();
-        assert_eq!(deferred, 0);
+        let deferred = cache
+            .publish_plan(
+                plan,
+                HashMap::new(),
+                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                None,
+                &store,
+            )
+            .unwrap();
+        assert_eq!(deferred, super::PublishOutcome::Applied { gate_deferred: 0, persist_ok: true });
     }
 
     /// The overlay must not walk the tree itself: the walk policy (which links
@@ -6116,7 +6368,7 @@ mod tests {
 
         fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
         cache.mark_dirty_path(key("A.bsl"));
-        let dirty_before = cache.dirty_paths_snapshot();
+        let dirty_before = cache.publication_baseline();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest,
             &roots,
@@ -6256,7 +6508,7 @@ mod tests {
 
         fs::remove_file(&file).unwrap();
         cache.mark_dirty_path(key("Gone.bsl"));
-        let dirty_before = cache.dirty_paths_snapshot();
+        let dirty_before = cache.publication_baseline();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest,
             &roots,
@@ -6311,7 +6563,7 @@ mod tests {
         );
 
         fs::remove_file(&gone).unwrap();
-        let dirty_before = cache.dirty_paths_snapshot();
+        let dirty_before = cache.publication_baseline();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest,
             &roots,
@@ -6378,7 +6630,7 @@ mod tests {
         fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
         fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
         cache.mark_dirty_path(key("A.bsl"));
-        let dirty_before = cache.dirty_paths_snapshot();
+        let dirty_before = cache.publication_baseline();
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest,
             &roots,
@@ -6414,5 +6666,416 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replan.overlay_file_count(), 1, "nothing on disk suppresses the re-read");
+    }
+
+    /// И-а1: a deletion proven through the removal channel (dead root, `remove_known_deleted`)
+    /// survives the publication of a plan built BEFORE it — on every carrier, and even after
+    /// the point budget gives up on the dead root.
+    #[test]
+    fn a_planned_publish_does_not_resurrect_a_proven_delete() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir(&configuration).unwrap();
+        fs::write(configuration.join("A.bsl"), "Процедура Живая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let (roots, _) = WorkspaceRoots::build(workspace, &configuration, &[]);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 1, "the plan reads the then-live file");
+
+        // The whole root vanishes with the file; the removal channel proves the deletion.
+        fs::rename(&configuration, workspace.join("cf.saved")).unwrap();
+        cache.remove_known_deleted(&key("A.bsl"), true);
+        cache.mark_dirty_path(key("A.bsl"));
+
+        cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        let snapshot = cache.snapshot();
+        assert!(
+            snapshot.hidden_paths.contains(&key("A.bsl")),
+            "the proven deletion's hiding survives the stale plan"
+        );
+        assert!(
+            snapshot.lexical_documents.is_empty(),
+            "the stale plan's entry must not resurrect the deleted file"
+        );
+        assert!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().is_empty(),
+            "the stale plan's row must not land in the store"
+        );
+
+        // The dead root exhausts the point budget; the hiding still stands.
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES + 1) {
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        }
+        assert!(
+            cache.snapshot().hidden_paths.contains(&key("A.bsl")),
+            "budget exhaustion must not undo the proven deletion"
+        );
+    }
+
+    /// И-а2: an edit the point path already published between Phase A and Phase C survives the
+    /// publication of the older plan on S and R — and after a "restart" (a fresh plan over the
+    /// same store) nothing suppresses the re-read.
+    #[test]
+    fn a_point_reindex_between_phases_survives_the_publish() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+
+        // The edit lands mid-pass and the point path publishes it (mark consumed).
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert!(cache.dirty_paths_snapshot().is_empty(), "the point pass consumed the mark");
+
+        cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        assert!(
+            cache
+                .snapshot()
+                .lexical_documents
+                .iter()
+                .any(|document| document.symbol_name == "Вторая"),
+            "the older plan must not roll the published edit back"
+        );
+        assert!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().is_empty(),
+            "the stale plan's row for the out-fenced key is dropped"
+        );
+        let replan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(replan.overlay_file_count(), 1, "nothing on disk suppresses the re-read");
+    }
+
+    /// И-а2б: a proven point outcome fences the plan even when its S mutation was a NO-OP —
+    /// here a BaselineEqual settling a key S never held. The proof itself is fresh knowledge.
+    #[test]
+    fn an_idempotent_baseline_equal_settles_the_fence() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let base = "Процедура Базовая()\nКонецПроцедуры";
+        fs::write(&file, base).unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), super::fingerprint_content(base, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(cache.stats().overlay_files, 0, "baseline-equal: no entry");
+
+        // The plan reads a TEMPORARY local edit...
+        fs::write(&file, "Процедура Временная()\nКонецПроцедуры").unwrap();
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 1, "the plan reads the temporary edit");
+
+        // ...which is REVERTED before Phase C; the point path proves baseline-equality (a
+        // no-op on S: there was no entry to remove).
+        fs::write(&file, base).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+
+        cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        assert_eq!(
+            cache.stats().overlay_files,
+            0,
+            "the stale plan must not resurrect the reverted edit"
+        );
+    }
+
+    /// И-а3 + инвалидаторы: every wholesale invalidation between Phase A and Phase C makes
+    /// the older plan `Superseded` — nothing of it applies.
+    #[test]
+    fn a_wholesale_invalidation_supersedes_an_older_plan() {
+        let build = |workspace: &Path, store: &Store, cache: &mut WorkspaceOverlayCache| {
+            let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+            let roots = single_root(workspace);
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, store, true).unwrap();
+            let baseline = cache.publication_baseline();
+            let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+                &manifest,
+                &roots,
+                store,
+                &HashMap::new(),
+                None,
+            )
+            .unwrap();
+            (manifest, roots, baseline, plan)
+        };
+
+        // In-place full refresh between the phases.
+        {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path();
+            fs::write(workspace.join("A.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+            let store = Store::open(&workspace.join("search.db")).unwrap();
+            let mut cache = WorkspaceOverlayCache::default();
+            cache.enable_watcher_mode();
+            let (manifest, roots, baseline, plan) = build(workspace, &store, &mut cache);
+            fs::write(workspace.join("A.bsl"), "Процедура Вторая()\nКонецПроцедуры").unwrap();
+            cache.full_refresh_from_manifest(&manifest, &roots, None, 32, &store).unwrap();
+            let outcome =
+                cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+            assert_eq!(outcome, super::PublishOutcome::Superseded);
+            assert!(
+                cache
+                    .snapshot()
+                    .lexical_documents
+                    .iter()
+                    .any(|document| document.symbol_name == "Вторая"),
+                "the in-place publication's fresher state stands"
+            );
+        }
+        // clear() between the phases.
+        {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path();
+            fs::write(workspace.join("A.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+            let store = Store::open(&workspace.join("search.db")).unwrap();
+            let mut cache = WorkspaceOverlayCache::default();
+            cache.enable_watcher_mode();
+            let (_, _, baseline, plan) = build(workspace, &store, &mut cache);
+            cache.clear();
+            let outcome =
+                cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+            assert_eq!(outcome, super::PublishOutcome::Superseded);
+        }
+        // mark_initialized_clean() between the phases.
+        {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path();
+            fs::write(workspace.join("A.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+            let store = Store::open(&workspace.join("search.db")).unwrap();
+            let mut cache = WorkspaceOverlayCache::default();
+            cache.enable_watcher_mode();
+            let (_, _, baseline, plan) = build(workspace, &store, &mut cache);
+            cache.mark_initialized_clean();
+            let outcome =
+                cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+            assert_eq!(outcome, super::PublishOutcome::Superseded);
+        }
+        // set_graph_context_provider() between the phases.
+        {
+            struct NoContext;
+            impl crate::ports::GraphContextProvider for NoContext {
+                fn graph_context(
+                    &self,
+                    _rel_path: &str,
+                    _symbol_name: &str,
+                    _kind: &str,
+                ) -> Option<String> {
+                    None
+                }
+            }
+            let dir = tempdir().unwrap();
+            let workspace = dir.path();
+            fs::write(workspace.join("A.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+            let store = Store::open(&workspace.join("search.db")).unwrap();
+            let mut cache = WorkspaceOverlayCache::default();
+            cache.enable_watcher_mode();
+            let (_, _, baseline, plan) = build(workspace, &store, &mut cache);
+            cache.set_graph_context_provider(std::sync::Arc::new(NoContext));
+            let outcome =
+                cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+            assert_eq!(outcome, super::PublishOutcome::Superseded);
+            assert!(!cache.initialized, "the invalidation's re-init obligation stands");
+        }
+    }
+
+    /// И-а4: a key the plan's gate skipped by a LYING row (its retraction was denied, its mark
+    /// is alive) keeps its point-published state through the publish — the fence cannot
+    /// protect it (the settlement predates the fence), the live mark must.
+    #[test]
+    fn a_gate_skipped_key_with_a_live_mark_keeps_its_point_state() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let base = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, base).unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), super::fingerprint_content(base, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let db_path = workspace.join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+
+        // A same-stat edit; the point pass publishes it, but the row retraction is denied —
+        // the row survives, lying "baseline-equal", and the mark stays alive.
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_fp_delete BEFORE DELETE ON overlay_fingerprint_cache \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert_eq!(cache.stats().overlay_files, 1, "the point pass published the edit");
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "the denied retraction keeps the mark"
+        );
+
+        // The plan's gate trusts the surviving row and skips the file unread.
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 0, "the lying row hid the edit from the plan");
+
+        saboteur.execute_batch("DROP TRIGGER deny_fp_delete;").unwrap();
+        cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        assert_eq!(
+            cache.stats().overlay_files,
+            1,
+            "the point-published edit survives the gate-skipped publish"
+        );
+        assert!(
+            cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
+            "the mark survives to finish the row's retraction"
+        );
+        assert!(
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().is_empty(),
+            "the lying row does not survive the publish"
+        );
+    }
+
+    /// И-а5: the FAULT settlements fence the plan too. After the point budget drops the mark,
+    /// `unread_keys` (FileFault) or the settled S (ProvenGone) may be the only witnesses — a
+    /// stale clean plan must not erase them. (A BuildFault leg is deliberately absent: its
+    /// mark is retained UNCHARGED and never exhausts, so the mark itself always outlives any
+    /// plan and a fence-specific failure cannot be constructed.)
+    #[test]
+    fn a_point_fault_between_phases_still_fences_the_publish() {
+        // FileFault leg: the budget-exhausted unreadable file keeps its unread signal.
+        {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path();
+            let file = workspace.join("A.bsl");
+            fs::write(&file, "Процедура Первая()\nКонецПроцедуры").unwrap();
+            let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+            let roots = single_root(workspace);
+            let store = Store::open(&workspace.join("search.db")).unwrap();
+            let mut cache = WorkspaceOverlayCache::default();
+            cache.enable_watcher_mode();
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+            let baseline = cache.publication_baseline();
+            let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+                &manifest,
+                &roots,
+                &store,
+                &HashMap::new(),
+                None,
+            )
+            .unwrap();
+
+            fs::write(&file, [0xff, 0xfe]).unwrap();
+            cache.mark_dirty_path(key("A.bsl"));
+            for _ in 0..(MAX_DIRTY_REFRESH_FAILURES + 1) {
+                cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+            }
+            assert!(cache.dirty_paths_snapshot().is_empty(), "the budget dropped the mark");
+            assert_eq!(cache.unread_keys_count(), 1, "unread is the surviving witness");
+
+            cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+            assert_eq!(
+                cache.unread_keys_count(),
+                1,
+                "the stale clean plan must not erase the unread witness"
+            );
+        }
+        // ProvenGone leg: the point-proven deletion is not resurrected.
+        {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path();
+            let file = workspace.join("A.bsl");
+            fs::write(&file, "Процедура Первая()\nКонецПроцедуры").unwrap();
+            let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+            let roots = single_root(workspace);
+            let store = Store::open(&workspace.join("search.db")).unwrap();
+            let mut cache = WorkspaceOverlayCache::default();
+            cache.enable_watcher_mode();
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+            let baseline = cache.publication_baseline();
+            let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+                &manifest,
+                &roots,
+                &store,
+                &HashMap::new(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(plan.overlay_file_count(), 1);
+
+            fs::remove_file(&file).unwrap();
+            cache.mark_dirty_path(key("A.bsl"));
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+            assert_eq!(cache.stats().overlay_files, 0, "the point pass proved the deletion");
+
+            cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+            let snapshot = cache.snapshot();
+            assert!(
+                snapshot.lexical_documents.is_empty(),
+                "the stale plan must not resurrect the deleted file"
+            );
+            assert!(
+                snapshot.hidden_paths.contains(&key("A.bsl")),
+                "the proven deletion's hiding stands"
+            );
+        }
     }
 }

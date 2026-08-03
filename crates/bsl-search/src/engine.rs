@@ -9,7 +9,8 @@ use crate::resolver::{InMemoryResolvedViewResolver, ResolvedView};
 use crate::store::Store;
 use crate::workspace_overlay::{
     lexical_hits, normalized_file_hash_for_indexed_documents, semantic_hits, BaselineHashMode,
-    RefreshMode, RefreshPlan, WorkspaceOverlayCache, WorkspaceOverlayIndex, WorkspaceOverlayStats,
+    PublicationBaseline, PublishOutcome, RefreshMode, RefreshPlan, WorkspaceOverlayCache,
+    WorkspaceOverlayIndex, WorkspaceOverlayStats,
 };
 use crate::workspace_roots::{FileKey, WorkspaceRoots, CONFIGURATION_ROOT_ID};
 use crate::{
@@ -1695,13 +1696,25 @@ impl SearchEngine {
         &self,
         plan: RefreshPlan,
         new_embeddings: HashMap<String, Vec<f32>>,
-        dirty_before: &HashMap<FileKey, u64>,
-    ) -> Result<usize, SearchError> {
+        baseline: &PublicationBaseline,
+    ) -> Result<PublishOutcome, SearchError> {
         let mut cache = self
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
-        cache.publish_plan(plan, new_embeddings, dirty_before, self.embedder.as_ref(), &self.store)
+        cache.publish_plan(plan, new_embeddings, baseline, self.embedder.as_ref(), &self.store)
+    }
+
+    /// The atomic pre-plan snapshot (live marks + freshness fence) a planned publication is
+    /// judged against; captured under the cache lock before the lock-free Phase A/B.
+    pub fn workspace_overlay_publication_baseline(
+        &self,
+    ) -> Result<PublicationBaseline, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.publication_baseline())
     }
 
     /// Snapshot the overlay dirty-path set (path -> mark sequence). Taken under the cache lock
@@ -2745,7 +2758,11 @@ mod tests {
             )
             .unwrap();
         engine
-            .publish_workspace_overlay(plan, std::collections::HashMap::new(), &HashMap::new())
+            .publish_workspace_overlay(
+                plan,
+                std::collections::HashMap::new(),
+                &engine.workspace_overlay_publication_baseline().unwrap(),
+            )
             .unwrap();
 
         // Lexical overlay still sees the change without any embedding round-trip.

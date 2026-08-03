@@ -720,9 +720,16 @@ fn write_summary_block(
                 OverlayWarmupState::Synced { overlay_files, embedded } => format!(
                     "{overlay_files} locally-changed file(s) indexed ({embedded} chunks); their [S] reflects local edits."
                 ),
-                OverlayWarmupState::Incomplete { unreadable, canonical_fallbacks, read_failures } => format!(
-                    "built from an INCOMPLETE pass ({unreadable} unreadable subtree(s), {canonical_fallbacks} unresolved spelling(s), {read_failures} unread file(s)); what was seen is serving, local edits keep applying incrementally, and stale entries may linger until a clean rescan."
-                ),
+                OverlayWarmupState::Incomplete { unreadable, canonical_fallbacks, read_failures, persist_failed } => {
+                    let store_note =
+                        if *persist_failed { ", fingerprint persist FAILED (stale rows on disk)" } else { "" };
+                    format!(
+                        "built from an INCOMPLETE pass ({unreadable} unreadable subtree(s), {canonical_fallbacks} unresolved spelling(s), {read_failures} unread file(s){store_note}); what was seen is serving, local edits keep applying incrementally, and stale entries may linger until a clean rescan."
+                    )
+                }
+                OverlayWarmupState::Superseded => {
+                    "superseded by a concurrent full publication; a fresh pass follows.".to_owned()
+                }
                 OverlayWarmupState::Failed(reason) => format!(
                     "not built (warmup failed: {reason}); [S] still served by the baseline. Restart MCP to retry overlay embedding."
                 ),
@@ -1068,6 +1075,7 @@ mod tests {
             unreadable: 3,
             canonical_fallbacks: 1,
             read_failures: 2,
+            persist_failed: false,
         });
         assert!(
             incomplete.contains(
