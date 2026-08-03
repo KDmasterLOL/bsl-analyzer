@@ -139,6 +139,17 @@ impl SearchHit {
     }
 }
 
+// Test seam: force the vector eviction of a removal to count as failed, so a test can assert
+// that a removal whose vectors stayed in the live index is not reported as a success — and
+// that the store row it is selected by outlives the failure. The live index rejects nothing
+// on its own: removing an id it does not hold is a no-op there.
+#[cfg(test)]
+thread_local! {
+    // Thread-local on purpose: tests run in parallel, and a process-wide flag would fail
+    // removals in whichever unrelated test happened to be running at the time.
+    static FORCE_VECTOR_REMOVE_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub struct SearchEngine {
     store: Store,
     embedder: Option<Embedder>,
@@ -1403,56 +1414,62 @@ impl SearchEngine {
     /// relative to its own root, and re-deriving it from the workspace would hand
     /// an extension's file to the configuration and leave the real row in place.
     pub fn remove_workspace_key(&mut self, key: &FileKey) -> Result<(), SearchError> {
-        let has_baseline = match self.dispatched_manifest_fingerprints() {
-            Ok(manifest) => manifest.is_some_and(|m| m.contains_key(key)),
-            Err(error) => {
-                // No evidence, no hiding; the mark set below keeps the retry channel alive.
-                tracing::warn!("failed to load the baseline manifest for a removal: {error}");
-                false
-            }
-        };
+        // A manifest this engine cannot read is not evidence of "no baseline copy": guessing
+        // `false` would skip the hiding that stops the copy from being served.
+        let has_baseline =
+            self.dispatched_manifest_fingerprints()?.is_some_and(|m| m.contains_key(key));
         self.remove_workspace_key_with(key, has_baseline)
     }
 
     /// [`Self::remove_workspace_key`] with the baseline evidence already resolved, so a batch
     /// caller loads the manifest once instead of once per key.
+    ///
+    /// The store row goes LAST, after every step that can fail. That row is what a reconcile
+    /// selects the key by, so dropping it first would turn any later failure into a silent
+    /// loss: the retry mark reaches the overlay alone, and the chunk ids the vector eviction
+    /// needs come from the row itself. Leaving it in place instead makes the very next
+    /// reconcile pick the key up exactly where this pass left it.
     fn remove_workspace_key_with(
         &mut self,
         key: &FileKey,
         has_baseline: bool,
     ) -> Result<(), SearchError> {
-        // The retry obligation comes FIRST: every store operation below can fail, and
-        // returning early without the mark would leave no signal anywhere — not in S, not in
-        // R, not for the retry driver — while the rows still tell the old story.
-        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
+        // The retry obligation comes FIRST: every operation below can fail, and returning
+        // early without the mark would leave no signal for the point path — while the rows
+        // still tell the old story. A poisoned lock is a dead process, not a key state, but
+        // it does mean the obligation was not recorded, so it is not a success either.
+        {
+            let mut cache = self.workspace_overlay_cache.lock().map_err(|e| {
+                SearchError::Index(format!("workspace overlay cache lock error: {e}"))
+            })?;
             cache.enable_watcher_mode();
             cache.mark_dirty_path(key.clone());
         }
-        // Collect the chunk ids before deleting the rows so the exact vectors can be
-        // evicted from the live index without a full reload.
+        // Collected before the row goes, because the row is where they live.
         let chunk_ids = self.store.chunk_ids_for_file("code", &key.root_id, &key.path)?;
-        self.store.remove_file(&key.root_id, &key.path, "code")?;
+        for id in chunk_ids {
+            self.index.remove(id)?;
+        }
+        #[cfg(test)]
+        if FORCE_VECTOR_REMOVE_ERROR.with(std::cell::Cell::get) {
+            return Err(SearchError::Index("forced vector removal failure".to_owned()));
+        }
         self.store.insert_overlay_tombstone(&key.root_id, &key.path, "code")?;
         // The dead file's fingerprint row must not survive it: the dirty mark dies with the
         // process, and a namesake recreated at the same (len, mtime, canonical) would inherit
-        // the "verified" claim across a restart. On failure the mark above still retries this
-        // through the point path.
-        if let Err(error) = self.store.delete_overlay_fingerprint_entries(std::slice::from_ref(key))
+        // the "verified" claim across a restart.
+        self.store.delete_overlay_fingerprint_entries(std::slice::from_ref(key))?;
         {
-            tracing::warn!("failed to retract overlay fingerprint row: {error}");
-        }
-        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
-            // The store rows are gone, so the deletion is proven: drop the overlay entry at
-            // once — the point refresh would read a root that vanished WITH the file as
-            // "unreachable, retry" and leave a ghost entry. The mark still re-checks the disk:
-            // if the event lied, the next point pass republishes the live file.
+            // The deletion is proven, so drop the overlay entry at once — the point refresh
+            // would read a root that vanished WITH the file as "unreachable, retry" and leave
+            // a ghost entry. The mark still re-checks the disk: if the event lied, the next
+            // point pass republishes the live file.
+            let mut cache = self.workspace_overlay_cache.lock().map_err(|e| {
+                SearchError::Index(format!("workspace overlay cache lock error: {e}"))
+            })?;
             cache.remove_known_deleted(key, has_baseline);
         }
-        for id in chunk_ids {
-            if let Err(e) = self.index.remove(id) {
-                tracing::debug!(id, "vector index removal skipped: {e}");
-            }
-        }
+        self.store.remove_file(&key.root_id, &key.path, "code")?;
         Ok(())
     }
 
@@ -1539,6 +1556,8 @@ impl SearchEngine {
         let mut candidates: Vec<FileKey> = carriers.all_keys().into_iter().collect();
         candidates.sort();
         let mut removed = 0;
+        let mut failed = 0;
+        let mut first_error = None;
         for key in candidates {
             if present.contains(&key) {
                 continue;
@@ -1547,8 +1566,26 @@ impl SearchEngine {
                 continue;
             }
             let has_baseline = carriers.manifest.contains(&key);
-            self.remove_workspace_key_with(&key, has_baseline)?;
-            removed += 1;
+            // A key that cannot be removed does not cost the rest of the batch its pass: each
+            // key's carriers are independent, and aborting here would strand every key after
+            // the first fault until some later rescan happens to run.
+            match self.remove_workspace_key_with(&key, has_baseline) {
+                Ok(()) => removed += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        root = %key.root_id,
+                        path = %key.path,
+                        "failed to reconcile a deleted file out of the index: {error}"
+                    );
+                    failed += 1;
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(SearchError::Index(format!(
+                "reconcile removed {removed} keys and failed on {failed}; first failure: {error}"
+            )));
         }
         Ok(removed)
     }
@@ -2517,7 +2554,7 @@ struct FileResult {
 
 #[cfg(test)]
 mod tests {
-    use super::SearchEngine;
+    use super::{SearchEngine, FORCE_VECTOR_REMOVE_ERROR};
     use crate::key_carriers::KeyCarrier;
     use crate::ports::{SnapshotCatalog, SnapshotContentStore};
     use crate::workspace_overlay::RefreshMode;
@@ -3287,6 +3324,203 @@ mod tests {
         assert!(
             hits.iter().all(|h| h.symbol_name != "Ушедшая"),
             "the reconciled file's vector is evicted from the live index: {hits:?}",
+        );
+    }
+
+    /// Indexed files with their store rows, as a boot walk would have left them. Seeded in
+    /// ONE call: the collection sync is a whole-collection operation, so a second call would
+    /// evict what the first one wrote.
+    fn seed_rows(engine: &mut SearchEngine, paths: &[&str]) {
+        let documents: Vec<IndexedDocument> = paths
+            .iter()
+            .map(|path| IndexedDocument {
+                collection: "code".to_owned(),
+                root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                path: (*path).to_owned(),
+                symbol_name: "П".to_owned(),
+                kind: "procedure".to_owned(),
+                line_start: 0,
+                line_end: 1,
+                text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                content_hash: "h".to_owned(),
+                graph_context: None,
+            })
+            .collect();
+        engine.sync_indexed_documents_in_collection("code", &documents, None).unwrap();
+    }
+
+    /// The store row is what a reconcile sees a key by, so it must be the LAST thing a
+    /// removal drops: a failure after it would leave nothing to select the key again, and
+    /// the retry mark reaches the overlay only. Checked on the tombstone, whose write has
+    /// always been fallible and has always run after the row.
+    #[test]
+    fn a_denied_tombstone_leaves_the_store_row_as_evidence() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["Removed.bsl"]);
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_tombstone BEFORE INSERT ON overlay_tombstones \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+
+        assert!(engine.reconcile_workspace_files(&HashSet::new()).is_err(), "the denial surfaces");
+        assert_eq!(engine.file_count().unwrap(), 1, "the row survives as evidence for a retry");
+
+        saboteur.execute_batch("DROP TRIGGER deny_tombstone").unwrap();
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            1,
+            "once the fault clears, the key is still there to remove",
+        );
+    }
+
+    /// Retracting the fingerprint row used to be best effort: its failure was logged and the
+    /// removal reported success, leaving a row that claims the file was verified — enough for
+    /// a namesake at the same size and mtime to inherit the claim across a restart.
+    #[test]
+    fn a_denied_fingerprint_retraction_fails_the_removal() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["Removed.bsl"]);
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "",
+                &HashMap::from([(
+                    FileKey::configuration("Removed.bsl"),
+                    crate::store::PersistedFingerprint {
+                        file_size: 7,
+                        file_mtime_secs: 1,
+                        file_mtime_nanos: 0,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: workspace.join("Removed.bsl").display().to_string(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_fp_delete BEFORE DELETE ON overlay_fingerprint_cache \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+
+        assert!(
+            engine.reconcile_workspace_files(&HashSet::new()).is_err(),
+            "a carrier left populated is not a successful removal",
+        );
+        assert_eq!(engine.file_count().unwrap(), 1, "the row survives as evidence for a retry");
+    }
+
+    /// Evicting the dead file's vectors is the one step whose retry dies with the store row:
+    /// the chunk ids come from that row, and the dirty mark only ever reaches the overlay.
+    #[test]
+    fn a_failed_vector_eviction_fails_the_removal_and_keeps_the_row() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["Removed.bsl"]);
+
+        FORCE_VECTOR_REMOVE_ERROR.with(|flag| flag.set(true));
+        let outcome = engine.reconcile_workspace_files(&HashSet::new());
+        FORCE_VECTOR_REMOVE_ERROR.with(|flag| flag.set(false));
+
+        assert!(outcome.is_err(), "a vector left in the live index is not a successful removal");
+        assert_eq!(engine.file_count().unwrap(), 1, "the row survives as evidence for a retry");
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            1,
+            "the retry finds the key exactly where the failed pass left it",
+        );
+    }
+
+    /// A manifest that cannot be read is not evidence that there is no baseline copy. Taken
+    /// as one, the removal would skip the hiding and the copy would keep being served — while
+    /// the caller was told the file is gone.
+    #[test]
+    fn an_unreadable_manifest_fails_the_removal() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Removed.bsl");
+        fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["Removed.bsl"]);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "Removed.bsl".to_owned(),
+                    file_fingerprint: "fp-file".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur.execute_batch("DROP TABLE baseline_manifest_files").unwrap();
+
+        fs::remove_file(&file).unwrap();
+        assert!(
+            engine.remove_workspace_path(&file).is_err(),
+            "a removal that could not weigh the baseline is not a success",
+        );
+    }
+
+    /// A reconcile is a batch: one key it cannot remove must not cost the others their pass.
+    /// The failure is still reported — it just no longer strands the tail.
+    #[test]
+    fn a_reconcile_batch_outlives_a_failing_key() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["AFailing.bsl", "BHealthy.bsl"]);
+
+        // Denied for exactly one key, so the batch has both a failing and a healthy member.
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_one_tombstone BEFORE INSERT ON overlay_tombstones \
+                 WHEN NEW.path = 'AFailing.bsl' BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+
+        assert!(engine.reconcile_workspace_files(&HashSet::new()).is_err(), "the failure is told");
+        assert_eq!(
+            engine.file_count().unwrap(),
+            1,
+            "the healthy key was removed despite the earlier failure",
+        );
+        assert!(
+            engine
+                .store()
+                .all_files_in_collection("code")
+                .unwrap()
+                .iter()
+                .any(|(key, _)| key.path == "AFailing.bsl"),
+            "and the failing one is the one left behind",
         );
     }
 
