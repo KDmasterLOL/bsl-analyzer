@@ -174,7 +174,6 @@ impl SharedState {
             change_hub.clone(),
             Arc::clone(&search_engine),
             Arc::clone(&watcher_ready),
-            config_path.to_path_buf(),
             graph.clone(),
             overlay_retry.clone(),
         );
@@ -631,15 +630,35 @@ impl SharedState {
 
     fn configure_workspace_engine(
         engine: &mut SearchEngine,
-        workspace_source_root: &Path,
+        workspace_roots: bsl_search::WorkspaceRoots,
         watcher_ready: &AtomicBool,
         hash_mode: BaselineHashMode,
     ) {
-        engine.set_workspace_root(workspace_source_root.to_path_buf());
+        engine.set_workspace_roots(workspace_roots);
         engine.set_workspace_baseline_hash_mode(hash_mode);
         if watcher_ready.load(Ordering::SeqCst) {
             engine.enable_workspace_watcher_mode();
         }
+    }
+
+    /// The engine's root table for one project: the configuration root plus every declared
+    /// extension, identified relative to the PROJECT directory — the identity
+    /// [`bsl_search::WorkspaceRoots`] documents and the one stored rows carry across restarts.
+    /// Rejected roots are named with their reason: a silently dropped root looks exactly like a
+    /// tree nobody edited.
+    fn workspace_roots_of(project: &project_model::Project) -> bsl_search::WorkspaceRoots {
+        let extensions: Vec<PathBuf> =
+            project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
+        let (roots, rejected) =
+            bsl_search::WorkspaceRoots::build(&project.root, project.source_path(), &extensions);
+        for rejection in rejected {
+            tracing::warn!(
+                path = ?rejection.path,
+                reason = ?rejection.reason,
+                "extension root is not registered in the search index",
+            );
+        }
+        roots
     }
 
     fn semantic_runtime_status_for_mode(
@@ -717,7 +736,7 @@ impl SharedState {
             let mut engine = Self::open_workspace_overlay_search_engine(&db_path)?;
             Self::configure_workspace_engine(
                 &mut engine,
-                &source_path,
+                Self::workspace_roots_of(&project),
                 watcher_ready,
                 BaselineHashMode::NormalizedChunks,
             );
@@ -827,7 +846,7 @@ impl SharedState {
 
         Self::configure_workspace_engine(
             &mut engine,
-            &source_path,
+            Self::workspace_roots_of(&project),
             watcher_ready,
             BaselineHashMode::RawFileBytes,
         );
@@ -859,7 +878,7 @@ impl SharedState {
             // deleted while the daemon was down. Reconcile the store to disk so the overlay baseline
             // truly == working tree before asserting Clean; a walk that could not prove this
             // downgrades to a prime (which never asserts a false clean).
-            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine, &source_path) {
+            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine) {
                 OverlayInit::Clean
             } else {
                 OverlayInit::Prime
@@ -935,7 +954,7 @@ impl SharedState {
             // (incl. edits made while the daemon was down) but did not remove rows for a `.bsl`
             // deleted while down. Reconcile the store to disk so the overlay baseline == working tree
             // before asserting Clean; a walk that could not prove this downgrades to a prime.
-            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine, &source_path) {
+            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine) {
                 OverlayInit::Clean
             } else {
                 OverlayInit::Prime
@@ -960,7 +979,7 @@ impl SharedState {
                 Ok(indexed) => tracing::info!(indexed, "FTS index built"),
                 Err(e) => tracing::warn!("failed to build FTS index: {e}"),
             }
-            if Self::reconcile_boot_store_with_disk(&mut engine, &source_path) {
+            if Self::reconcile_boot_store_with_disk(&mut engine) {
                 OverlayInit::Clean
             } else {
                 OverlayInit::Prime
@@ -968,7 +987,7 @@ impl SharedState {
         } else {
             // Warm store: prime handles the while-down EDITS; the reconcile still removes rows for
             // files DELETED while down (a prime only hides them lazily and never from the store).
-            Self::reconcile_boot_store_with_disk(&mut engine, &source_path);
+            Self::reconcile_boot_store_with_disk(&mut engine);
             OverlayInit::Prime
         };
 
@@ -1994,6 +2013,220 @@ mod tests {
             engine.chunk_count().unwrap(),
             0,
             "the stale chunk of the now-chunkless file is removed from the store",
+        );
+    }
+
+    /// Lay out a workspace whose configuration sits in a SUBDIRECTORY and whose extensions sit
+    /// beside it, then declare both extensions. The nesting matters: it is the only shape where
+    /// a table built on the configuration root and one built on the project root disagree about
+    /// every extension's identifier.
+    fn workspace_with_two_extensions() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let configuration = workspace.join("src").join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::write(
+            configuration.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &configuration,
+            "Основной",
+            "&НаСервере\nФункция СимволКонфигурации() Экспорт Возврат 1; КонецФункции\n",
+        );
+        for (directory, symbol) in [("ext-a", "СимволПервого"), ("ext-b", "СимволВторого")]
+        {
+            let extension = workspace.join(directory);
+            fs::create_dir_all(&extension).unwrap();
+            fs::write(
+                extension.join("Configuration.xml"),
+                format!("<Configuration><Name>{directory}</Name></Configuration>"),
+            )
+            .unwrap();
+            write_common_module_tree(
+                &extension,
+                "Расширенный",
+                &format!("&НаСервере\nФункция {symbol}() Экспорт Возврат 1; КонецФункции\n"),
+            );
+        }
+        fs::write(
+            workspace.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\n\
+             extensions = [{ name = \"a\", path = \"ext-a\" }, { name = \"b\", path = \"ext-b\" }]\n",
+        )
+        .unwrap();
+        (dir, workspace)
+    }
+
+    /// The production boot must register EVERY declared extension root, and under the identifier
+    /// `WorkspaceRoots` promises: relative to the project directory, not to the configuration root
+    /// ("root ids are relative to it… not the configuration root, which may sit in a
+    /// subdirectory"). The identifier is the stored rows' identity across restarts, so an
+    /// absolute one is a silent, persistent mis-keying rather than a cosmetic difference.
+    /// Two extensions, because a table built from only the first element of the declared list
+    /// satisfies every single-extension check.
+    #[test]
+    fn boot_registers_every_declared_extension_under_a_workspace_relative_id() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let (_dir, workspace) = workspace_with_two_extensions();
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the local init produces an engine");
+
+        let roots = init.engine.workspace_roots().expect("the boot configures a root table");
+        let ids: Vec<&str> = roots.ids().collect();
+        assert!(
+            ids.contains(&"ext-a") && ids.contains(&"ext-b"),
+            "both declared extensions are registered by their workspace-relative ids: {ids:?}",
+        );
+
+        let extension_module = workspace
+            .join("ext-a")
+            .join("CommonModules")
+            .join("Расширенный")
+            .join("Ext")
+            .join("Module.bsl");
+        assert!(
+            init.engine.mark_workspace_path_dirty(&extension_module).unwrap(),
+            "a file of a declared extension resolves to a store key",
+        );
+    }
+
+    /// Overlapping roots behave in two DIFFERENT ways, and both must survive the boot: an
+    /// extension INSIDE the configuration takes no root of its own (its files stay the
+    /// configuration's, and must remain findable), while an extension CONTAINING the
+    /// configuration registers normally and is told apart from it by the longest matching
+    /// prefix. An implementation that rejects the containing root loses its files entirely —
+    /// the configuration's walk never reaches them.
+    #[test]
+    fn overlapping_roots_keep_every_file_under_exactly_one_owner() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let configuration = workspace.join("src").join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::write(
+            configuration.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &configuration,
+            "Основной",
+            "&НаСервере\nФункция СимволКонфигурации() Экспорт Возврат 1; КонецФункции\n",
+        );
+        // Inside the configuration root.
+        let inner = configuration.join("inner-ext");
+        fs::create_dir_all(&inner).unwrap();
+        fs::write(
+            inner.join("Configuration.xml"),
+            "<Configuration><Name>Внутреннее</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &inner,
+            "Внутренний",
+            "&НаСервере\nФункция СимволВнутреннего() Экспорт Возврат 1; КонецФункции\n",
+        );
+        // Containing the configuration root: the workspace itself.
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Внешнее</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &workspace,
+            "Внешний",
+            "&НаСервере\nФункция СимволВнешнего() Экспорт Возврат 1; КонецФункции\n",
+        );
+        fs::write(
+            workspace.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\n\
+             extensions = [{ name = \"inner\", path = \"src/cf/inner-ext\" }, \
+             { name = \"outer\", path = \".\" }]\n",
+        )
+        .unwrap();
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+        let project = crate::project::at(&workspace);
+        assert!(project.is_ok(), "the fixture project parses: {:?}", project.err());
+
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the local init produces an engine");
+        let roots = init.engine.workspace_roots().expect("the boot configures a root table");
+
+        let owner_of = |path: &std::path::Path| {
+            let canonical = path.canonicalize().expect("the fixture file exists");
+            roots.root_of(path, &canonical).expect("every fixture file has an owner")
+        };
+
+        let inner_module =
+            inner.join("CommonModules").join("Внутренний").join("Ext").join("Module.bsl");
+        let owner = owner_of(&inner_module);
+        assert_eq!(
+            owner.root_id,
+            bsl_search::CONFIGURATION_ROOT_ID,
+            "an extension inside the configuration takes no root of its own",
+        );
+
+        let configuration_module =
+            configuration.join("CommonModules").join("Основной").join("Ext").join("Module.bsl");
+        assert_eq!(
+            owner_of(&configuration_module).root_id,
+            bsl_search::CONFIGURATION_ROOT_ID,
+            "the containing extension does not steal the configuration's own files",
+        );
+
+        let outer_module =
+            workspace.join("CommonModules").join("Внешний").join("Ext").join("Module.bsl");
+        assert_eq!(
+            owner_of(&outer_module).root_id,
+            ".",
+            "a file outside the configuration belongs to the extension that contains it",
+        );
+    }
+
+    /// The negative control for the test above: with nothing declared, the very same file is NOT
+    /// a workspace key. Without it, an implementation that keys every path under the sun would
+    /// pass the positive check.
+    #[test]
+    fn a_file_outside_every_declared_root_has_no_key() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let (_dir, workspace) = workspace_with_two_extensions();
+        fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            &watcher_ready,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the local init produces an engine");
+
+        let extension_module = workspace
+            .join("ext-a")
+            .join("CommonModules")
+            .join("Расширенный")
+            .join("Ext")
+            .join("Module.bsl");
+        assert!(
+            !init.engine.mark_workspace_path_dirty(&extension_module).unwrap(),
+            "an undeclared tree stays outside the index",
         );
     }
 }

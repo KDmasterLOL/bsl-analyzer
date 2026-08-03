@@ -1214,7 +1214,7 @@ mod tests {
             kind: ChangeKind::MaybeChanged,
             seq: 1,
         };
-        SharedState::apply_search_drift(&engine_arc, &workspace, &[entry], false, &graph);
+        SharedState::apply_search_drift(&engine_arc, &[entry], false, &graph);
         {
             let guard = engine_arc.lock().unwrap();
             let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
@@ -1309,7 +1309,6 @@ mod tests {
         };
         SharedState::apply_search_drift(
             &engine_arc,
-            &workspace,
             &[entry],
             false,
             &crate::graph::GraphState::disabled(),
