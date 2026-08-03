@@ -429,10 +429,17 @@ impl HubInner {
         // the arrived path in one event, and a rename out of a scan root puts them
         // on opposite sides of the boundary. An event with NO paths is left alone:
         // an absent path is not evidence that the lost change was out of scope.
+        //
+        // A rescan notice is left alone for the same reason and then some: it does
+        // not report a change to the path it names, it reports that the stream
+        // lapsed and nothing received so far can be trusted. Scope says nothing
+        // about what was lost. Inotify raises it without a path; FSEvents attaches
+        // one, and that path is commonly the workspace directory — outside every
+        // scan root in a nested layout.
         let scope = self.scope();
         let paths: Vec<PathBuf> =
             event.paths.iter().filter(|path| scope.may_record(path)).cloned().collect();
-        if !event.paths.is_empty() && paths.is_empty() {
+        if !event.paths.is_empty() && paths.is_empty() && !event.need_rescan() {
             self.wake.notify_all();
             return Vec::new();
         }
@@ -1264,6 +1271,26 @@ mod tests {
             Health::Degraded(DegradeReason::UnknownEvent),
             "an event with no path proves nothing about scope"
         );
+    }
+
+    /// A rescan notice is not a change to the path it names — it says the event
+    /// stream itself lapsed, so nothing received so far can be trusted. Scope tells
+    /// nothing about what was lost, and dropping the notice would leave consumers
+    /// serving stale results with the hub reporting good health. Inotify raises it
+    /// without a path, FSEvents attaches one (the workspace directory, quite
+    /// possibly outside every scan root) — which is exactly where a scope filter
+    /// would swallow it.
+    #[test]
+    fn a_rescan_notice_outside_the_scope_still_degrades() {
+        let project = nested_project();
+        let hub = project.hub();
+
+        let notice = Event::new(EventKind::Other)
+            .add_path(project.workspace.join("vendor"))
+            .set_flag(notify::event::Flag::Rescan);
+        hub.ingest_for_test(Ok(notice));
+
+        assert_eq!(hub.health(), Health::Degraded(DegradeReason::UnknownEvent));
     }
 
     /// An ordinary file outside every scan root is not a config file and not a
