@@ -2246,6 +2246,19 @@ impl Store {
         Ok(())
     }
 
+    /// Every key the fingerprint cache holds, whatever snapshot it was written for.
+    ///
+    /// Deliberately not [`Self::load_overlay_fingerprint_cache`]: that one takes a snapshot id
+    /// and CLEARS the whole table when the rows belong to another one, which is right for a
+    /// refresh reading its own snapshot but destructive for a caller that only wants to know
+    /// which keys still have a row. It also needs no manifest header, so a reconcile of a
+    /// local index does not depend on a carrier that mode does not serve.
+    pub fn overlay_fingerprint_keys(&self) -> Result<HashSet<FileKey>, SearchError> {
+        let mut stmt = self.conn.prepare("SELECT root_id, path FROM overlay_fingerprint_cache")?;
+        let rows = stmt.query_map([], file_key_row)?.collect::<Result<HashSet<FileKey>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn clear_overlay_fingerprint_cache(&self) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
         Ok(())

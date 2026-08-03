@@ -1429,6 +1429,14 @@ impl SearchEngine {
     /// loss: the retry mark reaches the overlay alone, and the chunk ids the vector eviction
     /// needs come from the row itself. Leaving it in place instead makes the very next
     /// reconcile pick the key up exactly where this pass left it.
+    ///
+    /// One window stays open and is accepted knowingly: if the final row delete fails after
+    /// the vectors are out, a file that turns out to still exist (a removal event that lied,
+    /// or a delete-and-recreate) keeps its row and loses its vectors until a rebuild — the
+    /// point refresh finds it equal to the baseline and reindexes nothing. Closing it needs
+    /// atomicity between an in-memory index and SQLite, which does not exist here; every
+    /// other order merely moves the window (evicting after the row delete strands vectors
+    /// with no row left to find them by).
     fn remove_workspace_key_with(
         &mut self,
         key: &FileKey,
@@ -1506,18 +1514,10 @@ impl SearchEngine {
             carriers.overlay_entries = entries;
             carriers.unread = unread;
         }
-        // Not `.ok()`: a header this engine cannot read is not an absent one, and reading the
-        // fingerprint rows under the resulting empty id would treat every existing row as
-        // belonging to another snapshot — which CLEARS the whole cache, destroying the very
-        // evidence a retry would need.
-        let snapshot_id =
-            self.store.load_baseline_manifest()?.map(|r| r.snapshot_id).unwrap_or_default();
-        carriers.fingerprints = self
-            .store
-            .load_overlay_fingerprint_cache(&snapshot_id)?
-            .unwrap_or_default()
-            .into_keys()
-            .collect();
+        // Keys only, without a snapshot id: the snapshot-aware load clears the table when the
+        // rows belong to another snapshot, and it would need the manifest header — making a
+        // reconcile of a LOCAL index fail on a carrier that mode does not even serve.
+        carriers.fingerprints = self.store.overlay_fingerprint_keys()?;
         carriers.manifest =
             self.dispatched_manifest_fingerprints()?.unwrap_or_default().into_keys().collect();
         Ok(carriers)
@@ -3535,6 +3535,28 @@ mod tests {
         assert!(
             engine.reconcile_workspace_files(&HashSet::new()).is_err(),
             "a sweep that could not read a carrier is not a successful sweep",
+        );
+    }
+
+    /// The manifest is a carrier only where it is served, so a local reconcile must not
+    /// depend on it: an inherited header left broken on disk would otherwise block the sweep
+    /// of the carriers this mode does have.
+    #[test]
+    fn a_local_reconcile_ignores_an_unreadable_inactive_manifest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["Gone.bsl"]);
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur.execute_batch("DROP TABLE baseline_manifest").unwrap();
+
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            1,
+            "the local carriers are swept whatever state an unserved manifest is in",
         );
     }
 
