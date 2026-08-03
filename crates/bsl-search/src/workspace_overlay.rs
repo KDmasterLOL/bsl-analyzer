@@ -1864,6 +1864,24 @@ impl WorkspaceOverlayCache {
         self.unread_keys.len()
     }
 
+    /// The keys this cache still knows about, as the two kinds of POSITIVE knowledge it
+    /// holds: entries it serves, and files it owes a re-read. Hidden paths are not among
+    /// them — hiding proves a file is absent from disk, not that its carriers were cleared,
+    /// and the same state is reached by a clean full pass that never touched a store row.
+    pub(crate) fn known_keys(&self) -> (HashSet<FileKey>, HashSet<FileKey>) {
+        (self.entries.keys().cloned().collect(), self.unread_keys.clone())
+    }
+
+    /// The keys whose baseline copy is currently hidden from results.
+    ///
+    /// Hiding proves a file is ABSENT from disk, not that its carriers were cleared: a clean
+    /// full pass hides a baseline key it did not see without touching that key's store row.
+    /// The one thing it does settle is a key the manifest alone carries, whose removal cannot
+    /// delete a row of someone else's corpus and is expressed by this hiding instead.
+    pub(crate) fn hidden_keys(&self) -> HashSet<FileKey> {
+        self.hidden_paths.clone()
+    }
+
     /// How many overlay entries are missing at least one vector. A PARTIALLY vectorized entry
     /// counts too: `build_overlay_vectors` legitimately returns vectors only for the chunks
     /// with a warm cache hit, so emptiness alone would hide a half-embedded file from the

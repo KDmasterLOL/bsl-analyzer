@@ -1456,15 +1456,61 @@ impl SearchEngine {
         Ok(())
     }
 
+    /// One reading of every carrier that can still know about a workspace file, taken once
+    /// per operation: each carrier costs a load, and asking per key would turn a reconcile
+    /// into a query per stored file.
+    ///
+    /// A carrier that cannot be read is left EMPTY rather than guessed at, and the two cases
+    /// mean different things. The manifest is empty whenever this engine does not serve an
+    /// external baseline — its rows deliberately survive a mode switch, so a local engine
+    /// must not read them as evidence. The overlay is empty only if its lock is poisoned,
+    /// which is a dead process rather than a key state.
+    fn carrier_keys(&self) -> Result<crate::key_carriers::CarrierKeys, SearchError> {
+        let mut carriers = crate::key_carriers::CarrierKeys {
+            store_rows: self
+                .store
+                .all_files_in_collection("code")?
+                .into_iter()
+                .map(|(key, _hash)| key)
+                .collect(),
+            ..Default::default()
+        };
+        if let Ok(cache) = self.workspace_overlay_cache.lock() {
+            let (entries, unread) = cache.known_keys();
+            carriers.overlay_entries = entries;
+            carriers.unread = unread;
+        }
+        let snapshot_id = self
+            .store
+            .load_baseline_manifest()
+            .ok()
+            .flatten()
+            .map(|r| r.snapshot_id)
+            .unwrap_or_default();
+        carriers.fingerprints = self
+            .store
+            .load_overlay_fingerprint_cache(&snapshot_id)?
+            .unwrap_or_default()
+            .into_keys()
+            .collect();
+        carriers.manifest =
+            self.dispatched_manifest_fingerprints()?.unwrap_or_default().into_keys().collect();
+        Ok(carriers)
+    }
+
     /// Reconcile the workspace `code` collection against the set of `.bsl` files actually
-    /// present on disk (`present_abs`, absolute paths from a fresh walk): every stored path
-    /// no longer present is removed via [`Self::remove_workspace_path`] (tombstone + overlay
-    /// dirty + incremental vector eviction). This closes the gap where a file deleted during
-    /// a lost watch window (change-hub overflow or a structural subtree rescan) keeps its FTS
-    /// rows and vectors forever, because the ordinary drift path only marks files that still
-    /// exist. Bounded O(stored files) and driven only on the rare rescan branch; the caller
-    /// walks the tree OUTSIDE the engine lock and passes the result here. Returns the number
-    /// of removed paths.
+    /// present on disk (`present_abs`, absolute paths from a fresh walk): every key no longer
+    /// present is removed via [`Self::remove_workspace_key_with`] (tombstone + overlay dirty +
+    /// incremental vector eviction). This closes the gap where a file deleted during a lost
+    /// watch window (change-hub overflow or a structural subtree rescan) keeps its rows and
+    /// vectors forever, because the ordinary drift path only marks files that still exist.
+    ///
+    /// Candidates come from EVERY carrier (see [`Self::carrier_keys`]), not from the store
+    /// rows alone: those rows are a snapshot of the boot walk, so a file indexed afterwards
+    /// has no row at all, and against a remote baseline there are no local rows whatsoever.
+    /// Bounded O(known keys) and driven only on the rare rescan branch; the caller walks the
+    /// tree OUTSIDE the engine lock and passes the result here. Returns the number of removed
+    /// keys.
     pub fn reconcile_workspace_files(
         &mut self,
         present_abs: &HashSet<std::path::PathBuf>,
@@ -1476,27 +1522,33 @@ impl SearchEngine {
         // a file of one root never answers for the same relative path in another.
         let present: HashSet<FileKey> =
             present_abs.iter().filter_map(|p| self.workspace_file_key(p)).collect();
-        let stored: Vec<FileKey> = self
-            .store
-            .all_files_in_collection("code")?
-            .into_iter()
-            .map(|(key, _hash)| key)
-            .collect();
-        // One manifest load for the whole batch, not one per removed key.
-        let manifest = match self.dispatched_manifest_fingerprints() {
-            Ok(manifest) => manifest,
+        let carriers = self.carrier_keys()?;
+        // A manifest-only key survives its own removal — the row belongs to someone else's
+        // corpus and only its hiding is ours to write — so without this the next reconcile
+        // would select it again, and every pass would report a removal that changes nothing.
+        // Read once, and only for that case: hiding elsewhere proves absence from disk, not
+        // a settled key (a clean full pass hides a baseline key while its row lives on).
+        let hidden = match self.workspace_overlay_cache.lock() {
+            Ok(cache) => cache.hidden_keys(),
             Err(error) => {
-                tracing::warn!("failed to load the baseline manifest for a removal: {error}");
-                None
+                tracing::warn!("failed to read overlay hidings for a reconcile: {error}");
+                HashSet::new()
             }
         };
+        // Sorted so a batch removes in a stable order regardless of hash iteration.
+        let mut candidates: Vec<FileKey> = carriers.all_keys().into_iter().collect();
+        candidates.sort();
         let mut removed = 0;
-        for key in stored {
-            if !present.contains(&key) {
-                let has_baseline = manifest.as_ref().is_some_and(|m| m.contains_key(&key));
-                self.remove_workspace_key_with(&key, has_baseline)?;
-                removed += 1;
+        for key in candidates {
+            if present.contains(&key) {
+                continue;
             }
+            if carriers.manifest_is_sole_carrier(&key) && hidden.contains(&key) {
+                continue;
+            }
+            let has_baseline = carriers.manifest.contains(&key);
+            self.remove_workspace_key_with(&key, has_baseline)?;
+            removed += 1;
         }
         Ok(removed)
     }
@@ -2466,7 +2518,9 @@ struct FileResult {
 #[cfg(test)]
 mod tests {
     use super::SearchEngine;
+    use crate::key_carriers::KeyCarrier;
     use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+    use crate::workspace_overlay::RefreshMode;
     use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
     use crate::{BaselineRef, CorpusId, IndexedDocument, SearchError, Snapshot};
     use std::collections::HashMap;
@@ -3233,6 +3287,257 @@ mod tests {
         assert!(
             hits.iter().all(|h| h.symbol_name != "Ушедшая"),
             "the reconciled file's vector is evicted from the live index: {hits:?}",
+        );
+    }
+
+    /// A file indexed AFTER boot lives in the overlay alone — the store rows stop growing
+    /// once the daemon is up — so a reconcile that walks the rows cannot see it, and its
+    /// entry keeps serving a file that is gone from disk.
+    #[test]
+    fn a_reconcile_removes_a_key_known_only_to_the_overlay() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("AfterBoot.bsl");
+        fs::write(&file, "Процедура ПослеСтарта()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        let key = FileKey::configuration("AfterBoot.bsl");
+        assert_eq!(engine.file_count().unwrap(), 0, "no boot walk ever wrote a row");
+        assert!(
+            engine.carrier_keys().unwrap().carriers_of(&key).contains(&KeyCarrier::OverlayEntry),
+            "the overlay is the only carrier that knows this file",
+        );
+
+        fs::remove_file(&file).unwrap();
+        let removed = engine.reconcile_workspace_files(&HashSet::new()).unwrap();
+
+        assert_eq!(removed, 1, "the overlay-only key is reconciled out");
+        assert!(
+            engine.carrier_keys().unwrap().carriers_of(&key).is_empty(),
+            "no carrier still knows it",
+        );
+    }
+
+    /// The fingerprint row outlives its entry: an entry that matched the baseline is dropped
+    /// while its row stays behind asserting the file was verified. Left alone, that row lets
+    /// a namesake recreated at the same size and mtime inherit the claim across a restart.
+    #[test]
+    fn a_reconcile_removes_a_key_known_only_to_the_fingerprint_row() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        let key = FileKey::configuration("OnlyFingerprint.bsl");
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "",
+                &HashMap::from([(
+                    key.clone(),
+                    crate::store::PersistedFingerprint {
+                        file_size: 7,
+                        file_mtime_secs: 1,
+                        file_mtime_nanos: 0,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: workspace.join("OnlyFingerprint.bsl").display().to_string(),
+                    },
+                )]),
+            )
+            .unwrap();
+        assert_eq!(
+            engine.carrier_keys().unwrap().carriers_of(&key),
+            vec![KeyCarrier::FingerprintRow],
+            "the fingerprint row is the only carrier",
+        );
+
+        let removed = engine.reconcile_workspace_files(&HashSet::new()).unwrap();
+
+        assert_eq!(removed, 1, "the fingerprint-only key is reconciled out");
+        assert!(
+            engine.carrier_keys().unwrap().carriers_of(&key).is_empty(),
+            "no carrier still knows it",
+        );
+    }
+
+    /// Against a remote baseline the local rows are cleared on boot, so the manifest is the
+    /// only carrier there is. A reconcile blind to it removes nothing at all, and a file
+    /// deleted locally keeps arriving from the baseline.
+    #[test]
+    fn a_reconcile_hides_a_key_known_only_to_the_served_manifest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "Deleted.bsl".to_owned(),
+                    file_fingerprint: "fp-file".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+        let key = FileKey::configuration("Deleted.bsl");
+
+        let removed = engine.reconcile_workspace_files(&HashSet::new()).unwrap();
+
+        assert_eq!(removed, 1, "the manifest-only key is reconciled out");
+        assert!(
+            engine.workspace_overlay_cache.lock().unwrap().hidden_keys().contains(&key),
+            "removing a manifest-only key is expressed by hiding its baseline copy",
+        );
+    }
+
+    /// The manifest deliberately survives a mode switch, so its rows prove nothing to an
+    /// engine that does not serve it. Reading them anyway would make a local engine remove
+    /// ghosts of another mode's corpus.
+    #[test]
+    fn an_inherited_manifest_yields_no_candidates_in_the_local_mode() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "stale-snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "Ghost.bsl".to_owned(),
+                    file_fingerprint: "fp-file".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            0,
+            "an inherited manifest is not evidence in the local mode",
+        );
+        // The positive control: the very same rows DO yield a candidate once served, so the
+        // assertion above cannot be satisfied by never reading the manifest at all.
+        engine.set_serves_external_baseline(true).unwrap();
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            1,
+            "served, the same manifest yields its key",
+        );
+    }
+
+    /// Removing a manifest-only key cannot delete its row — the manifest is a snapshot of
+    /// someone else's corpus — so the key survives its own removal. Re-selecting it every
+    /// time would grow the removal count and the retry obligations without a single change
+    /// to what search serves.
+    #[test]
+    fn a_second_reconcile_over_an_unchanged_tree_removes_nothing() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "Deleted.bsl".to_owned(),
+                    file_fingerprint: "fp-file".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+
+        assert_eq!(engine.reconcile_workspace_files(&HashSet::new()).unwrap(), 1);
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            0,
+            "the second pass has nothing left to do",
+        );
+    }
+
+    /// Hiding proves a file is absent from disk, NOT that its carriers were cleared: a clean
+    /// full pass hides a baseline key it did not see without touching the store row. Treating
+    /// a hidden key as already settled would leave that row, its chunks and its vectors alive
+    /// for good.
+    #[test]
+    fn a_hidden_key_whose_row_survives_is_still_a_candidate() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Hidden.bsl");
+        fs::write(&file, "Процедура Спрятанная()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        let key = FileKey::configuration("Hidden.bsl");
+        assert_eq!(engine.file_count().unwrap(), 1, "the boot walk wrote its row");
+
+        // A clean full pass over a tree the file has left: it hides the baseline key and
+        // leaves the row exactly as it was.
+        fs::remove_file(&file).unwrap();
+        engine.workspace_overlay_snapshot(RefreshMode::Embed).unwrap();
+        assert!(
+            engine.workspace_overlay_cache.lock().unwrap().hidden_keys().contains(&key),
+            "the clean pass hid the vanished baseline key",
+        );
+        assert_eq!(engine.file_count().unwrap(), 1, "the row survived the pass untouched");
+
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            1,
+            "hiding does not excuse the row from reconciliation",
+        );
+        assert_eq!(engine.file_count().unwrap(), 0, "the row is gone");
+    }
+
+    /// The reconcile grew its candidate set, so what it must NOT do grew with it: a file
+    /// present on disk stays, however many carriers know about it.
+    #[test]
+    fn a_reconcile_keeps_an_overlay_only_file_that_is_still_on_disk() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Alive.bsl");
+        fs::write(&file, "Процедура Живая()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        let key = FileKey::configuration("Alive.bsl");
+
+        let present = HashSet::from([file.clone()]);
+        assert_eq!(
+            engine.reconcile_workspace_files(&present).unwrap(),
+            0,
+            "a file the walk found is never removed",
+        );
+        assert!(
+            !engine.carrier_keys().unwrap().carriers_of(&key).is_empty(),
+            "its overlay entry is intact",
         );
     }
 

@@ -9,6 +9,7 @@ mod external_baseline;
 mod fingerprint;
 mod hybrid;
 mod index;
+mod key_carriers;
 mod lexical;
 mod local_baseline;
 mod merge;
