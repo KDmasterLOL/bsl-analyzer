@@ -350,6 +350,20 @@ impl SharedState {
         match search_engine.lock() {
             Ok(guard) => match guard.as_ref() {
                 Some(engine) => {
+                    // Re-checked AFTER the engine lock was acquired: the pre-publish check
+                    // above is a TOCTOU guard only, and a stop arriving while this thread
+                    // waited on the mutex must still win — the ownership fence below cannot
+                    // stand in for it (an unmanaged lease always grants it).
+                    if !keep_going() {
+                        tracing::warn!("overlay warmup: stopped before publish");
+                        Self::set_overlay_warmup_state(
+                            overlay_warmup,
+                            OverlayWarmupState::Failed(
+                                "workspace ownership lost at publish".to_owned(),
+                            ),
+                        );
+                        return;
+                    }
                     // Phase C under the REAL fence: fingerprint rows suppress the next
                     // owner's re-reads after a restart, so a narrow ownership window is not
                     // enough here — a claim either completes before this write or waits.
@@ -821,6 +835,45 @@ mod tests {
                 .unwrap()
                 .initialized,
             "a stopped pass publishes nothing"
+        );
+    }
+
+    /// A stop that lands AFTER the pre-publish check still wins: the post-lock re-check is
+    /// the only guard once the pre-check has passed, and an unmanaged lease's fence cannot
+    /// stand in for it.
+    #[test]
+    fn a_stop_after_the_precheck_still_blocks_the_publication() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let mut engine =
+            SearchEngine::new(&workspace.join("search.db"), mock_semantic_config(&mock)).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let overlay_warmup = Arc::new(Mutex::new(crate::state::OverlayWarmupState::Pending));
+
+        // The first check (pre-publish) passes; the stop lands before the post-lock one.
+        let calls = AtomicUsize::new(0);
+        SharedState::run_overlay_warmup(
+            &engine_arc,
+            &overlay_warmup,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &|| calls.fetch_add(1, Ordering::SeqCst) == 0,
+        );
+        assert!(
+            !engine_arc
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .workspace_overlay_retry_signals()
+                .unwrap()
+                .initialized,
+            "the post-lock re-check must stop the publication"
         );
     }
 

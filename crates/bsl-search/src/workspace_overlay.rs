@@ -1794,10 +1794,14 @@ impl WorkspaceOverlayCache {
         // debt) are kept even below the fence: another plan with an older fence may still be
         // in flight (the library does not enforce the driver's single-flight), and pruning
         // them would hand that plan the very keys the fence protects. A CARRIER-LESS
-        // settlement at or below the fence (a tracelessly deleted key) is pruned — without
-        // this, a workspace rotating unique paths would grow the map with its history, not
-        // its size. Residual: an older overlapping plan may resurrect a traceless deletion
-        // in that narrow window; unreachable under the driver's single-flight.
+        // settlement at or below the fence is pruned — without this, a workspace rotating
+        // unique paths would grow the map with its history, not its size. Residual, named in
+        // full: the traceless PROOFS — a deletion with no baseline copy AND a BaselineEqual
+        // that lifted the entry — leave no carrier to keep them alive, so an OLDER plan
+        // overlapping the publication that pruned them could resurrect the superseded
+        // content. Both legs require two planned publications in flight at once, which the
+        // driver's single-flight rules out; keeping them selectively would need a marker
+        // indistinguishable from unbounded growth.
         let fence = baseline.fence;
         self.settled_seq.retain(|key, seq| {
             *seq > fence
@@ -1807,8 +1811,9 @@ impl WorkspaceOverlayCache {
                 || self.unread_keys.contains(key)
         });
         // Marked keys the gate skipped unread: the tail deliberately kept their marks, and
-        // the caller reports them as unread files.
-        let gate_deferred = deferred.len();
+        // the caller reports them as unread files — counting only the keys the applied
+        // unread set does not already cover, or one unverified file would show up twice.
+        let gate_deferred = deferred.iter().filter(|key| !self.unread_keys.contains(*key)).count();
 
         self.persist_embedding_cache(embedder, store);
 
@@ -7707,6 +7712,55 @@ mod tests {
             cache.dirty_failure_count(&key("A.bsl")),
             1,
             "the stale success must not reset the fresher streak"
+        );
+    }
+
+    /// One unverified file is ONE unread file in the outcome: a key both gate-deferred and
+    /// freshly unread must not be counted twice by the publish result.
+    #[test]
+    fn a_deferred_key_that_went_unread_is_counted_once() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let base = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, base).unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), super::fingerprint_content(base, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+
+        // The plan trusts the baseline-equal row and skips the marked key unread...
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+            baseline.distrusted(),
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 0, "the gate skipped the marked key");
+
+        // ...and the SAME key goes unread through the point path before Phase C.
+        fs::write(&file, [0xff, 0xfe]).unwrap();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert_eq!(cache.unread_keys_count(), 1);
+
+        let outcome = cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        let super::PublishOutcome::Applied { gate_deferred, unread_keys, .. } = outcome else {
+            panic!("the plan applies");
+        };
+        assert_eq!(
+            unread_keys + gate_deferred,
+            1,
+            "one unverified file must not be reported as two"
         );
     }
 }
