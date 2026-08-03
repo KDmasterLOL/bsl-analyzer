@@ -563,7 +563,7 @@ impl McpServer {
     /// `diagnostics`. Actions: `search_code` — the search (`query` required; `limit` default
     /// 10, max 50); `status` — index readiness. While the index warms up it returns a retry
     /// envelope; retry shortly. Hits arrive twice: a listing for people in the text block, and
-    /// the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, path,
+    /// the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, root_id, path,
     /// line_start, line_end, symbol, kind, graph_id, snippet, snippet_truncated_lines}], shown,
     /// total, budget_exhausted?, degraded?}`. Read the structured form: it is the versioned
     /// contract, whereas the text layout may be reformatted in any release. Absent fields mean
@@ -1801,7 +1801,7 @@ mod tool_descriptions {
             `diagnostics`. Actions: `search_code` — the search (`query` required; `limit` default
             10, max 50); `status` — index readiness. While the index warms up it returns a retry
             envelope; retry shortly. Hits arrive twice: a listing for people in the text block, and
-            the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, path,
+            the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, root_id, path,
             line_start, line_end, symbol, kind, graph_id, snippet, snippet_truncated_lines}], shown,
             total, budget_exhausted?, degraded?}`. Read the structured form: it is the versioned
             contract, whereas the text layout may be reformatted in any release. Absent fields mean
