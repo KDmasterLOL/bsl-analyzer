@@ -1447,13 +1447,6 @@ impl SearchEngine {
         }
         // Collected before the row goes, because the row is where they live.
         let chunk_ids = self.store.chunk_ids_for_file("code", &key.root_id, &key.path)?;
-        for id in chunk_ids {
-            self.index.remove(id)?;
-        }
-        #[cfg(test)]
-        if FORCE_VECTOR_REMOVE_ERROR.with(std::cell::Cell::get) {
-            return Err(SearchError::Index("forced vector removal failure".to_owned()));
-        }
         self.store.insert_overlay_tombstone(&key.root_id, &key.path, "code")?;
         // The dead file's fingerprint row must not survive it: the dirty mark dies with the
         // process, and a namesake recreated at the same (len, mtime, canonical) would inherit
@@ -1468,6 +1461,17 @@ impl SearchEngine {
                 SearchError::Index(format!("workspace overlay cache lock error: {e}"))
             })?;
             cache.remove_known_deleted(key, has_baseline);
+        }
+        // Second to last, right before the row that names the chunks: evicting earlier would
+        // strip a file of its vectors on any LATER failure, and a removal event that turns out
+        // to have lied leaves the file unchanged on disk — so the point refresh settles it as
+        // equal to the baseline, reindexes nothing, and the vectors never come back.
+        for id in chunk_ids {
+            #[cfg(test)]
+            if FORCE_VECTOR_REMOVE_ERROR.with(std::cell::Cell::get) {
+                return Err(SearchError::Index("forced vector removal failure".to_owned()));
+            }
+            self.index.remove(id)?;
         }
         self.store.remove_file(&key.root_id, &key.path, "code")?;
         Ok(())
@@ -1492,18 +1496,22 @@ impl SearchEngine {
                 .collect(),
             ..Default::default()
         };
-        if let Ok(cache) = self.workspace_overlay_cache.lock() {
+        {
+            // A carrier that could not be read leaves its keys out of the reconcile entirely,
+            // so a silent empty set would report a full sweep that never looked here.
+            let cache = self.workspace_overlay_cache.lock().map_err(|e| {
+                SearchError::Index(format!("workspace overlay cache lock error: {e}"))
+            })?;
             let (entries, unread) = cache.known_keys();
             carriers.overlay_entries = entries;
             carriers.unread = unread;
         }
-        let snapshot_id = self
-            .store
-            .load_baseline_manifest()
-            .ok()
-            .flatten()
-            .map(|r| r.snapshot_id)
-            .unwrap_or_default();
+        // Not `.ok()`: a header this engine cannot read is not an absent one, and reading the
+        // fingerprint rows under the resulting empty id would treat every existing row as
+        // belonging to another snapshot — which CLEARS the whole cache, destroying the very
+        // evidence a retry would need.
+        let snapshot_id =
+            self.store.load_baseline_manifest()?.map(|r| r.snapshot_id).unwrap_or_default();
         carriers.fingerprints = self
             .store
             .load_overlay_fingerprint_cache(&snapshot_id)?
@@ -3426,14 +3434,49 @@ mod tests {
 
     /// Evicting the dead file's vectors is the one step whose retry dies with the store row:
     /// the chunk ids come from that row, and the dirty mark only ever reaches the overlay.
+    /// The seam fires BEFORE the eviction, so the test states what a real failure leaves —
+    /// the vector still answering — instead of asserting it after the vectors are already out.
     #[test]
     fn a_failed_vector_eviction_fails_the_removal_and_keeps_the_row() {
+        use crate::embedder::EmbedderConfig;
+        use crate::{Chunk, ChunkKind, Store};
+
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let db_path = workspace.join("bsl-search.db");
-        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        let vector = vec![1.0f32, 0.0, 0.0];
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "Removed.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Ушедшая".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Ушедшая()\nКонецПроцедуры".to_owned(),
+                    }],
+                    Some(std::slice::from_ref(&vector)),
+                )
+                .unwrap();
+        }
+        let config = crate::SearchConfig {
+            embedder: EmbedderConfig {
+                base_url: "http://127.0.0.1:1".to_owned(),
+                model: "test-model".to_owned(),
+                dim: Some(3),
+                api_key: None,
+                provider: None,
+            },
+            execution: crate::EmbeddingExecutionPolicy::default(),
+        };
+        let mut engine = SearchEngine::new(&db_path, config).unwrap();
         engine.set_workspace_root(workspace);
-        seed_rows(&mut engine, &["Removed.bsl"]);
 
         FORCE_VECTOR_REMOVE_ERROR.with(|flag| flag.set(true));
         let outcome = engine.reconcile_workspace_files(&HashSet::new());
@@ -3441,11 +3484,111 @@ mod tests {
 
         assert!(outcome.is_err(), "a vector left in the live index is not a successful removal");
         assert_eq!(engine.file_count().unwrap(), 1, "the row survives as evidence for a retry");
+        assert!(
+            engine
+                .search_with_embedding(&vector, 5, None)
+                .unwrap()
+                .iter()
+                .any(|hit| hit.symbol_name == "Ушедшая"),
+            "the failure left the vector in the live index — which is what makes it a failure",
+        );
         assert_eq!(
             engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
             1,
             "the retry finds the key exactly where the failed pass left it",
         );
+        assert!(
+            engine
+                .search_with_embedding(&vector, 5, None)
+                .unwrap()
+                .iter()
+                .all(|hit| hit.symbol_name != "Ушедшая"),
+            "and the successful retry evicts it",
+        );
+    }
+
+    /// A carrier that could not be READ leaves its keys out of the sweep entirely, so the
+    /// reading must fail loudly: reporting a clean reconcile after skipping a carrier is worse
+    /// than reporting nothing.
+    #[test]
+    fn an_unreadable_overlay_fails_the_reconcile_instead_of_sweeping_without_it() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("AfterBoot.bsl");
+        fs::write(&file, "Процедура ПослеСтарта()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = engine.workspace_overlay_cache.lock().unwrap();
+            panic!("poison the overlay lock");
+        }));
+        std::panic::set_hook(hook);
+
+        fs::remove_file(&file).unwrap();
+        assert!(
+            engine.reconcile_workspace_files(&HashSet::new()).is_err(),
+            "a sweep that could not read a carrier is not a successful sweep",
+        );
+    }
+
+    /// A manifest header this engine cannot read is not an absent header. Reading the
+    /// fingerprint rows under the empty id that an absent header yields would treat every
+    /// existing row as another snapshot's and CLEAR the cache — the reconcile would destroy
+    /// the evidence a retry needs while reporting a failure.
+    #[test]
+    fn an_unreadable_manifest_header_leaves_the_fingerprint_rows_alone() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "A.bsl".to_owned(),
+                    file_fingerprint: "fp-file".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "snap",
+                &HashMap::from([(
+                    FileKey::configuration("A.bsl"),
+                    crate::store::PersistedFingerprint {
+                        file_size: 7,
+                        file_mtime_secs: 1,
+                        file_mtime_nanos: 0,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: workspace.join("A.bsl").display().to_string(),
+                    },
+                )]),
+            )
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur.execute_batch("DROP TABLE baseline_manifest").unwrap();
+
+        assert!(engine.reconcile_workspace_files(&HashSet::new()).is_err(), "the failure is told");
+        let surviving: i64 = saboteur
+            .query_row("SELECT COUNT(*) FROM overlay_fingerprint_cache", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(surviving, 1, "the fingerprint row a retry needs was not swept away");
     }
 
     /// A manifest that cannot be read is not evidence that there is no baseline copy. Taken
