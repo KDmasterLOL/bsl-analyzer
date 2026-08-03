@@ -219,6 +219,7 @@ impl SharedState {
         search_engine: &SharedSearchEngine,
         overlay_warmup: &Arc<Mutex<OverlayWarmupState>>,
         lease: &crate::workspace_lease::WorkspaceLease,
+        keep_going: &dyn Fn() -> bool,
     ) {
         let cloned = match search_engine.lock() {
             Ok(guard) => match guard.as_ref() {
@@ -303,8 +304,10 @@ impl SharedState {
         // Lock-free: plan against a reopened standalone store and embed the missing chunks. The
         // engine mutex is NOT held here, so search/status stay responsive during the remote embed.
         // Ownership is re-checked between embed batches (the uncached read — the cached
-        // verdict would let a superseded daemon write for up to its TTL after a takeover).
-        let should_continue = || lease.owns_caches_now();
+        // verdict would let a superseded daemon write for up to its TTL after a takeover),
+        // and the caller's own stop signal rides along: a shutdown mid-batch must not keep
+        // writing the shared table while the lease is being handed over.
+        let should_continue = || lease.owns_caches_now() && keep_going();
         let primed = SearchEngine::prime_workspace_overlay_standalone(
             &db_path,
             embedder_config,
@@ -312,6 +315,7 @@ impl SharedState {
             warm_cache,
             graph_provider,
             &should_continue,
+            dirty_before.distrusted(),
         );
         let (plan, new_embeddings) = match primed {
             Ok(result) => result,
@@ -328,8 +332,6 @@ impl SharedState {
         // Capture plan stats BEFORE `plan`/`new_embeddings` are consumed by the publish below, so
         // the warmup outcome can report how many local files were embedded (and how many chunks)
         // — and, for an incomplete pass, exactly how much the pass could not vouch for.
-        let plan_empty = plan.is_empty();
-        let overlay_files = plan.overlay_file_count();
         let embedded = new_embeddings.len();
         let scan_unreadable = plan.scan_unreadable();
         let scan_canonical_fallbacks = plan.scan_canonical_fallbacks();
@@ -356,16 +358,23 @@ impl SharedState {
                         return;
                     };
                     match published {
-                        Ok(bsl_search::PublishOutcome::Applied { gate_deferred, persist_ok }) => {
+                        Ok(bsl_search::PublishOutcome::Applied {
+                            gate_deferred,
+                            persist_ok,
+                            overlay_files: applied_overlay_files,
+                        }) => {
                             tracing::info!("workspace overlay semantic warmup complete");
                             // A marked key the plan's gate skipped unread counts as an unread
                             // file: the pass did not verify it, and an empty plan built over a
                             // stale row must not read as "no local diffs". A failed persist
                             // makes the pass incomplete too — a "clean" outcome would reset
-                            // the retry backoff while stale rows still sit on disk.
+                            // the retry backoff while stale rows still sit on disk. The file
+                            // count comes from the APPLIED state, not the plan: carried and
+                            // fenced keys make the two diverge, and the status must describe
+                            // what actually serves.
                             let outcome = Self::warmup_outcome(
-                                plan_empty,
-                                overlay_files,
+                                applied_overlay_files == 0,
+                                applied_overlay_files,
                                 embedded,
                                 scan_unreadable,
                                 scan_canonical_fallbacks,
@@ -807,6 +816,7 @@ mod tests {
             &engine_arc,
             &overlay_warmup,
             &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &|| true,
         );
         std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -859,6 +869,7 @@ mod tests {
             &engine_arc,
             &overlay_warmup,
             &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &|| true,
         );
         std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
 

@@ -1635,6 +1635,7 @@ impl SearchEngine {
         warm_embeddings: HashMap<String, Vec<f32>>,
         graph_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
         should_continue: &dyn Fn() -> bool,
+        distrusted: &HashSet<FileKey>,
     ) -> Result<(RefreshPlan, HashMap<String, Vec<f32>>), SearchError> {
         let batch_size = EmbeddingExecutionPolicy::default().batch_size();
         // `open_existing`, not `open`: this standalone pass runs while another daemon may own
@@ -1670,6 +1671,7 @@ impl SearchEngine {
             &store,
             &warm_embeddings,
             graph_provider.as_deref(),
+            distrusted,
         )?;
 
         let mut new_embeddings = Self::embed_missing_overlay_chunks(
@@ -1730,6 +1732,15 @@ impl SearchEngine {
             for ((embedding_key, _), embedding) in batch.iter().zip(embeddings) {
                 batch_persist.insert((*embedding_key).clone(), embedding.clone());
                 new_embeddings.insert((*embedding_key).clone(), embedding);
+            }
+            // Re-checked AFTER the embed round-trip too: ownership (or the driver itself) may
+            // have gone away while the request was in flight, and the save below writes the
+            // shared table. The residual sub-batch window is the accepted vector-row trade —
+            // a re-embed replaces a vector, unlike a fingerprint row it cannot lie durably.
+            if !should_continue() {
+                return Err(SearchError::Embedder(
+                    "overlay embed pass stopped: workspace ownership lost".to_owned(),
+                ));
             }
             // Persist to the standalone store (NOT the live engine) so partial progress survives
             // a mid-pass failure. The shared live cache is touched only once, in Phase C.
@@ -2811,6 +2822,7 @@ mod tests {
                 engine.store(),
                 &std::collections::HashMap::new(),
                 None,
+                &std::collections::HashSet::new(),
             )
             .unwrap();
         engine

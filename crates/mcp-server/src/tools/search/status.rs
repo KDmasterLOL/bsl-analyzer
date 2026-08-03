@@ -731,7 +731,7 @@ fn write_summary_block(
                     "superseded by a concurrent full publication; a fresh pass follows.".to_owned()
                 }
                 OverlayWarmupState::Failed(reason) => format!(
-                    "not built (warmup failed: {reason}); [S] still served by the baseline. Restart MCP to retry overlay embedding."
+                    "not built (warmup failed: {reason}); [S] still served by the baseline. The retry driver repeats the pass automatically."
                 ),
                 OverlayWarmupState::Skipped(reason) => format!("disabled ({reason})."),
             }
@@ -1064,6 +1064,10 @@ mod tests {
         assert!(no_diffs.contains("working tree matches the baseline"));
         let failed = run(OverlayWarmupState::Failed("embedder timeout: global".to_owned()));
         assert!(failed.contains("warmup failed: embedder timeout: global"));
+        assert!(
+            !failed.contains("Restart MCP to retry"),
+            "Failed is retried automatically now; a restart demand would be a lie: {failed}"
+        );
         let synced = run(OverlayWarmupState::Synced { overlay_files: 2, embedded: 5 });
         assert!(synced.contains("2 locally-changed file(s) indexed (5 chunks)"));
 

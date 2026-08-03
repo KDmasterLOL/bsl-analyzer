@@ -183,7 +183,10 @@ impl Store {
     /// owner's tables on a version mismatch, and a pass has no business doing either.
     /// `seed_mark_seq` still runs: it only raises the in-memory counter floor.
     pub fn open_existing(path: &Path) -> Result<Self, SearchError> {
-        let conn = Connection::open(path)?;
+        // No CREATE flag: the default open would materialize an empty file for a missing
+        // path — a side effect the "existing" contract (and the ownership discipline of the
+        // standalone pass) forbids.
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let store = Self { conn, path: path.to_path_buf(), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
         let stored: Option<String> = store
@@ -2480,6 +2483,16 @@ mod tests {
         let rows = store.load_overlay_fingerprint_cache("snap").unwrap().unwrap_or_default();
         assert_eq!(rows.len(), 1, "the original table survived intact");
         assert!(rows.contains_key(&FileKey::configuration("Old.bsl")));
+    }
+
+    /// `open_existing` opens EXISTING stores only: a missing path is an error and no empty
+    /// file is materialized — the standalone pass has no business creating shared state.
+    #[test]
+    fn open_existing_does_not_create_a_missing_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.db");
+        assert!(Store::open_existing(&path).is_err());
+        assert!(!path.exists(), "the refusal must leave no file behind");
     }
 
     /// A store in the shape the release before composite keys wrote, built with

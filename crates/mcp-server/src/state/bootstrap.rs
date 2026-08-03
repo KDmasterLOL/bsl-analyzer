@@ -398,7 +398,11 @@ impl SharedState {
                 // first pass unconditional.
                 if needs_overlay_warmup {
                     if let Some(retry) = &overlay_retry {
-                        retry.kick();
+                        // The fresh kick, not the bare one: the worker's first tick may have
+                        // raced this publication, collected a transient "engine unavailable"
+                        // and armed its backoff — the engine appearing is exactly the kind of
+                        // new fact that resets it.
+                        retry.kick_fresh();
                     }
                 }
             })

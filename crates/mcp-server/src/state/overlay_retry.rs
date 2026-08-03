@@ -87,11 +87,6 @@ impl OverlayRetry {
         retry
     }
 
-    /// Wake the worker for a condition check (the startup kick, a backoff expiry probe).
-    pub(crate) fn kick(&self) {
-        self.wake.notify_all();
-    }
-
     /// Fresh drift arrived: whatever kept previous passes incomplete may have changed, so
     /// the backoff resets and the worker wakes.
     pub(crate) fn kick_fresh(&self) {
@@ -205,7 +200,13 @@ impl OverlayRetry {
                 SemanticRuntimeStatus::OverlaySyncing,
             );
         }
-        super::SharedState::run_overlay_warmup(&self.engine, &self.overlay_warmup, &self.lease);
+        let stop = &self.stop;
+        super::SharedState::run_overlay_warmup(
+            &self.engine,
+            &self.overlay_warmup,
+            &self.lease,
+            &|| !stop.load(Ordering::SeqCst),
+        );
         let outcome = self
             .overlay_warmup
             .lock()
@@ -368,7 +369,7 @@ mod tests {
         let kickers: Vec<_> = (0..8)
             .map(|_| {
                 let retry = Arc::clone(&retry);
-                std::thread::spawn(move || retry.kick())
+                std::thread::spawn(move || retry.kick_fresh())
             })
             .collect();
         for kicker in kickers {
@@ -392,7 +393,7 @@ mod tests {
             Arc::clone(&engine_arc),
             crate::workspace_lease::WorkspaceLease::unmanaged(),
         );
-        retry.kick();
+        retry.kick_fresh();
         assert!(wait_for(5_000, || retry.pass_count() >= 1), "the blind pass runs");
 
         let dir = tempdir().unwrap();
@@ -498,7 +499,9 @@ mod tests {
 
         let mine = crate::workspace_lease::WorkspaceLease::claim(workspace);
         let _newer = crate::workspace_lease::WorkspaceLease::claim(workspace);
-        super::super::SharedState::run_overlay_warmup(&engine_arc, &overlay_warmup, &mine);
+        super::super::SharedState::run_overlay_warmup(&engine_arc, &overlay_warmup, &mine, &|| {
+            true
+        });
         let outcome = overlay_warmup.lock().unwrap().clone();
         assert!(
             matches!(&outcome, OverlayWarmupState::Failed(reason) if reason.contains("ownership")),

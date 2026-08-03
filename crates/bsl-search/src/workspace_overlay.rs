@@ -268,6 +268,17 @@ enum PointAction {
 pub struct PublicationBaseline {
     dirty: HashMap<FileKey, u64>,
     fence: u64,
+    /// The unread debts as of the capture: Phase A must not trust a fingerprint row for
+    /// these keys — the shared table may hold a row another daemon published, and a
+    /// stat-matching row is exactly what the debt says cannot be believed.
+    unread: HashSet<FileKey>,
+}
+
+impl PublicationBaseline {
+    /// The keys whose fingerprint rows Phase A must not trust (see the field doc).
+    pub fn distrusted(&self) -> &HashSet<FileKey> {
+        &self.unread
+    }
 }
 
 /// The outcome of a planned publication. `Superseded` means a wholesale invalidation happened
@@ -275,7 +286,14 @@ pub struct PublicationBaseline {
 /// embeddings were merged) and the caller owes a fresh pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishOutcome {
-    Applied { gate_deferred: usize, persist_ok: bool },
+    Applied {
+        gate_deferred: usize,
+        persist_ok: bool,
+        /// The overlay size AFTER the publish — carried and fenced keys make the applied
+        /// state diverge from the plan's own counts, and the reported status must describe
+        /// what actually serves.
+        overlay_files: usize,
+    },
     Superseded,
 }
 
@@ -420,7 +438,11 @@ impl WorkspaceOverlayCache {
     /// The atomic pre-plan snapshot for a planned publication: the live marks (whose exact
     /// sequences tell a superseded mark from a re-marked one) and the freshness fence.
     pub fn publication_baseline(&self) -> PublicationBaseline {
-        PublicationBaseline { dirty: self.dirty_paths.clone(), fence: self.dirty_seq }
+        PublicationBaseline {
+            dirty: self.dirty_paths.clone(),
+            fence: self.dirty_seq,
+            unread: self.unread_keys.clone(),
+        }
     }
 
     pub fn mark_dirty_path(&mut self, key: FileKey) {
@@ -899,7 +921,13 @@ impl WorkspaceOverlayCache {
                 self.dirty_failures.remove(key);
             }
         }
+        // A FENCED key's faults are the stale plan's, not the state's: a fresher point
+        // settlement already resolved the key, and re-marking it (or re-opening its unread
+        // debt) would make yesterday's failure current again.
         for key in verdict.read_failures {
+            if verdict.fenced.contains(key) {
+                continue;
+            }
             tracing::warn!(
                 root = %key.root_id,
                 path = %key.path,
@@ -911,6 +939,9 @@ impl WorkspaceOverlayCache {
             self.unread_keys.insert(key.clone());
         }
         for key in verdict.build_faults {
+            if verdict.fenced.contains(key) {
+                continue;
+            }
             let prior_failures = self.dirty_failures.remove(key).unwrap_or(0);
             self.retain_dirty_uncharged(key.clone(), prior_failures);
         }
@@ -922,7 +953,7 @@ impl WorkspaceOverlayCache {
                 .retain(|key| verdict.read_failures.contains(key) || verdict.fenced.contains(key));
         } else {
             for key in verdict.seen_keys {
-                if !verdict.read_failures.contains(key) {
+                if !verdict.read_failures.contains(key) && !verdict.fenced.contains(key) {
                     self.unread_keys.remove(key);
                 }
             }
@@ -1453,6 +1484,7 @@ impl WorkspaceOverlayCache {
         store: &Store,
         warm_embeddings: &HashMap<String, Vec<f32>>,
         graph_context: Option<&dyn GraphContextProvider>,
+        distrusted: &HashSet<FileKey>,
     ) -> Result<RefreshPlan, SearchError> {
         let scanned = scan_workspace_files(roots);
         Self::plan_full_refresh_from_manifest_scanned(
@@ -1461,6 +1493,7 @@ impl WorkspaceOverlayCache {
             store,
             warm_embeddings,
             graph_context,
+            distrusted,
         )
     }
 
@@ -1470,6 +1503,7 @@ impl WorkspaceOverlayCache {
         store: &Store,
         warm_embeddings: &HashMap<String, Vec<f32>>,
         graph_context: Option<&dyn GraphContextProvider>,
+        distrusted: &HashSet<FileKey>,
     ) -> Result<RefreshPlan, SearchError> {
         let snapshot_id = store
             .load_baseline_manifest()
@@ -1496,7 +1530,11 @@ impl WorkspaceOverlayCache {
             let baseline_fingerprint = manifest_fingerprints.get(&file.key);
 
             if let Some(cached) = persisted.get(&file.key) {
-                if cached.file_size == file.fingerprint.len
+                // The unread debt distrusts the row even here: the caller's own retraction
+                // landed at fault time, but the SHARED table may have been repopulated by a
+                // neighbouring daemon whose knowledge predates the local fault.
+                if !distrusted.contains(&file.key)
+                    && cached.file_size == file.fingerprint.len
                     && fingerprint_mtime_matches(file.fingerprint.modified, cached)
                     && fingerprint_canonical_matches(&file.fingerprint, cached)
                 {
@@ -1741,17 +1779,18 @@ impl WorkspaceOverlayCache {
             &to_consume,
         );
         self.finish_publication(&verdict, &to_consume, persist_ok);
-        // Settlements at or below the fence are no longer needed: any future plan captures a
-        // later fence, and the wholesale check guards everything older.
-        let fence = baseline.fence;
-        self.settled_seq.retain(|_, seq| *seq > fence);
+        // `settled_seq` is deliberately NOT pruned here: another plan with an OLDER fence may
+        // still be in flight (the library does not enforce the driver's single-flight), and
+        // pruning by this plan's fence would hand that older plan the very keys the fence
+        // exists to protect. The map is bounded by the workspace file count (a re-settlement
+        // overwrites its key) and cleared by every wholesale invalidation.
         // Marked keys the gate skipped unread: the tail deliberately kept their marks, and
         // the caller reports them as unread files.
         let gate_deferred = deferred.len();
 
         self.persist_embedding_cache(embedder, store);
 
-        Ok(PublishOutcome::Applied { gate_deferred, persist_ok })
+        Ok(PublishOutcome::Applied { gate_deferred, persist_ok, overlay_files: self.entries.len() })
     }
 
     /// Best-effort save of the merged embedding cache: vectors are value-stable and
@@ -2559,7 +2598,7 @@ mod tests {
     };
     use crate::store::Store;
     use crate::workspace_roots::{FileKey, WorkspaceRoots, CONFIGURATION_ROOT_ID};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
@@ -2833,6 +2872,7 @@ mod tests {
             &store,
             &warm,
             None,
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -2848,7 +2888,11 @@ mod tests {
             .publish_plan(
                 plan,
                 new_embeddings,
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -2894,6 +2938,7 @@ mod tests {
             &store,
             &warm,
             None,
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -2914,7 +2959,11 @@ mod tests {
             .publish_plan(
                 plan,
                 new_embeddings,
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -2944,6 +2993,7 @@ mod tests {
             &store,
             &warm,
             None,
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -3718,13 +3768,18 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -3749,13 +3804,18 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -3992,6 +4052,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
@@ -4156,13 +4217,18 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -4174,13 +4240,18 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -4335,13 +4406,18 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -4360,6 +4436,7 @@ mod tests {
                 &store,
                 &HashMap::new(),
                 None,
+                &HashSet::new(),
             )
             .unwrap()
         });
@@ -4371,7 +4448,11 @@ mod tests {
             cache.publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -4480,13 +4561,18 @@ mod tests {
                 store,
                 &HashMap::new(),
                 None,
+                &HashSet::new(),
             )
             .unwrap();
             cache
                 .publish_plan(
                     plan,
                     HashMap::new(),
-                    &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                    &super::PublicationBaseline {
+                        dirty: HashMap::new(),
+                        fence: u64::MAX,
+                        unread: HashSet::new(),
+                    },
                     None,
                     store,
                 )
@@ -4601,6 +4687,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the swap is visible after the restart");
@@ -4654,6 +4741,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the swap is visible after the restart");
@@ -4770,13 +4858,18 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -4792,13 +4885,18 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -4825,13 +4923,18 @@ mod tests {
             &solo_store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         solo_cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &solo_store,
             )
@@ -4842,13 +4945,18 @@ mod tests {
             &solo_store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         solo_cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &solo_store,
             )
@@ -5067,6 +5175,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -5100,6 +5209,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the swap is re-read and visible");
@@ -5248,6 +5358,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         restore_access(&broken);
@@ -5357,13 +5468,18 @@ mod tests {
             &plan_store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         plan_cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &plan_store,
             )
@@ -5376,6 +5492,7 @@ mod tests {
             &plan_store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(
@@ -5467,6 +5584,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the empty-spelling row must not be trusted");
@@ -5475,7 +5593,11 @@ mod tests {
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
@@ -5671,6 +5793,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         // Mid-embed the file changes at the same (len, mtime) and gets marked: the plan's only
@@ -5733,6 +5856,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the edit survives the restart");
@@ -5846,6 +5970,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the edit survives the restart");
@@ -5980,6 +6105,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
@@ -6072,6 +6198,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the edit survives the restart");
@@ -6123,6 +6250,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the edit survives once the store recovers");
@@ -6157,13 +6285,14 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         let deferred =
             cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
         assert_eq!(
             deferred,
-            super::PublishOutcome::Applied { gate_deferred: 1, persist_ok: true },
+            super::PublishOutcome::Applied { gate_deferred: 1, persist_ok: true, overlay_files: 0 },
             "one marked key was skipped unread by the gate"
         );
 
@@ -6175,18 +6304,26 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         let deferred = cache
             .publish_plan(
                 plan,
                 HashMap::new(),
-                &super::PublicationBaseline { dirty: HashMap::new(), fence: u64::MAX },
+                &super::PublicationBaseline {
+                    dirty: HashMap::new(),
+                    fence: u64::MAX,
+                    unread: HashSet::new(),
+                },
                 None,
                 &store,
             )
             .unwrap();
-        assert_eq!(deferred, super::PublishOutcome::Applied { gate_deferred: 0, persist_ok: true });
+        assert_eq!(
+            deferred,
+            super::PublishOutcome::Applied { gate_deferred: 0, persist_ok: true, overlay_files: 1 }
+        );
     }
 
     /// The overlay must not walk the tree itself: the walk policy (which links
@@ -6398,6 +6535,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the edit is read by the plan");
@@ -6538,6 +6676,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
@@ -6555,6 +6694,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(replan.overlay_file_count(), 1, "the same-stat namesake is re-read");
@@ -6593,6 +6733,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         // A watcher re-mark AFTER the plan was built: the plan's row for A is stale and gets
@@ -6660,6 +6801,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the marked edit is re-read by the plan");
@@ -6686,6 +6828,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(replan.overlay_file_count(), 1, "nothing on disk suppresses the re-read");
@@ -6715,6 +6858,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the plan reads the then-live file");
@@ -6772,6 +6916,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -6800,6 +6945,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(replan.overlay_file_count(), 1, "nothing on disk suppresses the re-read");
@@ -6831,6 +6977,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the plan reads the temporary edit");
@@ -6864,6 +7011,7 @@ mod tests {
                 store,
                 &HashMap::new(),
                 None,
+                &HashSet::new(),
             )
             .unwrap();
             (manifest, roots, baseline, plan)
@@ -6994,6 +7142,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 0, "the lying row hid the edit from the plan");
@@ -7042,6 +7191,7 @@ mod tests {
                 &store,
                 &HashMap::new(),
                 None,
+                &HashSet::new(),
             )
             .unwrap();
 
@@ -7080,6 +7230,7 @@ mod tests {
                 &store,
                 &HashMap::new(),
                 None,
+                &HashSet::new(),
             )
             .unwrap();
             assert_eq!(plan.overlay_file_count(), 1);
@@ -7122,6 +7273,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
+            &HashSet::new(),
         )
         .unwrap();
         let missing: Vec<String> = plan.missing_embeddings().keys().cloned().collect();
@@ -7183,6 +7335,216 @@ mod tests {
                 .iter()
                 .any(|document| document.symbol_name == "Вторая"),
             "the same-stat recovery is published, not gated away"
+        );
+    }
+
+    /// Two plans in flight: a NEWER plan (whose fence postdates the point settlement)
+    /// publishing first must not strip the fence the OLDER plan still needs — the library
+    /// does not enforce the driver's single-flight.
+    #[test]
+    fn an_overlapping_newer_publish_keeps_the_fence_for_the_older_plan() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        let old_baseline = cache.publication_baseline();
+        let old_plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        // The point path publishes the edit; a NEWER plan (fence after the settlement)
+        // publishes before the older one.
+        fs::write(&file, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        let newer_baseline = cache.publication_baseline();
+        let newer_plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+        )
+        .unwrap();
+        cache.publish_plan(newer_plan, HashMap::new(), &newer_baseline, None, &store).unwrap();
+
+        cache.publish_plan(old_plan, HashMap::new(), &old_baseline, None, &store).unwrap();
+        assert!(
+            cache
+                .snapshot()
+                .lexical_documents
+                .iter()
+                .any(|document| document.symbol_name == "Вторая"),
+            "the newer publish must not strip the fence the older plan still needs"
+        );
+    }
+
+    /// A stale plan's read failure must not re-open an obligation a fresher point settlement
+    /// already resolved: the fenced key keeps its settled state on the marks and the debt.
+    #[test]
+    fn a_stale_read_failure_does_not_reopen_a_fresh_settlement() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, [0xff, 0xfe]).unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        assert_eq!(cache.unread_keys_count(), 1, "the warm pass records the failure");
+
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(plan.read_failure_count(), 1, "the plan saw the same failure");
+
+        // The file recovers and the point path settles everything.
+        fs::write(&file, "Процедура Ожила()\nКонецПроцедуры").unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        assert_eq!(cache.unread_keys_count(), 0);
+        assert!(cache.dirty_paths_snapshot().is_empty());
+
+        cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        assert_eq!(
+            cache.unread_keys_count(),
+            0,
+            "the stale plan's failure must not re-open the settled debt"
+        );
+        assert!(
+            cache.dirty_paths_snapshot().is_empty(),
+            "the stale plan's failure must not re-mark the settled key"
+        );
+    }
+
+    /// An UNCLEAN stale plan must not extinguish the unread debt of a key whose point
+    /// settlement out-fenced it: the plan's old successful sighting is not a read of the
+    /// CURRENT content.
+    #[test]
+    fn a_fenced_unread_debt_survives_an_unclean_plan() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), "manifest-differs".to_owned())]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest_scanned(
+            &manifest,
+            scanned_with(&[(&key("A.bsl"), &file)], 1, 0),
+            &store,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert!(!plan.scan_is_clean(), "the plan is deliberately unclean");
+
+        // The file breaks AFTER the plan read it; the point budget runs dry and the debt is
+        // the only witness left.
+        fs::write(&file, [0xff, 0xfe]).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES + 1) {
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        }
+        assert!(cache.dirty_paths_snapshot().is_empty());
+        assert_eq!(cache.unread_keys_count(), 1);
+
+        cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        assert_eq!(
+            cache.unread_keys_count(),
+            1,
+            "the stale sighting is not a read; the debt survives the unclean publish"
+        );
+    }
+
+    /// The unread debt distrusts even a REPOPULATED fingerprint row: the local retraction
+    /// landed at fault time, but the shared table may be rewritten by a neighbouring daemon
+    /// whose knowledge predates the fault — a stat-matching row is exactly what the debt
+    /// says cannot be believed, so Phase A must read the file.
+    #[test]
+    fn the_unread_debt_distrusts_a_repopulated_row() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        let base = "Процедура Первая()\nКонецПроцедуры";
+        fs::write(&file, base).unwrap();
+        let manifest = HashMap::from([(key("A.bsl"), super::fingerprint_content(base, "A.bsl"))]);
+        let roots = single_root(workspace);
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, true).unwrap();
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+        let initial_rows =
+            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default();
+        assert_eq!(initial_rows.len(), 1, "the baseline-equal row is persisted");
+
+        // A same-stat corruption exhausts the point budget; only the debt survives.
+        fs::write(&file, vec![0xff; base.len()]).unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+        cache.mark_dirty_path(key("A.bsl"));
+        for _ in 0..(MAX_DIRTY_REFRESH_FAILURES + 1) {
+            cache.refresh_with_manifest(&manifest, &roots, None, 32, &store, false).unwrap();
+        }
+        assert!(cache.dirty_paths_snapshot().is_empty());
+        assert_eq!(cache.unread_keys_count(), 1);
+
+        // A neighbouring daemon repopulates the table with its pre-fault knowledge, and the
+        // file recovers with DIFFERENT content at the same stat.
+        store.save_overlay_fingerprint_cache("", &initial_rows).unwrap();
+        let second = "Процедура Вторая()\nКонецПроцедуры";
+        fs::write(&file, second).unwrap();
+        fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+
+        let baseline = cache.publication_baseline();
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &manifest,
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+            baseline.distrusted(),
+        )
+        .unwrap();
+        assert_eq!(plan.overlay_file_count(), 1, "the distrusted row does not gate the read");
+        cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        assert_eq!(cache.unread_keys_count(), 0, "the successful read settles the debt");
+        assert!(
+            cache
+                .snapshot()
+                .lexical_documents
+                .iter()
+                .any(|document| document.symbol_name == "Вторая"),
+            "the recovered content is published, not gated away by the repopulated row"
         );
     }
 }
