@@ -842,6 +842,7 @@ impl WorkspaceChangeHub {
     }
 
     fn start_with_capacity(targets: Vec<WatchTarget>, cap: usize, tick_period: Duration) -> Self {
+        let placed = ResolvedTargets::here(targets.clone());
         let inner = Arc::new(HubInner {
             acc: Mutex::new(Accumulator::new(cap)),
             wake: Condvar::new(),
@@ -851,11 +852,13 @@ impl WorkspaceChangeHub {
             // A starting value only; the hub thread re-derives it right before
             // arming, so the relative spellings are resolved against the same
             // current directory the backend will use.
-            scope: Mutex::new(Scope::from_targets(&ResolvedTargets::here(targets.clone()))),
+            scope: Mutex::new(Scope::from_targets(&placed)),
             tick_period,
             ticks: AtomicU64::new(0),
             rearms: AtomicU64::new(0),
-            declared_published: Mutex::new(targets.clone()),
+            // Placed, like every later declaration: the record is compared against
+            // those, and a raw spelling would never equal its own placed form.
+            declared_published: Mutex::new(placed.as_slice().to_vec()),
         });
         let (tx, rx) = std::sync::mpsc::sync_channel::<HubMsg>(CHANNEL_BOUND);
 
@@ -909,6 +912,10 @@ impl WorkspaceChangeHub {
         // measure two different languages.
         let resolved = ResolvedTargets::here(targets.to_vec());
         let placed = resolved.is_complete();
+        // The declaration travels and is remembered in PLACED spellings: one relative
+        // spelling names two different targets under two different current directories,
+        // so remembering the raw one would suppress a real change as a repeat.
+        let declaration = resolved.as_slice().to_vec();
         let mut desired: Vec<(PathBuf, bool)> = dedup_targets(resolved.into_inner())
             .into_iter()
             .map(|(t, canonical)| (canonical, t.recursive))
@@ -924,11 +931,11 @@ impl WorkspaceChangeHub {
             // the only spelling the watch actually holds. Telling the thread costs a
             // message; not telling it leaves the tick re-arming targets the topology
             // dropped long ago.
-            self.publish_declaration(targets);
+            self.publish_declaration(&declaration);
             return true;
         }
         tracing::info!(?targets, "workspace change hub re-arming onto new scan roots");
-        self.note_declaration(targets);
+        self.note_declaration(&declaration);
         self.rearm(targets.to_vec(), REARM_ACK_TIMEOUT)
     }
 
@@ -952,9 +959,11 @@ impl WorkspaceChangeHub {
         if *published == targets {
             return;
         }
-        // `try_send`: a full control channel means the thread is busy with work that
-        // will re-derive coverage anyway, and blocking a build thread here would be
-        // worse than a late declaration.
+        // `try_send`, not a blocking send: a full control channel means an event storm,
+        // and stalling a build thread behind it would be worse than a late declaration.
+        // Late, not lost — the record stays on the previous set, so the next rebuild's
+        // `ensure_roots` publishes this one again instead of skipping it as a repeat.
+        // Until then the periodic check polices the previous declaration.
         if self.control.try_send(HubMsg::Declare(targets.to_vec())).is_ok() {
             *published = targets.to_vec();
         }
@@ -1488,10 +1497,13 @@ fn coverage_tick(
     let current = snapshot_of(declared, snapshot);
     if coverage_moved(declared, snapshot, &current) {
         *snapshot = current;
-        inner.rearms.fetch_add(1, Ordering::Relaxed);
         // Already absolute, so placing them again cannot move them; going through the
         // one constructor keeps that the only way a target reaches the watcher.
         apply_rearm(inner, watcher, armed, ResolvedTargets::here(declared.to_vec()));
+        // Counted AFTER the watch is in place, for the same reason as the tick below:
+        // a test that waits for this counter and then makes a one-shot change would
+        // otherwise make it inside the window where the new target is not armed yet.
+        inner.rearms.fetch_add(1, Ordering::Relaxed);
     }
     // Counted LAST, after every effect above is visible: a test that waits for this
     // counter is told the tick finished, not that it started.
@@ -1524,8 +1536,15 @@ fn apply_declaration(
     *declared = next;
     inner.set_scope(Scope::from_targets(&resolved));
     if moved {
-        inner.rearms.fetch_add(1, Ordering::Relaxed);
+        // Denies coverage on an unplaced target itself, so the branch below is the only
+        // one left without that report.
         apply_rearm(inner, watcher, armed, resolved);
+        inner.rearms.fetch_add(1, Ordering::Relaxed);
+    } else if !resolved.is_complete() {
+        // A target that could not be placed silently narrows the scope, and the caller
+        // already counts this declaration as delivered — so it is reported here, like at
+        // every other placement point, rather than left to look like agreement.
+        inner.note_unplaced_targets();
     }
 }
 
@@ -1883,6 +1902,28 @@ mod tests {
         let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         assert_eq!(hub.inner.tick_period, Duration::from_secs(30));
+    }
+
+    /// One relative spelling names two different targets under two different current
+    /// directories, so a record kept in raw spellings would suppress a real change of
+    /// declaration as a repeat, and the periodic check would keep policing the target the
+    /// hub was started from. The two-directory run itself is not reproduced here — the
+    /// current directory is process-wide, and moving it would decide the outcome of every
+    /// other test in this binary — so what is pinned is the property that forbids it.
+    #[test]
+    fn a_declaration_is_recorded_in_placed_spellings() {
+        let hub = WorkspaceChangeHub::start_targets(vec![WatchTarget::recursive(PathBuf::from(
+            "a-root-that-is-not-placed",
+        ))]);
+        let published =
+            hub.inner.declared_published.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        hub.shutdown();
+
+        assert_eq!(published.len(), 1, "the target is placeable, so it is kept");
+        assert!(
+            published[0].path.is_absolute(),
+            "a record in raw spellings cannot be compared across current directories: {published:?}"
+        );
     }
 
     /// The record of published declarations exists to skip REPEATS, so recording one the
