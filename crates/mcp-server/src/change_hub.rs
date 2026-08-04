@@ -1308,6 +1308,29 @@ fn coverage_moved(declared: &[WatchTarget], previous: &Snapshot, current: &Snaps
     now.iter().any(|(target, _)| previous.get(&target.path) != current.get(&target.path))
 }
 
+/// Does the cover a declaration asks for differ from what the watcher actually holds?
+///
+/// Compared by DECLARED spelling: two aliases of one directory canonicalize the same, so
+/// a cover that swapped one for the other is identical everywhere except here, while the
+/// backend keeps reporting under the spelling it was armed with — the one the scope has
+/// just stopped accepting. `armed` is the only record of that spelling.
+///
+/// Asked on a declaration and not on the tick: a declaration arrives once per rebuild,
+/// whereas the tick runs on a period, and a target whose `watch` keeps failing would then
+/// buy every consumer a full walk every period for as long as the obstacle lasts.
+fn cover_differs_from_armed(
+    cover: &[(WatchTarget, PathBuf)],
+    armed: &[(WatchTarget, PathBuf)],
+) -> bool {
+    let key = |list: &[(WatchTarget, PathBuf)]| -> Vec<(PathBuf, bool)> {
+        let mut keys: Vec<(PathBuf, bool)> =
+            list.iter().map(|(t, _)| (t.path.clone(), t.recursive)).collect();
+        keys.sort();
+        keys
+    };
+    key(cover) != key(armed)
+}
+
 /// Reduce a set of watch targets to the minimal cover: drop any target nested under
 /// a RECURSIVE target (a non-recursive ancestor covers only its direct children, so
 /// it absorbs nothing), and collapse exact duplicates — a recursive duplicate wins
@@ -1530,8 +1553,12 @@ fn apply_declaration(
     // Merged, not replaced: a drift that already happened to a surviving target must
     // survive this update, and a target seen for the first time gets described now.
     let current = snapshot_of(&next, snapshot);
-    let moved =
-        coverage_moved(declared, snapshot, &current) || coverage_moved(&next, snapshot, &current);
+    // Both movement checks read one declared set against two snapshots, so neither can see
+    // the declaration itself hand the cover from one alias to another: that is what the
+    // third asks, against the watch as it really stands.
+    let moved = coverage_moved(declared, snapshot, &current)
+        || coverage_moved(&next, snapshot, &current)
+        || cover_differs_from_armed(&cover_from_snapshot(&next, &current), armed);
     *snapshot = current;
     *declared = next;
     inner.set_scope(Scope::from_targets(&resolved));
@@ -1902,6 +1929,47 @@ mod tests {
         let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         assert_eq!(hub.inner.tick_period, Duration::from_secs(30));
+    }
+
+    /// Two aliases of one directory canonicalize the same, so the declaration dropping the
+    /// one the watch actually stands on moves no canonical path and no fingerprint. The
+    /// backend keeps reporting paths under the dropped spelling, which the narrowed scope
+    /// no longer accepts — the root goes silent while everything about it looks agreed.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_the_alias_the_watch_stands_on_re_arms() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let real = root.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        std::os::unix::fs::symlink(&real, &first).unwrap();
+        std::os::unix::fs::symlink(&real, &second).unwrap();
+
+        let hub = WorkspaceChangeHub::start_targets_with_period(
+            vec![WatchTarget::recursive(first.clone()), WatchTarget::recursive(second.clone())],
+            Duration::from_secs(3600),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+
+        // The winner of the collapse moves to `second` inside the declaration, then
+        // `first` leaves it. Both sets cover the same canonical directory recursively.
+        assert!(hub.ensure_roots(&[
+            WatchTarget::recursive(second.clone()),
+            WatchTarget::recursive(first.clone()),
+        ]));
+        assert!(hub.ensure_roots(&[WatchTarget::recursive(second.clone())]));
+        // A declaration is delivered asynchronously; the tick shares the channel, so its
+        // acknowledgement proves both were applied.
+        assert!(hub.tick_now(Duration::from_secs(5)));
+
+        let cursor = hub.subscribe();
+        std::fs::write(real.join("Module.bsl"), "x").unwrap();
+        assert!(
+            eventually(Duration::from_secs(10), || !entry_names(&hub.drain(cursor)).is_empty()),
+            "a change under the only declared spelling must still be delivered"
+        );
     }
 
     /// One relative spelling names two different targets under two different current
