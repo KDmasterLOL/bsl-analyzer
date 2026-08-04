@@ -1753,8 +1753,15 @@ fn coverage_tick(
     snapshot: &mut Snapshot,
 ) {
     let current = snapshot_of(declared, snapshot);
-    if coverage_moved(declared, snapshot, &current) {
-        *snapshot = current;
+    let moved = coverage_moved(declared, snapshot, &current);
+    // Stored on BOTH branches. "Coverage did not move" is a statement about the targets
+    // IN the cover; the ones outside it can still have changed, and blindness is read off
+    // this snapshot. A target first described as undescribable and later proven gone moves
+    // no coverage either way, so keeping the old description would leave it blind for ever
+    // over a path that no longer exists. Nothing else drifts: when the check says the
+    // cover did not move, every fingerprint inside it is equal by definition.
+    *snapshot = current;
+    if moved {
         // Already absolute, so placing them again cannot move them; going through the
         // one constructor keeps that the only way a target reaches the watcher.
         apply_rearm(inner, watcher, armed, ResolvedTargets::here(declared.to_vec()));
@@ -1860,8 +1867,8 @@ fn apply_declaration(
         inner.note_unplaced_targets();
     }
     // On BOTH branches. A declaration that re-arms nothing is exactly how a blind target
-    // leaves the set: absent from the cover, so dropping it moves no coverage at all, and
-    // a set reconciled only inside `apply_rearm` would hold ill health over it forever.
+    // leaves the set: outside the cover, so dropping it moves no coverage at all, and a
+    // set reconciled only inside `apply_rearm` would hold ill health over it forever.
     refresh_blind_targets(inner, declared, snapshot, armed);
 }
 
@@ -2438,10 +2445,11 @@ mod tests {
     }
 
     /// The same exit, on the branch that never re-arms: a declaration whose cover equals
-    /// the one in force is applied without `apply_rearm` at all. A missing root is the
-    /// case that reaches it — absent from the cover, so dropping it moves nothing — and
-    /// an implementation that only reconciled the unwatched set inside `apply_rearm`
-    /// would hold ill health here forever.
+    /// the one in force is applied without `apply_rearm` at all. Reaching it takes a root
+    /// that is blind AND outside the cover, so that dropping it moves no coverage — which
+    /// is exactly the undescribable root, here a symlink pointing at itself. A missing
+    /// root would not do: it is not blind at all, so the test would pass over any
+    /// implementation whatever.
     #[cfg(unix)]
     #[test]
     fn a_declaration_that_re_arms_nothing_still_clears_a_dropped_root() {
@@ -2449,22 +2457,62 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let a = root.join("a");
         std::fs::create_dir(&a).unwrap();
+        let loopy = root.join("loopy");
+        std::os::unix::fs::symlink(&loopy, &loopy).unwrap();
+
         let hub = WorkspaceChangeHub::start_targets_with_period(
-            vec![
-                WatchTarget::recursive(a.clone()),
-                WatchTarget::recursive(root.join("нет-такого-каталога")),
-            ],
+            vec![WatchTarget::recursive(a.clone()), WatchTarget::recursive(loopy)],
             Duration::from_secs(3600),
         );
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         let cursor = hub.subscribe();
         let _ = hub.drain(cursor);
+        assert_eq!(
+            hub.health(),
+            Health::Degraded(DegradeReason::RewatchFailed),
+            "the loop is declared and unwatched, so there is ill health to clear"
+        );
 
         assert!(hub.ensure_roots(&[WatchTarget::recursive(a.clone())]));
         let _ = hub.drain(cursor);
         assert!(
             eventually(Duration::from_secs(5), || hub.health() == Health::Healthy),
             "nothing declared is unwatched"
+        );
+    }
+
+    /// A root that could not be described and then turned out to be gone is not blind:
+    /// nothing can watch what does not exist. Both fingerprints sit outside the cover, so
+    /// the coverage check sees no movement — and a tick that reads blindness off the
+    /// snapshot it declined to update would hold ill health over a target that no longer
+    /// exists, for the life of the daemon, while retrying a `watch` on nothing every
+    /// period.
+    #[cfg(unix)]
+    #[test]
+    fn a_blind_root_that_turns_out_to_be_gone_stops_costing_health() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let a = root.join("a");
+        std::fs::create_dir(&a).unwrap();
+        let loopy = root.join("loopy");
+        std::os::unix::fs::symlink(&loopy, &loopy).unwrap();
+
+        let hub = WorkspaceChangeHub::start_targets_with_period(
+            vec![WatchTarget::recursive(a), WatchTarget::recursive(loopy.clone())],
+            Duration::from_secs(3600),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+        assert_eq!(hub.health(), Health::Degraded(DegradeReason::RewatchFailed));
+
+        std::fs::remove_file(&loopy).unwrap();
+        assert!(hub.tick_now(Duration::from_secs(5)));
+        let _ = hub.drain(cursor);
+        assert_eq!(
+            hub.health(),
+            Health::Healthy,
+            "the obstacle and the target are both gone, so the cost must be gone with them"
         );
     }
 
