@@ -1484,22 +1484,44 @@ fn cover_differs_from_armed(
 /// The declared targets that exist and are not watched, with the canonical path the
 /// cover ranks them by.
 ///
-/// Derived from the cover, so a target that is simply not there is not blind: nothing can
-/// watch what does not exist, and its creation moves a fingerprint, which the periodic
-/// check already answers with a full re-arm. What is left is the target the watcher
-/// refused — a permission, an exhausted inotify limit — which stats and canonicalizes
-/// perfectly while its subtree goes unobserved.
+/// A target that is simply not there is NOT blind: nothing can watch what does not exist,
+/// and its creation moves a fingerprint, which the periodic check already answers with a
+/// full re-arm. Everything else declared and unwatched is, and it arrives two ways. Most
+/// of it through the cover: the target the watcher refused — a permission on the target,
+/// an exhausted inotify limit — which stats and canonicalizes perfectly while its subtree
+/// goes unobserved. The rest never reaches the cover at all, because it cannot be
+/// described: an unreadable PARENT denies every `stat` below it, and so does a symlink
+/// cycle. Such a target is neither present nor absent, and reading blindness off the
+/// cover alone would leave exactly it unreported, unwatched and never retried.
 fn blind_targets(
     declared: &[WatchTarget],
     snapshot: &Snapshot,
     armed: &[(WatchTarget, PathBuf)],
 ) -> Vec<(WatchTarget, PathBuf)> {
-    cover_from_snapshot(declared, snapshot)
+    let mut blind: Vec<(WatchTarget, PathBuf)> = cover_from_snapshot(declared, snapshot)
         .into_iter()
         .filter(|(target, canonical)| {
             !armed.iter().any(|(at, ac)| at.recursive == target.recursive && ac == canonical)
         })
-        .collect()
+        .collect();
+    for target in declared {
+        if !matches!(snapshot.get(&target.path), Some(Fingerprint::Unknown)) {
+            continue;
+        }
+        // Matched by DECLARED spelling, the only handle an undescribable target has: it
+        // has no canonical path to rank by, which is why the cover cannot hold it. The
+        // second test is the absorption the cover would have applied — an armed recursive
+        // ancestor watches it already, and calling it blind would degrade the hub for ever
+        // over a subtree that is in fact covered.
+        let covered = armed.iter().any(|(at, _)| {
+            (at.recursive == target.recursive && at.path == target.path)
+                || (at.recursive && target.path.starts_with(&at.path))
+        });
+        if !covered {
+            blind.push((target.clone(), target.path.clone()));
+        }
+    }
+    blind
 }
 
 /// Re-derive the blind set and report it to consumers ON THE TRANSITION into blindness.
@@ -1517,7 +1539,7 @@ fn refresh_blind_targets(
     declared: &[WatchTarget],
     snapshot: &Snapshot,
     armed: &[(WatchTarget, PathBuf)],
-) -> Vec<(WatchTarget, PathBuf)> {
+) {
     let blind = blind_targets(declared, snapshot, armed);
     let newly = {
         let mut published = inner.blind_targets.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1532,7 +1554,6 @@ fn refresh_blind_targets(
         inner.lock_acc().enter_rescan(false, DegradeReason::RewatchFailed);
         inner.wake.notify_all();
     }
-    blind
 }
 
 /// Reduce a set of watch targets to the minimal cover: drop any target nested under
@@ -1773,10 +1794,15 @@ fn retry_blind_targets(
     snapshot: &Snapshot,
 ) {
     let mut armed_any = false;
-    for (target, canonical) in blind_targets(declared, snapshot, armed) {
+    for (target, _) in blind_targets(declared, snapshot, armed) {
         match watcher.watch(&target.path, target.mode()) {
             Ok(()) => {
                 tracing::info!(root = ?target.path, recursive = target.recursive, "workspace change hub watching root (retry)");
+                // Canonicalized HERE, at the moment the watch went in, like every other
+                // arming path: a target the snapshot could not describe has no canonical
+                // path to carry, and one it could may have moved since — either way the
+                // truthful key is the one taken now.
+                let canonical = target.path.canonicalize().unwrap_or_else(|_| target.path.clone());
                 armed.push((target, canonical));
                 armed_any = true;
             }
@@ -2564,6 +2590,41 @@ mod tests {
             "a repeat of a failure already reported buys the consumers nothing"
         );
         readable(&b);
+    }
+
+    /// A declared root can exist and still be unstattable: an unreadable PARENT denies
+    /// every `stat` below it, and so does a symlink cycle. The fingerprint is then neither
+    /// present nor absent, and a blindness derived from the cover alone would never see
+    /// such a root — no report, no standing ill health, and no retry, which is the whole
+    /// of what this node is for.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_cannot_even_be_stat_ed_is_blind_like_any_other() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let a = root.join("a");
+        let parent = root.join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+        unreadable(&parent);
+
+        let hub = WorkspaceChangeHub::start_targets_with_period(
+            vec![WatchTarget::recursive(a), WatchTarget::recursive(child.clone())],
+            Duration::from_secs(3600),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the live root still arms");
+        assert_eq!(
+            hub.health(),
+            Health::Degraded(DegradeReason::RewatchFailed),
+            "a declared root nothing watches is not health, however it came to be unwatchable"
+        );
+
+        readable(&parent);
+        assert!(hub.tick_now(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+        assert_eq!(hub.health(), Health::Healthy, "and the retry must reach it too");
     }
 
     /// A hub whose thread never started arms nothing and never will, and it is the one

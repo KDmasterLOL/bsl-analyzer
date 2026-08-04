@@ -24,32 +24,67 @@ pub(super) static FORCE_REWALK_WALK_ERROR: std::sync::atomic::AtomicBool =
 const WATCH_READY_SLICE: Duration = Duration::from_secs(60);
 const WATCH_READY_BUDGET: Duration = Duration::from_secs(600);
 
+/// How long the search sink waits for the watch, in one slice and in total. A parameter
+/// rather than the two constants read directly, so a test can drive the slow-start path
+/// without standing through a production-sized slice.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WatchWaitPolicy {
+    slice: Duration,
+    budget: Duration,
+}
+
+impl WatchWaitPolicy {
+    pub(super) const PRODUCTION: Self =
+        Self { slice: WATCH_READY_SLICE, budget: WATCH_READY_BUDGET };
+
+    #[cfg(test)]
+    fn new(slice: Duration, budget: Duration) -> Self {
+        Self { slice, budget }
+    }
+}
+
+/// How a wait for the watch ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchWait {
+    /// Armed on the first ask: the watch was already up before this wait began.
+    AtOnce,
+    /// Armed, but only after at least one slice had expired — so the arming happened
+    /// DURING this wait, and everything before it went unobserved.
+    AfterWaiting,
+    /// Not armed, and not worth waiting for any longer.
+    Never,
+}
+
 impl SharedState {
-    /// Wait for the watch to arm, and say whether it did.
+    /// Wait for the watch to arm, and say how that ended.
     ///
-    /// Three answers, three different decisions. `Failed` is permanent, so waiting out
-    /// the budget over it would only delay the fallback everyone has already taken.
-    /// `NotYet` says nothing has gone wrong yet — a long initial walk looks exactly like
-    /// this — so the wait resumes until the budget is spent.
-    fn await_watch(hub: &WorkspaceChangeHub, slice: Duration, budget: Duration) -> bool {
-        let deadline = std::time::Instant::now() + budget;
+    /// Three readiness answers, three different decisions. `Failed` is permanent, so
+    /// waiting out the budget over it would only delay the fallback everyone has already
+    /// taken. `NotYet` says nothing has gone wrong yet — a long initial walk looks exactly
+    /// like this — so the wait resumes until the budget is spent.
+    fn await_watch(hub: &WorkspaceChangeHub, policy: WatchWaitPolicy) -> WatchWait {
+        let deadline = std::time::Instant::now() + policy.budget;
+        let mut waited = false;
         loop {
-            match hub.watch_readiness(slice) {
-                crate::change_hub::WatchReadiness::Armed => return true,
+            match hub.watch_readiness(policy.slice) {
+                crate::change_hub::WatchReadiness::Armed => {
+                    return if waited { WatchWait::AfterWaiting } else { WatchWait::AtOnce }
+                }
                 crate::change_hub::WatchReadiness::Failed => {
                     tracing::warn!(
                         "workspace change hub could not be set up; search overlay stays in scan mode"
                     );
-                    return false;
+                    return WatchWait::Never;
                 }
                 crate::change_hub::WatchReadiness::NotYet => {
                     if std::time::Instant::now() >= deadline {
                         tracing::warn!(
-                            budget_secs = budget.as_secs(),
+                            budget_secs = policy.budget.as_secs(),
                             "workspace change hub did not arm within the budget; search overlay stays in scan mode for this run of the daemon"
                         );
-                        return false;
+                        return WatchWait::Never;
                     }
+                    waited = true;
                 }
             }
         }
@@ -67,13 +102,15 @@ impl SharedState {
         watcher_ready: Arc<AtomicBool>,
         graph: GraphState,
         overlay_retry: Option<Arc<super::overlay_retry::OverlayRetry>>,
+        readiness: WatchWaitPolicy,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-overlay-watch".to_owned())
             .spawn(move || {
                 // Setup is asynchronous, so wait for it to settle rather than racing
                 // a bare `is_watching` check that would bail before the watch arms.
-                if !Self::await_watch(&hub, WATCH_READY_SLICE, WATCH_READY_BUDGET) {
+                let wait = Self::await_watch(&hub, readiness);
+                if wait == WatchWait::Never {
                     return;
                 }
 
@@ -90,6 +127,19 @@ impl SharedState {
                 tracing::info!("search overlay sink subscribed to workspace change hub");
 
                 let mut cursor = hub.subscribe();
+                // The watch armed while this thread was waiting, so nothing that happened
+                // before it produced an event, and this cursor starts at "everything so
+                // far already seen". The search index is built by another thread on its
+                // own schedule and may well have finished inside that window — its
+                // baseline would then be older than the first change anyone ever reports.
+                // One reconcile settles it; without it the overlay serves the pre-window
+                // content and looks event-complete while doing so.
+                if wait == WatchWait::AfterWaiting {
+                    tracing::info!(
+                        "workspace change hub armed while the search sink was waiting; reconciling the overlay once before trusting the stream"
+                    );
+                    Self::apply_search_drift(&engine, &[], true, &graph);
+                }
                 let mut generation = 0u64;
                 loop {
                     // Wake on new drift; the timeout only bounds how long a shutdown
@@ -660,6 +710,60 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
+    /// Waiting longer is only half of it. The watch armed while this thread was waiting,
+    /// so nothing before that moment was ever reported, while the search index — built by
+    /// another thread on its own schedule — may have finished inside that window. Entering
+    /// event mode on a cursor that starts at "all seen" would then serve the pre-window
+    /// content indefinitely: the very staleness the old code avoided by staying in scan
+    /// mode. One reconcile on entry is what the sink owes for the wait.
+    #[test]
+    fn the_search_sink_reconciles_after_a_slow_arm() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        fs::write(workspace.join("Module.bsl"), "Процедура П()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let (hub, hold) =
+            WorkspaceChangeHub::start_targets_held(vec![WatchTarget::recursive(workspace.clone())]);
+        SharedState::spawn_search_sink(
+            hub.clone(),
+            Arc::clone(&engine_arc),
+            Arc::new(AtomicBool::new(false)),
+            crate::graph::GraphState::disabled(),
+            None,
+            super::WatchWaitPolicy::new(Duration::from_millis(5), Duration::from_secs(30)),
+        );
+
+        // Released only after the sink has certainly spent slices waiting, so the arming
+        // it observes happens DURING its wait — the state the reconcile is owed for.
+        std::thread::sleep(Duration::from_millis(100));
+        hold.release();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut reconciled = false;
+        while Instant::now() < deadline {
+            let snapshot = {
+                let guard = engine_arc.lock().unwrap();
+                guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
+            };
+            if snapshot.keys().any(|key| key.path.ends_with("Module.bsl")) {
+                reconciled = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            reconciled,
+            "a sink entering event mode after an unobserved window owes the overlay one reconcile"
+        );
+    }
+
     /// A workspace whose initial walk outlasts one slice of patience is an ordinary large
     /// configuration, not a failure — and the sink that gave up on it left the search
     /// overlay in scan mode for the whole life of the daemon. What happens after the wait
@@ -683,12 +787,19 @@ mod tests {
             })
         };
         let started = Instant::now();
-        let armed =
-            SharedState::await_watch(&hub, Duration::from_millis(5), Duration::from_secs(30));
+        let wait = SharedState::await_watch(
+            &hub,
+            super::WatchWaitPolicy::new(Duration::from_millis(5), Duration::from_secs(30)),
+        );
         let waited = started.elapsed();
         releaser.join().unwrap();
 
-        assert!(armed, "a hub that is merely slow to start must not be given up on");
+        assert_eq!(
+            wait,
+            super::WatchWait::AfterWaiting,
+            "a hub that is merely slow to start must not be given up on, and the wait is what \
+             tells the sink it owes a reconcile"
+        );
         assert!(
             waited >= Duration::from_millis(100),
             "the wait has to have crossed several expired slices to prove it resumed: {waited:?}"
@@ -710,12 +821,18 @@ mod tests {
         )]);
 
         let started = Instant::now();
-        let armed =
-            SharedState::await_watch(&hub, Duration::from_millis(5), Duration::from_millis(400));
+        let wait = SharedState::await_watch(
+            &hub,
+            super::WatchWaitPolicy::new(Duration::from_millis(5), Duration::from_millis(400)),
+        );
         let waited = started.elapsed();
         hold.release();
 
-        assert!(!armed, "a hub that never arms must not hold the thread for ever");
+        assert_eq!(
+            wait,
+            super::WatchWait::Never,
+            "a hub that never arms must not hold the thread for ever"
+        );
         assert!(
             waited >= Duration::from_millis(400),
             "giving up before the budget abandons a workspace that was merely slow: {waited:?}"
@@ -736,11 +853,13 @@ mod tests {
         )]);
 
         let started = Instant::now();
-        assert!(!SharedState::await_watch(
-            &hub,
-            Duration::from_millis(50),
-            Duration::from_secs(600)
-        ));
+        assert_eq!(
+            SharedState::await_watch(
+                &hub,
+                super::WatchWaitPolicy::new(Duration::from_millis(50), Duration::from_secs(600))
+            ),
+            super::WatchWait::Never
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "a permanent failure is not something to spend a budget on"
@@ -773,6 +892,7 @@ mod tests {
             Arc::clone(&watcher_ready),
             crate::graph::GraphState::disabled(),
             None,
+            super::WatchWaitPolicy::PRODUCTION,
         );
 
         // Wait deterministically for the sink to subscribe (observer + sink = 2

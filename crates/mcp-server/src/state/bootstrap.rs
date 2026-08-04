@@ -176,6 +176,7 @@ impl SharedState {
             Arc::clone(&watcher_ready),
             graph.clone(),
             overlay_retry.clone(),
+            super::sync::WatchWaitPolicy::PRODUCTION,
         );
 
         Ok(Self {
