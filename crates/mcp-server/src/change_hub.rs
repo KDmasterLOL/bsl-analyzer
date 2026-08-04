@@ -309,15 +309,15 @@ struct Scope {
 
 /// Every spelling one watched directory can appear under in an event path.
 ///
-/// Three, not two. `declared` is what the caller wrote and what `watcher.watch`
-/// receives; `canonical` is what topology decisions rank by. `as_reported` is the
-/// spelling a notify backend actually reports for a RELATIVE target, and it equals
-/// neither of the others once the path holds a `..` or crosses a symlink.
+/// Two, because a scope is only ever built from [`ResolvedTargets`], whose paths
+/// are already absolute: `declared` is what `watcher.watch` receives and what the
+/// backend therefore reports, `canonical` is what topology decisions rank by. The
+/// two part company as soon as the path crosses a symlink, and a predicate holding
+/// one of them would discard a whole tree declared through the other.
 #[derive(Debug, Clone)]
 struct Spellings {
     declared: PathBuf,
     canonical: PathBuf,
-    as_reported: PathBuf,
 }
 
 impl Spellings {
@@ -325,36 +325,15 @@ impl Spellings {
         Self {
             declared: path.to_path_buf(),
             canonical: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
-            as_reported: Self::as_notify_reports(path),
-        }
-    }
-
-    /// Exactly what every notify backend does to a relative target before arming
-    /// it: join it to the current directory and leave the components alone.
-    ///
-    /// `std::path::absolute` is NOT a substitute. On Windows it goes through
-    /// `GetFullPathNameW`, which resolves `..` away (`C:\foo\..\bar.rs` becomes
-    /// `C:\foo\bar.rs`), while the backend keeps the component — so the watched
-    /// path and the reported one would stop matching, and the whole tree would go
-    /// silent. On Unix it also drops `.` components, which the backend keeps.
-    fn as_notify_reports(path: &Path) -> PathBuf {
-        if path.is_absolute() {
-            return path.to_path_buf();
-        }
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(path),
-            Err(_) => path.to_path_buf(),
         }
     }
 
     fn covers(&self, path: &Path) -> bool {
-        path.starts_with(&self.declared)
-            || path.starts_with(&self.canonical)
-            || path.starts_with(&self.as_reported)
+        path.starts_with(&self.declared) || path.starts_with(&self.canonical)
     }
 
     fn is(&self, path: &Path) -> bool {
-        path == self.declared || path == self.canonical || path == self.as_reported
+        path == self.declared || path == self.canonical
     }
 }
 
@@ -369,34 +348,82 @@ impl Spellings {
 /// fails, so no test catches it; the type does. Handing the backend an
 /// already-absolute path also removes that second read entirely: `watch_inner`
 /// takes an absolute path as given.
-/// In its own module so the field is out of reach even here: a tuple constructor
+/// In its own module so the fields are out of reach even here: a tuple constructor
 /// visible to the rest of the file would let the resolution be skipped by writing
 /// `ResolvedTargets(targets)`, which is precisely the mistake the type exists to
 /// make impossible.
 mod resolved {
-    use super::{Spellings, WatchTarget};
+    use std::path::Path;
 
-    pub(super) struct ResolvedTargets(Vec<WatchTarget>);
+    use super::WatchTarget;
+
+    pub(super) struct ResolvedTargets {
+        targets: Vec<WatchTarget>,
+        complete: bool,
+    }
 
     impl ResolvedTargets {
-        pub(super) fn resolve(targets: Vec<WatchTarget>) -> Self {
-            Self(
-                targets
-                    .into_iter()
-                    .map(|target| WatchTarget {
-                        path: Spellings::as_notify_reports(&target.path),
-                        recursive: target.recursive,
-                    })
-                    .collect(),
-            )
+        /// Resolve against ONE snapshot of the current directory, taken by the
+        /// caller for the whole set. Per-target reads would let a set spanning a
+        /// scan root and a config directory land in two different workspaces.
+        ///
+        /// The join is exactly what a notify backend does to a relative target:
+        /// prepend the current directory and leave the components alone.
+        /// `std::path::absolute` is NOT a substitute — on Windows it goes through
+        /// `GetFullPathNameW`, which resolves `..` away (`C:\foo\..\bar.rs` becomes
+        /// `C:\foo\bar.rs`), while the backend keeps the component, so the watched
+        /// path and the reported one would stop matching and the whole tree would go
+        /// silent. On Unix it also drops `.` components, which the backend keeps.
+        ///
+        /// Without a snapshot (`cwd` is `None` — a deleted or unreadable current
+        /// directory) a relative target is DROPPED rather than carried through
+        /// relative: keeping it would hand the backend a path it resolves against
+        /// its own later read of the same process-wide state, which is the very
+        /// disagreement this type exists to prevent. The set then reports itself
+        /// incomplete, and the caller degrades instead of claiming coverage.
+        pub(super) fn resolve(targets: Vec<WatchTarget>, cwd: Option<&Path>) -> Self {
+            let mut complete = true;
+            let targets = targets
+                .into_iter()
+                .filter_map(|target| {
+                    if target.path.is_absolute() {
+                        return Some(target);
+                    }
+                    match cwd {
+                        Some(cwd) => Some(WatchTarget {
+                            path: cwd.join(&target.path),
+                            recursive: target.recursive,
+                        }),
+                        None => {
+                            tracing::warn!(
+                                root = ?target.path,
+                                "workspace change hub cannot place a relative watch root: no current directory"
+                            );
+                            complete = false;
+                            None
+                        }
+                    }
+                })
+                .collect();
+            Self { targets, complete }
+        }
+
+        pub(super) fn here(targets: Vec<WatchTarget>) -> Self {
+            Self::resolve(targets, std::env::current_dir().ok().as_deref())
+        }
+
+        /// Whether every requested target survived resolution. `false` means the
+        /// watch cannot cover what was asked for, whatever the backend then says.
+        pub(super) fn is_complete(&self) -> bool {
+            self.complete
         }
 
         pub(super) fn as_slice(&self) -> &[WatchTarget] {
-            &self.0
+            &self.targets
         }
 
         pub(super) fn into_inner(self) -> Vec<WatchTarget> {
-            self.0
+            self.targets
         }
     }
 }
@@ -770,7 +797,7 @@ impl WorkspaceChangeHub {
             // A starting value only; the hub thread re-derives it right before
             // arming, so the relative spellings are resolved against the same
             // current directory the backend will use.
-            scope: Mutex::new(Scope::from_targets(&ResolvedTargets::resolve(targets.clone()))),
+            scope: Mutex::new(Scope::from_targets(&ResolvedTargets::here(targets.clone()))),
         });
         let (tx, rx) = std::sync::mpsc::sync_channel::<HubMsg>(CHANNEL_BOUND);
 
@@ -819,7 +846,12 @@ impl WorkspaceChangeHub {
     /// `targets` — `false` when a needed re-arm was not acknowledged or left a
     /// target unarmed.
     pub(crate) fn ensure_roots(&self, targets: &[WatchTarget]) -> bool {
-        let mut desired: Vec<(PathBuf, bool)> = dedup_targets(targets.to_vec())
+        // Resolve before comparing, exactly as the hub thread will: the live set was
+        // published from placed targets, so comparing raw spellings against it would
+        // measure two different languages.
+        let resolved = ResolvedTargets::here(targets.to_vec());
+        let placed = resolved.is_complete();
+        let mut desired: Vec<(PathBuf, bool)> = dedup_targets(resolved.into_inner())
             .into_iter()
             .map(|(t, canonical)| (canonical, t.recursive))
             .collect();
@@ -827,7 +859,7 @@ impl WorkspaceChangeHub {
         let mut current =
             self.inner.watched_roots.lock().unwrap_or_else(PoisonError::into_inner).clone();
         current.sort();
-        if current == desired {
+        if placed && current == desired {
             return true;
         }
         tracing::info!(?targets, "workspace change hub re-arming onto new scan roots");
@@ -1078,14 +1110,12 @@ fn run_hub_thread(
     // spelling (a retargeted symlink would then claim coverage it lost). A target
     // whose `watch()` failed is deliberately NOT recorded, so a later re-arm onto
     // the same set retries it instead of assuming coverage.
-    // Re-derive the scope here, on the thread that is about to arm the watch: a
-    // relative target is resolved against the process-wide current directory, and
-    // resolving it on the caller's thread minutes earlier could disagree with what
-    // the backend resolves now. The window is not closed entirely — the current
-    // directory is shared mutable process state — but it shrinks to the gap between
-    // these two lines and the `watch` calls below.
+    // Re-derive the scope here, on the thread that is about to arm the watch, from
+    // targets whose relative spellings are already placed: the backend receives an
+    // absolute path and never reads the process-wide current directory again, so
+    // the scope cannot end up describing a different tree than the one armed.
     let mut armed: Vec<(WatchTarget, PathBuf)> = Vec::new();
-    let targets = ResolvedTargets::resolve(targets);
+    let targets = ResolvedTargets::here(targets);
     inner.set_scope(Scope::from_targets(&targets));
     for (target, canonical) in dedup_targets(targets.into_inner()) {
         match watcher.watch(&target.path, target.mode()) {
@@ -1146,14 +1176,17 @@ fn apply_rearm(
 ) -> bool {
     // Scope follows the DESIRED set, before de-duplication: a target absorbed by a
     // recursive ancestor is still part of what the hub watches for.
-    let new_targets = ResolvedTargets::resolve(new_targets);
+    let new_targets = ResolvedTargets::here(new_targets);
+    // A target that could not be placed is absent from the desired set, so the
+    // arming loop below has nothing to fail on: coverage has to be denied here or
+    // the caller would read a silent drop as success.
+    let mut full_coverage = new_targets.is_complete();
     inner.set_scope(Scope::from_targets(&new_targets));
     let desired = dedup_targets(new_targets.into_inner());
     let is_armed = |list: &[(WatchTarget, PathBuf)], t: &WatchTarget, c: &PathBuf| {
         list.iter().any(|(at, ac)| at.recursive == t.recursive && ac == c)
     };
 
-    let mut full_coverage = true;
     let mut next_armed: Vec<(WatchTarget, PathBuf)> = Vec::new();
     for (target, canonical) in &desired {
         if is_armed(armed, target, canonical) {
@@ -1401,7 +1434,7 @@ mod tests {
         // the first everywhere and resolves the second on Windows. Without them the
         // test cannot tell the two ways of building the spelling apart.
         let declared = base.join("prefix").join("..").join(".").join("src");
-        let scope = Scope::from_targets(&ResolvedTargets::resolve(vec![WatchTarget::recursive(
+        let scope = Scope::from_targets(&ResolvedTargets::here(vec![WatchTarget::recursive(
             declared.clone(),
         )]));
 
@@ -1423,10 +1456,11 @@ mod tests {
     /// the backend takes an absolute path as given.
     #[test]
     fn targets_are_resolved_once_so_the_watcher_and_the_scope_cannot_disagree() {
-        let resolved = ResolvedTargets::resolve(vec![
+        let resolved = ResolvedTargets::here(vec![
             WatchTarget::recursive(PathBuf::from("src")),
             WatchTarget { path: PathBuf::from("."), recursive: false },
         ]);
+        assert!(resolved.is_complete());
         let resolved = resolved.as_slice();
 
         assert!(
@@ -1440,11 +1474,59 @@ mod tests {
 
         let absolute = std::env::current_dir().unwrap().join("src");
         assert!(
-            ResolvedTargets::resolve(vec![WatchTarget::recursive(absolute.clone())]).as_slice()[0]
+            ResolvedTargets::here(vec![WatchTarget::recursive(absolute.clone())]).as_slice()[0]
                 .path
                 == absolute,
             "an already-absolute target is left exactly as it was"
         );
+    }
+
+    /// One directory snapshot for the whole set, not one per target. A set spanning
+    /// a scan root and the workspace config directory that were placed against
+    /// different directories would watch the sources of one project and the
+    /// configuration of another, and nothing downstream could tell.
+    ///
+    /// The single read is a property of the signature — `resolve` cannot consult
+    /// process state at all — so this asserts the consequence: every relative target
+    /// lands under the one directory handed in, and absolute ones are left alone.
+    #[test]
+    fn every_relative_target_is_placed_against_the_one_directory_given() {
+        let base = PathBuf::from("/base");
+        let elsewhere = PathBuf::from("/elsewhere/extension");
+        let resolved = ResolvedTargets::resolve(
+            vec![
+                WatchTarget::recursive(PathBuf::from("src")),
+                WatchTarget { path: PathBuf::from("."), recursive: false },
+                WatchTarget::recursive(elsewhere.clone()),
+            ],
+            Some(&base),
+        );
+
+        assert!(resolved.is_complete());
+        let placed: Vec<&PathBuf> = resolved.as_slice().iter().map(|t| &t.path).collect();
+        assert_eq!(placed, vec![&base.join("src"), &base.join("."), &elsewhere]);
+    }
+
+    /// Without a readable current directory a relative target cannot be placed at
+    /// all. Carrying it through relative would hand the backend a path it resolves
+    /// against its own later read of the same process-wide state — the disagreement
+    /// between the armed tree and the described one that this whole boundary exists
+    /// to prevent. Dropping it is only safe if the set says so: a caller that read
+    /// the drop as success would report full coverage over a subtree nobody watches.
+    #[test]
+    fn a_relative_target_without_a_directory_is_dropped_and_the_set_says_so() {
+        let absolute = PathBuf::from("/base/src");
+        let resolved = ResolvedTargets::resolve(
+            vec![
+                WatchTarget::recursive(PathBuf::from("src")),
+                WatchTarget::recursive(absolute.clone()),
+            ],
+            None,
+        );
+
+        assert!(!resolved.is_complete(), "coverage cannot be claimed over a dropped target");
+        let placed: Vec<&PathBuf> = resolved.as_slice().iter().map(|t| &t.path).collect();
+        assert_eq!(placed, vec![&absolute], "what could be placed is still watched");
     }
 
     /// A rescan notice is not a change to the path it names — it says the event
