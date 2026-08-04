@@ -430,16 +430,21 @@ impl HubInner {
         // on opposite sides of the boundary. An event with NO paths is left alone:
         // an absent path is not evidence that the lost change was out of scope.
         //
-        // A rescan notice is left alone for the same reason and then some: it does
-        // not report a change to the path it names, it reports that the stream
-        // lapsed and nothing received so far can be trusted. Scope says nothing
-        // about what was lost. Inotify raises it without a path; FSEvents attaches
-        // one, and that path is commonly the workspace directory — outside every
-        // scan root in a nested layout.
+        // A rescan notice is handled before any of that: it does not report a change
+        // to the path it names, it reports that the stream lapsed and nothing
+        // received so far can be trusted. Scope says nothing about what was lost, so
+        // neither the filter nor the kind may swallow it — the flag is an attribute
+        // in its own right, and nothing in notify's contract ties it to one kind.
+        // Inotify raises it without a path; FSEvents attaches one, commonly the
+        // workspace directory, which in a nested layout lies outside every scan root.
+        if event.need_rescan() {
+            self.lock_acc().enter_rescan(false, DegradeReason::UnknownEvent);
+        }
+
         let scope = self.scope();
         let paths: Vec<PathBuf> =
             event.paths.iter().filter(|path| scope.may_record(path)).cloned().collect();
-        if !event.paths.is_empty() && paths.is_empty() && !event.need_rescan() {
+        if !event.paths.is_empty() && paths.is_empty() {
             self.wake.notify_all();
             return Vec::new();
         }
@@ -1282,15 +1287,29 @@ mod tests {
     /// would swallow it.
     #[test]
     fn a_rescan_notice_outside_the_scope_still_degrades() {
-        let project = nested_project();
-        let hub = project.hub();
+        // The flag is an attribute in its own right: nothing in the contract ties it
+        // to one kind, so every kind a backend may pair it with must degrade. Each
+        // kind gets its own hub — health does not reset between notices.
+        for kind in [
+            EventKind::Other,
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::File),
+            EventKind::Access(notify::event::AccessKind::Close(notify::event::AccessMode::Write)),
+        ] {
+            let project = nested_project();
+            let hub = project.hub();
+            let notice = Event::new(kind)
+                .add_path(project.workspace.join("vendor"))
+                .set_flag(notify::event::Flag::Rescan);
+            hub.ingest_for_test(Ok(notice));
 
-        let notice = Event::new(EventKind::Other)
-            .add_path(project.workspace.join("vendor"))
-            .set_flag(notify::event::Flag::Rescan);
-        hub.ingest_for_test(Ok(notice));
-
-        assert_eq!(hub.health(), Health::Degraded(DegradeReason::UnknownEvent));
+            assert_eq!(
+                hub.health(),
+                Health::Degraded(DegradeReason::UnknownEvent),
+                "a rescan notice carrying {kind:?} must still degrade"
+            );
+        }
     }
 
     /// An ordinary file outside every scan root is not a config file and not a
