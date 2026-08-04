@@ -310,15 +310,14 @@ struct Scope {
 /// Every spelling one watched directory can appear under in an event path.
 ///
 /// Three, not two. `declared` is what the caller wrote and what `watcher.watch`
-/// receives; `canonical` is what topology decisions rank by. `absolute` is the
-/// declared path merely made absolute, without resolving links — that is what a
-/// notify backend reports for a RELATIVE target, and it equals neither of the
-/// others once the path holds a `..` or crosses a symlink.
+/// receives; `canonical` is what topology decisions rank by. `as_reported` is the
+/// spelling a notify backend actually reports for a RELATIVE target, and it equals
+/// neither of the others once the path holds a `..` or crosses a symlink.
 #[derive(Debug, Clone)]
 struct Spellings {
     declared: PathBuf,
     canonical: PathBuf,
-    absolute: PathBuf,
+    as_reported: PathBuf,
 }
 
 impl Spellings {
@@ -326,18 +325,36 @@ impl Spellings {
         Self {
             declared: path.to_path_buf(),
             canonical: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
-            absolute: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+            as_reported: Self::as_notify_reports(path),
+        }
+    }
+
+    /// Exactly what every notify backend does to a relative target before arming
+    /// it: join it to the current directory and leave the components alone.
+    ///
+    /// `std::path::absolute` is NOT a substitute. On Windows it goes through
+    /// `GetFullPathNameW`, which resolves `..` away (`C:\foo\..\bar.rs` becomes
+    /// `C:\foo\bar.rs`), while the backend keeps the component — so the watched
+    /// path and the reported one would stop matching, and the whole tree would go
+    /// silent. On Unix it also drops `.` components, which the backend keeps.
+    fn as_notify_reports(path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            return path.to_path_buf();
+        }
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
         }
     }
 
     fn covers(&self, path: &Path) -> bool {
         path.starts_with(&self.declared)
             || path.starts_with(&self.canonical)
-            || path.starts_with(&self.absolute)
+            || path.starts_with(&self.as_reported)
     }
 
     fn is(&self, path: &Path) -> bool {
-        path == self.declared || path == self.canonical || path == self.absolute
+        path == self.declared || path == self.canonical || path == self.as_reported
     }
 }
 
@@ -1306,9 +1323,17 @@ mod tests {
     /// Every notify backend makes a relative watch target absolute before arming
     /// it, so events come back spelled from the current directory. Keeping only the
     /// declared (relative) and canonical spellings loses the whole tree whenever
-    /// those two differ from the absolute one — a `..` component, or a symlink on
+    /// those two differ from the reported one — a `..` component, or a symlink on
     /// the way. A plain relative root hides this: its canonical spelling already
     /// matches what the watcher reports.
+    ///
+    /// This case holds the behaviour but cannot, on Unix, distinguish the two ways
+    /// of building that third spelling: `std::path::absolute` differs from the
+    /// backend's plain join only in dropping `.` (which component comparison
+    /// ignores anyway) and in resolving `..` — and the latter it does on Windows
+    /// alone. So the mutation that swaps one for the other is only observable on a
+    /// Windows host; here the reasoning rests on the std docs and the backend
+    /// source, not on a red test.
     #[test]
     fn a_relative_target_stays_in_scope_when_events_arrive_absolute() {
         let cwd = std::env::current_dir().unwrap();
@@ -1317,14 +1342,20 @@ mod tests {
         std::fs::create_dir(dir.path().join("src")).unwrap();
 
         let base = dir.path().strip_prefix(&cwd).unwrap();
-        let declared = base.join("prefix").join("..").join("src");
+        // `.` alongside `..`: the backend keeps both, `std::path::absolute` drops
+        // the first everywhere and resolves the second on Windows. Without them the
+        // test cannot tell the two ways of building the spelling apart.
+        let declared = base.join("prefix").join("..").join(".").join("src");
         let scope = Scope::from_targets(&[WatchTarget::recursive(declared.clone())]);
 
+        // The reference is computed the way the backend computes it — joining to the
+        // current directory, components untouched.
+        let reported = cwd.join(&declared);
         assert!(
-            scope.may_record(&cwd.join(&declared).join("Module.bsl")),
+            scope.may_record(&reported.join("Module.bsl")),
             "the spelling the watcher actually reports is in scope"
         );
-        assert!(scope.may_walk(&cwd.join(&declared).join("CommonModules")));
+        assert!(scope.may_walk(&reported.join("CommonModules")));
     }
 
     /// A rescan notice is not a change to the path it names — it says the event
