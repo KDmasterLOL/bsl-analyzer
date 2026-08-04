@@ -303,8 +303,42 @@ impl Accumulator {
 /// tree declared through a symlink.
 #[derive(Debug, Default, Clone)]
 struct Scope {
-    scan_roots: Vec<(PathBuf, PathBuf)>,
-    config_dirs: Vec<(PathBuf, PathBuf)>,
+    scan_roots: Vec<Spellings>,
+    config_dirs: Vec<Spellings>,
+}
+
+/// Every spelling one watched directory can appear under in an event path.
+///
+/// Three, not two. `declared` is what the caller wrote and what `watcher.watch`
+/// receives; `canonical` is what topology decisions rank by. `absolute` is the
+/// declared path merely made absolute, without resolving links — that is what a
+/// notify backend reports for a RELATIVE target, and it equals neither of the
+/// others once the path holds a `..` or crosses a symlink.
+#[derive(Debug, Clone)]
+struct Spellings {
+    declared: PathBuf,
+    canonical: PathBuf,
+    absolute: PathBuf,
+}
+
+impl Spellings {
+    fn of(path: &Path) -> Self {
+        Self {
+            declared: path.to_path_buf(),
+            canonical: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+            absolute: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+        }
+    }
+
+    fn covers(&self, path: &Path) -> bool {
+        path.starts_with(&self.declared)
+            || path.starts_with(&self.canonical)
+            || path.starts_with(&self.absolute)
+    }
+
+    fn is(&self, path: &Path) -> bool {
+        path == self.declared || path == self.canonical || path == self.absolute
+    }
 }
 
 impl Scope {
@@ -314,23 +348,16 @@ impl Scope {
     /// a root that failed to arm is still part of the scope, and its events —
     /// arriving through a covering target — must not be dropped.
     fn from_targets(targets: &[WatchTarget]) -> Self {
-        let spellings = |t: &WatchTarget| {
-            (t.path.clone(), t.path.canonicalize().unwrap_or_else(|_| t.path.clone()))
-        };
+        let spellings = |t: &WatchTarget| Spellings::of(&t.path);
         Self {
             scan_roots: targets.iter().filter(|t| t.recursive).map(spellings).collect(),
             config_dirs: targets.iter().filter(|t| !t.recursive).map(spellings).collect(),
         }
     }
 
-    fn under_any(path: &Path, dirs: &[(PathBuf, PathBuf)]) -> bool {
-        dirs.iter()
-            .any(|(declared, canonical)| path.starts_with(declared) || path.starts_with(canonical))
-    }
-
     /// Whether a change to `path` may be walked and taken under recursive watch.
     fn may_walk(&self, path: &Path) -> bool {
-        Self::under_any(path, &self.scan_roots)
+        self.scan_roots.iter().any(|root| root.covers(path))
     }
 
     /// Whether a change to `path` may be recorded for consumers.
@@ -351,9 +378,7 @@ impl Scope {
             return false;
         }
         let Some(parent) = path.parent() else { return false };
-        self.config_dirs
-            .iter()
-            .any(|(declared, canonical)| parent == declared || parent == canonical)
+        self.config_dirs.iter().any(|dir| dir.is(parent))
     }
 }
 
@@ -1276,6 +1301,30 @@ mod tests {
             Health::Degraded(DegradeReason::UnknownEvent),
             "an event with no path proves nothing about scope"
         );
+    }
+
+    /// Every notify backend makes a relative watch target absolute before arming
+    /// it, so events come back spelled from the current directory. Keeping only the
+    /// declared (relative) and canonical spellings loses the whole tree whenever
+    /// those two differ from the absolute one — a `..` component, or a symlink on
+    /// the way. A plain relative root hides this: its canonical spelling already
+    /// matches what the watcher reports.
+    #[test]
+    fn a_relative_target_stays_in_scope_when_events_arrive_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        std::fs::create_dir(dir.path().join("prefix")).unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+
+        let base = dir.path().strip_prefix(&cwd).unwrap();
+        let declared = base.join("prefix").join("..").join("src");
+        let scope = Scope::from_targets(&[WatchTarget::recursive(declared.clone())]);
+
+        assert!(
+            scope.may_record(&cwd.join(&declared).join("Module.bsl")),
+            "the spelling the watcher actually reports is in scope"
+        );
+        assert!(scope.may_walk(&cwd.join(&declared).join("CommonModules")));
     }
 
     /// A rescan notice is not a change to the path it names — it says the event
