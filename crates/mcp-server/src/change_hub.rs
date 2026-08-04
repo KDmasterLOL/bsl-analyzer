@@ -721,9 +721,9 @@ impl WorkspaceChangeHub {
             watching: AtomicBool::new(false),
             channel_overflow: AtomicBool::new(false),
             watched_roots: Mutex::new(Vec::new()),
-            // Derived here, not on the hub thread: the watcher callback can fire
-            // before setup finishes, and an empty scope would silently drop those
-            // first events.
+            // A starting value only; the hub thread re-derives it right before
+            // arming, so the relative spellings are resolved against the same
+            // current directory the backend will use.
             scope: Mutex::new(Scope::from_targets(&targets)),
         });
         let (tx, rx) = std::sync::mpsc::sync_channel::<HubMsg>(CHANNEL_BOUND);
@@ -1032,7 +1032,14 @@ fn run_hub_thread(
     // spelling (a retargeted symlink would then claim coverage it lost). A target
     // whose `watch()` failed is deliberately NOT recorded, so a later re-arm onto
     // the same set retries it instead of assuming coverage.
+    // Re-derive the scope here, on the thread that is about to arm the watch: a
+    // relative target is resolved against the process-wide current directory, and
+    // resolving it on the caller's thread minutes earlier could disagree with what
+    // the backend resolves now. The window is not closed entirely — the current
+    // directory is shared mutable process state — but it shrinks to the gap between
+    // these two lines and the `watch` calls below.
     let mut armed: Vec<(WatchTarget, PathBuf)> = Vec::new();
+    inner.set_scope(Scope::from_targets(&targets));
     for (target, canonical) in dedup_targets(targets) {
         match watcher.watch(&target.path, target.mode()) {
             Ok(()) => {
