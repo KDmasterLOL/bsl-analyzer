@@ -389,15 +389,18 @@ mod resolved {
                     if target.path.is_absolute() {
                         return Some(target);
                     }
-                    match cwd {
-                        Some(cwd) => Some(WatchTarget {
-                            path: cwd.join(&target.path),
-                            recursive: target.recursive,
-                        }),
+                    let placed = cwd.map(|cwd| cwd.join(&target.path));
+                    // The join is checked, not trusted. On Windows a drive-relative
+                    // target (`C:src`) carries a prefix without a root, and `join`
+                    // REPLACES the base with it, so the result is still relative and
+                    // the backend would resolve it against its own later read of the
+                    // per-drive current directory — the very race being removed here.
+                    match placed.filter(|path| path.is_absolute()) {
+                        Some(path) => Some(WatchTarget { path, recursive: target.recursive }),
                         None => {
                             tracing::warn!(
                                 root = ?target.path,
-                                "workspace change hub cannot place a relative watch root: no current directory"
+                                "workspace change hub cannot place a relative watch root"
                             );
                             complete = false;
                             None
@@ -642,6 +645,16 @@ impl HubInner {
             "change hub could not extend watch to new subtree; drift there may be missed: {error}"
         );
         self.lock_acc().enter_rescan(false, DegradeReason::RewatchFailed);
+        self.wake.notify_all();
+    }
+
+    /// A target that could not be placed leaves a subtree unwatched under a path
+    /// nobody downstream can even name, unlike a root that merely failed to arm —
+    /// there the path is known and a later re-arm retries it. Health must say so,
+    /// or consumers coast on their reconcile interval believing the stream covers
+    /// everything asked for.
+    fn note_unplaced_targets(&self) {
+        self.lock_acc().enter_rescan(false, DegradeReason::WatcherSetup);
         self.wake.notify_all();
     }
 
@@ -1116,6 +1129,9 @@ fn run_hub_thread(
     // the scope cannot end up describing a different tree than the one armed.
     let mut armed: Vec<(WatchTarget, PathBuf)> = Vec::new();
     let targets = ResolvedTargets::here(targets);
+    if !targets.is_complete() {
+        inner.note_unplaced_targets();
+    }
     inner.set_scope(Scope::from_targets(&targets));
     for (target, canonical) in dedup_targets(targets.into_inner()) {
         match watcher.watch(&target.path, target.mode()) {
@@ -1181,6 +1197,9 @@ fn apply_rearm(
     // arming loop below has nothing to fail on: coverage has to be denied here or
     // the caller would read a silent drop as success.
     let mut full_coverage = new_targets.is_complete();
+    if !full_coverage {
+        inner.note_unplaced_targets();
+    }
     inner.set_scope(Scope::from_targets(&new_targets));
     let desired = dedup_targets(new_targets.into_inner());
     let is_armed = |list: &[(WatchTarget, PathBuf)], t: &WatchTarget, c: &PathBuf| {
@@ -1491,20 +1510,40 @@ mod tests {
     /// lands under the one directory handed in, and absolute ones are left alone.
     #[test]
     fn every_relative_target_is_placed_against_the_one_directory_given() {
-        let base = PathBuf::from("/base");
-        let elsewhere = PathBuf::from("/elsewhere/extension");
+        // Not a literal: `/base` carries no drive prefix, so Windows reads it as
+        // RELATIVE and the resolver would rightly drop it.
+        let base = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let (base, elsewhere) = (base.path(), elsewhere.path().join("extension"));
         let resolved = ResolvedTargets::resolve(
             vec![
                 WatchTarget::recursive(PathBuf::from("src")),
                 WatchTarget { path: PathBuf::from("."), recursive: false },
                 WatchTarget::recursive(elsewhere.clone()),
             ],
-            Some(&base),
+            Some(base),
         );
 
         assert!(resolved.is_complete());
         let placed: Vec<&PathBuf> = resolved.as_slice().iter().map(|t| &t.path).collect();
         assert_eq!(placed, vec![&base.join("src"), &base.join("."), &elsewhere]);
+    }
+
+    /// Placing a target is a claim that the backend will not resolve the path
+    /// again, and only an absolute path makes that claim true. A base that is
+    /// itself relative cannot produce one — nor can a Windows drive-relative
+    /// target, whose prefix REPLACES the base on join and leaves the result
+    /// relative to the per-drive current directory. The join is therefore checked
+    /// rather than assumed.
+    #[test]
+    fn a_target_that_stays_relative_after_the_join_is_dropped() {
+        let resolved = ResolvedTargets::resolve(
+            vec![WatchTarget::recursive(PathBuf::from("src"))],
+            Some(Path::new("relative/base")),
+        );
+
+        assert!(!resolved.is_complete());
+        assert!(resolved.as_slice().is_empty());
     }
 
     /// Without a readable current directory a relative target cannot be placed at
@@ -1515,7 +1554,10 @@ mod tests {
     /// the drop as success would report full coverage over a subtree nobody watches.
     #[test]
     fn a_relative_target_without_a_directory_is_dropped_and_the_set_says_so() {
-        let absolute = PathBuf::from("/base/src");
+        // A real temporary directory, not a `/base/src` literal: on Windows a path
+        // without a drive prefix is relative, and the assertion would invert.
+        let dir = tempfile::tempdir().unwrap();
+        let absolute = dir.path().join("src");
         let resolved = ResolvedTargets::resolve(
             vec![
                 WatchTarget::recursive(PathBuf::from("src")),
