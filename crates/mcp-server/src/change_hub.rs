@@ -75,6 +75,50 @@ pub(crate) enum DegradeReason {
     Rearmed,
 }
 
+/// Run on the hub thread immediately before the watch is armed. `None` in production.
+type BeforeArm = Arc<dyn Fn() + Send + Sync>;
+
+/// Holds a hub's thread short of arming until released.
+#[cfg(test)]
+pub(crate) struct HubHold {
+    held: Mutex<bool>,
+    released: Condvar,
+}
+
+#[cfg(test)]
+impl HubHold {
+    fn new() -> Self {
+        Self { held: Mutex::new(true), released: Condvar::new() }
+    }
+
+    fn wait(&self) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        while *held {
+            held = self.released.wait(held).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        *self.held.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        self.released.notify_all();
+    }
+}
+
+/// What a consumer waiting for the watch has learnt when its wait returned.
+///
+/// Three answers, because two collapse the only distinction that matters to a caller
+/// deciding whether to wait again: a hub that will never arm and a hub that has not armed
+/// YET both read as "not armed", and a consumer that treats the second as the first gives
+/// up on a workspace whose initial walk simply outlasted one slice of patience.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WatchReadiness {
+    Armed,
+    /// Permanent: the hub reported setup failure and will not arm.
+    Failed,
+    /// The wait expired with setup still in flight. Asking again is meaningful.
+    NotYet,
+}
+
 /// Observable health of the hub. `WatcherSetup` is permanent; every other
 /// degradation is transient and clears back to `Healthy` once all live cursors
 /// have acknowledged the reconcile request.
@@ -848,6 +892,30 @@ impl WorkspaceChangeHub {
         Self::start_with_capacity(targets, DEFAULT_CAPACITY, COVERAGE_TICK_PERIOD)
     }
 
+    /// A hub whose thread the operating system refused to start.
+    #[cfg(test)]
+    pub(crate) fn start_with_unstartable_thread(targets: Vec<WatchTarget>) -> Self {
+        Self::start_seamed(targets, DEFAULT_CAPACITY, COVERAGE_TICK_PERIOD, true, None)
+    }
+
+    /// A hub held just short of arming until the returned handle is released, so a
+    /// consumer can be observed waiting on a hub that is alive and not yet ready. Once
+    /// released it arms for real, which is what makes it a control and not a stub: the
+    /// consumer's work after the wait has to actually happen.
+    #[cfg(test)]
+    pub(crate) fn start_targets_held(targets: Vec<WatchTarget>) -> (Self, Arc<HubHold>) {
+        let hold = Arc::new(HubHold::new());
+        let gate = Arc::clone(&hold);
+        let hub = Self::start_seamed(
+            targets,
+            DEFAULT_CAPACITY,
+            COVERAGE_TICK_PERIOD,
+            false,
+            Some(Arc::new(move || gate.wait())),
+        );
+        (hub, hold)
+    }
+
     /// [`Self::start_targets`] with a tick interval a test can actually wait for.
     #[cfg(test)]
     pub(crate) fn start_targets_with_period(targets: Vec<WatchTarget>, period: Duration) -> Self {
@@ -855,6 +923,24 @@ impl WorkspaceChangeHub {
     }
 
     fn start_with_capacity(targets: Vec<WatchTarget>, cap: usize, tick_period: Duration) -> Self {
+        Self::start_seamed(targets, cap, tick_period, false, None)
+    }
+
+    /// The hub with its two startup seams exposed. Production passes `false` and `None`.
+    ///
+    /// Both exist because the states they produce cannot be provoked on demand and are
+    /// the states no other door leads to. `refuse_spawn`: an operating system refusing a
+    /// thread — every other permanent failure is reported through a different path, so
+    /// the wiring that turns THIS one into a report is otherwise unreachable.
+    /// `before_arm`: a hub alive, not yet armed and not failed — what a huge initial walk
+    /// looks like, and the only readiness answer that means "ask again later".
+    fn start_seamed(
+        targets: Vec<WatchTarget>,
+        cap: usize,
+        tick_period: Duration,
+        refuse_spawn: bool,
+        before_arm: Option<BeforeArm>,
+    ) -> Self {
         let placed = ResolvedTargets::here(targets.clone());
         let inner = Arc::new(HubInner {
             acc: Mutex::new(Accumulator::new(cap)),
@@ -878,10 +964,25 @@ impl WorkspaceChangeHub {
 
         let thread_inner = Arc::clone(&inner);
         let event_tx = tx.clone();
-        let thread = std::thread::Builder::new()
-            .name("bsl-workspace-change-hub".to_owned())
-            .spawn(move || run_hub_thread(thread_inner, targets, event_tx, rx))
-            .ok();
+        let spawned = if refuse_spawn {
+            Err(std::io::Error::other("hub thread spawn refused by test seam"))
+        } else {
+            std::thread::Builder::new()
+                .name("bsl-workspace-change-hub".to_owned())
+                .spawn(move || run_hub_thread(thread_inner, targets, event_tx, rx, before_arm))
+        };
+        // A hub whose thread never started arms nothing, ever. Dropping the error would
+        // leave `watching` false and `setup_failed` unset — the one state that reads as
+        // "still starting", so every consumer would wait out its whole readiness budget
+        // and then take the slow path anyway, having learnt nothing.
+        let thread = match spawned {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                tracing::error!("workspace change hub thread could not start: {error}");
+                inner.mark_setup_failed();
+                None
+            }
+        };
 
         Self { inner, control: tx, thread: Arc::new(Mutex::new(thread)) }
     }
@@ -1079,22 +1180,31 @@ impl WorkspaceChangeHub {
         self.inner.watching.load(Ordering::SeqCst)
     }
 
-    /// Block until setup settles (watch armed or failed) or `timeout` elapses.
-    /// Returns whether the watch is armed. Sinks call this instead of a bare
-    /// `is_watching` check so they do not race the asynchronous setup.
-    pub(crate) fn wait_until_watching(&self, timeout: Duration) -> bool {
+    /// Block until setup settles (watch armed or failed) or `timeout` elapses, and say
+    /// WHICH of the three happened. Sinks call this instead of a bare `is_watching`
+    /// check so they do not race the asynchronous setup.
+    pub(crate) fn watch_readiness(&self, timeout: Duration) -> WatchReadiness {
         let deadline = Instant::now() + timeout;
         let mut acc = self.inner.lock_acc();
         loop {
             if self.inner.watching.load(Ordering::SeqCst) {
-                return true;
+                return WatchReadiness::Armed;
             }
             if acc.setup_failed {
-                return false;
+                return WatchReadiness::Failed;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return self.inner.watching.load(Ordering::SeqCst);
+                // Both re-read at the deadline: either can have settled while the last
+                // wait was expiring, and reporting `NotYet` over a settled hub would
+                // send the caller back to wait for something that already happened.
+                return if self.inner.watching.load(Ordering::SeqCst) {
+                    WatchReadiness::Armed
+                } else if acc.setup_failed {
+                    WatchReadiness::Failed
+                } else {
+                    WatchReadiness::NotYet
+                };
             }
             let (guard, _) = self
                 .inner
@@ -1103,6 +1213,14 @@ impl WorkspaceChangeHub {
                 .unwrap_or_else(|poison| poison.into_inner());
             acc = guard;
         }
+    }
+
+    /// Whether the watch armed within `timeout`. Kept alongside the three-state form
+    /// because it is what every test asks: a test drives a hub that arms in milliseconds
+    /// and has nothing to decide between "not yet" and "never".
+    #[cfg(test)]
+    pub(crate) fn wait_until_watching(&self, timeout: Duration) -> bool {
+        self.watch_readiness(timeout) == WatchReadiness::Armed
     }
 
     /// Block until the accumulator advances past `since` or `timeout` elapses,
@@ -1463,6 +1581,7 @@ fn run_hub_thread(
     targets: Vec<WatchTarget>,
     event_tx: std::sync::mpsc::SyncSender<HubMsg>,
     rx: std::sync::mpsc::Receiver<HubMsg>,
+    before_arm: Option<BeforeArm>,
 ) {
     let callback_inner = Arc::clone(&inner);
     let watcher = RecommendedWatcher::new(
@@ -1509,6 +1628,9 @@ fn run_hub_thread(
     // tree the watcher ended up on, so a retarget racing the arming pass would read as
     // agreement forever; taken before, the same race costs one extra re-arm.
     let mut snapshot = snapshot_of(&declared, &Snapshot::new());
+    if let Some(before_arm) = before_arm {
+        before_arm();
+    }
     for (target, canonical) in dedup_targets(targets.into_inner()) {
         match watcher.watch(&target.path, target.mode()) {
             Ok(()) => {
@@ -2442,6 +2564,44 @@ mod tests {
             "a repeat of a failure already reported buys the consumers nothing"
         );
         readable(&b);
+    }
+
+    /// A hub whose thread never started arms nothing and never will, and it is the one
+    /// permanent failure that reaches no other reporting path: dropping the spawn error
+    /// leaves the hub looking like one that is merely still starting, so every consumer
+    /// waits out its whole readiness budget before falling back to the slow path it was
+    /// entitled to immediately.
+    #[test]
+    fn a_hub_whose_thread_never_started_reports_failure_at_once() {
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start_with_unstartable_thread(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+
+        let asked = Instant::now();
+        assert_eq!(hub.watch_readiness(Duration::from_secs(30)), WatchReadiness::Failed);
+        assert!(
+            asked.elapsed() < Duration::from_secs(5),
+            "the answer is the failure itself, not the wait expiring"
+        );
+        assert_eq!(hub.health(), Health::Degraded(DegradeReason::WatcherSetup));
+    }
+
+    /// "Not armed" is two states, and only one of them is worth waiting on. A hub still
+    /// walking a large tree must be distinguishable from one that failed, or a consumer
+    /// has to choose between abandoning the first and hanging on the second.
+    #[test]
+    fn a_hub_still_starting_says_not_yet_and_arms_once_released() {
+        let dir = tempdir().unwrap();
+        let (hub, hold) = WorkspaceChangeHub::start_targets_held(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+
+        assert_eq!(hub.watch_readiness(Duration::from_millis(50)), WatchReadiness::NotYet);
+        assert_eq!(hub.health(), Health::Healthy, "nothing has gone wrong yet");
+
+        hold.release();
+        assert_eq!(hub.watch_readiness(Duration::from_secs(5)), WatchReadiness::Armed);
     }
 
     /// Two aliases of one directory canonicalize the same, so the declaration dropping the

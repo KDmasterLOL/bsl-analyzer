@@ -14,7 +14,47 @@ use std::time::Duration;
 pub(super) static FORCE_REWALK_WALK_ERROR: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// One slice of waiting for the watch to arm, and the whole budget for it.
+///
+/// The slice is only how often the wait comes up for air; the budget is what actually
+/// bounds it. Ten minutes is far more than the initial walk of a large configuration
+/// takes and still finite — a sink that waited forever would be a thread leaked for the
+/// life of the daemon, and one that gave up after a single slice abandons the workspace
+/// whose walk merely outlasted a minute.
+const WATCH_READY_SLICE: Duration = Duration::from_secs(60);
+const WATCH_READY_BUDGET: Duration = Duration::from_secs(600);
+
 impl SharedState {
+    /// Wait for the watch to arm, and say whether it did.
+    ///
+    /// Three answers, three different decisions. `Failed` is permanent, so waiting out
+    /// the budget over it would only delay the fallback everyone has already taken.
+    /// `NotYet` says nothing has gone wrong yet — a long initial walk looks exactly like
+    /// this — so the wait resumes until the budget is spent.
+    fn await_watch(hub: &WorkspaceChangeHub, slice: Duration, budget: Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match hub.watch_readiness(slice) {
+                crate::change_hub::WatchReadiness::Armed => return true,
+                crate::change_hub::WatchReadiness::Failed => {
+                    tracing::warn!(
+                        "workspace change hub could not be set up; search overlay stays in scan mode"
+                    );
+                    return false;
+                }
+                crate::change_hub::WatchReadiness::NotYet => {
+                    if std::time::Instant::now() >= deadline {
+                        tracing::warn!(
+                            budget_secs = budget.as_secs(),
+                            "workspace change hub did not arm within the budget; search overlay stays in scan mode for this run of the daemon"
+                        );
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
     /// Drive the search overlay from the change hub. Search is one sink among
     /// several: it drains its own cursor and applies the shared drift classification
     /// (stateless policy) — `.bsl` bodies marked dirty, deleted `.bsl` removed from the
@@ -33,10 +73,7 @@ impl SharedState {
             .spawn(move || {
                 // Setup is asynchronous, so wait for it to settle rather than racing
                 // a bare `is_watching` check that would bail before the watch arms.
-                if !hub.wait_until_watching(Duration::from_secs(60)) {
-                    tracing::warn!(
-                        "workspace change hub is not watching; search overlay stays in scan mode"
-                    );
+                if !Self::await_watch(&hub, WATCH_READY_SLICE, WATCH_READY_BUDGET) {
                     return;
                 }
 
@@ -622,6 +659,93 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    /// A workspace whose initial walk outlasts one slice of patience is an ordinary large
+    /// configuration, not a failure — and the sink that gave up on it left the search
+    /// overlay in scan mode for the whole life of the daemon. What happens after the wait
+    /// is unchanged and covered by `search_sink_marks_only_bsl_paths_dirty`; what this
+    /// pins is that the wait now reaches it.
+    #[test]
+    fn the_search_sink_keeps_waiting_while_the_hub_is_still_starting() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let (hub, hold) = WorkspaceChangeHub::start_targets_held(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+
+        let releaser = {
+            let hold = Arc::clone(&hold);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                hold.release();
+            })
+        };
+        let started = Instant::now();
+        let armed =
+            SharedState::await_watch(&hub, Duration::from_millis(5), Duration::from_secs(30));
+        let waited = started.elapsed();
+        releaser.join().unwrap();
+
+        assert!(armed, "a hub that is merely slow to start must not be given up on");
+        assert!(
+            waited >= Duration::from_millis(100),
+            "the wait has to have crossed several expired slices to prove it resumed: {waited:?}"
+        );
+    }
+
+    /// The budget is what bounds the wait — not a count of slices, which is what a naive
+    /// "try twice" implementation would bound it by and which no test of mere termination
+    /// can tell apart. Measured with a slice far shorter than the budget, so an
+    /// implementation stopping after any small number of slices returns far too early.
+    #[test]
+    fn the_search_sink_gives_up_on_the_budget_and_not_before() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let (hub, hold) = WorkspaceChangeHub::start_targets_held(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+
+        let started = Instant::now();
+        let armed =
+            SharedState::await_watch(&hub, Duration::from_millis(5), Duration::from_millis(400));
+        let waited = started.elapsed();
+        hold.release();
+
+        assert!(!armed, "a hub that never arms must not hold the thread for ever");
+        assert!(
+            waited >= Duration::from_millis(400),
+            "giving up before the budget abandons a workspace that was merely slow: {waited:?}"
+        );
+        assert!(waited < Duration::from_secs(10), "and it must give up: {waited:?}");
+    }
+
+    /// A permanent failure is answered at once. Waiting out a ten-minute budget over a hub
+    /// that has already said it will never arm only delays the fallback.
+    #[test]
+    fn the_search_sink_does_not_wait_out_a_permanent_failure() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start_with_unstartable_thread(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+
+        let started = Instant::now();
+        assert!(!SharedState::await_watch(
+            &hub,
+            Duration::from_millis(50),
+            Duration::from_secs(600)
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a permanent failure is not something to spend a budget on"
+        );
+    }
 
     #[test]
     fn search_sink_marks_only_bsl_paths_dirty() {
