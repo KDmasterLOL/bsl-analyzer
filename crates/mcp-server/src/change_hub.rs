@@ -650,9 +650,16 @@ impl HubInner {
 
     /// A target that could not be placed leaves a subtree unwatched under a path
     /// nobody downstream can even name, unlike a root that merely failed to arm —
-    /// there the path is known and a later re-arm retries it. Health must say so,
-    /// or consumers coast on their reconcile interval believing the stream covers
-    /// everything asked for.
+    /// there the path is known and a later re-arm retries it.
+    ///
+    /// What this buys is ONE forced reconcile, not standing ill health: `drain`
+    /// clears the reason once every cursor has acknowledged that round, while the
+    /// dropped target stays dropped. Standing ill health has exactly one carrier
+    /// here, `setup_failed`, and it means the hub is unusable — spending it on a
+    /// partial drop would cost every consumer the event stream it still has, to
+    /// describe a subtree the periodic reconcile already covers. So: nothing
+    /// derived before the drop is trusted, and coverage afterwards is the
+    /// reconciler's, the same bargain an unarmable root gets.
     fn note_unplaced_targets(&self) {
         self.lock_acc().enter_rescan(false, DegradeReason::WatcherSetup);
         self.wake.notify_all();
@@ -1514,14 +1521,18 @@ mod tests {
         // RELATIVE and the resolver would rightly drop it.
         let base = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
-        let (base, elsewhere) = (base.path(), elsewhere.path().join("extension"));
+        // Canonicalized, not merely temporary: the system temp directory is
+        // whatever `TMPDIR` says, and a test that assumes it absolute would be
+        // testing the environment instead of the resolver.
+        let base = base.path().canonicalize().unwrap();
+        let elsewhere = elsewhere.path().canonicalize().unwrap().join("extension");
         let resolved = ResolvedTargets::resolve(
             vec![
                 WatchTarget::recursive(PathBuf::from("src")),
                 WatchTarget { path: PathBuf::from("."), recursive: false },
                 WatchTarget::recursive(elsewhere.clone()),
             ],
-            Some(base),
+            Some(&base),
         );
 
         assert!(resolved.is_complete());
@@ -1557,7 +1568,7 @@ mod tests {
         // A real temporary directory, not a `/base/src` literal: on Windows a path
         // without a drive prefix is relative, and the assertion would invert.
         let dir = tempfile::tempdir().unwrap();
-        let absolute = dir.path().join("src");
+        let absolute = dir.path().canonicalize().unwrap().join("src");
         let resolved = ResolvedTargets::resolve(
             vec![
                 WatchTarget::recursive(PathBuf::from("src")),
