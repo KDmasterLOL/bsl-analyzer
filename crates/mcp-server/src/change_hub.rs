@@ -193,12 +193,14 @@ impl Accumulator {
         self.next_seq - 1
     }
 
-    fn subscribe(&mut self) -> u64 {
+    fn subscribe(&mut self, force_rescan: bool) -> u64 {
         let id = self.next_cursor_id;
         self.next_cursor_id += 1;
         // A cursor born during an active rescan window must still be told to
-        // reconcile; one born while healthy starts clean.
-        let pending_rescan = self.degrade_reason.is_some();
+        // reconcile; one born while healthy starts clean. `force_rescan` carries the
+        // standing reasons the window does not — a declared root nothing is watching
+        // outlives the window that announced it.
+        let pending_rescan = force_rescan || self.degrade_reason.is_some();
         self.cursors.insert(id, CursorState { pos: self.max_seq(), pending_rescan });
         id
     }
@@ -514,6 +516,12 @@ struct HubInner {
     /// declaration change from a repeat. Compared by raw spelling AND mode: an alias
     /// swap keeps the canonical path and would otherwise pass unnoticed.
     declared_published: Mutex<Vec<WatchTarget>>,
+    /// Declared targets that exist and are not watched. DERIVED from the declaration and
+    /// the armed set on every change to either, never accumulated: a target can leave the
+    /// declaration without ever arming (a topology rebuild drops an extension, and a
+    /// re-arm only ever arms what is now desired), and an accumulated set would keep the
+    /// hub degraded for the life of the daemon over a root nobody declares any more.
+    blind_targets: Mutex<Vec<PathBuf>>,
 }
 
 impl HubInner {
@@ -683,6 +691,11 @@ impl HubInner {
     fn note_unplaced_targets(&self) {
         self.lock_acc().enter_rescan(false, DegradeReason::WatcherSetup);
         self.wake.notify_all();
+    }
+
+    /// Is anything declared, present and unwatched right now?
+    fn is_partially_blind(&self) -> bool {
+        !self.blind_targets.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
     }
 
     fn mark_setup_failed(&self) {
@@ -859,6 +872,7 @@ impl WorkspaceChangeHub {
             // Placed, like every later declaration: the record is compared against
             // those, and a raw spelling would never equal its own placed form.
             declared_published: Mutex::new(placed.as_slice().to_vec()),
+            blind_targets: Mutex::new(Vec::new()),
         });
         let (tx, rx) = std::sync::mpsc::sync_channel::<HubMsg>(CHANNEL_BOUND);
 
@@ -1005,9 +1019,14 @@ impl WorkspaceChangeHub {
 
     /// Register a cursor positioned at "everything up to now already seen": a fresh
     /// subscriber only receives changes that land after it subscribes (plus a
-    /// pending reconcile flag if it subscribes during an open rescan window).
+    /// pending reconcile flag if it subscribes during an open rescan window, or while
+    /// a declared root is unwatched — the window closes as soon as the cursors that
+    /// existed at the time acknowledge it, and the blindness it announced does not).
     pub(crate) fn subscribe(&self) -> SinkCursor {
-        SinkCursor { id: self.inner.lock_acc().subscribe() }
+        // Read before taking the accumulator, so no path holds one of the two locks
+        // while asking for the other.
+        let blind = self.inner.is_partially_blind();
+        SinkCursor { id: self.inner.lock_acc().subscribe(blind) }
     }
 
     /// Drop a cursor and reclaim any entries it was the last to hold back.
@@ -1022,8 +1041,21 @@ impl WorkspaceChangeHub {
         self.inner.lock_acc().drain(cursor.id)
     }
 
+    /// Reported health: the accumulator's transient reason, or — once that has been
+    /// acknowledged away — the standing fact that something declared is unwatched.
+    ///
+    /// The transient reason wins while it lasts because it is the more urgent of the
+    /// two: it names an unread window, whereas blindness names a subtree the consumer's
+    /// own periodic scan already covers. Nothing here holds one lock while taking the
+    /// other; the accumulator guard is released by the end of its own statement.
     pub(crate) fn health(&self) -> Health {
-        self.inner.lock_acc().health()
+        let health = self.inner.lock_acc().health();
+        match health {
+            Health::Healthy if self.inner.is_partially_blind() => {
+                Health::Degraded(DegradeReason::RewatchFailed)
+            }
+            health => health,
+        }
     }
 
     pub(crate) fn events_seen(&self) -> u64 {
@@ -1331,6 +1363,60 @@ fn cover_differs_from_armed(
     key(cover) != key(armed)
 }
 
+/// The declared targets that exist and are not watched, with the canonical path the
+/// cover ranks them by.
+///
+/// Derived from the cover, so a target that is simply not there is not blind: nothing can
+/// watch what does not exist, and its creation moves a fingerprint, which the periodic
+/// check already answers with a full re-arm. What is left is the target the watcher
+/// refused — a permission, an exhausted inotify limit — which stats and canonicalizes
+/// perfectly while its subtree goes unobserved.
+fn blind_targets(
+    declared: &[WatchTarget],
+    snapshot: &Snapshot,
+    armed: &[(WatchTarget, PathBuf)],
+) -> Vec<(WatchTarget, PathBuf)> {
+    cover_from_snapshot(declared, snapshot)
+        .into_iter()
+        .filter(|(target, canonical)| {
+            !armed.iter().any(|(at, ac)| at.recursive == target.recursive && ac == canonical)
+        })
+        .collect()
+}
+
+/// Re-derive the blind set and report it to consumers ON THE TRANSITION into blindness.
+///
+/// Called wherever the declaration or the armed set can have moved, which is what makes
+/// membership an intersection with the CURRENT declaration rather than a growing list.
+///
+/// Reporting only the transition is what makes retrying affordable: every reconcile
+/// request costs each consumer a full tree walk, so a target re-tried each period would
+/// buy a walk each period for as long as the obstacle lasts — the precise cost the retry
+/// exists to avoid. What the repeats do not report, the standing ill health derived from
+/// the set says instead, and unlike a reconcile window it is not cleared by `drain`.
+fn refresh_blind_targets(
+    inner: &HubInner,
+    declared: &[WatchTarget],
+    snapshot: &Snapshot,
+    armed: &[(WatchTarget, PathBuf)],
+) -> Vec<(WatchTarget, PathBuf)> {
+    let blind = blind_targets(declared, snapshot, armed);
+    let newly = {
+        let mut published = inner.blind_targets.lock().unwrap_or_else(PoisonError::into_inner);
+        let newly = blind.iter().any(|(target, _)| !published.contains(&target.path));
+        *published = blind.iter().map(|(target, _)| target.path.clone()).collect();
+        newly
+    };
+    if newly {
+        for (target, _) in &blind {
+            tracing::warn!(root = ?target.path, "workspace change hub is not watching a declared root; changes under it are found only by a reconcile");
+        }
+        inner.lock_acc().enter_rescan(false, DegradeReason::RewatchFailed);
+        inner.wake.notify_all();
+    }
+    blind
+}
+
 /// Reduce a set of watch targets to the minimal cover: drop any target nested under
 /// a RECURSIVE target (a non-recursive ancestor covers only its direct children, so
 /// it absorbs nothing), and collapse exact duplicates — a recursive duplicate wins
@@ -1441,6 +1527,9 @@ fn run_hub_thread(
         return;
     }
     inner.publish_watched_roots(&armed);
+    // Before readiness is announced, so a consumer that waits for it and subscribes is
+    // told to reconcile the window it was never watching over.
+    refresh_blind_targets(&inner, &declared, &snapshot, &armed);
     inner.mark_watching();
 
     // The deadline is checked BEFORE reading a message, not derived from a receive
@@ -1477,6 +1566,9 @@ fn run_hub_thread(
                 declared = resolved.as_slice().to_vec();
                 snapshot = snapshot_of(&declared, &snapshot);
                 let full_coverage = apply_rearm(&inner, &mut watcher, &mut armed, resolved);
+                // Before the acknowledgement: the requester is released by it and may read
+                // health immediately.
+                refresh_blind_targets(&inner, &declared, &snapshot, &armed);
                 // `try_send`, not `send`: the requester may have timed out and
                 // dropped its receiver; the hub thread must never block on it.
                 let _ = ack.try_send(full_coverage);
@@ -1527,10 +1619,56 @@ fn coverage_tick(
         // a test that waits for this counter and then makes a one-shot change would
         // otherwise make it inside the window where the new target is not armed yet.
         inner.rearms.fetch_add(1, Ordering::Relaxed);
+    } else {
+        retry_blind_targets(inner, watcher, armed, declared, snapshot);
     }
+    refresh_blind_targets(inner, declared, snapshot, armed);
     // Counted LAST, after every effect above is visible: a test that waits for this
     // counter is told the tick finished, not that it started.
     inner.ticks.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Try again on the declared targets the watcher does not hold, without disturbing the
+/// ones it does.
+///
+/// A separate path, not a re-arm: the obstacles that leave a target unwatched — a denied
+/// permission, an exhausted inotify limit — clear without touching a single fingerprint,
+/// so the coverage check sees nothing to react to and would never retry at all. Going
+/// through `apply_rearm` instead would be worse than useless here: it unwatches, and a
+/// recursive `unwatch` of an overlapping root strips descendant registrations, so a
+/// periodic re-arm would keep paying that risk for a target that is merely missing.
+/// This path only ever ADDS, so it takes nothing away from what is already covered.
+///
+/// Success is new coverage after a blind window — everything under the target changed
+/// unobserved for as long as it stayed blind — and is worth exactly one reconcile for the
+/// whole batch. Failure leaves nothing at all behind: no reconcile, no publication, no
+/// repeat of a report consumers already have.
+fn retry_blind_targets(
+    inner: &HubInner,
+    watcher: &mut RecommendedWatcher,
+    armed: &mut Vec<(WatchTarget, PathBuf)>,
+    declared: &[WatchTarget],
+    snapshot: &Snapshot,
+) {
+    let mut armed_any = false;
+    for (target, canonical) in blind_targets(declared, snapshot, armed) {
+        match watcher.watch(&target.path, target.mode()) {
+            Ok(()) => {
+                tracing::info!(root = ?target.path, recursive = target.recursive, "workspace change hub watching root (retry)");
+                armed.push((target, canonical));
+                armed_any = true;
+            }
+            Err(error) => {
+                tracing::debug!(root = ?target.path, "workspace change hub retry still cannot watch root: {error}")
+            }
+        }
+    }
+    if !armed_any {
+        return;
+    }
+    inner.publish_watched_roots(armed);
+    inner.lock_acc().enter_rescan(false, DegradeReason::Rearmed);
+    inner.wake.notify_all();
 }
 
 /// Take a new declared set that the caller believes needs no re-arming.
@@ -1573,6 +1711,10 @@ fn apply_declaration(
         // every other placement point, rather than left to look like agreement.
         inner.note_unplaced_targets();
     }
+    // On BOTH branches. A declaration that re-arms nothing is exactly how a blind target
+    // leaves the set: absent from the cover, so dropping it moves no coverage at all, and
+    // a set reconciled only inside `apply_rearm` would hold ill health over it forever.
+    refresh_blind_targets(inner, declared, snapshot, armed);
 }
 
 /// Re-point the watch set at `new_targets`, on the hub thread. Additions are armed
@@ -1622,7 +1764,6 @@ fn apply_rearm(
             }
             Err(error) => {
                 tracing::warn!(root = ?target.path, "workspace change hub failed to watch new root: {error}");
-                inner.note_rewatch_failed(&target.path, &error);
                 full_coverage = false;
             }
         }
@@ -1648,7 +1789,7 @@ fn apply_rearm(
         match watcher.watch(&target.path, target.mode()) {
             Ok(()) => kept.push((target, canonical)),
             Err(error) => {
-                inner.note_rewatch_failed(&target.path, &error);
+                tracing::warn!(root = ?target.path, "workspace change hub lost a kept root on re-arm: {error}");
                 full_coverage = false;
             }
         }
@@ -1998,6 +2139,309 @@ mod tests {
 
         readable(&b);
         hub.shutdown();
+    }
+
+    /// One live root and one the watcher genuinely cannot take. The period is an hour, so
+    /// every tick in the tests below is one the test asked for and nothing happens between
+    /// two assertions on its own.
+    #[cfg(unix)]
+    fn partly_blind_hub() -> (tempfile::TempDir, PathBuf, PathBuf, WorkspaceChangeHub) {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        unreadable(&b);
+        let hub = WorkspaceChangeHub::start_targets_with_period(
+            vec![WatchTarget::recursive(a.clone()), WatchTarget::recursive(b.clone())],
+            Duration::from_secs(3600),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the live root still arms");
+        (dir, a, b, hub)
+    }
+
+    /// A root the watch could not take at startup must be retried, and the retry has to
+    /// come from the hub itself: nothing outside re-declares a topology that did not
+    /// change, and the obstacle — a permission, an inotify limit — clears without
+    /// touching a single fingerprint, so the coverage check sees no movement to react to.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_the_watch_could_not_take_at_start_is_armed_by_a_later_tick() {
+        let (_dir, _a, b, hub) = partly_blind_hub();
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+
+        readable(&b);
+        assert!(hub.tick_now(Duration::from_secs(5)));
+
+        std::fs::write(b.join("Module.bsl"), "x").unwrap();
+        assert!(
+            eventually(Duration::from_secs(10), || {
+                entry_names(&hub.drain(cursor)).iter().any(|n| n.ends_with("Module.bsl"))
+            }),
+            "the retry must arm the root, and changes under it must then arrive"
+        );
+    }
+
+    /// The first failure has to reach consumers, and health alone does not prove it did:
+    /// standing ill health is derived from the unwatched target, so an implementation
+    /// that only computed it — never asking anyone to reconcile — would satisfy a health
+    /// assertion while the window between startup and this subscription stayed unread.
+    #[cfg(unix)]
+    #[test]
+    fn the_first_root_the_watch_could_not_take_is_reported_at_once() {
+        let (_dir, _a, b, hub) = partly_blind_hub();
+        assert_eq!(
+            hub.health(),
+            Health::Degraded(DegradeReason::RewatchFailed),
+            "a root nothing watches is not health"
+        );
+        let cursor = hub.subscribe();
+        assert!(
+            hub.drain(cursor).rescan_required,
+            "the blind window between startup and this subscription is nobody else's to read"
+        );
+        readable(&b);
+    }
+
+    /// Ill health lasts as long as the obstacle, not as long as the reconcile window.
+    /// `drain` clears the reason the moment every cursor has acknowledged it, so an
+    /// obstacle that does not block WRITES — an exhausted inotify limit on a readable,
+    /// writable directory — would leave the hub calling itself healthy over a subtree it
+    /// cannot see. A consumer that subscribes after that window has to learn it too.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_stays_unwatchable_keeps_the_hub_unhealthy() {
+        let (_dir, _a, b, hub) = partly_blind_hub();
+        let cursor = hub.subscribe();
+        assert!(hub.drain(cursor).rescan_required);
+        assert!(!hub.drain(cursor).rescan_required, "the window is closed");
+
+        assert_eq!(
+            hub.health(),
+            Health::Degraded(DegradeReason::RewatchFailed),
+            "the root is still unwatched, whatever the cursors have acknowledged"
+        );
+        let late = hub.subscribe();
+        assert!(
+            hub.drain(late).rescan_required,
+            "a consumer arriving after the window still has the blind subtree to reconcile"
+        );
+        readable(&b);
+    }
+
+    /// Arming a root that was blind is new coverage, and everything under it changed
+    /// unobserved for as long as it stayed blind — so it is worth exactly one reconcile.
+    /// The drain-clean before the measurement is what makes this able to fail: without
+    /// it the flag from the FIRST failure, inherited by a subscription inside the open
+    /// window, would pass for the one the retry is supposed to raise.
+    #[cfg(unix)]
+    #[test]
+    fn arming_a_root_after_its_blind_window_asks_for_one_reconcile() {
+        let (_dir, _a, b, hub) = partly_blind_hub();
+        let cursor = hub.subscribe();
+        assert!(hub.drain(cursor).rescan_required);
+        let batch = hub.drain(cursor);
+        assert!(
+            !batch.rescan_required && batch.entries.is_empty(),
+            "drained clean, so what follows is the retry's doing and nothing else"
+        );
+
+        readable(&b);
+        std::fs::write(b.join("Module.bsl"), "x").unwrap();
+        assert!(hub.tick_now(Duration::from_secs(5)));
+        assert!(
+            hub.drain(cursor).rescan_required,
+            "a change made while the root was blind is only found by a reconcile"
+        );
+    }
+
+    /// The cost is paid while the obstacle lasts and stops with it. Mutation: keep a
+    /// target in the unwatched set after it arms — the hub then stays degraded forever
+    /// and every consumer keeps its slow path for the life of the daemon.
+    #[cfg(unix)]
+    #[test]
+    fn the_hub_is_healthy_again_once_the_root_arms() {
+        let (_dir, _a, b, hub) = partly_blind_hub();
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+
+        readable(&b);
+        assert!(hub.tick_now(Duration::from_secs(5)));
+        let _ = hub.drain(cursor);
+        assert_eq!(hub.health(), Health::Healthy, "everything declared is watched again");
+    }
+
+    /// A blind target can leave the declared set without ever arming: a topology rebuild
+    /// drops the extension, and the re-arm only ever arms what is now desired. Membership
+    /// of the unwatched set is therefore derived from the declaration, not accumulated —
+    /// mutation: accumulate, and ill health outlives both the obstacle and the target.
+    #[cfg(unix)]
+    #[test]
+    fn a_blind_root_dropped_from_the_declaration_stops_costing_health() {
+        let (_dir, a, b, hub) = partly_blind_hub();
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+
+        assert!(hub.rearm(vec![WatchTarget::recursive(a.clone())], Duration::from_secs(10)));
+        let _ = hub.drain(cursor);
+        assert_eq!(hub.health(), Health::Healthy, "everything still declared is watched");
+        readable(&b);
+    }
+
+    /// The same exit, on the branch that never re-arms: a declaration whose cover equals
+    /// the one in force is applied without `apply_rearm` at all. A missing root is the
+    /// case that reaches it — absent from the cover, so dropping it moves nothing — and
+    /// an implementation that only reconciled the unwatched set inside `apply_rearm`
+    /// would hold ill health here forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_declaration_that_re_arms_nothing_still_clears_a_dropped_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let a = root.join("a");
+        std::fs::create_dir(&a).unwrap();
+        let hub = WorkspaceChangeHub::start_targets_with_period(
+            vec![
+                WatchTarget::recursive(a.clone()),
+                WatchTarget::recursive(root.join("нет-такого-каталога")),
+            ],
+            Duration::from_secs(3600),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+
+        assert!(hub.ensure_roots(&[WatchTarget::recursive(a.clone())]));
+        let _ = hub.drain(cursor);
+        assert!(
+            eventually(Duration::from_secs(5), || hub.health() == Health::Healthy),
+            "nothing declared is unwatched"
+        );
+    }
+
+    /// A watch that failed in the DEFENSIVE pass is as blind as one that failed the first
+    /// pass, and it is the pass no arming loop reports: an implementation registering only
+    /// the first would call the hub healthy the moment the re-arm's own reconcile window
+    /// closed, over a root nothing watches.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_lost_in_the_defensive_pass_keeps_the_hub_unhealthy() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (a, b, c) = (root.join("a"), root.join("b"), root.join("c"));
+        for path in [&a, &b, &c] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let hub = WorkspaceChangeHub::start_targets(vec![
+            WatchTarget::recursive(a.clone()),
+            WatchTarget::recursive(b.clone()),
+        ]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+
+        unreadable(&b);
+        assert!(!hub.ensure_roots(&[
+            WatchTarget::recursive(a.clone()),
+            WatchTarget::recursive(b.clone()),
+            WatchTarget::recursive(c.clone()),
+        ]));
+        let _ = hub.drain(cursor);
+        assert_eq!(
+            hub.health(),
+            Health::Degraded(DegradeReason::RewatchFailed),
+            "the root the defensive pass lost is unwatched like any other"
+        );
+        readable(&b);
+        hub.shutdown();
+    }
+
+    /// A root lost in the defensive pass recovers the same way any other does — by the
+    /// hub's own retry. Nothing re-declares the topology afterwards: it never changed.
+    ///
+    /// Health, not delivery, is what this can assert. A defensive re-watch that fails
+    /// never unregistered the watch the first pass had already placed, so events under
+    /// the root may well keep arriving — the hub's own record is what went wrong, and a
+    /// retry restricted to roots that failed the FIRST pass would leave it wrong forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_lost_in_the_defensive_pass_is_armed_by_a_later_tick() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (a, b, c) = (root.join("a"), root.join("b"), root.join("c"));
+        for path in [&a, &b, &c] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let hub = WorkspaceChangeHub::start_targets_with_period(
+            vec![WatchTarget::recursive(a.clone()), WatchTarget::recursive(b.clone())],
+            Duration::from_secs(3600),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+
+        unreadable(&b);
+        assert!(!hub.ensure_roots(&[
+            WatchTarget::recursive(a.clone()),
+            WatchTarget::recursive(b.clone()),
+            WatchTarget::recursive(c.clone()),
+        ]));
+
+        readable(&b);
+        assert!(hub.tick_now(Duration::from_secs(5)));
+        let _ = hub.drain(cursor);
+        assert_eq!(
+            hub.health(),
+            Health::Healthy,
+            "the retry must cover the root the defensive pass dropped"
+        );
+    }
+
+    /// A retry that fails is not a decision to stop retrying. The obstacle that clears
+    /// between two periods — an inotify limit freed by another process — is the ordinary
+    /// case, and a single silent attempt would leave the root blind for the daemon's life.
+    #[cfg(unix)]
+    #[test]
+    fn a_retry_that_failed_does_not_stop_the_next_one() {
+        let (_dir, _a, b, hub) = partly_blind_hub();
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+
+        assert!(hub.tick_now(Duration::from_secs(5)), "this retry must fail");
+        readable(&b);
+        assert!(hub.tick_now(Duration::from_secs(5)), "and this one must be attempted at all");
+
+        std::fs::write(b.join("Module.bsl"), "x").unwrap();
+        assert!(
+            eventually(Duration::from_secs(10), || {
+                entry_names(&hub.drain(cursor)).iter().any(|n| n.ends_with("Module.bsl"))
+            }),
+            "the second retry must arm the root"
+        );
+    }
+
+    /// Retrying is only affordable because it is silent. Every reconcile request costs
+    /// each consumer a full tree walk, so once the failure is reported the repeats add
+    /// exactly none — not "at most one", which would let precisely that unnecessary walk
+    /// through while still looking like a bound.
+    #[cfg(unix)]
+    #[test]
+    fn a_retry_that_keeps_failing_asks_for_no_reconcile() {
+        let (_dir, _a, b, hub) = partly_blind_hub();
+        let cursor = hub.subscribe();
+        assert!(hub.drain(cursor).rescan_required, "the first failure is reported");
+        let rescans = hub.rescan_request_count();
+
+        for _ in 0..3 {
+            assert!(hub.tick_now(Duration::from_secs(5)));
+        }
+        assert_eq!(
+            hub.rescan_request_count(),
+            rescans,
+            "a repeat of a failure already reported buys the consumers nothing"
+        );
+        readable(&b);
     }
 
     /// Two aliases of one directory canonicalize the same, so the declaration dropping the
@@ -2638,7 +3082,7 @@ mod tests {
         std::fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
 
         let mut acc = Accumulator::new(64);
-        let cursor = acc.subscribe();
+        let cursor = acc.subscribe(false);
         // First event fires while the file exists.
         let (canonical, kind) = classify_path(&file).unwrap();
         assert_eq!(kind, ChangeKind::MaybeChanged);
@@ -2677,7 +3121,7 @@ mod tests {
             std::fs::write(&via_link, "x").unwrap();
 
             let mut acc = Accumulator::new(64);
-            let cursor = acc.subscribe();
+            let cursor = acc.subscribe(false);
             let (create_key, _) = classify_path(&via_link).unwrap();
             acc.record(create_key, via_link.clone(), ChangeKind::MaybeChanged);
 
@@ -2703,8 +3147,8 @@ mod tests {
     #[test]
     fn reclamation_releases_entries_once_all_cursors_advance() {
         let mut acc = Accumulator::new(64);
-        let a = acc.subscribe();
-        let b = acc.subscribe();
+        let a = acc.subscribe(false);
+        let b = acc.subscribe(false);
 
         for i in 0..10 {
             let p = PathBuf::from(format!("/f{i}.bsl"));
@@ -2735,8 +3179,8 @@ mod tests {
     #[test]
     fn overflow_clears_flags_per_cursor_then_recovers() {
         let mut acc = Accumulator::new(2);
-        let a = acc.subscribe();
-        let b = acc.subscribe();
+        let a = acc.subscribe(false);
+        let b = acc.subscribe(false);
 
         // Two distinct undrained keys fill the cap; a third trips overflow.
         acc.record(PathBuf::from("/a.bsl"), PathBuf::from("/a.bsl"), ChangeKind::MaybeChanged);
@@ -2766,28 +3210,28 @@ mod tests {
     #[test]
     fn late_subscriber_during_rescan_window_sees_the_flag() {
         let mut acc = Accumulator::new(2);
-        let a = acc.subscribe();
+        let a = acc.subscribe(false);
         acc.record(PathBuf::from("/a.bsl"), PathBuf::from("/a.bsl"), ChangeKind::MaybeChanged);
         acc.record(PathBuf::from("/b.bsl"), PathBuf::from("/b.bsl"), ChangeKind::MaybeChanged);
         acc.record(PathBuf::from("/c.bsl"), PathBuf::from("/c.bsl"), ChangeKind::MaybeChanged);
         assert_eq!(acc.health(), Health::Degraded(DegradeReason::Overflow));
 
         // Subscribing while A has not yet acknowledged: the newcomer must reconcile.
-        let late = acc.subscribe();
+        let late = acc.subscribe(false);
         assert!(acc.drain(late).rescan_required, "a cursor born mid-window reconciles");
 
         // A newcomer after everyone has acknowledged starts clean.
         let _ = acc.drain(a);
         let _ = acc.drain(late);
         assert_eq!(acc.health(), Health::Healthy);
-        let fresh = acc.subscribe();
+        let fresh = acc.subscribe(false);
         assert!(!acc.drain(fresh).rescan_required, "a cursor born healthy does not reconcile");
     }
 
     #[test]
     fn independent_cursors_drain_their_own_deltas() {
         let mut acc = Accumulator::new(64);
-        let x = acc.subscribe();
+        let x = acc.subscribe(false);
         acc.record(PathBuf::from("/a.bsl"), PathBuf::from("/a.bsl"), ChangeKind::MaybeChanged);
         acc.record(PathBuf::from("/b.bsl"), PathBuf::from("/b.bsl"), ChangeKind::MaybeChanged);
 
@@ -2795,7 +3239,7 @@ mod tests {
         assert_eq!(batch_x.entries.len(), 2);
 
         // Y subscribes now — it must not replay the earlier changes.
-        let y = acc.subscribe();
+        let y = acc.subscribe(false);
         acc.record(PathBuf::from("/c.bsl"), PathBuf::from("/c.bsl"), ChangeKind::MaybeChanged);
 
         let batch_y = acc.drain(y);
