@@ -940,19 +940,24 @@ impl WorkspaceChangeHub {
     }
 
     /// Hand a coverage-equivalent declaration to the thread, unless it already has it.
+    ///
+    /// The record is of what was DELIVERED, not of what was intended: a failed send
+    /// leaves it untouched, so the next caller with the same set publishes again instead
+    /// of skipping as a repeat a declaration nobody ever received. The lock spans the
+    /// send for the same reason — released first, two callers could record in one order
+    /// and enqueue in the other, leaving the record naming a set the thread never got.
     fn publish_declaration(&self, targets: &[WatchTarget]) {
-        {
-            let mut published =
-                self.inner.declared_published.lock().unwrap_or_else(PoisonError::into_inner);
-            if *published == targets {
-                return;
-            }
-            *published = targets.to_vec();
+        let mut published =
+            self.inner.declared_published.lock().unwrap_or_else(PoisonError::into_inner);
+        if *published == targets {
+            return;
         }
         // `try_send`: a full control channel means the thread is busy with work that
         // will re-derive coverage anyway, and blocking a build thread here would be
         // worse than a late declaration.
-        let _ = self.control.try_send(HubMsg::Declare(targets.to_vec()));
+        if self.control.try_send(HubMsg::Declare(targets.to_vec())).is_ok() {
+            *published = targets.to_vec();
+        }
     }
 
     /// Terminate the hub thread and join it. Cursors keep draining whatever was
@@ -1182,6 +1187,13 @@ pub(crate) fn watch_targets_for(workspace_root: &Path, scan_roots: &[PathBuf]) -
 /// `Unknown` is that weaker case. It equals itself, so a persistent failure never reads
 /// as movement, and it carries no canonical path, so such a target stays out of the
 /// cover until a `stat` succeeds.
+///
+/// `created` is best-effort by nature: a filesystem without a birth time (NFSv3, some
+/// FUSE mounts) reports none for every target, and there a root deleted and recreated at
+/// the same path fingerprints identically, so an isolated one — no watched ancestor to
+/// report its re-creation — stays uncovered until something re-arms. Nothing cheaper
+/// answers better: the inode is reused across an immediate re-create on ext4, so it would
+/// read as unchanged too. What remains is the consumers' own reconcile, one round later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Fingerprint {
     Absent,
@@ -1294,14 +1306,6 @@ fn coverage_moved(declared: &[WatchTarget], previous: &Snapshot, current: &Snaps
 /// gets watched, so event paths keep the spelling consumers strip against (the
 /// search sink strips the non-canonical source root). Returns each kept target with
 /// the canonical path used for the decision.
-/// How often the hub re-checks that its declared coverage is still live.
-///
-/// A symlinked root retargeted in place emits no event at all, so nothing but this
-/// interval bounds how long a daemon can watch a tree nobody declared any more. Thirty
-/// seconds sits alongside the consumers' own reconcile cadence, and the check itself is
-/// a handful of `stat` calls over a handful of targets.
-const COVERAGE_TICK_PERIOD: Duration = Duration::from_secs(30);
-
 fn dedup_targets(targets: Vec<WatchTarget>) -> Vec<(WatchTarget, PathBuf)> {
     let mut pairs: Vec<(PathBuf, WatchTarget)> = targets
         .into_iter()
@@ -1324,6 +1328,14 @@ fn dedup_targets(targets: Vec<WatchTarget>) -> Vec<(WatchTarget, PathBuf)> {
 /// How long a re-arm caller waits for the hub thread's acknowledgement before
 /// reporting failure. The thread only pumps events, so this is generous.
 const REARM_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the hub re-checks that its declared coverage is still live.
+///
+/// A symlinked root retargeted in place emits no event at all, so nothing but this
+/// interval bounds how long a daemon can watch a tree nobody declared any more. Thirty
+/// seconds sits alongside the consumers' own reconcile cadence, and the check itself is
+/// a handful of `stat` calls over a handful of targets.
+const COVERAGE_TICK_PERIOD: Duration = Duration::from_secs(30);
 
 /// Arm the watch over every target and pump events (and control messages) until
 /// shutdown. Runs on its own thread so `start` returns without blocking on the
@@ -1426,9 +1438,13 @@ fn run_hub_thread(
                 }
             }
             HubMsg::Rearm { targets, ack } => {
-                declared = ResolvedTargets::here(targets.clone()).into_inner();
+                // Placed ONCE for the whole message: the periodic check must police the
+                // very tree the watcher gets armed on, and a second `here()` could read a
+                // current directory that moved in between.
+                let resolved = ResolvedTargets::here(targets);
+                declared = resolved.as_slice().to_vec();
                 snapshot = snapshot_of(&declared, &snapshot);
-                let full_coverage = apply_rearm(&inner, &mut watcher, &mut armed, targets);
+                let full_coverage = apply_rearm(&inner, &mut watcher, &mut armed, resolved);
                 // `try_send`, not `send`: the requester may have timed out and
                 // dropped its receiver; the hub thread must never block on it.
                 let _ = ack.try_send(full_coverage);
@@ -1469,14 +1485,17 @@ fn coverage_tick(
     declared: &[WatchTarget],
     snapshot: &mut Snapshot,
 ) {
-    inner.ticks.fetch_add(1, Ordering::Relaxed);
     let current = snapshot_of(declared, snapshot);
-    if !coverage_moved(declared, snapshot, &current) {
-        return;
+    if coverage_moved(declared, snapshot, &current) {
+        *snapshot = current;
+        inner.rearms.fetch_add(1, Ordering::Relaxed);
+        // Already absolute, so placing them again cannot move them; going through the
+        // one constructor keeps that the only way a target reaches the watcher.
+        apply_rearm(inner, watcher, armed, ResolvedTargets::here(declared.to_vec()));
     }
-    *snapshot = current;
-    inner.rearms.fetch_add(1, Ordering::Relaxed);
-    apply_rearm(inner, watcher, armed, declared.to_vec());
+    // Counted LAST, after every effect above is visible: a test that waits for this
+    // counter is told the tick finished, not that it started.
+    inner.ticks.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Take a new declared set that the caller believes needs no re-arming.
@@ -1506,7 +1525,7 @@ fn apply_declaration(
     inner.set_scope(Scope::from_targets(&resolved));
     if moved {
         inner.rearms.fetch_add(1, Ordering::Relaxed);
-        apply_rearm(inner, watcher, armed, declared.clone());
+        apply_rearm(inner, watcher, armed, resolved);
     }
 }
 
@@ -1524,11 +1543,13 @@ fn apply_rearm(
     inner: &HubInner,
     watcher: &mut RecommendedWatcher,
     armed: &mut Vec<(WatchTarget, PathBuf)>,
-    new_targets: Vec<WatchTarget>,
+    new_targets: ResolvedTargets,
 ) -> bool {
     // Scope follows the DESIRED set, before de-duplication: a target absorbed by a
     // recursive ancestor is still part of what the hub watches for.
-    let new_targets = ResolvedTargets::here(new_targets);
+    //
+    // Taking targets already placed, rather than placing them here, is what keeps the
+    // caller's snapshot and the armed watch describing one tree.
     // A target that could not be placed is absent from the desired set, so the
     // arming loop below has nothing to fail on: coverage has to be denied here or
     // the caller would read a silent drop as success.
@@ -1862,6 +1883,29 @@ mod tests {
         let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         assert_eq!(hub.inner.tick_period, Duration::from_secs(30));
+    }
+
+    /// The record of published declarations exists to skip REPEATS, so recording one the
+    /// thread never received would silence every later attempt to send it — and the
+    /// periodic check would keep policing a topology nobody declared any more. Delivery
+    /// is failed here by ending the thread; a control channel filled by an event storm
+    /// takes the same branch, and is what makes this reachable in production.
+    #[cfg(unix)]
+    #[test]
+    fn a_declaration_the_thread_never_received_is_not_recorded() {
+        let layout = linked_root();
+        let started = vec![WatchTarget::recursive(layout.link.clone())];
+        let hub = WorkspaceChangeHub::start_targets(started.clone());
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        hub.shutdown();
+
+        // Same coverage under a different spelling: the input that publishes a
+        // declaration instead of asking for a re-arm.
+        hub.ensure_roots(&[WatchTarget::recursive(layout.first.clone())]);
+
+        let published =
+            hub.inner.declared_published.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        assert_eq!(published, started, "an undelivered declaration must not count as sent");
     }
 
     /// The hub takes a path into work only when it belongs to the observed scope.
