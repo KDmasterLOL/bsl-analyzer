@@ -19,9 +19,9 @@ use notify::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use walkdir::WalkDir;
 
 /// Default capacity, counted in *undrained* in-flight distinct paths. Beyond this
@@ -166,6 +166,11 @@ struct Accumulator {
     degrade_reason: Option<DegradeReason>,
     /// Set once if the watcher could not be set up. Permanent for the hub's life.
     setup_failed: bool,
+    /// Every reconcile REQUEST, not every reconcile a consumer sees. `enter_rescan`
+    /// collapses repeats inside an open window, and `drain` closes that window, so
+    /// external state cannot tell one request per tick from one per target — while
+    /// the cost is real: a consumer answers each with a full tree walk.
+    rescans_requested: u64,
 }
 
 impl Accumulator {
@@ -180,6 +185,7 @@ impl Accumulator {
             events_seen: 0,
             degrade_reason: None,
             setup_failed: false,
+            rescans_requested: 0,
         }
     }
 
@@ -221,6 +227,7 @@ impl Accumulator {
     /// a window is already open — repeated overflow events neither re-log nor
     /// re-wake sinks, so a storm does not thrash.
     fn enter_rescan(&mut self, clear_entries: bool, reason: DegradeReason) {
+        self.rescans_requested += 1;
         let newly = self.degrade_reason.is_none();
         if clear_entries {
             self.entries.clear();
@@ -494,6 +501,19 @@ struct HubInner {
     /// What the hub takes into work. Set before the thread starts (events may
     /// arrive before setup finishes) and re-derived on every re-arm.
     scope: Mutex<Scope>,
+    /// How often the hub re-checks that its declared coverage is still live. A field,
+    /// not a constant: a test that waited the production interval would be unusable,
+    /// and a globally swappable constant would be shared state between parallel tests.
+    tick_period: Duration,
+    /// Coverage ticks that ran, and re-arms they caused. Both are needed: a tick that
+    /// merely happens proves nothing, and a re-arm that never happens is exactly the
+    /// failure this node exists to prevent.
+    ticks: AtomicU64,
+    rearms: AtomicU64,
+    /// The declared set last handed to the thread, so `ensure_roots` can tell a genuine
+    /// declaration change from a repeat. Compared by raw spelling AND mode: an alias
+    /// swap keeps the canonical path and would otherwise pass unnoticed.
+    declared_published: Mutex<Vec<WatchTarget>>,
 }
 
 impl HubInner {
@@ -764,6 +784,14 @@ enum HubMsg {
         targets: Vec<WatchTarget>,
         ack: std::sync::mpsc::SyncSender<bool>,
     },
+    /// A new declared set that the caller found coverage-equivalent. The thread still
+    /// decides for itself whether to re-arm (see [`apply_declaration`]).
+    Declare(Vec<WatchTarget>),
+    /// Run one coverage tick now. A test seam: production drives ticks by the
+    /// deadline, and both paths call the same function so a broken periodic path
+    /// cannot hide behind a working commanded one.
+    #[cfg(test)]
+    Tick,
     /// Exit the hub thread. Cursors keep draining the frozen stream.
     #[allow(
         dead_code,
@@ -804,10 +832,16 @@ impl WorkspaceChangeHub {
 
     /// [`Self::start`] with explicit per-target modes (see [`watch_targets_for`]).
     pub(crate) fn start_targets(targets: Vec<WatchTarget>) -> Self {
-        Self::start_with_capacity(targets, DEFAULT_CAPACITY)
+        Self::start_with_capacity(targets, DEFAULT_CAPACITY, COVERAGE_TICK_PERIOD)
     }
 
-    fn start_with_capacity(targets: Vec<WatchTarget>, cap: usize) -> Self {
+    /// [`Self::start_targets`] with a tick interval a test can actually wait for.
+    #[cfg(test)]
+    pub(crate) fn start_targets_with_period(targets: Vec<WatchTarget>, period: Duration) -> Self {
+        Self::start_with_capacity(targets, DEFAULT_CAPACITY, period)
+    }
+
+    fn start_with_capacity(targets: Vec<WatchTarget>, cap: usize, tick_period: Duration) -> Self {
         let inner = Arc::new(HubInner {
             acc: Mutex::new(Accumulator::new(cap)),
             wake: Condvar::new(),
@@ -818,6 +852,10 @@ impl WorkspaceChangeHub {
             // arming, so the relative spellings are resolved against the same
             // current directory the backend will use.
             scope: Mutex::new(Scope::from_targets(&ResolvedTargets::here(targets.clone()))),
+            tick_period,
+            ticks: AtomicU64::new(0),
+            rearms: AtomicU64::new(0),
+            declared_published: Mutex::new(targets.clone()),
         });
         let (tx, rx) = std::sync::mpsc::sync_channel::<HubMsg>(CHANNEL_BOUND);
 
@@ -880,10 +918,41 @@ impl WorkspaceChangeHub {
             self.inner.watched_roots.lock().unwrap_or_else(PoisonError::into_inner).clone();
         current.sort();
         if placed && current == desired {
+            // Coverage is unchanged, but the DECLARATION may not be: a target absorbed
+            // by a recursive ancestor never reaches `watched_roots`, so its removal is
+            // invisible here, and an alias swap keeps the canonical path while changing
+            // the only spelling the watch actually holds. Telling the thread costs a
+            // message; not telling it leaves the tick re-arming targets the topology
+            // dropped long ago.
+            self.publish_declaration(targets);
             return true;
         }
         tracing::info!(?targets, "workspace change hub re-arming onto new scan roots");
+        self.note_declaration(targets);
         self.rearm(targets.to_vec(), REARM_ACK_TIMEOUT)
+    }
+
+    /// Record the declaration the thread is about to receive, so a repeat of the same
+    /// set costs nothing.
+    fn note_declaration(&self, targets: &[WatchTarget]) {
+        *self.inner.declared_published.lock().unwrap_or_else(PoisonError::into_inner) =
+            targets.to_vec();
+    }
+
+    /// Hand a coverage-equivalent declaration to the thread, unless it already has it.
+    fn publish_declaration(&self, targets: &[WatchTarget]) {
+        {
+            let mut published =
+                self.inner.declared_published.lock().unwrap_or_else(PoisonError::into_inner);
+            if *published == targets {
+                return;
+            }
+            *published = targets.to_vec();
+        }
+        // `try_send`: a full control channel means the thread is busy with work that
+        // will re-derive coverage anyway, and blocking a build thread here would be
+        // worse than a late declaration.
+        let _ = self.control.try_send(HubMsg::Declare(targets.to_vec()));
     }
 
     /// Terminate the hub thread and join it. Cursors keep draining whatever was
@@ -1017,6 +1086,44 @@ impl WorkspaceChangeHub {
         self.inner.lock_acc().cursors.len()
     }
 
+    /// Coverage ticks that ran on this hub.
+    #[cfg(test)]
+    pub(crate) fn tick_count(&self) -> u64 {
+        self.inner.ticks.load(Ordering::Relaxed)
+    }
+
+    /// Re-arms this hub decided on its own — by tick or by declaration, never by an
+    /// explicit `rearm` from a caller.
+    #[cfg(test)]
+    pub(crate) fn self_rearm_count(&self) -> u64 {
+        self.inner.rearms.load(Ordering::Relaxed)
+    }
+
+    /// Reconcile REQUESTS, including those a consumer never distinguishes: `drain`
+    /// closes the idempotence window, so repeats cost a full walk each.
+    #[cfg(test)]
+    pub(crate) fn rescan_request_count(&self) -> u64 {
+        self.inner.lock_acc().rescans_requested
+    }
+
+    /// Run one coverage tick and wait for it to finish, without waiting out the
+    /// period. Returns false if the hub thread is gone.
+    #[cfg(test)]
+    pub(crate) fn tick_now(&self, timeout: Duration) -> bool {
+        let before = self.tick_count();
+        if self.control.send(HubMsg::Tick).is_err() {
+            return false;
+        }
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.tick_count() > before {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
     /// Drive the exact transition the re-watch error branch takes. A real
     /// `watcher.watch` failure cannot be injected without a mock backend, so tests
     /// exercise the state transition directly.
@@ -1065,6 +1172,121 @@ pub(crate) fn watch_targets_for(workspace_root: &Path, scan_roots: &[PathBuf]) -
     targets
 }
 
+/// What one `stat` of a watch target says about it, at three levels rather than two.
+///
+/// `Absent` is a PROVEN absence and nothing weaker: the same allow-list the workspace
+/// walker uses (`project-model/src/workspace_walk.rs`), because a denied or interrupted
+/// call describes a path that is still there, and calling it gone would re-arm the whole
+/// tree twice — once on the failure, once on the recovery.
+///
+/// `Unknown` is that weaker case. It equals itself, so a persistent failure never reads
+/// as movement, and it carries no canonical path, so such a target stays out of the
+/// cover until a `stat` succeeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Fingerprint {
+    Absent,
+    Unknown,
+    Present { canonical: PathBuf, created: Option<SystemTime> },
+}
+
+/// A link cycle belongs in `Absent` by the same argument as `NotADirectory`, but it
+/// cannot be named: `ErrorKind::FilesystemLoop` is unstable on the toolchain this crate
+/// builds with, and matching a raw errno would differ per platform. It therefore lands
+/// in `Unknown`, which errs toward keeping the watch rather than dropping a live tree.
+fn target_cannot_exist(kind: std::io::ErrorKind) -> bool {
+    matches!(kind, std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)
+}
+
+/// Read one target's fingerprint. `previous` is consulted only for the `Unknown` case:
+/// a target already described keeps its description, so a transient failure costs
+/// nothing, while a target seen for the first time records `Unknown` as itself.
+fn fingerprint_of(path: &Path, previous: Option<&Fingerprint>) -> Fingerprint {
+    match std::fs::metadata(path) {
+        Ok(meta) => match path.canonicalize() {
+            Ok(canonical) => Fingerprint::Present { canonical, created: meta.created().ok() },
+            Err(error) if target_cannot_exist(error.kind()) => Fingerprint::Absent,
+            Err(_) => previous.cloned().unwrap_or(Fingerprint::Unknown),
+        },
+        Err(error) if target_cannot_exist(error.kind()) => Fingerprint::Absent,
+        Err(_) => previous.cloned().unwrap_or(Fingerprint::Unknown),
+    }
+}
+
+/// Fingerprints of every DECLARED target, keyed by its declared spelling.
+type Snapshot = HashMap<PathBuf, Fingerprint>;
+
+/// Take a fresh snapshot, carrying each target's previous description into a failed
+/// `stat` (see [`Fingerprint::Unknown`]). Targets that left the declared set are dropped;
+/// new ones are described as they are now.
+fn snapshot_of(declared: &[WatchTarget], previous: &Snapshot) -> Snapshot {
+    declared
+        .iter()
+        .map(|target| {
+            let fingerprint = fingerprint_of(&target.path, previous.get(&target.path));
+            (target.path.clone(), fingerprint)
+        })
+        .collect()
+}
+
+/// The minimal cover derived FROM A SNAPSHOT — never by canonicalizing again.
+///
+/// [`dedup_targets`] re-reads the filesystem and collapses every error to the raw path,
+/// so a denied `stat` on a symlink's parent would swap that target's canonical path for
+/// its declared one and read as a composition change: a full re-arm every tick for as
+/// long as the failure lasts. The snapshot already holds the canonical paths, and a
+/// target without one (absent or unknown) is simply not part of what can be watched.
+fn cover_from_snapshot(
+    declared: &[WatchTarget],
+    snapshot: &Snapshot,
+) -> Vec<(WatchTarget, PathBuf)> {
+    let mut pairs: Vec<(PathBuf, WatchTarget)> = declared
+        .iter()
+        .filter_map(|target| match snapshot.get(&target.path) {
+            Some(Fingerprint::Present { canonical, .. }) => {
+                Some((canonical.clone(), target.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.recursive.cmp(&a.1.recursive)));
+    pairs.dedup_by(|a, b| a.0 == b.0);
+
+    let mut kept: Vec<(WatchTarget, PathBuf)> = Vec::new();
+    for (canonical, target) in pairs {
+        if kept.iter().any(|(k, kc)| k.recursive && canonical.starts_with(kc)) {
+            continue;
+        }
+        kept.push((target, canonical));
+    }
+    kept
+}
+
+/// Has the watched world moved since `previous` was taken?
+///
+/// Two things count, and nothing else. The cover's MEMBERSHIP — compared by declared
+/// spelling too, because collapsing canonical duplicates keeps one target and the winner
+/// may swap from one alias to another with every fingerprint equal, leaving the watch on
+/// a spelling the scope no longer knows. And a fingerprint change on a target that is IN
+/// the cover: a target absorbed by a recursive ancestor does not reach `apply_rearm` at
+/// all, so paying a full walk for its re-creation would buy nothing — notify re-arms
+/// subdirectories of a recursive watch by itself.
+fn coverage_moved(declared: &[WatchTarget], previous: &Snapshot, current: &Snapshot) -> bool {
+    let was = cover_from_snapshot(declared, previous);
+    let now = cover_from_snapshot(declared, current);
+    let key = |cover: &[(WatchTarget, PathBuf)]| -> Vec<(PathBuf, bool, PathBuf)> {
+        let mut keys: Vec<(PathBuf, bool, PathBuf)> = cover
+            .iter()
+            .map(|(t, canonical)| (t.path.clone(), t.recursive, canonical.clone()))
+            .collect();
+        keys.sort();
+        keys
+    };
+    if key(&was) != key(&now) {
+        return true;
+    }
+    now.iter().any(|(target, _)| previous.get(&target.path) != current.get(&target.path))
+}
+
 /// Reduce a set of watch targets to the minimal cover: drop any target nested under
 /// a RECURSIVE target (a non-recursive ancestor covers only its direct children, so
 /// it absorbs nothing), and collapse exact duplicates — a recursive duplicate wins
@@ -1072,6 +1294,14 @@ pub(crate) fn watch_targets_for(workspace_root: &Path, scan_roots: &[PathBuf]) -
 /// gets watched, so event paths keep the spelling consumers strip against (the
 /// search sink strips the non-canonical source root). Returns each kept target with
 /// the canonical path used for the decision.
+/// How often the hub re-checks that its declared coverage is still live.
+///
+/// A symlinked root retargeted in place emits no event at all, so nothing but this
+/// interval bounds how long a daemon can watch a tree nobody declared any more. Thirty
+/// seconds sits alongside the consumers' own reconcile cadence, and the check itself is
+/// a handful of `stat` calls over a handful of targets.
+const COVERAGE_TICK_PERIOD: Duration = Duration::from_secs(30);
+
 fn dedup_targets(targets: Vec<WatchTarget>) -> Vec<(WatchTarget, PathBuf)> {
     let mut pairs: Vec<(PathBuf, WatchTarget)> = targets
         .into_iter()
@@ -1140,6 +1370,15 @@ fn run_hub_thread(
         inner.note_unplaced_targets();
     }
     inner.set_scope(Scope::from_targets(&targets));
+    // The declared set, kept for the life of the thread: `dedup_targets` below drops
+    // whatever a recursive ancestor absorbs or a canonical duplicate collapses, and
+    // either can become a target in its own right when a link is retargeted. A set
+    // rebuilt from the survivors could never bring those back.
+    let mut declared = targets.as_slice().to_vec();
+    // Taken BEFORE anything is armed. A snapshot taken afterwards would describe the
+    // tree the watcher ended up on, so a retarget racing the arming pass would read as
+    // agreement forever; taken before, the same race costs one extra re-arm.
+    let mut snapshot = snapshot_of(&declared, &Snapshot::new());
     for (target, canonical) in dedup_targets(targets.into_inner()) {
         match watcher.watch(&target.path, target.mode()) {
             Ok(()) => {
@@ -1160,8 +1399,24 @@ fn run_hub_thread(
     inner.publish_watched_roots(&armed);
     inner.mark_watching();
 
-    for msg in rx {
+    // The deadline is checked BEFORE reading a message, not derived from a receive
+    // timeout: `recv_timeout` hands over whatever is already queued regardless of how
+    // long the deadline has been past, so a storm of events would starve the tick
+    // indefinitely — on exactly the tree where losing coverage costs the most.
+    let mut due = Instant::now() + inner.tick_period;
+    loop {
         inner.drain_channel_overflow();
+        let now = Instant::now();
+        if now >= due {
+            coverage_tick(&inner, &mut watcher, &mut armed, &declared, &mut snapshot);
+            due = Instant::now() + inner.tick_period;
+            continue;
+        }
+        let msg = match rx.recv_timeout(due - now) {
+            Ok(msg) => msg,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+        };
         match msg {
             HubMsg::Event(res) => {
                 for dir in inner.ingest_event(res) {
@@ -1171,13 +1426,87 @@ fn run_hub_thread(
                 }
             }
             HubMsg::Rearm { targets, ack } => {
+                declared = ResolvedTargets::here(targets.clone()).into_inner();
+                snapshot = snapshot_of(&declared, &snapshot);
                 let full_coverage = apply_rearm(&inner, &mut watcher, &mut armed, targets);
                 // `try_send`, not `send`: the requester may have timed out and
                 // dropped its receiver; the hub thread must never block on it.
                 let _ = ack.try_send(full_coverage);
             }
+            HubMsg::Declare(targets) => {
+                apply_declaration(
+                    &inner,
+                    &mut watcher,
+                    &mut armed,
+                    &mut declared,
+                    &mut snapshot,
+                    targets,
+                );
+            }
+            #[cfg(test)]
+            HubMsg::Tick => {
+                coverage_tick(&inner, &mut watcher, &mut armed, &declared, &mut snapshot);
+                due = Instant::now() + inner.tick_period;
+            }
             HubMsg::Shutdown => return,
         }
+    }
+}
+
+/// Re-check that the declared coverage is still the coverage in force, and re-arm the
+/// whole set when it is not.
+///
+/// The tick decides, `apply_rearm` acts. Splitting it the other way — unwatching and
+/// watching target by target — was tried and abandoned: a recursive `unwatch` takes
+/// descendant registrations with it, and a nested target's removal punches a hole in a
+/// kept ancestor, so any per-target sequence has to rebuild the guarantees
+/// `apply_rearm` already provides by arming additions before removals and defensively
+/// re-watching everything it keeps.
+fn coverage_tick(
+    inner: &Arc<HubInner>,
+    watcher: &mut RecommendedWatcher,
+    armed: &mut Vec<(WatchTarget, PathBuf)>,
+    declared: &[WatchTarget],
+    snapshot: &mut Snapshot,
+) {
+    inner.ticks.fetch_add(1, Ordering::Relaxed);
+    let current = snapshot_of(declared, snapshot);
+    if !coverage_moved(declared, snapshot, &current) {
+        return;
+    }
+    *snapshot = current;
+    inner.rearms.fetch_add(1, Ordering::Relaxed);
+    apply_rearm(inner, watcher, armed, declared.to_vec());
+}
+
+/// Take a new declared set that the caller believes needs no re-arming.
+///
+/// The belief is not trusted: the caller compared coverage on ITS thread, and a target
+/// absorbed by an ancestor at that moment can be standing on its own by the time this
+/// runs. The snapshot is therefore taken FIRST — before the cover is recomputed — so a
+/// retarget inside that window reads as movement instead of being recorded as the
+/// starting state, and the decision to arm uses the same rule the tick uses.
+fn apply_declaration(
+    inner: &Arc<HubInner>,
+    watcher: &mut RecommendedWatcher,
+    armed: &mut Vec<(WatchTarget, PathBuf)>,
+    declared: &mut Vec<WatchTarget>,
+    snapshot: &mut Snapshot,
+    targets: Vec<WatchTarget>,
+) {
+    let resolved = ResolvedTargets::here(targets);
+    let next = resolved.as_slice().to_vec();
+    // Merged, not replaced: a drift that already happened to a surviving target must
+    // survive this update, and a target seen for the first time gets described now.
+    let current = snapshot_of(&next, snapshot);
+    let moved =
+        coverage_moved(declared, snapshot, &current) || coverage_moved(&next, snapshot, &current);
+    *snapshot = current;
+    *declared = next;
+    inner.set_scope(Scope::from_targets(&resolved));
+    if moved {
+        inner.rearms.fetch_add(1, Ordering::Relaxed);
+        apply_rearm(inner, watcher, armed, declared.clone());
     }
 }
 
@@ -1314,6 +1643,225 @@ mod tests {
 
     fn entry_names(batch: &DrainBatch) -> Vec<String> {
         batch.entries.iter().map(|e| e.raw.to_string_lossy().into_owned()).collect()
+    }
+
+    /// A workspace whose scan root is reached through a symlink, so the root can be
+    /// retargeted in place — the move that produces no filesystem event at all.
+    struct LinkedRoot {
+        _dir: tempfile::TempDir,
+        workspace: PathBuf,
+        link: PathBuf,
+        first: PathBuf,
+        second: PathBuf,
+    }
+
+    #[cfg(unix)]
+    fn linked_root() -> LinkedRoot {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().canonicalize().unwrap();
+        let first = workspace.join("first");
+        let second = workspace.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let link = workspace.join("root");
+        std::os::unix::fs::symlink(&first, &link).unwrap();
+        LinkedRoot { _dir: dir, workspace, link, first, second }
+    }
+
+    #[cfg(unix)]
+    impl LinkedRoot {
+        fn hub(&self, period: Duration) -> WorkspaceChangeHub {
+            let hub = WorkspaceChangeHub::start_targets_with_period(
+                watch_targets_for(&self.workspace, std::slice::from_ref(&self.link)),
+                period,
+            );
+            assert!(hub.wait_until_watching(Duration::from_secs(5)), "the hub must arm");
+            hub
+        }
+
+        fn retarget(&self, to: &Path) {
+            std::fs::remove_file(&self.link).unwrap();
+            std::os::unix::fs::symlink(to, &self.link).unwrap();
+        }
+    }
+
+    /// Wait until `f` holds, polling; returns whether it ever did.
+    fn eventually(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        f()
+    }
+
+    /// The move this whole node exists for, and the one nothing else can catch: a
+    /// symlinked scan root retargeted in place emits NO event, so an idle hub has
+    /// nothing to react to. Only the periodic check notices, and a hub that ran its
+    /// detector solely on the arrival of some other message would stay pointed at a
+    /// tree nobody declared any more — for as long as the daemon lives.
+    #[cfg(unix)]
+    #[test]
+    fn an_idle_hub_notices_a_root_retargeted_in_place() {
+        let project = linked_root();
+        let hub = project.hub(Duration::from_millis(50));
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+
+        project.retarget(&project.second);
+        assert!(
+            eventually(Duration::from_secs(10), || hub.self_rearm_count() > 0),
+            "an idle hub must notice a retarget nothing reports"
+        );
+
+        std::fs::write(project.second.join("Module.bsl"), "x").unwrap();
+        assert!(
+            eventually(Duration::from_secs(10), || { !entry_names(&hub.drain(cursor)).is_empty() }),
+            "the new target must be delivered once coverage follows it"
+        );
+    }
+
+    /// A busy hub is the one that can least afford blind coverage, and it is exactly
+    /// where a deadline read off a receive timeout never fires: `recv_timeout` returns
+    /// whatever is already queued, however long the deadline has been past.
+    #[cfg(unix)]
+    #[test]
+    fn a_tick_still_runs_while_the_queue_never_empties() {
+        let project = linked_root();
+        let hub = project.hub(Duration::from_millis(50));
+        let stop = Arc::new(AtomicBool::new(false));
+        let noise = {
+            let stop = Arc::clone(&stop);
+            let dir = project.first.clone();
+            std::thread::spawn(move || {
+                let mut n = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::fs::write(dir.join(format!("Noise{n}.bsl")), "x");
+                    n += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+        };
+
+        project.retarget(&project.second);
+        let noticed = eventually(Duration::from_secs(10), || hub.self_rearm_count() > 0);
+        stop.store(true, Ordering::Relaxed);
+        noise.join().unwrap();
+        assert!(noticed, "a busy queue must not starve the coverage tick");
+    }
+
+    /// One tick is not a tick: a deadline armed once would pass every check that moves
+    /// the target before the first firing, and leave the hub blind from then on.
+    #[cfg(unix)]
+    #[test]
+    fn the_tick_keeps_firing_after_the_first_one() {
+        let project = linked_root();
+        let hub = project.hub(Duration::from_millis(50));
+        assert!(
+            eventually(Duration::from_secs(10), || hub.tick_count() >= 1),
+            "the first tick must happen"
+        );
+        let after_first = hub.tick_count();
+
+        project.retarget(&project.second);
+        assert!(
+            eventually(Duration::from_secs(10), || hub.self_rearm_count() > 0),
+            "a retarget after the first tick must still be noticed"
+        );
+        assert!(hub.tick_count() > after_first);
+    }
+
+    /// A target that is simply not there costs nothing at all. It stays in the declared
+    /// set and out of the cover, tick after tick, so neither a full re-arm nor a
+    /// reconcile — which every consumer answers with a complete tree walk — may be
+    /// spent on it. The live neighbour is the positive control: without it the thread
+    /// would give up before the loop and both counters would read zero for the wrong
+    /// reason.
+    #[test]
+    fn a_target_that_stays_missing_costs_no_rearm_and_no_reconcile() {
+        let dir = tempdir().unwrap();
+        let live = dir.path().join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        let hub = WorkspaceChangeHub::start_targets_with_period(
+            vec![
+                WatchTarget::recursive(live.clone()),
+                WatchTarget::recursive(dir.path().join("absent")),
+            ],
+            Duration::from_millis(20),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+        let rescans = hub.rescan_request_count();
+
+        assert!(eventually(Duration::from_secs(5), || hub.tick_count() >= 3), "ticks must run");
+        assert_eq!(hub.self_rearm_count(), 0, "a stable absence is not movement");
+        assert_eq!(hub.rescan_request_count(), rescans, "and it must not cost a reconcile");
+    }
+
+    /// A target that disappears has moved once, not once per tick. The first tick
+    /// after the removal is entitled to a re-arm; every later one sees the same
+    /// absence and must stay silent, or a deleted extension root would put every
+    /// consumer through a full walk every period for the life of the daemon.
+    #[test]
+    fn a_removed_target_is_noticed_once_and_not_again() {
+        let dir = tempdir().unwrap();
+        let live = dir.path().join("live");
+        let doomed = dir.path().join("doomed");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&doomed).unwrap();
+        let hub = WorkspaceChangeHub::start_targets_with_period(
+            vec![WatchTarget::recursive(live), WatchTarget::recursive(doomed.clone())],
+            Duration::from_secs(3600),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+
+        std::fs::remove_dir_all(&doomed).unwrap();
+        assert!(hub.tick_now(Duration::from_secs(5)));
+        assert_eq!(hub.self_rearm_count(), 1, "the removal itself is movement");
+
+        let after = hub.self_rearm_count();
+        let rescans = hub.rescan_request_count();
+        assert!(hub.tick_now(Duration::from_secs(5)));
+        assert!(hub.tick_now(Duration::from_secs(5)));
+        assert_eq!(hub.self_rearm_count(), after, "the same absence is not movement again");
+        assert_eq!(hub.rescan_request_count(), rescans);
+    }
+
+    /// The flat layout is the one that breaks a naive detector: `watch_targets_for`
+    /// declares the workspace both recursively and non-recursively, so a rule that
+    /// compared the declared set against what is armed would find a target missing
+    /// forever and re-walk the whole tree every period.
+    #[test]
+    fn a_flat_workspace_that_does_not_move_costs_nothing() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let hub = WorkspaceChangeHub::start_targets_with_period(
+            watch_targets_for(&root, std::slice::from_ref(&root)),
+            Duration::from_millis(20),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+        let rescans = hub.rescan_request_count();
+
+        assert!(eventually(Duration::from_secs(5), || hub.tick_count() >= 5), "ticks must run");
+        assert_eq!(hub.self_rearm_count(), 0, "a still tree is not movement");
+        assert_eq!(hub.rescan_request_count(), rescans);
+    }
+
+    /// The production interval is part of the contract, not an implementation detail:
+    /// every other test either shortens it or drives the tick by hand, so a hub built
+    /// the ordinary way could carry an interval of a day and still pass them all.
+    #[test]
+    fn the_production_hub_ticks_every_thirty_seconds() {
+        assert_eq!(COVERAGE_TICK_PERIOD, Duration::from_secs(30));
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        assert_eq!(hub.inner.tick_period, Duration::from_secs(30));
     }
 
     /// The hub takes a path into work only when it belongs to the observed scope.
