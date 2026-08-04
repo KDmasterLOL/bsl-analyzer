@@ -358,14 +358,60 @@ impl Spellings {
     }
 }
 
+/// Watch targets whose relative paths have been resolved against the current
+/// directory exactly ONCE, before anything is armed or compared.
+///
+/// A newtype rather than a convention, because forgetting the call is invisible:
+/// the current directory would then be read twice from process-wide state — by the
+/// scope and, later, by the backend inside `watch` — and a change in between would
+/// leave the watcher armed on one tree while the scope describes another, with
+/// every event from the armed tree filtered out in silence. Nothing observable
+/// fails, so no test catches it; the type does. Handing the backend an
+/// already-absolute path also removes that second read entirely: `watch_inner`
+/// takes an absolute path as given.
+/// In its own module so the field is out of reach even here: a tuple constructor
+/// visible to the rest of the file would let the resolution be skipped by writing
+/// `ResolvedTargets(targets)`, which is precisely the mistake the type exists to
+/// make impossible.
+mod resolved {
+    use super::{Spellings, WatchTarget};
+
+    pub(super) struct ResolvedTargets(Vec<WatchTarget>);
+
+    impl ResolvedTargets {
+        pub(super) fn resolve(targets: Vec<WatchTarget>) -> Self {
+            Self(
+                targets
+                    .into_iter()
+                    .map(|target| WatchTarget {
+                        path: Spellings::as_notify_reports(&target.path),
+                        recursive: target.recursive,
+                    })
+                    .collect(),
+            )
+        }
+
+        pub(super) fn as_slice(&self) -> &[WatchTarget] {
+            &self.0
+        }
+
+        pub(super) fn into_inner(self) -> Vec<WatchTarget> {
+            self.0
+        }
+    }
+}
+
+use resolved::ResolvedTargets;
+
 impl Scope {
     /// Recursive targets are the scan roots; a non-recursive target is there for
     /// the project-config files that live directly in it (see
     /// [`watch_targets_for`]). Built from the DESIRED targets, not the armed ones:
     /// a root that failed to arm is still part of the scope, and its events —
     /// arriving through a covering target — must not be dropped.
-    fn from_targets(targets: &[WatchTarget]) -> Self {
+    fn from_targets(targets: &ResolvedTargets) -> Self {
         let spellings = |t: &WatchTarget| Spellings::of(&t.path);
+        let targets = targets.as_slice();
         Self {
             scan_roots: targets.iter().filter(|t| t.recursive).map(spellings).collect(),
             config_dirs: targets.iter().filter(|t| !t.recursive).map(spellings).collect(),
@@ -724,7 +770,7 @@ impl WorkspaceChangeHub {
             // A starting value only; the hub thread re-derives it right before
             // arming, so the relative spellings are resolved against the same
             // current directory the backend will use.
-            scope: Mutex::new(Scope::from_targets(&targets)),
+            scope: Mutex::new(Scope::from_targets(&ResolvedTargets::resolve(targets.clone()))),
         });
         let (tx, rx) = std::sync::mpsc::sync_channel::<HubMsg>(CHANNEL_BOUND);
 
@@ -1039,8 +1085,9 @@ fn run_hub_thread(
     // directory is shared mutable process state — but it shrinks to the gap between
     // these two lines and the `watch` calls below.
     let mut armed: Vec<(WatchTarget, PathBuf)> = Vec::new();
+    let targets = ResolvedTargets::resolve(targets);
     inner.set_scope(Scope::from_targets(&targets));
-    for (target, canonical) in dedup_targets(targets) {
+    for (target, canonical) in dedup_targets(targets.into_inner()) {
         match watcher.watch(&target.path, target.mode()) {
             Ok(()) => {
                 tracing::info!(root = ?target.path, recursive = target.recursive, "workspace change hub watching root");
@@ -1099,8 +1146,9 @@ fn apply_rearm(
 ) -> bool {
     // Scope follows the DESIRED set, before de-duplication: a target absorbed by a
     // recursive ancestor is still part of what the hub watches for.
+    let new_targets = ResolvedTargets::resolve(new_targets);
     inner.set_scope(Scope::from_targets(&new_targets));
-    let desired = dedup_targets(new_targets);
+    let desired = dedup_targets(new_targets.into_inner());
     let is_armed = |list: &[(WatchTarget, PathBuf)], t: &WatchTarget, c: &PathBuf| {
         list.iter().any(|(at, ac)| at.recursive == t.recursive && ac == c)
     };
@@ -1353,7 +1401,9 @@ mod tests {
         // the first everywhere and resolves the second on Windows. Without them the
         // test cannot tell the two ways of building the spelling apart.
         let declared = base.join("prefix").join("..").join(".").join("src");
-        let scope = Scope::from_targets(&[WatchTarget::recursive(declared.clone())]);
+        let scope = Scope::from_targets(&ResolvedTargets::resolve(vec![WatchTarget::recursive(
+            declared.clone(),
+        )]));
 
         // The reference is computed the way the backend computes it — joining to the
         // current directory, components untouched.
@@ -1363,6 +1413,38 @@ mod tests {
             "the spelling the watcher actually reports is in scope"
         );
         assert!(scope.may_walk(&reported.join("CommonModules")));
+    }
+
+    /// Reading the current directory twice — once for the scope, once inside the
+    /// backend's `watch` — is a race on process-wide state: a change in between
+    /// arms the watcher on one tree while the scope describes another, and every
+    /// event from the armed tree is then filtered out in silence. Resolving the
+    /// targets once, before anything is armed or compared, removes the second read:
+    /// the backend takes an absolute path as given.
+    #[test]
+    fn targets_are_resolved_once_so_the_watcher_and_the_scope_cannot_disagree() {
+        let resolved = ResolvedTargets::resolve(vec![
+            WatchTarget::recursive(PathBuf::from("src")),
+            WatchTarget { path: PathBuf::from("."), recursive: false },
+        ]);
+        let resolved = resolved.as_slice();
+
+        assert!(
+            resolved.iter().all(|t| t.path.is_absolute()),
+            "nothing relative reaches the watcher, so it never re-reads the directory"
+        );
+        // Modes must survive the rewrite: the non-recursive one is what carries the
+        // project-config files.
+        assert_eq!(resolved.iter().filter(|t| t.recursive).count(), 1);
+        assert_eq!(resolved.iter().filter(|t| !t.recursive).count(), 1);
+
+        let absolute = std::env::current_dir().unwrap().join("src");
+        assert!(
+            ResolvedTargets::resolve(vec![WatchTarget::recursive(absolute.clone())]).as_slice()[0]
+                .path
+                == absolute,
+            "an already-absolute target is left exactly as it was"
+        );
     }
 
     /// A rescan notice is not a change to the path it names — it says the event
