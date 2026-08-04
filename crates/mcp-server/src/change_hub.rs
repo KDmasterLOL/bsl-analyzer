@@ -1637,13 +1637,23 @@ fn apply_rearm(
     // Defensive re-arm of every kept target: on inotify a recursive unwatch of an
     // overlapping obsolete root strips descendant registrations, including a kept
     // target's. Re-watching an already-watched path is idempotent.
-    for (target, _) in &next_armed {
-        if let Err(error) = watcher.watch(&target.path, target.mode()) {
-            inner.note_rewatch_failed(&target.path, &error);
-            full_coverage = false;
+    //
+    // A target that fails here is DROPPED, exactly as one that fails the first pass:
+    // `armed` is what every later decision reads as "already covered", so leaving it
+    // there would make the next request for the same set find coverage equal and answer
+    // yes over a subtree nothing is watching. Dropping a target whose watch may in fact
+    // still stand costs one retry; keeping one that does not costs the events.
+    let mut kept: Vec<(WatchTarget, PathBuf)> = Vec::with_capacity(next_armed.len());
+    for (target, canonical) in next_armed {
+        match watcher.watch(&target.path, target.mode()) {
+            Ok(()) => kept.push((target, canonical)),
+            Err(error) => {
+                inner.note_rewatch_failed(&target.path, &error);
+                full_coverage = false;
+            }
         }
     }
-    *armed = next_armed;
+    *armed = kept;
     inner.publish_watched_roots(armed);
 
     let mut acc = inner.lock_acc();
@@ -1753,6 +1763,24 @@ mod tests {
     }
 
     /// Wait until `f` holds, polling; returns whether it ever did.
+    /// Make a directory unwatchable for real: `inotify_add_watch` needs read permission,
+    /// and refuses both a first watch and a re-watch of an already-watched path without
+    /// it. Nothing weaker works — an unreadable directory still stats and canonicalizes,
+    /// so it moves no fingerprint.
+    #[cfg(unix)]
+    fn unreadable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+
+    /// Restore access. Called before the temporary directory is dropped: its recursive
+    /// removal cannot descend into a directory it may not read.
+    #[cfg(unix)]
+    fn readable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     fn eventually(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
@@ -1929,6 +1957,47 @@ mod tests {
         let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         assert_eq!(hub.inner.tick_period, Duration::from_secs(30));
+    }
+
+    /// `armed` is what every later decision reads as "already covered", so a target whose
+    /// re-watch failed must not sit in it: the failed call is reported once, and then the
+    /// next request for the same set finds coverage equal and answers yes over a subtree
+    /// nothing is watching.
+    #[cfg(unix)]
+    #[test]
+    fn a_target_whose_defensive_watch_failed_is_not_claimed_as_covered() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (a, b, c) = (root.join("a"), root.join("b"), root.join("c"));
+        for path in [&a, &b, &c] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let hub = WorkspaceChangeHub::start_targets(vec![
+            WatchTarget::recursive(a.clone()),
+            WatchTarget::recursive(b.clone()),
+        ]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+
+        // `chmod` alone moves no fingerprint, so the re-arm has to come from elsewhere:
+        // adding `c` is the ordinary reason a rebuild re-arms, and it carries `b` into the
+        // defensive pass, where the watch now fails.
+        unreadable(&b);
+        let targets = vec![
+            WatchTarget::recursive(a.clone()),
+            WatchTarget::recursive(b.clone()),
+            WatchTarget::recursive(c.clone()),
+        ];
+        assert!(
+            !hub.ensure_roots(&targets),
+            "the defensive watch of `b` fails, so coverage is denied"
+        );
+        assert!(
+            !hub.ensure_roots(&targets),
+            "the same set must still be denied: `b` is not watched, however long it stays in the live set"
+        );
+
+        readable(&b);
+        hub.shutdown();
     }
 
     /// Two aliases of one directory canonicalize the same, so the declaration dropping the
