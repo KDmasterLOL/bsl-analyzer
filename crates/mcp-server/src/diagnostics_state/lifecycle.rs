@@ -250,8 +250,14 @@ impl DiagnosticsState {
         // to disk through the drain path, so freshness needs no scan — staleness reduces
         // to an in-flight reload. Only fall back to a freshness scan with no hub or a
         // degraded one (the scan path), keeping the healthy hot path free of a walk.
-        let hub_healthy =
-            matches!(&self.change_hub, Some(hub) if matches!(hub.health(), Health::Healthy));
+        // Asked about OUR cursor, like the drain decision above it: a debt belongs to the
+        // consumer that owes it, and a shared verdict would spend a walk here on somebody
+        // else's silence.
+        let cursor = *lock_recover(&self.hub_cursor);
+        let hub_healthy = matches!(
+            &self.change_hub,
+            Some(hub) if matches!(hub.health_for(cursor), Health::Healthy)
+        );
         let scan = if matches!(self.status(), DiagnosticsStatus::Ready { .. }) && !hub_healthy {
             self.workspace_root.as_deref().and_then(|root| self.throttled_scan(root))
         } else {

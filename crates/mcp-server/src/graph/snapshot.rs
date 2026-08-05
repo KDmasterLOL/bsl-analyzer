@@ -210,9 +210,16 @@ impl GraphState {
                 return Some((c.disk_fp, c.clean));
             }
         }
+        // Asked about OUR cursor, not about the hub at large: `invalidate_scan_on_hub_drift`
+        // above has just drained it, so any debt left here is the hub's own incompleteness
+        // — while a shared verdict would also carry the debt of a consumer that simply
+        // stopped draining, and put this one on a full walk for as long as that lasted.
         let hub_healthy = matches!(
             &self.change_hub,
-            Some(hub) if matches!(hub.health(), crate::change_hub::Health::Healthy)
+            Some(hub) if matches!(
+                hub.health_for(*lock_recover(&self.hub_cursor)),
+                crate::change_hub::Health::Healthy
+            )
         );
         if !hub_healthy {
             let mut fp_state = lock_recover(&self.fp_map);
@@ -641,6 +648,80 @@ mod tests {
             }
         }
         assert!(seen, "the hub must deliver events under the newly-added extension root");
+    }
+
+    /// Another consumer that stopped draining owes its own reconcile. Answering that debt
+    /// here used to drop the graph's fingerprint map and buy a full tree walk on every
+    /// freshness check — for as long as the other consumer stayed silent, which is
+    /// forever if its thread is gone.
+    #[test]
+    fn a_foreign_cursors_debt_does_not_cost_the_graph_a_walk() {
+        use crate::change_hub::WorkspaceChangeHub;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let hub = WorkspaceChangeHub::start(vec![root.to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let mut graph = GraphState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
+        // Without this the throttled scan cache answers before the health question is ever
+        // asked, and this test would pass no matter what the answer would have been.
+        graph.drift_interval = Duration::ZERO;
+        graph.ensure_loading();
+        wait_ready(&graph);
+        // The graph's own cursor exists and is clean from here on: `current_disk_fp`
+        // drains it before it asks anything. Two calls settle the map and its own debt.
+        let _ = graph.current_disk_fp();
+        let _ = graph.current_disk_fp();
+
+        // A stranger subscribes and never drains; then everyone is asked to reconcile.
+        // The graph answers for ITSELF with one walk — that debt is genuinely its own —
+        // and the stranger's stays outstanding for ever after.
+        let _stranger = hub.subscribe();
+        hub.degrade_external();
+        let _ = graph.current_disk_fp();
+
+        let walks = graph.scan_count.load(std::sync::atomic::Ordering::SeqCst);
+        let _ = graph.current_disk_fp();
+        assert_eq!(
+            graph.scan_count.load(std::sync::atomic::Ordering::SeqCst),
+            walks,
+            "somebody else's outstanding reconcile is not the graph's to pay for"
+        );
+    }
+
+    /// The other half, and the one that keeps the first honest: when the HUB cannot
+    /// deliver, the graph must keep walking however clean its own cursor is. Without this
+    /// leg, replacing the health question with an unconditional fast path passes every
+    /// other gate here while going quietly blind.
+    ///
+    /// The carrier is a hub whose thread never started, not a blind root: the graph
+    /// re-declares the hub's targets as it builds, which would take an unwatched root out
+    /// of the declaration and leave the hub honestly healthy — a stand that proves nothing.
+    #[test]
+    fn a_hub_that_cannot_deliver_still_sends_the_graph_back_to_a_walk() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let hub = WorkspaceChangeHub::start_with_unstartable_thread(vec![WatchTarget::recursive(
+            root.to_path_buf(),
+        )]);
+
+        let mut graph = GraphState::for_workspace(root.to_path_buf()).with_change_hub(hub);
+        graph.drift_interval = Duration::ZERO;
+        graph.ensure_loading();
+        wait_ready(&graph);
+        let _ = graph.current_disk_fp();
+        let walks = graph.scan_count.load(std::sync::atomic::Ordering::SeqCst);
+
+        let _ = graph.current_disk_fp();
+        assert!(
+            graph.scan_count.load(std::sync::atomic::Ordering::SeqCst) > walks,
+            "a hub that will never deliver leaves the graph nothing to trust"
+        );
     }
 
     /// A config-file change delivered by the hub must invalidate the throttled

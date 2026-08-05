@@ -8,11 +8,17 @@
 //!
 //! Reclamation is driven by the cursors: an entry is dropped once every live
 //! cursor has advanced past it, so the capacity bounds only *undrained* in-flight
-//! paths rather than growing for the daemon's whole lifetime. If more than the
-//! cap pile up undrained (a mass change like a branch switch), or the event
-//! stream is lossy, the accumulator is cleared and every live cursor is told —
-//! exactly once — to reconcile with a full scan; health returns to `Healthy` once
-//! all cursors have acknowledged, and accumulation continues.
+//! paths rather than growing for the daemon's whole lifetime.
+//!
+//! Two different things can force a reconcile, and they are kept apart because
+//! they are owed by different people. If the event stream is lossy — the backend
+//! dropped events before the hub saw them — nobody has the detail, so every live
+//! cursor is told, exactly once, to reconcile with a full scan. If instead the cap
+//! is reached, the accumulator is being held at whichever cursor stopped draining:
+//! the detail is released by advancing THAT cursor, and only it is told. A
+//! consumer keeping up therefore pays nothing for one that stopped — it keeps its
+//! exact paths — and asks about health through its own cursor rather than through
+//! a shared verdict somebody else's silence would spoil.
 
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
@@ -66,9 +72,14 @@ pub(crate) enum DegradeReason {
     /// A consumer's periodic reconcile scan found drift the event stream never
     /// delivered — evidence the backend is lossy, so fall back to scanning.
     ReconcileMiss,
-    /// More than the cap piled up undrained, or the callback channel overflowed:
-    /// detail was dropped and a full reconcile scan is needed.
+    /// The callback channel overflowed: the backend dropped events before anyone saw
+    /// them, so every consumer alike lost detail and must reconcile.
     Overflow,
+    /// THIS consumer fell so far behind that the detail it had not drained was released
+    /// to keep the accumulator bounded. Nobody else lost anything — which is why it is a
+    /// separate reason from [`DegradeReason::Overflow`], and why it is carried by the one
+    /// cursor rather than by the shared reconcile window.
+    CursorLagged,
     /// The watched root set was re-pointed (an extension topology reload). State a
     /// consumer derived under the old set predates the new roots' coverage, so
     /// each must rescan once before trusting the stream again.
@@ -139,6 +150,7 @@ impl Health {
             Health::Degraded(DegradeReason::RewatchFailed) => "degraded:rewatch-failed",
             Health::Degraded(DegradeReason::ReconcileMiss) => "degraded:reconcile-miss",
             Health::Degraded(DegradeReason::Overflow) => "degraded:overflow",
+            Health::Degraded(DegradeReason::CursorLagged) => "degraded:cursor-lagged",
             Health::Degraded(DegradeReason::Rearmed) => "degraded:rearmed",
         }
     }
@@ -183,8 +195,11 @@ pub(crate) struct DrainBatch {
 struct CursorState {
     /// The last sequence number this cursor has drained through.
     pos: u64,
-    /// Set when the hub overflowed; delivered once on the next drain, then cleared.
-    pending_rescan: bool,
+    /// This cursor's own outstanding reconcile debt, WITH the reason it was incurred;
+    /// delivered once on the next drain, then cleared. Carrying the reason here rather
+    /// than only in the shared window is what lets a debt exist for one consumer alone —
+    /// a debt nobody can name is a debt no health can report.
+    pending: Option<DegradeReason>,
 }
 
 /// Bounded, seq-tagged accumulator. Entries coalesce by canonical path so the map
@@ -237,15 +252,20 @@ impl Accumulator {
         self.next_seq - 1
     }
 
-    fn subscribe(&mut self, force_rescan: bool) -> u64 {
+    fn subscribe(&mut self, force: Option<DegradeReason>) -> u64 {
         let id = self.next_cursor_id;
         self.next_cursor_id += 1;
         // A cursor born during an active rescan window must still be told to
-        // reconcile; one born while healthy starts clean. `force_rescan` carries the
-        // standing reasons the window does not — a declared root nothing is watching
-        // outlives the window that announced it.
-        let pending_rescan = force_rescan || self.degrade_reason.is_some();
-        self.cursors.insert(id, CursorState { pos: self.max_seq(), pending_rescan });
+        // reconcile; one born while healthy starts clean. `force` carries the standing
+        // reasons the window does not — a declared root nothing is watching outlives the
+        // window that announced it.
+        //
+        // Only the SHARED window is inherited. A debt belonging to one lagging cursor is
+        // not a loss of the stream: nothing was dropped before this cursor existed that
+        // anyone else still holds, so charging it a full reconcile would be charging it
+        // for somebody else's silence.
+        let pending = force.or_else(|| self.degrade_reason.clone());
+        self.cursors.insert(id, CursorState { pos: self.max_seq(), pending });
         id
     }
 
@@ -255,17 +275,55 @@ impl Accumulator {
     }
 
     fn record(&mut self, canonical: PathBuf, raw: PathBuf, kind: ChangeKind) {
-        // A brand-new key past the cap means more than `cap` distinct paths are
-        // waiting undrained: detail is no longer trustworthy, so drop it all and
-        // ask consumers to reconcile. Already-tracked keys still refresh below.
+        // A brand-new key past the cap means more than `cap` distinct paths are waiting
+        // undrained — but they are waiting for SOMEBODY, and the accumulator is held at
+        // the slowest cursor. Making room is therefore that cursor's business, not
+        // everyone's. Already-tracked keys just refresh below.
         if !self.entries.contains_key(&canonical) && self.entries.len() >= self.cap {
-            self.enter_rescan(true, DegradeReason::Overflow);
-            return;
+            self.make_room();
         }
         let seq = self.next_seq;
         self.next_seq += 1;
         self.entries.insert(canonical.clone(), ChangeEntry { canonical, raw, kind, seq });
         self.generation += 1;
+    }
+
+    /// Release undrained detail until the accumulator is back inside its cap, charging
+    /// the release to the cursors that are actually holding it.
+    ///
+    /// The floor is the SLOWEST cursor, so the one furthest behind is advanced first and
+    /// told it lost detail; everyone level with the stream keeps their exact paths and
+    /// owes nothing. Only that one, not every cursor behind the head: with positions 0, 1
+    /// and current, freeing what 0 pins is enough, and 1 lost nothing.
+    ///
+    /// Terminates by construction: each round advances one cursor that was strictly
+    /// behind, and once every cursor sits at `max_seq` the reclaim below removes every
+    /// entry there is.
+    fn make_room(&mut self) {
+        self.reclaim();
+        while self.entries.len() >= self.cap {
+            let max = self.max_seq();
+            let Some(id) = self
+                .cursors
+                .iter()
+                .filter(|(_, cursor)| cursor.pos < max)
+                .min_by_key(|(_, cursor)| cursor.pos)
+                .map(|(id, _)| *id)
+            else {
+                // Nobody is observing, or everybody is current: whatever is left is
+                // nobody's to lose, and the cap has to hold regardless.
+                self.entries.clear();
+                return;
+            };
+            if let Some(cursor) = self.cursors.get_mut(&id) {
+                cursor.pos = max;
+                // `get_or_insert`, not an overwrite: an open window's reason is the more
+                // informative of the two, and this cursor owes one reconcile either way.
+                cursor.pending.get_or_insert(DegradeReason::CursorLagged);
+                self.generation += 1;
+            }
+            self.reclaim();
+        }
     }
 
     /// Enter a reconcile window: optionally clear the (now-untrusted) entries, flag
@@ -280,10 +338,9 @@ impl Accumulator {
         }
         let mut changed = newly;
         for cursor in self.cursors.values_mut() {
-            if !cursor.pending_rescan {
-                cursor.pending_rescan = true;
-                changed = true;
-            }
+            // Overwritten, unlike a lag debt: this is the newest thing that went wrong,
+            // and it is what a consumer asking why it must reconcile should be told.
+            changed |= cursor.pending.replace(reason.clone()).is_none();
         }
         self.degrade_reason = Some(reason.clone());
         if changed {
@@ -307,13 +364,13 @@ impl Accumulator {
         let rescan_required = match self.cursors.get_mut(&id) {
             Some(cursor) => {
                 cursor.pos = max;
-                std::mem::replace(&mut cursor.pending_rescan, false)
+                cursor.pending.take().is_some()
             }
             None => false,
         };
 
         // Recover once no live cursor is still owed a reconcile.
-        if self.degrade_reason.is_some() && !self.cursors.values().any(|c| c.pending_rescan) {
+        if self.degrade_reason.is_some() && !self.cursors.values().any(|c| c.pending.is_some()) {
             self.degrade_reason = None;
         }
         self.reclaim();
@@ -336,6 +393,24 @@ impl Accumulator {
         }
         match &self.degrade_reason {
             Some(reason) => Health::Degraded(reason.clone()),
+            None => Health::Healthy,
+        }
+    }
+
+    /// Health as it concerns ONE consumer: the hub's own condition plus that cursor's
+    /// own outstanding debt — never somebody else's.
+    ///
+    /// Without a cursor the answer is the shared one: a consumer that has not subscribed
+    /// has observed nothing, and nothing observed is no reason to trust the stream.
+    fn health_for(&self, cursor: Option<u64>) -> Health {
+        if self.setup_failed {
+            return Health::Degraded(DegradeReason::WatcherSetup);
+        }
+        let Some(id) = cursor else {
+            return self.health();
+        };
+        match self.cursors.get(&id).and_then(|cursor| cursor.pending.clone()) {
+            Some(reason) => Health::Degraded(reason),
             None => Health::Healthy,
         }
     }
@@ -1126,7 +1201,7 @@ impl WorkspaceChangeHub {
     pub(crate) fn subscribe(&self) -> SinkCursor {
         // Read before taking the accumulator, so no path holds one of the two locks
         // while asking for the other.
-        let blind = self.inner.is_partially_blind();
+        let blind = self.inner.is_partially_blind().then_some(DegradeReason::RewatchFailed);
         SinkCursor { id: self.inner.lock_acc().subscribe(blind) }
     }
 
@@ -1151,6 +1226,26 @@ impl WorkspaceChangeHub {
     /// other; the accumulator guard is released by the end of its own statement.
     pub(crate) fn health(&self) -> Health {
         let health = self.inner.lock_acc().health();
+        match health {
+            Health::Healthy if self.inner.is_partially_blind() => {
+                Health::Degraded(DegradeReason::RewatchFailed)
+            }
+            health => health,
+        }
+    }
+
+    /// Health as it concerns ONE consumer, for deciding between the event stream and a
+    /// full scan.
+    ///
+    /// The hub's own condition is everyone's: a watch that never armed, or a declared
+    /// root nothing is watching, means the stream is incomplete no matter who is asking.
+    /// An outstanding reconcile debt is not — it belongs to the cursor that owes it, and
+    /// answering it to everybody is how one consumer that stopped draining used to put
+    /// every other consumer on the slow path for the life of the daemon.
+    ///
+    /// [`Self::health`] stays for reporting the hub itself.
+    pub(crate) fn health_for(&self, cursor: Option<SinkCursor>) -> Health {
+        let health = self.inner.lock_acc().health_for(cursor.map(|cursor| cursor.id));
         match health {
             Health::Healthy if self.inner.is_partially_blind() => {
                 Health::Degraded(DegradeReason::RewatchFailed)
@@ -1959,8 +2054,67 @@ fn apply_rearm(
     full_coverage
 }
 
+/// Stands other modules' tests need, not just this one's. A consumer proving it no
+/// longer pays for somebody else's silence has to be able to build a hub that is
+/// standing-degraded, and that stand can only be built here, next to what it exercises.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{WatchTarget, WorkspaceChangeHub};
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    /// Make a directory unwatchable for real: `inotify_add_watch` needs read permission,
+    /// and refuses both a first watch and a re-watch of an already-watched path without
+    /// it. Nothing weaker works — an unreadable directory still stats and canonicalizes,
+    /// so it moves no fingerprint.
+    #[cfg(unix)]
+    pub(crate) fn unreadable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+
+    /// Restore access. Called before the temporary directory is dropped: its recursive
+    /// removal cannot descend into a directory it may not read.
+    #[cfg(unix)]
+    pub(crate) fn readable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    pub(crate) fn eventually(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        f()
+    }
+
+    /// One live root and one the watcher genuinely cannot take, so the hub is standing
+    /// degraded for a reason no drain clears. The period is an hour, so every tick is one
+    /// the test asked for and nothing happens between two assertions on its own.
+    #[cfg(unix)]
+    pub(crate) fn partly_blind_hub() -> (tempfile::TempDir, PathBuf, PathBuf, WorkspaceChangeHub) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        unreadable(&b);
+        let hub = WorkspaceChangeHub::start_targets_with_period(
+            vec![WatchTarget::recursive(a.clone()), WatchTarget::recursive(b.clone())],
+            Duration::from_secs(3600),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the live root still arms");
+        (dir, a, b, hub)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
     use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind};
     use tempfile::tempdir;
@@ -2059,35 +2213,6 @@ mod tests {
     }
 
     /// Wait until `f` holds, polling; returns whether it ever did.
-    /// Make a directory unwatchable for real: `inotify_add_watch` needs read permission,
-    /// and refuses both a first watch and a re-watch of an already-watched path without
-    /// it. Nothing weaker works — an unreadable directory still stats and canonicalizes,
-    /// so it moves no fingerprint.
-    #[cfg(unix)]
-    fn unreadable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
-    }
-
-    /// Restore access. Called before the temporary directory is dropped: its recursive
-    /// removal cannot descend into a directory it may not read.
-    #[cfg(unix)]
-    fn readable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    fn eventually(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if f() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        f()
-    }
-
     /// The move this whole node exists for, and the one nothing else can catch: a
     /// symlinked scan root retargeted in place emits NO event, so an idle hub has
     /// nothing to react to. Only the periodic check notices, and a hub that ran its
@@ -2294,25 +2419,6 @@ mod tests {
 
         readable(&b);
         hub.shutdown();
-    }
-
-    /// One live root and one the watcher genuinely cannot take. The period is an hour, so
-    /// every tick in the tests below is one the test asked for and nothing happens between
-    /// two assertions on its own.
-    #[cfg(unix)]
-    fn partly_blind_hub() -> (tempfile::TempDir, PathBuf, PathBuf, WorkspaceChangeHub) {
-        let dir = tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let (a, b) = (root.join("a"), root.join("b"));
-        std::fs::create_dir(&a).unwrap();
-        std::fs::create_dir(&b).unwrap();
-        unreadable(&b);
-        let hub = WorkspaceChangeHub::start_targets_with_period(
-            vec![WatchTarget::recursive(a.clone()), WatchTarget::recursive(b.clone())],
-            Duration::from_secs(3600),
-        );
-        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the live root still arms");
-        (dir, a, b, hub)
     }
 
     /// A root the watch could not take at startup must be retried, and the retry has to
@@ -3351,7 +3457,7 @@ mod tests {
         std::fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
 
         let mut acc = Accumulator::new(64);
-        let cursor = acc.subscribe(false);
+        let cursor = acc.subscribe(None);
         // First event fires while the file exists.
         let (canonical, kind) = classify_path(&file).unwrap();
         assert_eq!(kind, ChangeKind::MaybeChanged);
@@ -3390,7 +3496,7 @@ mod tests {
             std::fs::write(&via_link, "x").unwrap();
 
             let mut acc = Accumulator::new(64);
-            let cursor = acc.subscribe(false);
+            let cursor = acc.subscribe(None);
             let (create_key, _) = classify_path(&via_link).unwrap();
             acc.record(create_key, via_link.clone(), ChangeKind::MaybeChanged);
 
@@ -3416,8 +3522,8 @@ mod tests {
     #[test]
     fn reclamation_releases_entries_once_all_cursors_advance() {
         let mut acc = Accumulator::new(64);
-        let a = acc.subscribe(false);
-        let b = acc.subscribe(false);
+        let a = acc.subscribe(None);
+        let b = acc.subscribe(None);
 
         for i in 0..10 {
             let p = PathBuf::from(format!("/f{i}.bsl"));
@@ -3445,62 +3551,178 @@ mod tests {
         assert!(acc.entries.is_empty());
     }
 
+    /// One consumer stopping must cost the others nothing. A cursor that stops draining
+    /// pins the reclaim floor for everyone, so the cap is reached over and over, and the
+    /// price of the cap — a full reconcile — used to be charged to every cursor alive.
+    ///
+    /// The one that keeps up is subscribed FIRST on purpose: with the other order an
+    /// implementation sacrificing the OLDEST cursor rather than the furthest behind
+    /// passes this gate while still punishing exactly the wrong one.
     #[test]
-    fn overflow_clears_flags_per_cursor_then_recovers() {
+    fn a_cursor_that_keeps_up_pays_nothing_for_one_that_stopped() {
         let mut acc = Accumulator::new(2);
-        let a = acc.subscribe(false);
-        let b = acc.subscribe(false);
+        let fast = acc.subscribe(None);
+        let _stalled = acc.subscribe(None);
 
-        // Two distinct undrained keys fill the cap; a third trips overflow.
+        for n in 0..5 {
+            let p = PathBuf::from(format!("/p{n}.bsl"));
+            acc.record(p.clone(), p, ChangeKind::MaybeChanged);
+            let batch = acc.drain(fast);
+            assert!(!batch.rescan_required, "step {n}: keeping up must cost no reconcile");
+            assert_eq!(batch.entries.len(), 1, "step {n}: and must deliver the path itself");
+        }
+        assert!(acc.entries.len() <= acc.cap, "the cap still bounds the accumulator");
+    }
+
+    /// The one who fell behind is told, and told once: it lost detail, and silence would
+    /// leave it serving state that predates changes nobody will ever replay for it.
+    #[test]
+    fn the_cursor_that_fell_behind_is_told_to_reconcile() {
+        let mut acc = Accumulator::new(2);
+        let fast = acc.subscribe(None);
+        let stalled = acc.subscribe(None);
+
+        for n in 0..5 {
+            let p = PathBuf::from(format!("/p{n}.bsl"));
+            acc.record(p.clone(), p, ChangeKind::MaybeChanged);
+            let _ = acc.drain(fast);
+        }
+        assert!(acc.drain(stalled).rescan_required, "the cursor that lost detail must know");
+        assert!(!acc.drain(stalled).rescan_required, "and be told exactly once");
+    }
+
+    /// Only the FURTHEST behind pays. With three cursors at three different positions,
+    /// advancing the last one is enough to free room, and the middle one lost nothing —
+    /// an implementation flagging everyone who is behind would punish it too, and the
+    /// two-cursor stand cannot see that: there the second cursor is always level.
+    #[test]
+    fn only_the_furthest_behind_pays_for_the_overflow() {
+        let mut acc = Accumulator::new(3);
+        let stalled = acc.subscribe(None);
+        let middle = acc.subscribe(None);
+        let level = acc.subscribe(None);
+
+        let record = |acc: &mut Accumulator, name: &str| {
+            let p = PathBuf::from(name);
+            acc.record(p.clone(), p, ChangeKind::MaybeChanged);
+        };
+        record(&mut acc, "/p1.bsl");
+        let _ = acc.drain(middle);
+        let _ = acc.drain(level);
+        record(&mut acc, "/p2.bsl");
+        let _ = acc.drain(level);
+        record(&mut acc, "/p3.bsl");
+        let _ = acc.drain(level);
+        // `stalled` at the very beginning, `middle` one path in, `level` current.
+        record(&mut acc, "/p4.bsl");
+
+        assert!(acc.drain(stalled).rescan_required, "the furthest behind pays");
+        let batch = acc.drain(middle);
+        assert!(!batch.rescan_required, "the one in the middle lost nothing");
+        let mut names: Vec<String> =
+            batch.entries.iter().map(|e| e.raw.to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, vec!["/p2.bsl", "/p3.bsl", "/p4.bsl"], "and keeps its exact paths");
+    }
+
+    /// Nobody is observing yet, so nobody is owed anything. Dropping the detail keeps the
+    /// memory bound before the first subscriber; opening a reconcile window would hand a
+    /// debt to a consumer that had not even arrived when the paths went by.
+    #[test]
+    fn an_overflow_before_the_first_subscriber_owes_nobody() {
+        let mut acc = Accumulator::new(1);
         acc.record(PathBuf::from("/a.bsl"), PathBuf::from("/a.bsl"), ChangeKind::MaybeChanged);
         acc.record(PathBuf::from("/b.bsl"), PathBuf::from("/b.bsl"), ChangeKind::MaybeChanged);
-        acc.record(PathBuf::from("/c.bsl"), PathBuf::from("/c.bsl"), ChangeKind::MaybeChanged);
 
+        assert!(acc.entries.len() <= acc.cap, "the cap holds before anyone subscribes");
+        assert_eq!(acc.health(), Health::Healthy, "an unobserved drop is nobody's debt");
+        let first = acc.subscribe(None);
+        assert!(!acc.drain(first).rescan_required, "and the first arrival inherits nothing");
+    }
+
+    /// A cursor falling behind is not a loss of the stream. Nothing was dropped for anyone
+    /// else, so a consumer arriving afterwards owes no reconcile — and the debt of the one
+    /// that did fall behind has to be visible on ITS health, which needs a reason of its
+    /// own: reusing `Overflow` would put the two events back under one name.
+    #[test]
+    fn a_lagging_cursor_is_its_own_debt_and_not_the_streams() {
+        let mut acc = Accumulator::new(2);
+        let stalled = acc.subscribe(None);
+        for n in 0..4 {
+            let p = PathBuf::from(format!("/p{n}.bsl"));
+            acc.record(p.clone(), p, ChangeKind::MaybeChanged);
+        }
+
+        assert_eq!(acc.health(), Health::Healthy, "the stream lost nothing");
+        let late = acc.subscribe(None);
+        assert!(!acc.drain(late).rescan_required, "so a newcomer owes nothing");
+
+        let Health::Degraded(reason) = acc.health_for(Some(stalled)) else {
+            panic!("the cursor that lost detail is not healthy");
+        };
+        assert_ne!(reason, DegradeReason::Overflow, "its own lag is not a loss of the stream");
+    }
+
+    /// A genuine loss of the stream is everyone's, and is told to each cursor exactly
+    /// once. Driven through `enter_rescan` directly, because the accumulator's own cap no
+    /// longer produces this: filling the cap is one consumer falling behind, which is a
+    /// different event under a different name.
+    #[test]
+    fn a_lost_stream_is_told_to_each_cursor_once_then_recovers() {
+        let mut acc = Accumulator::new(2);
+        let a = acc.subscribe(None);
+        let b = acc.subscribe(None);
+
+        acc.enter_rescan(true, DegradeReason::Overflow);
         assert_eq!(acc.health(), Health::Degraded(DegradeReason::Overflow));
-        assert!(acc.entries.is_empty(), "overflow drops the untrusted detail");
+        assert!(acc.entries.is_empty(), "a lost stream drops the untrusted detail");
 
-        // Accumulation continues after overflow (the old bug dropped new keys).
         acc.record(PathBuf::from("/d.bsl"), PathBuf::from("/d.bsl"), ChangeKind::MaybeChanged);
-        assert_eq!(acc.entries.len(), 1, "new changes after overflow are captured");
+        assert_eq!(acc.entries.len(), 1, "new changes after the loss are captured");
 
-        // Each cursor is told to reconcile exactly once.
         let batch_a = acc.drain(a);
         assert!(batch_a.rescan_required);
-        let batch_a2 = acc.drain(a);
-        assert!(!batch_a2.rescan_required, "the flag is delivered only once");
+        assert!(!acc.drain(a).rescan_required, "the flag is delivered only once");
         // A alone acknowledging is not enough; B still owes a reconcile.
         assert_eq!(acc.health(), Health::Degraded(DegradeReason::Overflow));
 
-        let batch_b = acc.drain(b);
-        assert!(batch_b.rescan_required);
+        assert!(acc.drain(b).rescan_required);
         assert_eq!(acc.health(), Health::Healthy, "recovers once all cursors confirm");
     }
 
+    /// The backend dropping events is the loss that belongs to everyone: the paths were
+    /// gone before the hub ever saw them, so no cursor can be spared. BOTH discriminate:
+    /// an implementation opening the window only for future subscribers satisfies the
+    /// late-arrival half while the cursor that was already there loses the change for good.
     #[test]
-    fn late_subscriber_during_rescan_window_sees_the_flag() {
-        let mut acc = Accumulator::new(2);
-        let a = acc.subscribe(false);
-        acc.record(PathBuf::from("/a.bsl"), PathBuf::from("/a.bsl"), ChangeKind::MaybeChanged);
-        acc.record(PathBuf::from("/b.bsl"), PathBuf::from("/b.bsl"), ChangeKind::MaybeChanged);
-        acc.record(PathBuf::from("/c.bsl"), PathBuf::from("/c.bsl"), ChangeKind::MaybeChanged);
-        assert_eq!(acc.health(), Health::Degraded(DegradeReason::Overflow));
+    fn a_dropped_event_is_owed_by_cursors_present_and_future() {
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let present = hub.subscribe();
+        let _ = hub.drain(present);
 
-        // Subscribing while A has not yet acknowledged: the newcomer must reconcile.
-        let late = acc.subscribe(false);
-        assert!(acc.drain(late).rescan_required, "a cursor born mid-window reconciles");
+        hub.inner.channel_overflow.store(true, Ordering::Relaxed);
+        hub.inner.drain_channel_overflow();
+        assert_eq!(hub.health(), Health::Degraded(DegradeReason::Overflow));
 
-        // A newcomer after everyone has acknowledged starts clean.
-        let _ = acc.drain(a);
-        let _ = acc.drain(late);
-        assert_eq!(acc.health(), Health::Healthy);
-        let fresh = acc.subscribe(false);
-        assert!(!acc.drain(fresh).rescan_required, "a cursor born healthy does not reconcile");
+        // Subscribed while the window is still open — draining `present` first would
+        // close it, and then a clean answer for `late` would be right rather than wrong.
+        let late = hub.subscribe();
+        assert!(
+            hub.drain(present).rescan_required,
+            "a cursor alive when the backend dropped events lost them too"
+        );
+        assert!(
+            hub.drain(late).rescan_required,
+            "and a cursor born inside the window cannot know what it missed either"
+        );
     }
 
     #[test]
     fn independent_cursors_drain_their_own_deltas() {
         let mut acc = Accumulator::new(64);
-        let x = acc.subscribe(false);
+        let x = acc.subscribe(None);
         acc.record(PathBuf::from("/a.bsl"), PathBuf::from("/a.bsl"), ChangeKind::MaybeChanged);
         acc.record(PathBuf::from("/b.bsl"), PathBuf::from("/b.bsl"), ChangeKind::MaybeChanged);
 
@@ -3508,7 +3730,7 @@ mod tests {
         assert_eq!(batch_x.entries.len(), 2);
 
         // Y subscribes now — it must not replay the earlier changes.
-        let y = acc.subscribe(false);
+        let y = acc.subscribe(None);
         acc.record(PathBuf::from("/c.bsl"), PathBuf::from("/c.bsl"), ChangeKind::MaybeChanged);
 
         let batch_y = acc.drain(y);

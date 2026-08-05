@@ -90,8 +90,13 @@ impl DiagnosticsState {
 
         // Healthy hub → event-driven drain (O(change), no scan on the hot path).
         // No hub, or a degraded one, → today's throttled scan-on-read (parity).
+        //
+        // Health is asked about OUR cursor: another consumer that stopped draining owes
+        // its own reconcile, and answering that debt here would put these diagnostics on
+        // a full scan for as long as the other one stays silent.
+        let cursor = *lock_recover(&self.hub_cursor);
         match &self.change_hub {
-            Some(hub) if matches!(hub.health(), Health::Healthy) => {
+            Some(hub) if matches!(hub.health_for(cursor), Health::Healthy) => {
                 self.poll_drift_via_drain(hub, &root);
             }
             _ => {
@@ -1572,6 +1577,68 @@ mod tests {
 
         assert!(wait_for_apply(&state, gen0), "a degraded hub still applies the edit via scan");
         assert!(state.scan_count() > 0, "the degraded path uses the scan, matching today");
+    }
+
+    /// A consumer that stopped draining owes its own reconcile, and it used to be charged
+    /// to everyone: the shared verdict stayed degraded for as long as that cursor was
+    /// silent, so these diagnostics answered every read with a full workspace scan for the
+    /// rest of the daemon's life.
+    ///
+    /// The counter covers BOTH health questions on this path — the drain/scan choice and
+    /// the freshness fallback — because either one scanning shows up in it. An
+    /// implementation that moved only one of them off the shared verdict fails here.
+    #[test]
+    fn a_foreign_cursors_debt_does_not_cost_diagnostics_a_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // A stranger subscribes and never drains; everyone is asked to reconcile. These
+        // diagnostics answer for THEMSELVES — that debt is genuinely theirs — and the
+        // stranger's stays outstanding for ever after.
+        let _stranger = hub.subscribe();
+        hub.degrade_external();
+        // Paid through the reconcile tick, not through a read: on the scan path a read
+        // never drains, so the debt would otherwise outlive the reason for it.
+        state.reconcile_tick();
+
+        let scans = state.scan_count();
+        let _ = state.read(|_resident, _| ());
+        assert_eq!(
+            state.scan_count(),
+            scans,
+            "somebody else's outstanding reconcile is not these diagnostics' to pay for"
+        );
+    }
+
+    /// The other half, and the one that keeps the first honest: a hub that cannot deliver
+    /// at all leaves nothing to trust, however clean this consumer's own cursor is.
+    /// Without this leg, an unconditional fast path passes the test above while quietly
+    /// serving whatever the event stream never delivered.
+    #[test]
+    fn a_hub_that_cannot_deliver_still_sends_diagnostics_to_a_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let hub = WorkspaceChangeHub::start_with_unstartable_thread(vec![
+            crate::change_hub::WatchTarget::recursive(root.to_path_buf()),
+        ]);
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf()).with_change_hub(hub);
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let scans = state.scan_count();
+        let _ = state.read(|_resident, _| ());
+        assert!(
+            state.scan_count() > scans,
+            "a hub that will never deliver leaves the diagnostics nothing to trust"
+        );
     }
 
     /// The reconciler/watchdog: a change the event stream failed to deliver (simulated by
