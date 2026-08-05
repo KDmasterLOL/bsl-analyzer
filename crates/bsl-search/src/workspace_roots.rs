@@ -176,11 +176,17 @@ impl WorkspaceRoots {
     /// `str` can carry comes back with those bytes replaced, and no byte comparison finds
     /// it any more. Re-render the roots the same way and both sides speak one alphabet.
     ///
-    /// Not a second rule: the ranking is the same, and the table's identifiers are lossy
-    /// strings already — two roots that render alike are rejected when it is built — so
-    /// this equates nothing the key space kept apart. The rendering is built only when the
-    /// path actually carries a replacement character and nothing else matched, so the
-    /// walking callers never pay for it.
+    /// The ranking is the same one, and the rendering is built only when the path actually
+    /// carries a replacement character and nothing else matched, so the walking callers
+    /// never pay for it.
+    ///
+    /// What the rendering CAN do is make two roots that the byte comparison keeps apart
+    /// look alike — the identifier check at build time does not prevent it, because the
+    /// configuration's identifier is reserved and never collides with anything, and
+    /// identifiers are built from the canonical spellings while the second pass here ranks
+    /// the declared ones. A tie is therefore answered with "unknown", not with the deeper
+    /// or the later root: the two candidates are equally plausible, and a key guessed from
+    /// them would mark a file that is not the one that changed.
     fn lossy_match(&self, walked: &Path, canonical: &Path) -> Option<FileKey> {
         let rendered = |path: &Path| {
             path.to_str().is_some_and(|path| path.contains(char::REPLACEMENT_CHARACTER))
@@ -201,8 +207,33 @@ impl WorkspaceRoots {
                 })
                 .collect(),
         };
-        view.longest_match(canonical, |root| &root.canonical)
-            .or_else(|| view.longest_match(walked, |root| &root.declared))
+        view.unambiguous_match(canonical, |root| &root.canonical)
+            .or_else(|| view.unambiguous_match(walked, |root| &root.declared))
+    }
+
+    /// [`Self::longest_match`] that refuses a tie: the deepest match, and only when one
+    /// root reaches that deep.
+    fn unambiguous_match(
+        &self,
+        path: &Path,
+        spelling: impl Fn(&Root) -> &PathBuf,
+    ) -> Option<FileKey> {
+        let mut matches: Vec<(usize, FileKey)> = self
+            .roots
+            .iter()
+            .filter_map(|root| {
+                let rel = path.strip_prefix(spelling(root)).ok()?;
+                rel.components().next().is_some().then(|| {
+                    (spelling(root).components().count(), FileKey::new(&root.id, key_of(rel)))
+                })
+            })
+            .collect();
+        let deepest = matches.iter().map(|(depth, _)| *depth).max()?;
+        matches.retain(|(depth, _)| *depth == deepest);
+        match matches.as_slice() {
+            [(_, key)] => Some(key.clone()),
+            _ => None,
+        }
     }
 
     /// The owning root ranked by the DECLARED spellings alone. For a file whose canonical
@@ -728,6 +759,32 @@ mod tests {
 
             let rendered = PathBuf::from(file.to_string_lossy().into_owned());
             assert_eq!(owner(&roots, &rendered), expected, "and so does what a store gave back");
+        }
+
+        /// Two roots that differ only in bytes no `str` can hold render alike, and the
+        /// identifier check does not reject the pair: the configuration's identifier is
+        /// reserved, so it collides with nothing. Neither candidate is more plausible than
+        /// the other, and a key picked from them would name a file that did not change —
+        /// so the rendering answers "unknown" and the byte-exact spelling keeps working.
+        #[test]
+        fn a_rendering_that_fits_two_roots_attributes_to_neither() {
+            let dir = tempfile::tempdir().unwrap();
+            let configuration = dir.path().join(OsString::from_vec(b"c\xff".to_vec()));
+            let extension = dir.path().join(OsString::from_vec(b"c\xfe".to_vec()));
+            std::fs::create_dir_all(&configuration).unwrap();
+            std::fs::create_dir_all(&extension).unwrap();
+            let (roots, rejected) =
+                WorkspaceRoots::build(dir.path(), &configuration, std::slice::from_ref(&extension));
+            assert!(rejected.is_empty(), "the reserved identifier collides with nothing");
+
+            let file = configuration.join(MODULE);
+            assert_eq!(
+                owner(&roots, &file),
+                Some(FileKey::configuration(MODULE.to_owned())),
+                "the real bytes still tell the two apart",
+            );
+            let rendered = PathBuf::from(file.to_string_lossy().into_owned());
+            assert_eq!(owner(&roots, &rendered), None, "the rendering tells them apart no more");
         }
 
         /// The fallback ranks, it does not wave through: a rendered path outside every root
