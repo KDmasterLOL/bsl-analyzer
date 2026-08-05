@@ -42,6 +42,8 @@ pub(super) struct ScanCache {
     pub(super) at: Instant,
     pub(super) stats: Vec<FileStat>,
     pub(super) config_fp: u64,
+    /// The baseline this snapshot is comparable against — see `Inner::baseline_epoch`.
+    pub(super) baseline_epoch: u64,
 }
 
 impl DiagnosticsState {
@@ -67,6 +69,16 @@ impl DiagnosticsState {
     #[cfg(test)]
     pub(super) fn set_reconcile_probe(&self, f: impl FnOnce() + Send + 'static) {
         *lock_recover(&self.reconcile_probe) = Some(Box::new(f));
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_post_scan_probe(&self, f: impl FnOnce() + Send + 'static) {
+        *lock_recover(&self.post_scan_probe) = Some(Box::new(f));
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_pre_drain_probe(&self, f: impl FnOnce() + Send + 'static) {
+        *lock_recover(&self.pre_drain_probe) = Some(Box::new(f));
     }
 
     pub(super) fn poll_drift(&self) {
@@ -195,11 +207,20 @@ impl DiagnosticsState {
             self.poll_drift_via_scan(root);
             return;
         };
+        #[cfg(test)]
+        self.fire_pre_drain_probe();
+
         let batch = hub.drain(cursor);
         *lock_recover(&self.hub_cursor) = Some(batch.cursor);
+        // A debt raised between the health decision above and this drain: the scan covers
+        // what the hub dropped, and the entries cover what the scan's cache is too old to
+        // see — this path does not force a fresh walk, so a cache younger than the drift
+        // interval answers with a snapshot taken before these very entries.
         if batch.rescan_required {
             self.poll_drift_via_scan(root);
-            return;
+            if lock_recover(&self.inner).reload == ReloadState::Running {
+                return;
+            }
         }
         if batch.entries.is_empty() {
             return;
@@ -245,6 +266,10 @@ impl DiagnosticsState {
             &class.removed_keys,
             &class.new_fp,
         );
+        // The baseline just moved, which leaves every cached snapshot describing the world
+        // before the move. Dropping the cache is what stops the next scan within the drift
+        // interval from being compared against a baseline it predates.
+        *lock_recover(&self.scan) = None;
     }
 
     fn apply_drained_resident(
@@ -263,7 +288,9 @@ impl DiagnosticsState {
             if inner.reload == ReloadState::Running {
                 return;
             }
-            let Inner { resident: Some(resident), stats, generation, status, .. } = &mut *inner
+            let Inner {
+                resident: Some(resident), stats, generation, status, baseline_epoch, ..
+            } = &mut *inner
             else {
                 return;
             };
@@ -294,6 +321,7 @@ impl DiagnosticsState {
                 for key in removed_keys {
                     stats.remove(key);
                 }
+                *baseline_epoch += 1;
                 if moved {
                     *generation += 1;
                     // An add/remove changed the served file universe; keep the
@@ -345,7 +373,22 @@ impl DiagnosticsState {
             {
                 return;
             }
-            let Inner { resident: Some(resident), stats, generation, status, .. } = &mut *inner
+            // The baseline moved after this snapshot was taken, so the two describe
+            // different worlds and their diff runs backwards (Ф12): a file added since
+            // would be applied as a deletion. Checked HERE, under the lock that does the
+            // applying — a check at the caller leaves the window between the two open, and
+            // there is more than one caller.
+            if scan.baseline_epoch != inner.baseline_epoch {
+                tracing::debug!(
+                    snapshot = scan.baseline_epoch,
+                    baseline = inner.baseline_epoch,
+                    "dropping a scan whose baseline moved under it; the next poll rescans"
+                );
+                return;
+            }
+            let Inner {
+                resident: Some(resident), stats, generation, status, baseline_epoch, ..
+            } = &mut *inner
             else {
                 return;
             };
@@ -376,6 +419,7 @@ impl DiagnosticsState {
                 // (a pure mtime touch with unchanged content) stops us re-scanning it
                 // every window.
                 *stats = scan.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+                *baseline_epoch += 1;
                 if moved {
                     *generation += 1;
                     // An add/remove changed the served file universe; keep the
@@ -520,24 +564,24 @@ impl DiagnosticsState {
         }
     }
 
-    fn drain_delivered_paths(
-        &self,
-        hub: &WorkspaceChangeHub,
-        root: &Path,
-    ) -> std::collections::HashSet<String> {
+    fn drain_delivered_paths(&self, hub: &WorkspaceChangeHub, root: &Path) -> DeliveredPaths {
         let cursor = *lock_recover(&self.hub_cursor);
         let Some(cursor) = cursor else {
-            return std::collections::HashSet::new();
+            return DeliveredPaths::default();
         };
         let batch = hub.drain(cursor);
         *lock_recover(&self.hub_cursor) = Some(batch.cursor);
+        // A demand to reconcile is not a retraction of the paths in the same batch: the hub
+        // keeps its entries on every input but a channel overflow, and a path it handed over
+        // was handed over whatever else it also asked for. The scan still runs — the entries
+        // are a SUBSET of the truth, not all of it.
         if batch.rescan_required {
             self.poll_drift_via_scan(root);
-            return std::collections::HashSet::new();
         }
-        let delivered: std::collections::HashSet<String> =
-            batch.entries.iter().map(|e| e.canonical.to_string_lossy().into_owned()).collect();
+        let delivered = DeliveredPaths::of(&batch.entries);
         if !batch.entries.is_empty() {
+            // The scan above compares against a cache that may predate this batch, so it can
+            // leave a delivered path unapplied; applying the entries covers exactly those.
             self.apply_drained_entries(&batch.entries);
         }
         delivered
@@ -581,6 +625,9 @@ impl DiagnosticsState {
             return;
         }
 
+        #[cfg(test)]
+        self.fire_post_scan_probe();
+
         // 3. A legitimate edit may have landed AFTER step 1's drain but DURING the scan
         //    above. Drain once more: the paths it now delivers were merely late, not missed.
         delivered.extend(self.drain_delivered_paths(&hub, &root));
@@ -596,7 +643,7 @@ impl DiagnosticsState {
             .iter()
             .chain(&changes.removed)
             .chain(&changes.modified)
-            .any(|p| !delivered.contains(p));
+            .any(|p| !delivered.covers(p));
         if missed {
             tracing::warn!(
                 "diagnostics reconciler found drift the change hub did not deliver; \
@@ -614,13 +661,37 @@ impl DiagnosticsState {
         }
     }
 
+    #[cfg(test)]
+    fn fire_post_scan_probe(&self) {
+        let probe = lock_recover(&self.post_scan_probe).take();
+        if let Some(probe) = probe {
+            probe();
+        }
+    }
+
+    #[cfg(test)]
+    fn fire_pre_drain_probe(&self) {
+        let probe = lock_recover(&self.pre_drain_probe).take();
+        if let Some(probe) = probe {
+            probe();
+        }
+    }
+
     pub(super) fn throttled_scan(&self, root: &Path) -> Option<OwnedScan> {
         let mut cache = lock_recover(&self.scan);
         if let Some(c) = cache.as_ref() {
             if c.at.elapsed() < self.drift_interval {
-                return Some(OwnedScan { stats: c.stats.clone(), config_fp: c.config_fp });
+                return Some(OwnedScan {
+                    stats: c.stats.clone(),
+                    config_fp: c.config_fp,
+                    baseline_epoch: c.baseline_epoch,
+                });
             }
         }
+        // Read BEFORE the walk, never after. Too old is safe — the snapshot is refused and
+        // the next poll walks again; too new would let a snapshot that predates a baseline
+        // move claim it was taken after one.
+        let baseline_epoch = lock_recover(&self.inner).baseline_epoch;
         self.scan_count.fetch_add(1, Ordering::SeqCst);
         // One project load per scan: the stat universe and the config identity must
         // describe the same project state, mirroring how the build derives its
@@ -630,14 +701,54 @@ impl DiagnosticsState {
         let project = crate::graph::input::ProjectSnapshot::load(root);
         let stats = crate::graph::scan::scan_stats_over_roots(&project.scan_roots);
         let config_fp = config_identity(config_files_fp, &project.configs);
-        *cache = Some(ScanCache { at: Instant::now(), stats: stats.clone(), config_fp });
-        Some(OwnedScan { stats, config_fp })
+        *cache =
+            Some(ScanCache { at: Instant::now(), stats: stats.clone(), config_fp, baseline_epoch });
+        Some(OwnedScan { stats, config_fp, baseline_epoch })
+    }
+}
+
+/// What a tick's drains handed over, in the two shapes the hub can name it: exact paths,
+/// and directories whose disappearance stands for descendants no drain can enumerate.
+///
+/// The distinction is not cosmetic. A vanished directory arrives as ONE entry while the scan
+/// lists every file that was under it, so comparing by equality alone would call each of
+/// those a miss — and a miss is answered by charging every consumer of the hub a full
+/// reconcile.
+#[derive(Default)]
+pub(super) struct DeliveredPaths {
+    exact: std::collections::HashSet<String>,
+    subtrees: Vec<PathBuf>,
+}
+
+impl DeliveredPaths {
+    fn of(entries: &[ChangeEntry]) -> Self {
+        let mut delivered = Self::default();
+        for entry in entries {
+            if entry.kind == crate::change_hub::ChangeKind::SubtreeRemoved {
+                delivered.subtrees.push(entry.canonical.clone());
+            }
+            delivered.exact.insert(entry.canonical.to_string_lossy().into_owned());
+        }
+        delivered
+    }
+
+    fn extend(&mut self, other: Self) {
+        self.exact.extend(other.exact);
+        self.subtrees.extend(other.subtrees);
+    }
+
+    /// Whether this path was delivered — itself, or as part of a directory that vanished.
+    /// Containment is by whole components, so `Dir` never answers for `Dir2`.
+    fn covers(&self, path: &str) -> bool {
+        self.exact.contains(path)
+            || self.subtrees.iter().any(|dir| Path::new(path).starts_with(dir))
     }
 }
 
 pub(super) struct OwnedScan {
     pub(super) stats: Vec<FileStat>,
     pub(super) config_fp: u64,
+    pub(super) baseline_epoch: u64,
 }
 
 pub(super) fn compute_freshness(inner: &Inner, scan: Option<&OwnedScan>) -> Freshness {
@@ -767,6 +878,7 @@ mod tests {
     use crate::change_hub::ChangeKind;
     use ide::DiagnosticsConfig;
     use std::fs;
+    use std::sync::{Arc, Mutex};
 
     /// The resident's config identity must move on a `dependsOn`-only edit while the
     /// per-file stat channel stays silent — that identity is the only trigger a full
@@ -1469,8 +1581,12 @@ mod tests {
         let state = DiagnosticsState::for_workspace(std::env::temp_dir());
 
         // A fresh scan (just now) must NOT be force-cleared — the storm guard.
-        *lock_recover(&state.scan) =
-            Some(ScanCache { at: Instant::now(), stats: Vec::new(), config_fp: 0 });
+        *lock_recover(&state.scan) = Some(ScanCache {
+            at: Instant::now(),
+            stats: Vec::new(),
+            config_fp: 0,
+            baseline_epoch: 0,
+        });
         state.force_rescan();
         assert!(
             lock_recover(&state.scan).is_some(),
@@ -1483,7 +1599,7 @@ mod tests {
             .checked_sub(FORCE_RESCAN_FLOOR + Duration::from_millis(50))
             .expect("a valid past instant");
         *lock_recover(&state.scan) =
-            Some(ScanCache { at: stale_at, stats: Vec::new(), config_fp: 0 });
+            Some(ScanCache { at: stale_at, stats: Vec::new(), config_fp: 0, baseline_epoch: 0 });
         state.force_rescan();
         assert!(
             lock_recover(&state.scan).is_none(),
@@ -1925,6 +2041,447 @@ mod tests {
             hub.health(),
             Health::Healthy,
             "an edit delivered during the scan is not a miss and must not degrade",
+        );
+    }
+
+    /// The containment rule the miss check leans on, pinned where it lives: an end-to-end
+    /// deletion cannot pin it, because a directory removed through the filesystem also
+    /// delivers an event per file, and those exact paths would answer for the descendants
+    /// even if containment did nothing.
+    mod delivered_coverage {
+        use super::*;
+
+        fn subtree_removal(path: &str) -> ChangeEntry {
+            ChangeEntry {
+                canonical: PathBuf::from(path),
+                raw: PathBuf::from(path),
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }
+        }
+
+        #[test]
+        fn a_vanished_directory_answers_for_its_descendants() {
+            let delivered = DeliveredPaths::of(&[subtree_removal("/w/Dir")]);
+            assert!(delivered.covers("/w/Dir/A.bsl"));
+            assert!(delivered.covers("/w/Dir/Deep/B.bsl"));
+            assert!(delivered.covers("/w/Dir"), "and for itself");
+        }
+
+        #[test]
+        fn a_namesake_directory_is_not_covered() {
+            let delivered = DeliveredPaths::of(&[subtree_removal("/w/Dir")]);
+            assert!(!delivered.covers("/w/Dir2/A.bsl"));
+        }
+
+        /// Only a vanished DIRECTORY stands for what is under it. An ordinary change to a
+        /// path covers that path alone — otherwise an edit inside a directory would vouch
+        /// for files nobody reported.
+        #[test]
+        fn an_ordinary_entry_covers_only_itself() {
+            let delivered = DeliveredPaths::of(&[ChangeEntry {
+                canonical: PathBuf::from("/w/Dir"),
+                raw: PathBuf::from("/w/Dir"),
+                kind: ChangeKind::MaybeChanged,
+                seq: 1,
+            }]);
+            assert!(delivered.covers("/w/Dir"));
+            assert!(!delivered.covers("/w/Dir/A.bsl"));
+        }
+    }
+
+    /// A batch that also demands a full reconcile still DELIVERED its paths, and the hub
+    /// keeps them on every input but a channel overflow. Counting them as missed answers a
+    /// reconcile with another one — charged to every consumer of the hub, not just this one.
+    #[test]
+    fn a_path_delivered_alongside_a_rescan_is_not_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // The probe fires between the reconciler's first drain and its scan: it edits a
+        // module, waits for the hub to hold it, then opens a reconcile window that does NOT
+        // clear entries — the shape nine of the hub's ten inputs have.
+        let probe_root = root.to_path_buf();
+        let probe_hub = hub.clone();
+        let after_probe = Arc::new(Mutex::new(0u64));
+        let probe_seen = Arc::clone(&after_probe);
+        state.set_reconcile_probe(move || {
+            fs::write(
+                probe_root.join("CommonModules/Сервер/Ext/Module.bsl"),
+                "&НаСервере\nФункция Считать() Экспорт Возврат 17; КонецФункции\n",
+            )
+            .unwrap();
+            let mut obs = probe_hub.subscribe();
+            for _ in 0..300 {
+                let batch = probe_hub.drain(obs);
+                obs = batch.cursor;
+                if batch.entries.iter().any(|e| e.raw.to_string_lossy().contains("Module.bsl")) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            probe_hub.unsubscribe(obs);
+            probe_hub.degrade_external();
+            *lock_recover(&probe_seen) = probe_hub.rescan_request_count();
+        });
+
+        state.reconcile_tick();
+
+        assert_eq!(
+            hub.rescan_request_count(),
+            *lock_recover(&after_probe),
+            "the reconciler asked for no reconcile of its own: the path was delivered",
+        );
+    }
+
+    /// A snapshot and the baseline it is compared against must describe the same world.
+    /// Once the baseline moves, their diff runs BACKWARDS: a file added since the snapshot
+    /// was taken is absent from it, so it reads as a deletion and is applied as one.
+    #[test]
+    fn a_scan_taken_before_the_baseline_moved_is_not_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, _hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // The snapshot, taken while the new module does not exist yet.
+        let snapshot = state.throttled_scan(root).expect("a scan");
+
+        // The baseline moves: the module is created and applied from the event stream.
+        write_common_module(root, "Новый", true, "&НаСервере\nФункция Н() Экспорт КонецФункции");
+        let added = module_path(root, "Новый");
+        state.apply_drained_entries(&[ChangeEntry {
+            canonical: added.clone(),
+            raw: added.clone(),
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        }]);
+        assert!(
+            matches!(
+                state.read(|r, _| r.file_id_for(&added).is_some()),
+                ResidentOutcome::Ready(true, _)
+            ),
+            "the new module is in the resident before the stale scan is applied",
+        );
+
+        // The stale snapshot now describes a world without that module.
+        let changes = {
+            let inner = lock_recover(&state.inner);
+            classify_changes(&inner.stats, &snapshot.stats)
+        };
+        assert!(
+            changes.removed.iter().any(|p| p.contains("Новый")),
+            "the stale snapshot really does read the new module as deleted",
+        );
+        state.apply_scan_drift(&changes, false, &snapshot);
+
+        assert!(
+            matches!(
+                state.read(|r, _| r.file_id_for(&added).is_some()),
+                ResidentOutcome::Ready(true, _)
+            ),
+            "a snapshot older than the baseline is refused, not applied backwards",
+        );
+    }
+
+    /// The largest baseline move there is: a rebuild replaces `stats` wholesale. A snapshot
+    /// from before it would rebase the freshly built baseline back onto its own older view.
+    #[test]
+    fn a_scan_taken_before_a_rebuild_is_not_applied_to_the_new_resident() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, _hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let snapshot = state.throttled_scan(root).expect("a scan");
+        write_common_module(root, "После", true, "&НаСервере\nФункция П() Экспорт КонецФункции");
+
+        state.kick_full_reload();
+        for _ in 0..300 {
+            if lock_recover(&state.inner).reload != ReloadState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        wait_ready(&state);
+        let built = module_path(root, "После");
+        assert!(
+            matches!(
+                state.read(|r, _| r.file_id_for(&built).is_some()),
+                ResidentOutcome::Ready(true, _)
+            ),
+            "the rebuild picked the module up",
+        );
+
+        let changes = {
+            let inner = lock_recover(&state.inner);
+            classify_changes(&inner.stats, &snapshot.stats)
+        };
+        state.apply_scan_drift(&changes, false, &snapshot);
+
+        assert!(
+            matches!(
+                state.read(|r, _| r.file_id_for(&built).is_some()),
+                ResidentOutcome::Ready(true, _)
+            ),
+            "a rebuild's baseline is not rebased onto a snapshot that predates it",
+        );
+    }
+
+    /// The epoch check guards the FILE diff, which is meaningless against a moved baseline.
+    /// A config change is not a diff — it says the analyzer setup changed, which staleness
+    /// cannot make untrue — and the rebuild it triggers reads the world afresh anyway.
+    /// Gating it too would strand config drift until the next reconcile tick, since the miss
+    /// check counts file paths only and a healthy read never scans.
+    #[test]
+    fn a_config_change_survives_a_snapshot_the_epoch_check_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, _hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let snapshot = state.throttled_scan(root).expect("a scan");
+        // Move the baseline out from under the snapshot.
+        write_common_module(root, "Сдвиг", true, "&НаСервере\nФункция С() Экспорт КонецФункции");
+        let moved = module_path(root, "Сдвиг");
+        state.apply_drained_entries(&[ChangeEntry {
+            canonical: moved.clone(),
+            raw: moved,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        }]);
+        lock_recover(&state.inner).reload = ReloadState::Idle;
+
+        let no_file_drift =
+            WorkspaceDiff { added: Vec::new(), removed: Vec::new(), modified: Vec::new() };
+        state.apply_scan_drift(&no_file_drift, true, &snapshot);
+
+        assert_ne!(
+            lock_recover(&state.inner).reload,
+            ReloadState::Idle,
+            "config drift is answered by a rebuild even when the snapshot is stale",
+        );
+    }
+
+    /// Applying entries moves the baseline, which leaves every cached snapshot describing
+    /// the world before the move. The cache must go with it, or the next scan inside the
+    /// drift interval is served a snapshot the baseline has already outrun.
+    #[test]
+    fn applying_entries_drops_the_scan_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (mut state, _hub) = state_with_hub(root);
+        state.drift_interval = Duration::from_secs(60);
+        state.ensure_loading();
+        wait_ready(&state);
+        state.throttled_scan(root).expect("a scan warms the cache");
+
+        write_common_module(root, "Свежий", true, "&НаСервере\nФункция Св() Экспорт КонецФункции");
+        let fresh = module_path(root, "Свежий");
+        let scans = state.scan_count();
+        state.apply_drained_entries(&[ChangeEntry {
+            canonical: fresh.clone(),
+            raw: fresh,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        }]);
+        state.throttled_scan(root).expect("a scan");
+
+        assert!(
+            state.scan_count() > scans,
+            "the next scan walks instead of reusing a snapshot the baseline outran",
+        );
+    }
+
+    /// A read whose drain comes back demanding a reconcile answers with a scan — but that
+    /// scan is served from a cache up to `drift_interval` old, which can predate the very
+    /// entries the batch delivered. Applying them is what keeps the read from waiting for
+    /// the cache to cool.
+    #[test]
+    fn a_read_applies_the_entries_delivered_with_a_rescan_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (mut state, hub) = state_with_hub(root);
+        state.drift_interval = Duration::from_secs(60);
+        state.ensure_loading();
+        wait_ready(&state);
+        // Warm the scan cache, so the scan the rescan branch performs is served from a
+        // snapshot older than the file the probe is about to create.
+        state.force_rescan();
+        let _ = state.read(|_, _| ());
+
+        // The debt is raised INSIDE the window between the health decision and the drain:
+        // raised any earlier, the read would take the scan path and never drain at all.
+        let probe_root = root.to_path_buf();
+        let probe_hub = hub.clone();
+        state.set_pre_drain_probe(move || {
+            write_common_module(
+                &probe_root,
+                "Внезапный",
+                true,
+                "&НаСервере\nФункция Внезапная() Экспорт КонецФункции",
+            );
+            let mut obs = probe_hub.subscribe();
+            for _ in 0..300 {
+                let batch = probe_hub.drain(obs);
+                obs = batch.cursor;
+                if batch.entries.iter().any(|e| e.raw.to_string_lossy().contains("Внезапный"))
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            probe_hub.unsubscribe(obs);
+            probe_hub.degrade_external();
+        });
+
+        let _ = state.read(|_, _| ());
+
+        let sudden = module_path(root, "Внезапный");
+        let found = state.read(|resident, _| resident.file_id_for(&sudden).is_some());
+        assert!(
+            matches!(found, ResidentOutcome::Ready(true, _)),
+            "the entries delivered with the rescan demand are applied, not dropped",
+        );
+    }
+
+    /// The scan is what covers whatever the hub DROPPED, so it runs whether or not the
+    /// batch also carried entries. An empty batch is the case where nothing else would.
+    #[test]
+    fn a_read_still_scans_when_the_rescan_demand_carries_no_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let probe_hub = hub.clone();
+        state.set_pre_drain_probe(move || probe_hub.degrade_external());
+
+        let scans = state.scan_count();
+        let _ = state.read(|_, _| ());
+
+        assert!(
+            state.scan_count() > scans,
+            "a reconcile demand is answered by a walk even with nothing to apply",
+        );
+    }
+
+    /// The tick clears its scan cache ONCE, and the snapshot it then takes immediately
+    /// becomes the warm cache the second drain's scan is served from. An event delivered
+    /// after that snapshot is therefore in neither the snapshot nor step 4's diff: without
+    /// applying the batch's own entries it waits for the cache to cool.
+    #[test]
+    fn an_event_delivered_after_the_scan_is_applied_in_the_same_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (mut state, hub) = state_with_hub(root);
+        // A warm cache is the whole point: at the test harness's zero interval the second
+        // drain's scan would be a fresh walk that sees the late file by itself.
+        state.drift_interval = Duration::from_secs(60);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // Drift that exists BEFORE the scan, so the tick does not return on an empty diff
+        // and never reaches the second drain at all.
+        lock_recover(&state.inner).stats.insert(root.join("Vanished.bsl").display().to_string(), 1);
+
+        let probe_root = root.to_path_buf();
+        let probe_hub = hub.clone();
+        state.set_post_scan_probe(move || {
+            write_common_module(
+                &probe_root,
+                "Поздний",
+                true,
+                "&НаСервере\nФункция Поздняя() Экспорт КонецФункции",
+            );
+            let mut obs = probe_hub.subscribe();
+            for _ in 0..300 {
+                let batch = probe_hub.drain(obs);
+                obs = batch.cursor;
+                if batch.entries.iter().any(|e| e.raw.to_string_lossy().contains("Поздний"))
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            probe_hub.unsubscribe(obs);
+            probe_hub.degrade_external();
+        });
+
+        state.reconcile_tick();
+
+        let late = module_path(root, "Поздний");
+        let found = state.read(|resident, _| resident.file_id_for(&late).is_some());
+        assert!(
+            matches!(found, ResidentOutcome::Ready(true, _)),
+            "the file delivered after the snapshot is in the resident, not waiting for the \
+             cache to cool",
+        );
+    }
+
+    /// The drain names a vanished directory and nothing else — the descendants it stood for
+    /// are exactly what can no longer be enumerated, while the scan lists every one of them.
+    /// Matching delivered paths by equality alone therefore calls every descendant a miss.
+    #[test]
+    fn the_descendants_of_a_delivered_vanished_directory_are_not_missed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_common_module(root, "Первый", true, "&НаСервере\nФункция А() Экспорт КонецФункции");
+        write_common_module(root, "Второй", true, "&НаСервере\nФункция Б() Экспорт КонецФункции");
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let probe_root = root.to_path_buf();
+        let probe_hub = hub.clone();
+        let after_probe = Arc::new(Mutex::new(0u64));
+        let probe_seen = Arc::clone(&after_probe);
+        state.set_reconcile_probe(move || {
+            fs::remove_dir_all(probe_root.join("CommonModules")).unwrap();
+            let mut obs = probe_hub.subscribe();
+            for _ in 0..300 {
+                let batch = probe_hub.drain(obs);
+                obs = batch.cursor;
+                if batch.entries.iter().any(|e| e.kind == ChangeKind::SubtreeRemoved) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            probe_hub.unsubscribe(obs);
+            probe_hub.degrade_external();
+            *lock_recover(&probe_seen) = probe_hub.rescan_request_count();
+        });
+
+        state.reconcile_tick();
+
+        assert_eq!(
+            hub.rescan_request_count(),
+            *lock_recover(&after_probe),
+            "the vanished directory covers the files that went with it",
         );
     }
 

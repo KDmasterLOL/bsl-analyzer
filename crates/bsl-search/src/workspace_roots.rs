@@ -65,6 +65,15 @@ impl FileKey {
     pub fn is_configuration(&self) -> bool {
         self.root_id == CONFIGURATION_ROOT_ID
     }
+
+    /// Whether this key names a file strictly inside the directory `dir` names.
+    ///
+    /// Compared by whole components, not by text: a textual prefix would let `Dir`
+    /// swallow `Dir2`, and the two are unrelated directories. Roots must match — the
+    /// same relative path under two roots is two different files.
+    pub fn is_under(&self, dir: &FileKey) -> bool {
+        self.root_id == dir.root_id && starts_at(Path::new(&self.path), Path::new(&dir.path))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -582,6 +591,34 @@ mod tests {
             let key = roots.root_of(&file, &canonical).unwrap();
             assert_ne!(key.root_id, CONFIGURATION_ROOT_ID, "the extension keeps its own identity");
             assert_eq!(key.path, MODULE);
+        }
+    }
+
+    mod containment {
+        use super::*;
+
+        #[test]
+        fn a_directory_contains_its_files_at_any_depth_but_not_itself() {
+            let dir = FileKey::configuration("Dir");
+            assert!(FileKey::configuration("Dir/A.bsl").is_under(&dir));
+            assert!(FileKey::configuration("Dir/Deep/B.bsl").is_under(&dir));
+            assert!(!dir.is_under(&dir), "a directory is not a file inside itself");
+        }
+
+        /// The whole reason containment is compared by components: `Dir2` merely starts
+        /// with the same text and is an unrelated directory.
+        #[test]
+        fn a_namesake_directory_is_not_inside() {
+            assert!(!FileKey::configuration("Dir2/A.bsl").is_under(&FileKey::configuration("Dir")));
+        }
+
+        /// The same relative path under two roots is two different files, so a removal
+        /// aimed at one root must not reach the other's.
+        #[test]
+        fn containment_does_not_cross_roots() {
+            let file = FileKey::new("ext-1", "Dir/A.bsl");
+            assert!(file.is_under(&FileKey::new("ext-1", "Dir")));
+            assert!(!file.is_under(&FileKey::configuration("Dir")));
         }
     }
 }

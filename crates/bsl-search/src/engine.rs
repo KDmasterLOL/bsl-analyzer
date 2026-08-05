@@ -1421,6 +1421,56 @@ impl SearchEngine {
         self.remove_workspace_key_with(key, has_baseline)
     }
 
+    /// Remove every indexed file under `dir`, across every carrier.
+    ///
+    /// A vanished directory arrives as ONE event naming the directory itself, while the
+    /// files that went with it are never named — the walk that would have enumerated them
+    /// is exactly what is no longer possible. Point removal cannot express this: it keys
+    /// through [`Self::workspace_file_key`], which answers `None` for anything that is not
+    /// a `.bsl`, so a call on a directory is silently a no-op.
+    ///
+    /// Candidates come from every carrier for the same reason a reconcile does (see
+    /// [`Self::carrier_keys`]): against a remote baseline there are no local rows at all.
+    /// Returns the number of removed keys.
+    pub fn remove_workspace_subtree(
+        &mut self,
+        dir: impl AsRef<Path>,
+    ) -> Result<usize, SearchError> {
+        let dir = dir.as_ref();
+        let Some(roots) = self.workspace_roots.as_ref() else {
+            return Ok(0);
+        };
+        let walked = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            roots.configuration().unwrap_or_else(|| roots.workspace()).join(dir)
+        };
+        // Attributed by the DECLARED spellings alone: the directory is gone, so there is
+        // nothing left on disk to canonicalise, and its keys were spelled the way the walk
+        // reached it.
+        let Some(prefix) = roots.root_of_declared(&walked) else {
+            return Ok(0);
+        };
+        let carriers = self.carrier_keys()?;
+        let hidden = match self.workspace_overlay_cache.lock() {
+            Ok(cache) => cache.hidden_keys(),
+            Err(error) => {
+                tracing::warn!("failed to read overlay hidings for a subtree removal: {error}");
+                HashSet::new()
+            }
+        };
+        let candidates =
+            carriers.all_keys().into_iter().filter(|key| key.is_under(&prefix)).collect();
+        let batch = self.remove_key_batch(candidates, &carriers, &hidden);
+        if let Some(error) = batch.first_error {
+            return Err(SearchError::Index(format!(
+                "subtree removal cleared {} keys and failed on {}; first failure: {error}",
+                batch.removed, batch.failed
+            )));
+        }
+        Ok(batch.removed)
+    }
+
     /// [`Self::remove_workspace_key`] with the baseline evidence already resolved, so a batch
     /// caller loads the manifest once instead of once per key.
     ///
@@ -1560,16 +1610,38 @@ impl SearchEngine {
                 HashSet::new()
             }
         };
+        let candidates =
+            carriers.all_keys().into_iter().filter(|key| !present.contains(key)).collect();
+        let batch = self.remove_key_batch(candidates, &carriers, &hidden);
+        if let Some(error) = batch.first_error {
+            return Err(SearchError::Index(format!(
+                "reconcile removed {} keys and failed on {}; first failure: {error}",
+                batch.removed, batch.failed
+            )));
+        }
+        Ok(batch.removed)
+    }
+
+    /// Remove a chosen set of keys, with the carrier reading and the hiding reading already
+    /// taken once for the whole batch.
+    ///
+    /// Shared by every batch removal so the rules that make one correct — skip a key whose
+    /// removal would be a no-op, resolve baseline evidence per key, survive a single key's
+    /// failure — live in one place rather than being restated per caller.
+    fn remove_key_batch(
+        &mut self,
+        candidates: Vec<FileKey>,
+        carriers: &crate::key_carriers::CarrierKeys,
+        hidden: &HashSet<FileKey>,
+    ) -> RemovedBatch {
         // Sorted so a batch removes in a stable order regardless of hash iteration.
-        let mut candidates: Vec<FileKey> = carriers.all_keys().into_iter().collect();
+        let mut candidates = candidates;
         candidates.sort();
-        let mut removed = 0;
-        let mut failed = 0;
-        let mut first_error = None;
+        let mut batch = RemovedBatch::default();
         for key in candidates {
-            if present.contains(&key) {
-                continue;
-            }
+            // A manifest-only key survives its own removal — the row belongs to someone else's
+            // corpus and only its hiding is ours to write — so without this the next pass would
+            // select it again and report a removal that changes nothing.
             if carriers.manifest_is_sole_carrier(&key) && hidden.contains(&key) {
                 continue;
             }
@@ -1578,24 +1650,19 @@ impl SearchEngine {
             // key's carriers are independent, and aborting here would strand every key after
             // the first fault until some later rescan happens to run.
             match self.remove_workspace_key_with(&key, has_baseline) {
-                Ok(()) => removed += 1,
+                Ok(()) => batch.removed += 1,
                 Err(error) => {
                     tracing::warn!(
                         root = %key.root_id,
                         path = %key.path,
-                        "failed to reconcile a deleted file out of the index: {error}"
+                        "failed to remove a deleted file from the index: {error}"
                     );
-                    failed += 1;
-                    first_error.get_or_insert(error);
+                    batch.failed += 1;
+                    batch.first_error.get_or_insert(error);
                 }
             }
         }
-        if let Some(error) = first_error {
-            return Err(SearchError::Index(format!(
-                "reconcile removed {removed} keys and failed on {failed}; first failure: {error}"
-            )));
-        }
-        Ok(removed)
+        batch
     }
 
     /// Re-render the stored `graph_context` of every chunk whose owning file was marked
@@ -2540,6 +2607,15 @@ impl SearchEngine {
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(())
     }
+}
+
+/// What a batch removal did: the count each caller reports, and the first fault, kept so a
+/// batch can finish every independent key and still fail as a whole.
+#[derive(Default)]
+struct RemovedBatch {
+    removed: usize,
+    failed: usize,
+    first_error: Option<SearchError>,
 }
 
 struct FileTask {
@@ -3797,6 +3873,178 @@ mod tests {
         assert!(
             engine.workspace_overlay_cache.lock().unwrap().hidden_keys().contains(&key),
             "removing a manifest-only key is expressed by hiding its baseline copy",
+        );
+    }
+
+    /// A vanished directory takes its files with it, whichever carrier happens to know
+    /// them — and takes nothing that merely starts with the same text. `Dir2` is not
+    /// inside `Dir`, so a removal comparing paths as text instead of components would
+    /// erase a directory nobody touched.
+    #[test]
+    fn removing_a_subtree_clears_its_carriers_and_spares_a_namesake_directory() {
+        use crate::{Chunk, ChunkKind, Store};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        fs::create_dir(workspace.join("Dir")).unwrap();
+        fs::create_dir(workspace.join("Dir2")).unwrap();
+        let chunk = |name: &str| Chunk {
+            kind: ChunkKind::Procedure,
+            name: name.to_owned(),
+            is_export: true,
+            annotations: vec![],
+            line_start: 0,
+            line_end: 1,
+            text: format!("Процедура {name}()\nКонецПроцедуры"),
+        };
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(CONFIGURATION_ROOT_ID, "Dir/Row.bsl", b"ha", &[chunk("Строка")], None)
+                .unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "Dir2/Keep.bsl",
+                    b"hb",
+                    &[chunk("Соседка")],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+
+        // One key per carrier, so a removal that walks a single carrier cannot pass.
+        let live = workspace.join("Dir/Live.bsl");
+        fs::write(&live, "Процедура Живая()\nКонецПроцедуры").unwrap();
+        assert!(engine.mark_workspace_path_dirty(&live).unwrap());
+        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "",
+                &HashMap::from([(
+                    FileKey::configuration("Dir/Print.bsl"),
+                    crate::store::PersistedFingerprint {
+                        file_size: 7,
+                        file_mtime_secs: 1,
+                        file_mtime_nanos: 0,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: workspace.join("Dir/Print.bsl").display().to_string(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        let row = FileKey::configuration("Dir/Row.bsl");
+        let overlay = FileKey::configuration("Dir/Live.bsl");
+        let fingerprint = FileKey::configuration("Dir/Print.bsl");
+        let beside = FileKey::configuration("Dir2/Keep.bsl");
+        let carriers = engine.carrier_keys().unwrap();
+        assert!(carriers.carriers_of(&row).contains(&KeyCarrier::StoreRow));
+        assert!(carriers.carriers_of(&overlay).contains(&KeyCarrier::OverlayEntry));
+        assert!(carriers.carriers_of(&fingerprint).contains(&KeyCarrier::FingerprintRow));
+
+        let removed = engine.remove_workspace_subtree(workspace.join("Dir")).unwrap();
+
+        assert_eq!(removed, 3, "every carrier under the directory gave up its key");
+        let carriers = engine.carrier_keys().unwrap();
+        for key in [&row, &overlay, &fingerprint] {
+            assert!(carriers.carriers_of(key).is_empty(), "{key:?} is still known to a carrier");
+        }
+        assert!(!carriers.carriers_of(&beside).is_empty(), "the namesake directory is untouched");
+        assert!(
+            !engine.text_search("Соседка", 10, Some("code")).unwrap().is_empty(),
+            "and its file still answers searches",
+        );
+    }
+
+    /// A file proven present but unreadable leaves only an obligation to re-read it. If the
+    /// directory it lived in is gone, that obligation is for a file that no longer exists —
+    /// and nothing else records the key at all.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_subtree_clears_an_obligation_to_re_read_a_file_under_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::create_dir(workspace.join("Dir")).unwrap();
+        let unread = workspace.join("Dir/Unread.bsl");
+        fs::write(&unread, "Процедура Непрочтённая()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+        assert!(engine.mark_workspace_path_dirty(&unread).unwrap());
+        fs::set_permissions(&unread, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&unread).is_ok() {
+            // Running as root: permissions cannot make the file unreadable.
+            fs::set_permissions(&unread, fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        fs::set_permissions(&unread, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let key = FileKey::configuration("Dir/Unread.bsl");
+        assert_eq!(
+            engine.carrier_keys().unwrap().carriers_of(&key),
+            vec![KeyCarrier::UnreadObligation],
+            "the standing obligation is the only carrier",
+        );
+
+        let removed = engine.remove_workspace_subtree(workspace.join("Dir")).unwrap();
+
+        assert_eq!(removed, 1, "the obligation-only key is removed with its directory");
+        assert!(
+            engine.carrier_keys().unwrap().carriers_of(&key).is_empty(),
+            "no carrier still knows it",
+        );
+    }
+
+    /// Against a remote baseline the manifest is the only carrier there is, and a removal
+    /// there is expressed by hiding rather than by deleting someone else's row.
+    #[test]
+    fn removing_a_subtree_hides_the_baseline_copies_under_it() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        engine.set_workspace_root(workspace);
+        let baseline_file = |path: &str, id: &str| crate::BaselineManifestFile {
+            collection: "code".to_owned(),
+            path: path.to_owned(),
+            file_fingerprint: "fp-file".to_owned(),
+            document_count: 1,
+            file_object_id: id.to_owned(),
+        };
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![
+                    baseline_file("Dir/Deleted.bsl", "obj-1"),
+                    baseline_file("Dir2/Kept.bsl", "obj-2"),
+                ],
+            })
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+
+        let removed = engine.remove_workspace_subtree(workspace.join("Dir")).unwrap();
+
+        assert_eq!(removed, 1, "only the baseline copy under the directory is removed");
+        let hidden = engine.workspace_overlay_cache.lock().unwrap().hidden_keys();
+        assert!(
+            hidden.contains(&FileKey::configuration("Dir/Deleted.bsl")),
+            "the baseline copy under the gone directory stops being served",
+        );
+        assert!(
+            !hidden.contains(&FileKey::configuration("Dir2/Kept.bsl")),
+            "the namesake directory's baseline copy is untouched",
         );
     }
 

@@ -158,6 +158,11 @@ impl SharedState {
             tracing::warn!(
                 "workspace change hub overflowed; re-marking all workspace .bsl paths dirty for the search overlay"
             );
+            // A demand to reconcile does not make the paths in the SAME batch untrue: the hub
+            // keeps its entries on every input but a channel overflow. Deletions are the one
+            // bucket the re-walk below cannot recover — an incomplete walk skips the reconcile
+            // exactly so it does not evict healthy files, and then nothing removes them.
+            Self::remove_delivered_deletions(engine, entries);
             Self::rewalk_workspace_bsl_dirty(engine);
             // The dropped (or re-arm-superseded) detail may have included an
             // analyzer-config edit no scan of file bodies can reconstruct — treat
@@ -245,6 +250,45 @@ impl SharedState {
     /// rebuild, no sidecar rewrite — the row deletion already invalidates the persisted
     /// sidecar), so a large deletion no longer stalls under the engine lock. A path that
     /// is not a workspace `.bsl` is skipped.
+    /// Apply the deletions a batch delivered, whatever else that batch also demanded.
+    ///
+    /// A vanished directory is applied through the engine's subtree removal rather than as a
+    /// path: the drain names the directory alone, and the files that went with it are exactly
+    /// what no walk can enumerate any more.
+    fn remove_delivered_deletions(
+        engine: &SharedSearchEngine,
+        entries: &[crate::change_hub::ChangeEntry],
+    ) {
+        let class =
+            crate::drift_classify::classify_drift(entries, &std::collections::HashSet::new(), None);
+        if !class.bsl_removed.is_empty() {
+            Self::remove_search_paths(engine, class.bsl_removed.iter().map(|d| d.raw.as_path()));
+        }
+        let subtrees: Vec<&Path> = entries
+            .iter()
+            .filter(|e| e.kind == crate::change_hub::ChangeKind::SubtreeRemoved)
+            .map(|e| e.raw.as_path())
+            .collect();
+        if subtrees.is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = engine.lock() {
+            if let Some(engine) = guard.as_mut() {
+                for dir in subtrees {
+                    match engine.remove_workspace_subtree(dir) {
+                        Ok(removed) if removed > 0 => {
+                            tracing::info!(dir = ?dir, removed, "removed a vanished subtree from the index")
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(dir = ?dir, "failed to remove a vanished subtree: {e}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn remove_search_paths<'a>(engine: &SharedSearchEngine, paths: impl Iterator<Item = &'a Path>) {
         if let Ok(mut guard) = engine.lock() {
             if let Some(engine) = guard.as_mut() {
@@ -1679,6 +1723,101 @@ mod tests {
             "the xml drift nudged the graph to catch up without any graph tool call",
         );
     }
+    /// A batch that demands a full reconcile still carries the exact paths it knows about,
+    /// and the deletions among them are the one thing the re-walk cannot recover: an
+    /// incomplete walk skips the reconcile precisely so it does not evict healthy files,
+    /// leaving a deleted file in the index. Applying the delivered removals costs nothing
+    /// and is exact — including a vanished directory, whose descendants no drain can name.
+    #[test]
+    fn a_rescan_batch_removes_the_deletions_it_delivered_even_when_the_walk_is_incomplete() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        // Toggles the process-global `FORCE_REWALK_WALK_ERROR` seam; serialize against the
+        // other tests that read it.
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let mut index = |path: &str, name: &str| {
+                store
+                    .reindex_file(
+                        bsl_search::CONFIGURATION_ROOT_ID,
+                        path,
+                        b"h",
+                        &[Chunk {
+                            kind: ChunkKind::Procedure,
+                            name: name.to_owned(),
+                            is_export: true,
+                            annotations: vec![],
+                            line_start: 0,
+                            line_end: 1,
+                            text: format!("Процедура {name}()\nКонецПроцедуры"),
+                        }],
+                        None,
+                    )
+                    .unwrap();
+            };
+            index("Gone.bsl", "Ушедшая");
+            index("Dropped/One.bsl", "ПерваяИзПоддерева");
+            index("Dropped/Two.bsl", "ВтораяИзПоддерева");
+            index("Kept.bsl", "Оставшаяся");
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        assert_eq!(engine.file_count().unwrap(), 4, "all four files are indexed");
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        let gone = workspace.join("Gone.bsl");
+        let dropped = workspace.join("Dropped");
+        let entries = [
+            ChangeEntry {
+                canonical: gone.clone(),
+                raw: gone,
+                kind: ChangeKind::MaybeRemoved,
+                seq: 1,
+            },
+            ChangeEntry {
+                canonical: dropped.clone(),
+                raw: dropped,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 2,
+            },
+        ];
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &entries,
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        for token in ["Ушедшая", "ПерваяИзПоддерева", "ВтораяИзПоддерева"]
+        {
+            assert!(
+                engine.text_search(token, 10, Some("code")).unwrap().is_empty(),
+                "{token} was delivered as deleted and must not answer searches",
+            );
+        }
+        assert!(
+            !engine.text_search("Оставшаяся", 10, Some("code")).unwrap().is_empty(),
+            "a file nobody reported deleted is untouched",
+        );
+    }
+
     /// A partial rescan walk (an error mid-walk) must NOT reconcile: `present` is missing healthy
     /// files, so deleting stored files against it would evict live data. Only a clean walk
     /// reconciles. Reverting the walk-error guard deletes the stored file on the errored walk.

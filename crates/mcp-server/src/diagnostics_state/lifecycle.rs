@@ -47,6 +47,13 @@ pub(super) struct Inner {
     /// Folded fingerprint of the analyzer config files, for config drift.
     pub(super) config_fp: u64,
     pub(super) generation: u64,
+    /// Bumped every time `stats` moves, under this same lock.
+    ///
+    /// A scan is a snapshot of disk paired with the baseline it was meant to be compared
+    /// against; once the baseline moves, the comparison is between two different worlds and
+    /// produces a diff that runs BACKWARDS — a file added since the snapshot looks deleted.
+    /// The snapshot carries the epoch it was taken at so the apply can refuse it.
+    pub(super) baseline_epoch: u64,
     pub(super) reload: ReloadState,
     /// When the current `Loading` build started, for the `status`/`loading` envelope's
     /// `elapsed_ms`. Set on `Idle → Loading`, cleared when the resident becomes `Ready`.
@@ -88,6 +95,15 @@ pub(crate) struct DiagnosticsState {
     /// One-shot test seam fired between the reconciler's first drain and its scan.
     #[cfg(test)]
     pub(super) reconcile_probe: ReconcileProbe,
+    /// One-shot test seam fired between the reconciler's scan and its second drain — the
+    /// only window in which an event can arrive that the scan's snapshot cannot contain.
+    #[cfg(test)]
+    pub(super) post_scan_probe: ReconcileProbe,
+    /// One-shot test seam fired between the read path's health decision and its drain.
+    /// A reconcile debt raised inside that window is the only way the drain returns one:
+    /// a debt visible earlier sends the read down the scan path instead.
+    #[cfg(test)]
+    pub(super) pre_drain_probe: ReconcileProbe,
 }
 
 /// A one-shot callback the reconciler fires between its first drain and its scan.
@@ -113,6 +129,7 @@ impl DiagnosticsState {
                 stats: HashMap::new(),
                 config_fp: 0,
                 generation: 0,
+                baseline_epoch: 0,
                 reload: ReloadState::Idle,
                 loading_since: None,
             })),
@@ -132,6 +149,10 @@ impl DiagnosticsState {
             scope_ref_check_at: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             reconcile_probe: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            post_scan_probe: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            pre_drain_probe: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -376,6 +397,7 @@ impl DiagnosticsState {
                     let mut inner = lock_recover(&self.inner);
                     inner.resident = Some(built.resident);
                     inner.stats = built.stats;
+                    inner.baseline_epoch += 1;
                     inner.config_fp = built.config_fp;
                     inner.generation += 1;
                     inner.reload = ReloadState::Idle;
@@ -428,6 +450,7 @@ impl DiagnosticsState {
                 let mut inner = lock_recover(&self.inner);
                 inner.resident = Some(built.resident);
                 inner.stats = built.stats;
+                inner.baseline_epoch += 1;
                 inner.config_fp = built.config_fp;
                 inner.generation += 1;
                 inner.reload = ReloadState::Idle;
@@ -659,6 +682,7 @@ impl DiagnosticsState {
             }
             inner.resident = None;
             inner.stats.clear();
+            inner.baseline_epoch += 1;
             inner.status = DiagnosticsStatus::Idle;
             drop(inner);
             *lock_recover(&state.scan) = None;
