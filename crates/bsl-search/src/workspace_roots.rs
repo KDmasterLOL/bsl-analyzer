@@ -179,6 +179,37 @@ impl WorkspaceRoots {
         self.longest_match(walked, |root| &root.declared)
     }
 
+    /// The two spellings attribution ranks a path by.
+    ///
+    /// A relative path is read against the CONFIGURATION root: that is how every
+    /// stored path with the reserved id is spelled, and it is the prefix callers
+    /// strip before handing one over. The table's workspace exists to make root
+    /// identifiers relative and is a directory higher whenever the configuration
+    /// sits in a subdirectory.
+    pub(crate) fn spellings_of(&self, path: &Path) -> (PathBuf, PathBuf) {
+        let walked = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.configuration().unwrap_or_else(|| self.workspace()).join(path)
+        };
+        let canonical = canonical_spelling(&walked);
+        (walked, canonical)
+    }
+
+    /// The key a workspace path carries whatever its role — the question "which
+    /// root does this path belong to, and where in it" asked of a path that is
+    /// not a stored document: a metadata descriptor, a directory.
+    ///
+    /// The role branch [`crate::SearchEngine`] applies to a `.bsl` has no meaning
+    /// here: it exists to keep a key REMOVABLE under the spelling its file was
+    /// indexed with, and nothing is indexed under this one. Where the path
+    /// physically lies is the whole answer, so the canonical spelling ranks
+    /// first, as it does for a live file.
+    pub fn key_of_path(&self, path: &Path) -> Option<FileKey> {
+        let (walked, canonical) = self.spellings_of(path);
+        self.root_of(&walked, &canonical)
+    }
+
     /// The file a stored key points at, spelled as the project declared it.
     pub fn resolve(&self, key: &FileKey) -> Option<PathBuf> {
         let root = self.roots.iter().find(|root| root.id == key.root_id)?;
@@ -591,6 +622,52 @@ mod tests {
             let key = roots.root_of(&file, &canonical).unwrap();
             assert_ne!(key.root_id, CONFIGURATION_ROOT_ID, "the extension keeps its own identity");
             assert_eq!(key.path, MODULE);
+        }
+    }
+
+    /// Attribution of a path that is not a stored document: a metadata descriptor asks the
+    /// same question a `.bsl` does, and must not get a second answer.
+    mod any_path {
+        use super::*;
+
+        #[test]
+        fn a_descriptor_belongs_to_the_root_it_lies_in() {
+            let dir = tempfile::tempdir().unwrap();
+            let made = dirs(dir.path(), &["cf", "cfe/one"]);
+            let (roots, _) = WorkspaceRoots::build(dir.path(), &made[0], &[made[1].clone()]);
+
+            assert_eq!(
+                roots.key_of_path(&made[1].join("Configuration.xml")),
+                Some(FileKey::new("cfe/one", "Configuration.xml".to_owned())),
+            );
+            assert_eq!(
+                roots.key_of_path(&made[0].join("Catalogs/Товары.xml")),
+                Some(FileKey::configuration("Catalogs/Товары.xml")),
+            );
+        }
+
+        /// The reading a relative path gets everywhere in the engine: the configuration
+        /// root, which is where every stored path with the reserved id is spelled from.
+        #[test]
+        fn a_relative_path_is_read_against_the_configuration_root() {
+            let dir = tempfile::tempdir().unwrap();
+            let made = dirs(dir.path(), &["src/cf"]);
+            let (roots, _) = WorkspaceRoots::build(dir.path(), &made[0], &[]);
+
+            assert_eq!(
+                roots.key_of_path(Path::new("Configuration.xml")),
+                Some(FileKey::configuration("Configuration.xml")),
+            );
+        }
+
+        #[test]
+        fn a_path_outside_every_root_has_no_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let made = dirs(dir.path(), &["cf"]);
+            let (roots, _) = WorkspaceRoots::build(dir.path(), &made[0], &[]);
+
+            assert_eq!(roots.key_of_path(&outside.path().join("Configuration.xml")), None);
         }
     }
 

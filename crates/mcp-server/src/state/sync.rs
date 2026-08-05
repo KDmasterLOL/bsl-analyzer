@@ -355,31 +355,34 @@ impl SharedState {
         xml_paths: &[crate::drift_classify::DriftPath],
         graph: &GraphState,
     ) -> bool {
-        // Read the workspace root once (brief lock), then resolve owned subtrees off-lock.
-        let workspace_root = {
+        // Take the root table once (brief lock), then resolve owned subtrees off-lock.
+        let roots = {
             let Ok(guard) = engine.lock() else { return false };
             let Some(engine) = guard.as_ref() else { return false };
-            engine.configuration_root().map(Path::to_path_buf)
+            engine.workspace_roots().cloned()
         };
 
         let mut owned_modules: Vec<PathBuf> = Vec::new();
         let mut mark_whole_collection = false;
         for dp in xml_paths {
-            match owned_module_subtree(&dp.raw) {
-                Some(subtree) => owned_modules.extend(walk_bsl_files(&subtree)),
-                None if is_workspace_root_xml(&dp.raw, workspace_root.as_deref()) => {
-                    mark_whole_collection = true;
-                }
-                None => {}
+            // The root question is asked FIRST and independently: a root descriptor may well
+            // have a namesake subtree beside it, and the collection its change reaches is a
+            // superset of that subtree. Deciding by whichever branch matched first would
+            // leave the rest of the tree serving a stale context.
+            if is_root_descriptor(roots.as_ref(), &dp.raw) {
+                mark_whole_collection = true;
+                continue;
+            }
+            if let Some(subtree) = owned_module_subtree(&dp.raw) {
+                owned_modules.extend(walk_bsl_files(&subtree));
             }
         }
 
         // Referencing modules: resolved off any lock via the persisted graph, BEFORE the
         // store-write lock below (the graph db read must never nest under the engine lock).
-        let referencing_rels =
-            Self::resolve_referencing_module_rels(graph, xml_paths, workspace_root.as_deref());
+        let referencing_files = Self::resolve_referencing_module_files(graph, xml_paths);
 
-        if owned_modules.is_empty() && referencing_rels.is_empty() && !mark_whole_collection {
+        if owned_modules.is_empty() && referencing_files.is_empty() && !mark_whole_collection {
             return false;
         }
 
@@ -399,21 +402,26 @@ impl SharedState {
                 Err(e) => tracing::warn!(path = ?bsl, "failed to mark context dirty: {e}"),
             }
         }
-        for rel in referencing_rels {
-            match engine.mark_workspace_path_context_dirty(&rel) {
+        for file in referencing_files {
+            match engine.mark_workspace_path_context_dirty(&file) {
                 Ok(did) => marked |= did,
                 Err(e) => {
-                    tracing::warn!(path = %rel, "failed to mark referencing context dirty: {e}")
+                    tracing::warn!(path = ?file, "failed to mark referencing context dirty: {e}")
                 }
             }
         }
         marked
     }
 
-    /// Reverse-look-up the workspace modules that READ any changed MDO, returning their
-    /// workspace-relative `.bsl` keys (the spelling the `code` collection stores). A metadata
-    /// change alters the `graph_context` of every module that reads the object — not just its
-    /// owned modules — and the persisted graph is the only record of who reads what.
+    /// Reverse-look-up the workspace modules that READ any changed MDO, returning the graph's
+    /// own absolute spelling of each. A metadata change alters the `graph_context` of every
+    /// module that reads the object — not just its owned modules — and the persisted graph is
+    /// the only record of who reads what.
+    ///
+    /// Absolute, because attributing a path to its root is one procedure and it lives on the
+    /// root table: a caller that relativised the path itself would be a second one, and being
+    /// able to strip only ONE root's prefix is exactly how the modules of every other root
+    /// used to fall out of the result.
     ///
     /// Queries the CURRENTLY PUBLISHED graph via [`GraphState::snapshot`], which gates on a
     /// published build and opens the read-only db off the graph's inner lock. Pre-drift edges
@@ -427,33 +435,24 @@ impl SharedState {
     /// Off-lock throughout: opens the graph db once and runs one index-backed inbound-edge
     /// query per resolved MDO node id, so a batch of N `.xml` edits does at most N indexed
     /// queries, never a table scan.
-    fn resolve_referencing_module_rels(
+    fn resolve_referencing_module_files(
         graph: &GraphState,
         xml_paths: &[crate::drift_classify::DriftPath],
-        workspace_root: Option<&Path>,
-    ) -> std::collections::HashSet<String> {
-        let mut rels = std::collections::HashSet::new();
+    ) -> std::collections::HashSet<PathBuf> {
+        let mut files = std::collections::HashSet::new();
         let mdo_ids: Vec<String> =
             xml_paths.iter().filter_map(|dp| xml_to_mdo_id(&dp.raw)).collect();
         if mdo_ids.is_empty() {
-            return rels;
+            return files;
         }
-        let Some(workspace_root) = workspace_root else { return rels };
-        let Some(snapshot) = graph.snapshot() else { return rels };
-        let source_prefix = canonical_source_prefix(workspace_root);
+        let Some(snapshot) = graph.snapshot() else { return files };
         for mdo_id in mdo_ids {
             match snapshot.graph.referencing_files(&mdo_id) {
-                Ok(files) => {
-                    for file in files {
-                        if let Some(rel) = graph_file_to_rel(&file, &source_prefix) {
-                            rels.insert(rel);
-                        }
-                    }
-                }
+                Ok(found) => files.extend(found.into_iter().map(PathBuf::from)),
                 Err(e) => tracing::warn!(mdo = %mdo_id, "referencing-files lookup failed: {e}"),
             }
         }
-        rels
+        files
     }
 
     /// Re-mark every workspace `.bsl` dirty for the search overlay, then reconcile the
@@ -706,43 +705,41 @@ fn xml_to_mdo_id(xml: &Path) -> Option<String> {
     Some(format!("mdo/{}/{name}", mdo_type.english_name()))
 }
 
-/// The canonical, `/`-normalised source prefix used to relativise a graph `nodes.file`
-/// (stored absolute + canonical by `enumerate_bsl_files`) into the `code` collection key,
-/// derived exactly as `FusedChunkWriter` derives its stored rel paths so the two agree.
-fn canonical_source_prefix(workspace_root: &Path) -> String {
-    workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf())
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-/// Relativise an absolute, `/`-normalised graph `nodes.file` to the `code` collection key,
-/// mirroring `FusedChunkWriter`: strip the source prefix, require a path-separator boundary
-/// so a sibling root whose name merely starts with the prefix string is not mistaken for a
-/// child, then drop the leading `/`. `None` for a file outside the source root (an extension
-/// module the local index omits) or an empty remainder.
-fn graph_file_to_rel(file: &str, source_prefix: &str) -> Option<String> {
-    let prefix = source_prefix.trim_end_matches('/');
-    let rel =
-        file.strip_prefix(prefix).filter(|rest| rest.starts_with('/'))?.trim_start_matches('/');
-    (!rel.is_empty()).then(|| rel.to_owned())
-}
-
-/// Whether `xml` sits directly at the workspace root — any such descriptor
-/// (`Configuration.xml`, `ConfigDumpInfo.xml`, a plugin's root descriptor, …) can shift
-/// any module's context, so it is handled conservatively by marking the whole collection
-/// rather than a resolvable owned subtree. When the workspace root is unknown, fall back
-/// to the `Configuration.xml` name so the conservative branch still fires for the one
-/// descriptor guaranteed to live at the root.
-fn is_workspace_root_xml(xml: &Path, workspace_root: Option<&Path>) -> bool {
-    match workspace_root {
-        Some(root) => xml.parent() == Some(root),
-        None => {
-            xml.file_name().and_then(|n| n.to_str()).and_then(bsl_conventions::conventional_of)
-                == Some(bsl_conventions::ConventionalName::ConfigurationXml)
-        }
+/// Whether `xml` is the root descriptor of a source tree — `Configuration.xml`,
+/// `ConfigDumpInfo.xml`, a plugin's own root descriptor. Such a change can shift ANY
+/// module's context, so it is answered conservatively with a whole-collection mark rather
+/// than a resolvable owned subtree.
+///
+/// Three independent signs, because no one of them covers the class:
+///
+/// - the path attributes to the TOP LEVEL of a registered root. Ranked by both spellings,
+///   so an aliased delivery answers the same as a canonical one; and it is the only sign
+///   that recognises a root which is not a 1C dump at all and therefore carries no
+///   `Configuration.xml`;
+/// - the descriptor's own directory CONTAINS a `Configuration.xml` — the same disk probe
+///   by which the project model tells an extension from an ordinary directory. The root
+///   table deliberately omits the roots it rejected (one inside the configuration, one
+///   whose identifier was taken), and a tree nobody declared is not in it either, so a
+///   question asked of the table alone leaves their descriptors unrecognised;
+/// - the file's own name is `Configuration.xml`. What is left when the descriptor itself
+///   is what vanished: the neighbour the sign above looks for is the file now gone.
+fn is_root_descriptor(roots: Option<&bsl_search::WorkspaceRoots>, xml: &Path) -> bool {
+    let at_root_of_a_registered_root = roots
+        .and_then(|roots| roots.key_of_path(xml))
+        .is_some_and(|key| Path::new(&key.path).components().count() == 1);
+    if at_root_of_a_registered_root {
+        return true;
     }
+    let beside_a_configuration_xml = xml.parent().is_some_and(|dir| {
+        bsl_conventions::find_child_ci(
+            dir,
+            bsl_conventions::ConventionalName::ConfigurationXml.canonical(),
+        )
+        .is_some_and(|found| found.is_file())
+    });
+    beside_a_configuration_xml
+        || xml.file_name().and_then(|n| n.to_str()).and_then(bsl_conventions::conventional_of)
+            == Some(bsl_conventions::ConventionalName::ConfigurationXml)
 }
 
 #[cfg(test)]
@@ -1710,6 +1707,457 @@ mod tests {
                 && dirty.contains(&bsl_search::FileKey::configuration("B.bsl"))
         );
     }
+
+    /// Root descriptors of the roots other than the configuration's, and of the trees the
+    /// root table deliberately does not hold. A change to any of them can shift the graph
+    /// context of any module, and the modules of every root have been in the index since
+    /// the table gained them — so each must reach the whole collection.
+    mod root_descriptors {
+        use super::*;
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::FileKey;
+        use std::path::{Path, PathBuf};
+
+        /// Two documents, one per root, so a whole-collection mark is distinguishable from a
+        /// mark that reached one root only.
+        fn doc(root_id: &str, path: &str) -> IndexedDocument {
+            IndexedDocument {
+                collection: "code".to_owned(),
+                root_id: root_id.to_owned(),
+                path: path.to_owned(),
+                symbol_name: format!("Символ{path}"),
+                kind: "procedure".to_owned(),
+                line_start: 0,
+                line_end: 1,
+                text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                content_hash: "h".to_owned(),
+                graph_context: None,
+            }
+        }
+
+        fn engine_over(
+            db_path: &Path,
+            workspace: &Path,
+            configuration: &Path,
+            extensions: &[PathBuf],
+        ) -> (super::super::SharedSearchEngine, Vec<String>) {
+            let (roots, _) =
+                bsl_search::WorkspaceRoots::build(workspace, configuration, extensions);
+            let ids: Vec<String> = roots.ids().map(str::to_owned).collect();
+            let mut engine = SearchEngine::fts_only(db_path).unwrap();
+            engine.set_workspace_roots(roots);
+            let docs: Vec<IndexedDocument> =
+                ids.iter().map(|id| doc(id, "CommonModules/М/Ext/Module.bsl")).collect();
+            engine.sync_indexed_documents_in_collection("code", &docs, None).unwrap();
+            (Arc::new(Mutex::new(Some(engine))), ids)
+        }
+
+        fn drift(engine: &super::super::SharedSearchEngine, paths: &[&Path]) {
+            let entries: Vec<ChangeEntry> = paths
+                .iter()
+                .enumerate()
+                .map(|(i, path)| ChangeEntry {
+                    canonical: path.to_path_buf(),
+                    raw: path.to_path_buf(),
+                    kind: ChangeKind::MaybeChanged,
+                    seq: i as u64 + 1,
+                })
+                .collect();
+            SharedState::apply_search_drift(
+                engine,
+                &entries,
+                false,
+                &crate::graph::GraphState::disabled(),
+            );
+        }
+
+        fn marks(engine: &super::super::SharedSearchEngine) -> std::collections::HashSet<FileKey> {
+            let guard = engine.lock().unwrap();
+            guard.as_ref().unwrap().context_dirty_paths("code").unwrap()
+        }
+
+        /// A dump root: the descriptor that makes the project model call a directory an
+        /// extension at all.
+        fn dump_root(at: &Path) -> PathBuf {
+            std::fs::create_dir_all(at).unwrap();
+            std::fs::write(at.join("Configuration.xml"), "<Configuration/>").unwrap();
+            at.to_path_buf()
+        }
+
+        /// The root descriptor of a REGISTERED extension root. Recognising only the
+        /// configuration's root left this one marking nothing at all.
+        #[test]
+        fn a_root_descriptor_of_an_extension_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            // Outside the workspace on purpose: an extension inside it is covered by the
+            // configuration walk by accident, and the fixture would prove nothing.
+            let extension = dump_root(&dir.path().join("cfe"));
+            let (engine, ids) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&extension),
+            );
+
+            let descriptor = extension.join("ConfigDumpInfo.xml");
+            std::fs::write(&descriptor, "<ConfigDumpInfo/>").unwrap();
+            drift(&engine, &[&descriptor]);
+
+            let dirty = marks(&engine);
+            assert_eq!(dirty.len(), ids.len(), "every root's documents are marked: {dirty:?}");
+        }
+
+        /// The same descriptor one level down is an ordinary metadata file: it owns at most
+        /// its own subtree and must not reach the collection. Without this the root branch
+        /// could be "always true" and the tests above would still pass.
+        #[test]
+        fn a_descriptor_below_a_root_marks_nothing() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            let extension = dump_root(&dir.path().join("cfe"));
+            let (engine, _) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&extension),
+            );
+
+            let mut below = Vec::new();
+            for root in [&configuration, &extension] {
+                let deep = root.join("Catalogs");
+                std::fs::create_dir_all(&deep).unwrap();
+                let descriptor = deep.join("ConfigDumpInfo.xml");
+                std::fs::write(&descriptor, "<ConfigDumpInfo/>").unwrap();
+                below.push(descriptor);
+            }
+            drift(&engine, &below.iter().map(PathBuf::as_path).collect::<Vec<_>>());
+
+            assert!(marks(&engine).is_empty(), "a descriptor below a root marks nothing");
+        }
+
+        /// An extension canonically inside the configuration is REJECTED from the table
+        /// (its files carry the configuration's key), so no registered root sits at its
+        /// directory — the class the cut names as part of the rule, not an exception.
+        #[test]
+        fn a_configuration_xml_of_a_rejected_extension_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            let nested = dump_root(&configuration.join("nested"));
+            let (engine, _) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&nested),
+            );
+
+            drift(&engine, &[&nested.join("Configuration.xml")]);
+
+            assert!(!marks(&engine).is_empty(), "the rejected root's descriptor marks the tree");
+        }
+
+        /// The same rejected root, a descriptor NOT named `Configuration.xml`. The class is
+        /// every root-level descriptor, and a rule keyed on one file name would leave the
+        /// rest of it — `ConfigDumpInfo.xml`, a third-party dump's own descriptor — unmarked.
+        #[test]
+        fn a_root_descriptor_beside_a_configuration_xml_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            let nested = dump_root(&configuration.join("nested"));
+            let (engine, _) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&nested),
+            );
+
+            let descriptor = nested.join("ConfigDumpInfo.xml");
+            std::fs::write(&descriptor, "<ConfigDumpInfo/>").unwrap();
+            drift(&engine, &[&descriptor]);
+
+            assert!(!marks(&engine).is_empty(), "a descriptor beside a Configuration.xml marks");
+        }
+
+        /// The descriptor itself is what vanished, so the tree it stood in can no longer be
+        /// recognised by its neighbour — and a removal is exactly the change that shifts
+        /// every context.
+        #[test]
+        fn a_removed_configuration_xml_of_a_rejected_extension_still_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            let nested = dump_root(&configuration.join("nested"));
+            let (engine, _) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&nested),
+            );
+
+            let descriptor = nested.join("Configuration.xml");
+            std::fs::remove_file(&descriptor).unwrap();
+            drift(&engine, &[&descriptor]);
+
+            assert!(!marks(&engine).is_empty(), "a removed root descriptor still marks the tree");
+        }
+
+        /// A root-level descriptor that also has a namesake subtree beside it. The two
+        /// answers are not alternatives: the owned subtree is a subset of the collection the
+        /// root descriptor reaches, and deciding by whichever branch runs first would leave
+        /// the rest of the tree stale.
+        #[test]
+        fn a_root_descriptor_with_a_namesake_subtree_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            let extension = dump_root(&dir.path().join("cfe"));
+            let (engine, ids) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&extension),
+            );
+
+            let owned = extension.join("ConfigDumpInfo/Ext");
+            std::fs::create_dir_all(&owned).unwrap();
+            std::fs::write(owned.join("Module.bsl"), "Процедура П()\nКонецПроцедуры").unwrap();
+            let descriptor = extension.join("ConfigDumpInfo.xml");
+            std::fs::write(&descriptor, "<ConfigDumpInfo/>").unwrap();
+            drift(&engine, &[&descriptor]);
+
+            let dirty = marks(&engine);
+            for id in &ids {
+                assert!(
+                    dirty.contains(&FileKey::new(id, "CommonModules/М/Ext/Module.bsl")),
+                    "root {id:?} is marked despite the namesake subtree: {dirty:?}",
+                );
+            }
+        }
+
+        /// The event arrives spelled through an alias while the root is declared by its real
+        /// path. Attribution ranks roots by the canonical spelling, so both spellings answer
+        /// the same; comparing the delivered spelling alone would recognise neither.
+        #[cfg(unix)]
+        #[test]
+        fn a_root_descriptor_reached_through_an_alias_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            // No `Configuration.xml` in the extension root: with a neighbour present the
+            // structural probe would answer through the alias too, and the canonical
+            // attribution this pins would go untested.
+            let extension = dir.path().join("plain-root");
+            std::fs::create_dir_all(&extension).unwrap();
+            let alias = workspace.join("link");
+            std::os::unix::fs::symlink(&extension, &alias).unwrap();
+            let (engine, ids) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&extension),
+            );
+
+            let descriptor = extension.join("SomePlugin.xml");
+            std::fs::write(&descriptor, "<Root/>").unwrap();
+            drift(&engine, &[&alias.join("SomePlugin.xml")]);
+
+            let dirty = marks(&engine);
+            assert_eq!(dirty.len(), ids.len(), "the aliased spelling is attributed: {dirty:?}");
+        }
+    }
+    /// Marks that land on a module of an EXTENSION root. Its rows are keyed by that root,
+    /// so a mark spelled against the configuration would name a different file — or no
+    /// file at all.
+    mod extension_marks {
+        use super::*;
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::FileKey;
+        use std::path::{Path, PathBuf};
+
+        const MODULE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000002">
+        <Properties><Name>{}</Name><Server>true</Server></Properties>
+    </CommonModule>
+</MetaDataObject>"#;
+
+        fn write(path: &Path, text: &str) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+
+        fn common_module(root: &Path, name: &str, body: &str) {
+            write(&root.join(format!("CommonModules/{name}.xml")), &MODULE_XML.replace("{}", name));
+            write(&root.join(format!("CommonModules/{name}/Ext/Module.bsl")), body);
+        }
+
+        /// A configuration and an extension side by side, both declared to the project model.
+        /// The extension lies OUTSIDE the configuration root: one inside it is rejected from
+        /// the root table and its files carry the configuration's key, which would make the
+        /// fixture prove nothing.
+        fn two_root_workspace(workspace: &Path) -> (PathBuf, PathBuf) {
+            let configuration = workspace.join("cf");
+            let extension = workspace.join("cfe");
+            write(&configuration.join("Configuration.xml"), "<Configuration/>");
+            write(&extension.join("Configuration.xml"), "<Configuration/>");
+            fs::write(
+                workspace.join("bsl-analyzer.toml"),
+                "[source]\nroot = \"cf\"\nextensions = [{ name = \"a\", path = \"cfe\" }]\n",
+            )
+            .unwrap();
+            (configuration, extension)
+        }
+
+        fn engine_over(
+            db_path: &Path,
+            workspace: &Path,
+            configuration: &Path,
+            extension: &Path,
+        ) -> super::super::SharedSearchEngine {
+            let (roots, rejected) = bsl_search::WorkspaceRoots::build(
+                workspace,
+                configuration,
+                std::slice::from_ref(&extension.to_path_buf()),
+            );
+            assert!(rejected.is_empty(), "the extension is a root of its own: {rejected:?}");
+            let mut engine = SearchEngine::fts_only(db_path).unwrap();
+            engine.set_workspace_roots(roots);
+            // Rows keyed by the engine's own attribution: the mark is then compared against a
+            // key nobody spelled by hand.
+            engine.index_unindexed_roots_fts().unwrap();
+            engine.enable_workspace_watcher_mode();
+            Arc::new(Mutex::new(Some(engine)))
+        }
+
+        fn drift(
+            engine: &super::super::SharedSearchEngine,
+            xml: &Path,
+            graph: &crate::graph::GraphState,
+        ) {
+            SharedState::apply_search_drift(
+                engine,
+                &[ChangeEntry {
+                    canonical: xml.to_path_buf(),
+                    raw: xml.to_path_buf(),
+                    kind: ChangeKind::MaybeChanged,
+                    seq: 1,
+                }],
+                false,
+                graph,
+            );
+        }
+
+        /// A module of an extension that READS a configuration object. Its context embeds
+        /// that object's metadata, so a change to the object's descriptor makes it stale —
+        /// and the mark has to carry the extension's root, the one its row carries.
+        #[test]
+        fn a_referencing_module_of_an_extension_is_marked_under_its_own_root() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let (configuration, extension) = two_root_workspace(&workspace);
+
+            let xml = configuration.join("Catalogs/Х.xml");
+            write(
+                &xml,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>Х</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+            );
+            common_module(
+                &extension,
+                "Б",
+                "&НаСервере\nПроцедура ЧитаетХ() Экспорт\nСправочники.Х.СоздатьЭлемент();\nКонецПроцедуры",
+            );
+            common_module(
+                &extension,
+                "В",
+                "&НаСервере\nПроцедура НичегоНеЧитает() Экспорт\nВозврат;\nКонецПроцедуры",
+            );
+
+            let out = crate::cache::graph_db_path(&workspace);
+            fs::create_dir_all(out.parent().unwrap()).unwrap();
+            let project = crate::graph::ProjectSnapshot::load(&workspace);
+            let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+            let summary = crate::graph_db::build_graph_database(
+                &project,
+                &universe,
+                &out,
+                100,
+                &crate::graph_db::GraphMeta {
+                    revision: 1,
+                    fingerprint: crate::graph_db::GraphFp::default(),
+                    files: 0,
+                    built_at: "t".to_owned(),
+                },
+            )
+            .expect("graph builds");
+            let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+            graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules);
+
+            let engine =
+                engine_over(&dir.path().join("search.db"), &workspace, &configuration, &extension);
+            drift(&engine, &xml, &graph);
+
+            let guard = engine.lock().unwrap();
+            let engine = guard.as_ref().unwrap();
+            let dirty = engine.context_dirty_paths("code").unwrap();
+            let reader = FileKey::new("cfe", "CommonModules/Б/Ext/Module.bsl");
+            assert!(
+                dirty.contains(&reader),
+                "the extension's reader is marked under its own root: {dirty:?}",
+            );
+            assert!(
+                !dirty.contains(&FileKey::new("cfe", "CommonModules/В/Ext/Module.bsl")),
+                "a module that reads nothing about the object is untouched: {dirty:?}",
+            );
+            let rows: Vec<FileKey> = engine
+                .store()
+                .all_files_in_collection("code")
+                .unwrap()
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            assert!(rows.contains(&reader), "the mark names the key the row lives under: {rows:?}");
+            for key in &dirty {
+                assert!(
+                    rows.contains(key),
+                    "no mark names a root the table does not hold: {key:?} vs {rows:?}",
+                );
+            }
+        }
+
+        /// The owned modules of an extension's own object: resolved by path convention, so no
+        /// graph is needed — but the key still has to be the extension's.
+        #[test]
+        fn an_owned_module_of_an_extension_is_marked_under_its_own_root() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let (configuration, extension) = two_root_workspace(&workspace);
+            let owned = extension.join("Catalogs/Т/Ext/ObjectModule.bsl");
+            write(&owned, "Процедура П()\nКонецПроцедуры");
+            let xml = extension.join("Catalogs/Т.xml");
+            write(&xml, "<MetaDataObject/>");
+
+            let engine =
+                engine_over(&dir.path().join("search.db"), &workspace, &configuration, &extension);
+            drift(&engine, &xml, &crate::graph::GraphState::disabled());
+
+            let guard = engine.lock().unwrap();
+            let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
+            assert!(
+                dirty.contains(&FileKey::new("cfe", "Catalogs/Т/Ext/ObjectModule.bsl")),
+                "the extension's owned module is marked under its own root: {dirty:?}",
+            );
+        }
+    }
+
     /// An `.xml` drift whose owned module is marked context-dirty must NUDGE the graph to
     /// catch up — otherwise a search-only user (who never triggers a `graph` tool freshness
     /// check) leaves the marks unresolved forever. Asserting the graph left `Idle` with NO

@@ -1306,25 +1306,18 @@ impl SearchEngine {
     /// `.bsl` or lies outside every registered root. Shared by the workspace
     /// point-update entry points.
     ///
-    /// A relative path is taken as workspace-relative — that is the only reading
-    /// available, and the callers that pass one have already stripped the
-    /// workspace prefix themselves. The canonical spelling is what attribution
-    /// ranks roots by, which is why [`WorkspaceRoots::root_of`] takes two.
+    /// A relative path is taken as configuration-relative — that is the only reading
+    /// available, and the callers that pass one have already stripped the prefix
+    /// themselves. The canonical spelling is what attribution ranks roots by, which
+    /// is why [`WorkspaceRoots::root_of`] takes two; both come from the one procedure
+    /// [`WorkspaceRoots::spellings_of`], so a `.bsl` and a descriptor cannot be
+    /// attributed by different rules.
     fn workspace_file_key(&self, path: &Path) -> Option<FileKey> {
         let roots = self.workspace_roots.as_ref()?;
         if !bsl_conventions::has_extension(path, bsl_conventions::BSL_EXTENSION) {
             return None;
         }
-        // A relative path is spelled against the CONFIGURATION root: that is how every stored
-        // path with the reserved id is spelled, and it is the prefix callers strip before
-        // handing one over. The table's workspace exists to make root identifiers relative and
-        // is a directory higher whenever the configuration sits in a subdirectory.
-        let walked = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            roots.configuration().unwrap_or_else(|| roots.workspace()).join(path)
-        };
-        let canonical = crate::workspace_roots::canonical_spelling(&walked);
+        let (walked, canonical) = roots.spellings_of(path);
         // A `.bsl`-spelled link may resolve to a non-source target — by role, or by not being
         // a regular file at all (a directory spelled `.bsl`). A key under such a target's root
         // would be one that is FORBIDDEN to exist (the walk drops such files), so canonical
