@@ -267,11 +267,13 @@ impl SharedState {
             .iter()
             .filter(|e| e.kind == crate::change_hub::ChangeKind::SubtreeRemoved)
             .map(|e| e.raw.as_path())
-            .filter(|dir| match std::fs::symlink_metadata(dir) {
+            // Following links, exactly as the hub does when it decides a path vanished: a
+            // link whose target is gone is gone, and asking about the link itself would
+            // answer that the subtree is still there while the hub says otherwise.
+            .filter(|dir| match std::fs::metadata(dir) {
                 Ok(_) => false,
-                // Only a PROVEN absence, the same rule the hub applies when deciding a path
-                // vanished: a stat that could not be answered (permissions on a parent, a
-                // momentary race) says nothing about whether the files are there.
+                // Only a PROVEN absence. A stat that could not be answered (permissions on
+                // a parent, a momentary race) says nothing about whether the files are there.
                 Err(err) => matches!(
                     err.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
@@ -1902,6 +1904,82 @@ mod tests {
         assert!(
             !engine.text_search("Живущая", 10, Some("code")).unwrap().is_empty(),
             "a directory that is on disk when the removal is applied keeps its files",
+        );
+    }
+
+    /// The hub decides a path vanished by following links, so a subtree reached through a
+    /// link whose target is deleted is gone as far as it is concerned. Asking about the link
+    /// itself would answer "still there" and silently drop the removal it delivered.
+    #[cfg(unix)]
+    #[test]
+    fn a_subtree_reached_through_a_dangling_link_is_removed() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let outside = tempdir().unwrap();
+        let target = outside.path().join("real");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("A.bsl"), "Процедура Внешняя()\nКонецПроцедуры").unwrap();
+        let link = workspace.join("Linked");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Linked/A.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Внешняя".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Внешняя()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        // The target goes; the link stays behind, pointing at nothing.
+        fs::remove_dir_all(&target).unwrap();
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: link.clone(),
+                raw: link,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("Внешняя", 10, Some("code")).unwrap().is_empty(),
+            "a subtree whose target is deleted stops answering searches",
         );
     }
 

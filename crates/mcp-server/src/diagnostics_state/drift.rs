@@ -384,6 +384,12 @@ impl DiagnosticsState {
                     baseline = inner.baseline_epoch,
                     "dropping a scan whose baseline moved under it; the next poll rescans"
                 );
+                // The reason this scan ran is one-shot — a reconcile debt cleared by the
+                // drain that raised it, or a forced rescan already consumed — and refusing
+                // the snapshot answers none of it. Without re-arming, a healthy cursor
+                // sends every following read back down the drain path and the drift the hub
+                // lost stays unapplied until the watchdog tick, with `stale` reading false.
+                self.force_scan.store(true, Ordering::SeqCst);
                 return;
             }
             let Inner {
@@ -2189,6 +2195,49 @@ mod tests {
                 ResidentOutcome::Ready(true, _)
             ),
             "a snapshot older than the baseline is refused, not applied backwards",
+        );
+    }
+
+    /// Refusing a snapshot answers nothing: whatever made this scan run — a reconcile debt
+    /// the drain already cleared, a consumed force — is spent. A healthy cursor then sends
+    /// every following read down the drain path, so the drift the hub lost would sit
+    /// unapplied, and unreported, until the watchdog tick.
+    #[test]
+    fn a_refused_scan_re_arms_the_obligation_to_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, _hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let snapshot = state.throttled_scan(root).expect("a scan");
+        write_common_module(
+            root,
+            "Двигатель",
+            true,
+            "&НаСервере\nФункция Д() Экспорт КонецФункции",
+        );
+        let moved = module_path(root, "Двигатель");
+        state.apply_drained_entries(&[ChangeEntry {
+            canonical: moved.clone(),
+            raw: moved,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        }]);
+
+        let changes = {
+            let inner = lock_recover(&state.inner);
+            classify_changes(&inner.stats, &snapshot.stats)
+        };
+        state.apply_scan_drift(&changes, false, &snapshot);
+
+        let scans = state.scan_count();
+        let _ = state.read(|_, _| ());
+        assert!(
+            state.scan_count() > scans,
+            "the refused snapshot leaves the obligation to scan standing",
         );
     }
 
