@@ -425,8 +425,8 @@ impl SharedState {
     ///
     /// The graph keeps these paths as strings, so under a root whose name holds bytes no
     /// `str` can carry they come back rendered: such a path attributes to nothing, or — with
-    /// roots nested inside one another — to an ancestor whose key no row carries, which
-    /// makes the mark inert. Either way the module waits for a wider mark, and that is the
+    /// roots nested inside one another — to an ancestor, under whose key the mark normally
+    /// finds no row. Either way the module itself waits for a wider mark, and that is the
     /// deliberate answer: a rendering fits several roots at once, and a key guessed from it
     /// would name a file that did not change.
     ///

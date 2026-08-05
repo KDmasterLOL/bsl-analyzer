@@ -175,8 +175,10 @@ impl WorkspaceRoots {
     ///   spellings arrive at one key. This is the ordinary case and nothing is guessed;
     /// - rendered inside a root's own name, that root stops matching. An ANCESTOR root may
     ///   still match — nested extension roots are legal — and then the answer is the
-    ///   ancestor's key, which no indexed row carries: the file's row is keyed by the inner
-    ///   root. The mark written under it is inert and clears itself on the next refresh;
+    ///   ancestor's key, while the file's own row is keyed by the inner root. Usually no row
+    ///   carries that key and a mark written under it clears itself unused; where the key
+    ///   space's own collision puts a real file there, that file is re-rendered needlessly —
+    ///   its own context, so nothing wrong is stored — and the real one stays stale;
     /// - with no root matching at all, the answer is `None` and the caller skips its mark.
     ///
     /// What is deliberately NOT done is ranking such a path in the rendered alphabet. That
@@ -725,10 +727,10 @@ mod tests {
         }
 
         /// Roots may nest, so a rendering that unseats the inner root can still land on an
-        /// ancestor. The key it gets belongs to no indexed row — the file's row is the inner
-        /// root's — and a mark written under it is inert: nothing has chunks there, so the
-        /// next refresh clears it. Said plainly here because the alternative reading, that
-        /// such a path attributes to nothing, is what a shorter contract would promise.
+        /// ancestor. The file's own row stays keyed by the inner root, so the key this
+        /// produces normally carries no row at all. Said plainly here because the shorter
+        /// reading — that such a path attributes to nothing — is what a tidier contract
+        /// would promise and the code does not deliver.
         #[test]
         fn a_rendering_inside_a_nested_roots_name_lands_on_the_ancestor() {
             let dir = tempfile::tempdir().unwrap();
