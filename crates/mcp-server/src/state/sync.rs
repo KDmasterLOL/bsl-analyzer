@@ -280,9 +280,20 @@ impl SharedState {
         // same rule the classifier follows by re-stating every path — and it matters more
         // here, because one entry stands for a whole subtree and the walk that would undo a
         // wrong deletion is skipped precisely when it is incomplete.
+        // A removal is a subtree candidate whenever it cannot be a file of the corpus. The
+        // hub can only guess: it names a vanished path a subtree by the absence of an
+        // extension, because a path that is gone cannot be asked what it was — so a
+        // directory called `Dropped.v1` arrives as an ordinary removal. Judging by what the
+        // path could NOT have been keeps those, and costs nothing on the ones that really
+        // were files: no key lives under them, so the removal finds nothing.
         let subtrees: Vec<&Path> = entries
             .iter()
-            .filter(|e| e.kind == crate::change_hub::ChangeKind::SubtreeRemoved)
+            .filter(|e| {
+                e.kind == crate::change_hub::ChangeKind::SubtreeRemoved
+                    || (e.kind == crate::change_hub::ChangeKind::MaybeRemoved
+                        && !bsl_conventions::has_extension(&e.raw, bsl_conventions::BSL_EXTENSION)
+                        && !bsl_conventions::has_extension(&e.raw, bsl_conventions::XML_EXTENSION))
+            })
             .map(|e| e.raw.as_path())
             // Following links, exactly as the hub does when it decides a path vanished: a
             // link whose target is gone is gone, and asking about the link itself would
@@ -2005,6 +2016,76 @@ mod tests {
         assert!(
             !engine.text_search("Уцелевшая", 10, Some("code")).unwrap().is_empty(),
             "and nothing else is touched",
+        );
+    }
+
+    /// The hub names a vanished path a subtree only when it has no extension — it cannot ask
+    /// a path that is gone what it used to be. A directory with a dot in its name therefore
+    /// arrives as an ordinary removal, and the classifier drops it for being neither `.bsl`
+    /// nor `.xml`. Its files would then have nobody to remove them.
+    #[test]
+    fn a_vanished_directory_with_a_dotted_name_still_loses_its_files() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Dropped.v1/One.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "ИзВерсии".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура ИзВерсии()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        // The hub calls this `MaybeRemoved`, because `Dropped.v1` looks like it has an
+        // extension — the one thing it can tell about a path that no longer exists.
+        let dropped = workspace.join("Dropped.v1");
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: dropped.clone(),
+                raw: dropped,
+                kind: ChangeKind::MaybeRemoved,
+                seq: 1,
+            }],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("ИзВерсии", 10, Some("code")).unwrap().is_empty(),
+            "a dotted directory name does not save its files from a deletion",
         );
     }
 
