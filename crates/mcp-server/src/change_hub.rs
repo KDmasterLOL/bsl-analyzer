@@ -369,8 +369,12 @@ impl Accumulator {
             None => false,
         };
 
-        // Recover once no live cursor is still owed a reconcile.
-        if self.degrade_reason.is_some() && !self.cursors.values().any(|c| c.pending.is_some()) {
+        // Recover once no live cursor still owes THE WINDOW. A private lag debt does not
+        // count: it belongs to one cursor, and letting it hold the window open would put
+        // the shared verdict back under one consumer's silence — and charge every
+        // newcomer, which inherits the window, a reconcile it owes to nobody.
+        let owes_window = |cursor: &CursorState| matches!(&cursor.pending, Some(reason) if *reason != DegradeReason::CursorLagged);
+        if self.degrade_reason.is_some() && !self.cursors.values().any(owes_window) {
             self.degrade_reason = None;
         }
         self.reclaim();
@@ -2059,7 +2063,9 @@ fn apply_rearm(
 /// standing-degraded, and that stand can only be built here, next to what it exercises.
 #[cfg(test)]
 pub(crate) mod test_support {
+    #[cfg(unix)]
     use super::{WatchTarget, WorkspaceChangeHub};
+    #[cfg(unix)]
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
@@ -3661,6 +3667,78 @@ mod tests {
             panic!("the cursor that lost detail is not healthy");
         };
         assert_ne!(reason, DegradeReason::Overflow, "its own lag is not a loss of the stream");
+    }
+
+    /// A debt of one cursor's own is not the shared window. Left conflated, a private lag
+    /// keeps the window open after every cursor that owed the SHARED reconcile has paid,
+    /// so `health()` stays degraded and every newcomer inherits a full reconcile it owes
+    /// to nobody — the same "one silent consumer taxes the rest" this node removes,
+    /// re-entering by the back door.
+    #[test]
+    fn a_private_lag_does_not_hold_the_shared_window_open() {
+        let mut acc = Accumulator::new(2);
+        let lagging = acc.subscribe(None);
+        let other = acc.subscribe(None);
+        let record = |acc: &mut Accumulator, name: &str| {
+            let p = PathBuf::from(name);
+            acc.record(p.clone(), p, ChangeKind::MaybeChanged);
+        };
+
+        acc.enter_rescan(false, DegradeReason::RuntimeError);
+        record(&mut acc, "/p1.bsl");
+        assert!(acc.drain(lagging).rescan_required, "it owed the shared window too");
+
+        // Now `lagging` falls behind on its own while `other` still owes the window.
+        for name in ["/p2.bsl", "/p3.bsl", "/p4.bsl", "/p5.bsl"] {
+            record(&mut acc, name);
+        }
+        assert!(acc.drain(other).rescan_required, "the last debtor of the window pays");
+
+        assert_eq!(acc.health(), Health::Healthy, "the shared window is closed");
+        let late = acc.subscribe(None);
+        assert!(
+            !acc.drain(late).rescan_required,
+            "and a newcomer owes nothing for somebody else's private lag"
+        );
+    }
+
+    /// `health_for` has to carry BOTH standing conditions of the hub, and one stand cannot
+    /// show that: with a single test the carrier that is missing is exactly the one the
+    /// stand does not raise. This is the thread that never started.
+    #[test]
+    fn a_hub_that_never_started_is_unhealthy_for_every_cursor() {
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start_with_unstartable_thread(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+        let cursor = hub.subscribe();
+        let _ = hub.drain(cursor);
+
+        assert_eq!(
+            hub.health_for(Some(cursor)),
+            Health::Degraded(DegradeReason::WatcherSetup),
+            "a hub that will never watch is nobody's fast path"
+        );
+    }
+
+    /// The other carrier: a declared root nothing watches. The cursor is drained clean, so
+    /// its own debt cannot be what answers here — and without this the blind branch of
+    /// `health_for` is held by no test at all, while consumers keep trusting a stream that
+    /// does not cover the root.
+    #[cfg(unix)]
+    #[test]
+    fn a_blind_hub_is_unhealthy_for_a_cursor_that_owes_nothing() {
+        let (_dir, _a, b, hub) = partly_blind_hub();
+        let cursor = hub.subscribe();
+        assert!(hub.drain(cursor).rescan_required, "the blindness was announced");
+        assert!(!hub.drain(cursor).rescan_required, "and acknowledged");
+
+        assert_eq!(
+            hub.health_for(Some(cursor)),
+            Health::Degraded(DegradeReason::RewatchFailed),
+            "a root nothing watches is the hub's condition, not this cursor's debt"
+        );
+        readable(&b);
     }
 
     /// A genuine loss of the stream is everyone's, and is told to each cursor exactly
