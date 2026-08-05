@@ -19,7 +19,7 @@ use crate::{
 };
 use code_chunk::Chunker;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
@@ -1421,29 +1421,32 @@ impl SearchEngine {
         self.remove_workspace_key_with(key, has_baseline)
     }
 
-    /// Remove every indexed file under `dir`, across every carrier.
+    /// Drop the indexed files under `dirs` that are no longer on disk, across every carrier.
     ///
-    /// A vanished directory arrives as ONE event naming the directory itself, while the
-    /// files that went with it are never named — the walk that would have enumerated them
-    /// is exactly what is no longer possible. Point removal cannot express this: it keys
-    /// through [`Self::workspace_file_key`], which answers `None` for anything that is not
-    /// a `.bsl`, so a call on a directory is silently a no-op.
+    /// A vanished directory arrives as ONE event naming the directory itself, while the files
+    /// that went with it are never named — the walk that would have enumerated them is
+    /// exactly what is no longer possible. Point removal cannot express this: it keys through
+    /// [`Self::workspace_file_key`], which answers `None` for anything that is not a `.bsl`,
+    /// so a call on a directory is silently a no-op.
+    ///
+    /// Each candidate key is then checked against disk INDIVIDUALLY rather than trusting the
+    /// event or the state of the directory itself. Both of those are too coarse to be
+    /// trusted with a whole subtree: an event says what was true when it fired, and a
+    /// directory that is back says nothing about which of its files came back with it. The
+    /// key's own file is the only thing that answers the question actually being asked.
+    /// Anything that is not a proven absence — a permission error, a race — keeps its key.
+    ///
+    /// Callers pass every path a batch reported gone, not just the ones that look like
+    /// directories: the answer for a path that really was a file is simply an empty
+    /// candidate set, since no key lives strictly under it. Taking them together is what
+    /// keeps this to ONE reading of the carriers per batch.
     ///
     /// Candidates come from every carrier for the same reason a reconcile does (see
     /// [`Self::carrier_keys`]): against a remote baseline there are no local rows at all.
     /// Returns the number of removed keys.
-    pub fn remove_workspace_subtree(
-        &mut self,
-        dir: impl AsRef<Path>,
-    ) -> Result<usize, SearchError> {
-        let dir = dir.as_ref();
+    pub fn remove_vanished_under(&mut self, dirs: &[PathBuf]) -> Result<usize, SearchError> {
         let Some(roots) = self.workspace_roots.as_ref() else {
             return Ok(0);
-        };
-        let walked = if dir.is_absolute() {
-            dir.to_path_buf()
-        } else {
-            roots.configuration().unwrap_or_else(|| roots.workspace()).join(dir)
         };
         // Attributed by the DECLARED spellings alone: the directory is gone, so there is
         // nothing left on disk to canonicalise, and its keys were spelled the way the walk
@@ -1453,17 +1456,25 @@ impl SearchEngine {
         // It answers "which root owns this file", and a root owns no file at its own path,
         // so a directory that IS a root — an extension deleted whole, a configuration that
         // is the workspace — attributes to nothing at all. Its keys are its root's.
-        let prefix = roots.root_of_declared(&walked);
-        let swallowed_roots: HashSet<&str> = roots
-            .entries()
-            .filter(|(_, declared)| declared.starts_with(&walked))
-            .map(|(id, _)| id)
-            .collect();
-        if prefix.is_none() && swallowed_roots.is_empty() {
+        let mut prefixes: Vec<FileKey> = Vec::new();
+        let mut swallowed_roots: HashSet<String> = HashSet::new();
+        for dir in dirs {
+            let walked = if dir.is_absolute() {
+                dir.clone()
+            } else {
+                roots.configuration().unwrap_or_else(|| roots.workspace()).join(dir)
+            };
+            prefixes.extend(roots.root_of_declared(&walked));
+            swallowed_roots.extend(
+                roots
+                    .entries()
+                    .filter(|(_, declared)| declared.starts_with(&walked))
+                    .map(|(id, _)| id.to_owned()),
+            );
+        }
+        if prefixes.is_empty() && swallowed_roots.is_empty() {
             return Ok(0);
         }
-        let swallowed_roots: HashSet<String> =
-            swallowed_roots.into_iter().map(str::to_owned).collect();
         let carriers = self.carrier_keys()?;
         let hidden = match self.workspace_overlay_cache.lock() {
             Ok(cache) => cache.hidden_keys(),
@@ -1477,7 +1488,13 @@ impl SearchEngine {
             .into_iter()
             .filter(|key| {
                 swallowed_roots.contains(&key.root_id)
-                    || prefix.as_ref().is_some_and(|prefix| key.is_under(prefix))
+                    || prefixes.iter().any(|prefix| key.is_under(prefix))
+            })
+            .filter(|key| {
+                self.workspace_roots
+                    .as_ref()
+                    .and_then(|roots| roots.resolve(key))
+                    .is_some_and(|path| proven_absent(&path))
             })
             .collect();
         let batch = self.remove_key_batch(candidates, &carriers, &hidden);
@@ -2625,6 +2642,21 @@ impl SearchEngine {
         self.store.remove_file(CONFIGURATION_ROOT_ID, rel_path, collection)?;
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(())
+    }
+}
+
+/// Whether this path is PROVEN to be gone, as opposed to merely unreadable.
+///
+/// Following links, because a link whose target is deleted is deleted as far as anything
+/// reading the file is concerned. `NotADirectory` counts too: a path whose parent is a file
+/// cannot exist. Everything else — a permission error, a momentary race — is an unanswered
+/// question, and an unanswered question is not evidence of deletion.
+fn proven_absent(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(_) => false,
+        Err(err) => {
+            matches!(err.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)
+        }
     }
 }
 
@@ -3967,7 +3999,10 @@ mod tests {
         assert!(carriers.carriers_of(&overlay).contains(&KeyCarrier::OverlayEntry));
         assert!(carriers.carriers_of(&fingerprint).contains(&KeyCarrier::FingerprintRow));
 
-        let removed = engine.remove_workspace_subtree(workspace.join("Dir")).unwrap();
+        // The directory is what vanished; the removal answers per key, so its one file that
+        // existed has to go with it.
+        fs::remove_dir_all(workspace.join("Dir")).unwrap();
+        let removed = engine.remove_vanished_under(&[workspace.join("Dir")]).unwrap();
 
         assert_eq!(removed, 3, "every carrier under the directory gave up its key");
         let carriers = engine.carrier_keys().unwrap();
@@ -4036,7 +4071,7 @@ mod tests {
         engine.set_workspace_roots(roots);
 
         fs::remove_dir_all(&extension).unwrap();
-        let removed = engine.remove_workspace_subtree(&extension).unwrap();
+        let removed = engine.remove_vanished_under(std::slice::from_ref(&extension)).unwrap();
 
         assert_eq!(removed, 1, "the vanished root gave up its file");
         assert!(
@@ -4083,7 +4118,10 @@ mod tests {
             "the standing obligation is the only carrier",
         );
 
-        let removed = engine.remove_workspace_subtree(workspace.join("Dir")).unwrap();
+        // The obligation outlives the file: the directory goes, and with it any hope of
+        // ever re-reading what was owed.
+        fs::remove_dir_all(workspace.join("Dir")).unwrap();
+        let removed = engine.remove_vanished_under(&[workspace.join("Dir")]).unwrap();
 
         assert_eq!(removed, 1, "the obligation-only key is removed with its directory");
         assert!(
@@ -4121,7 +4159,7 @@ mod tests {
         engine.set_serves_external_baseline(true).unwrap();
         engine.initialize_workspace_overlay_clean().unwrap();
 
-        let removed = engine.remove_workspace_subtree(workspace.join("Dir")).unwrap();
+        let removed = engine.remove_vanished_under(&[workspace.join("Dir")]).unwrap();
 
         assert_eq!(removed, 1, "only the baseline copy under the directory is removed");
         let hidden = engine.workspace_overlay_cache.lock().unwrap().hidden_keys();

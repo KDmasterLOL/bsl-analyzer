@@ -276,56 +276,38 @@ impl SharedState {
         engine: &SharedSearchEngine,
         entries: &[crate::change_hub::ChangeEntry],
     ) {
-        // An event reports what was true when it fired. Disk is truth at APPLY time, the
-        // same rule the classifier follows by re-stating every path — and it matters more
-        // here, because one entry stands for a whole subtree and the walk that would undo a
-        // wrong deletion is skipped precisely when it is incomplete.
-        // A removal is a subtree candidate whenever it cannot be a file of the corpus. The
-        // hub can only guess: it names a vanished path a subtree by the absence of an
-        // extension, because a path that is gone cannot be asked what it was — so a
-        // directory called `Dropped.v1` arrives as an ordinary removal. Judging by what the
-        // path could NOT have been keeps those, and costs nothing on the ones that really
-        // were files: no key lives under them, so the removal finds nothing.
-        let subtrees: Vec<&Path> = entries
+        // EVERY reported removal is a candidate prefix, with no guessing at what the path
+        // was. The hub cannot tell: it calls a vanished path a subtree by the absence of an
+        // extension, because a path that is gone cannot be asked what it used to be — so a
+        // directory named `Расширение.v1` arrives as an ordinary removal, and one named
+        // `Модули.bsl` as a file. Judging by name is what kept losing whole classes.
+        //
+        // Nor is the state of the path itself the question. A directory that is back says
+        // nothing about which of its files came back with it, and an event says only what
+        // was true when it fired. The engine answers the question actually being asked —
+        // whether each indexed file is still there — one key at a time.
+        let removals: Vec<PathBuf> = entries
             .iter()
             .filter(|e| {
-                e.kind == crate::change_hub::ChangeKind::SubtreeRemoved
-                    || (e.kind == crate::change_hub::ChangeKind::MaybeRemoved
-                        && !bsl_conventions::has_extension(&e.raw, bsl_conventions::BSL_EXTENSION)
-                        && !bsl_conventions::has_extension(&e.raw, bsl_conventions::XML_EXTENSION))
+                matches!(
+                    e.kind,
+                    crate::change_hub::ChangeKind::SubtreeRemoved
+                        | crate::change_hub::ChangeKind::MaybeRemoved
+                )
             })
-            .map(|e| e.raw.as_path())
-            // Following links, exactly as the hub does when it decides a path vanished: a
-            // link whose target is gone is gone, and asking about the link itself would
-            // answer that the subtree is still there while the hub says otherwise.
-            .filter(|dir| match std::fs::metadata(dir) {
-                // Only a DIRECTORY back in place means the subtree is back. Anything else
-                // occupying that name — a file, a socket — proves the descendants are gone
-                // more firmly than the `NotADirectory` case below: a file holds no files.
-                Ok(meta) => !meta.is_dir(),
-                // Only a PROVEN absence. A stat that could not be answered (permissions on
-                // a parent, a momentary race) says nothing about whether the files are there.
-                Err(err) => matches!(
-                    err.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ),
-            })
+            .map(|e| e.raw.clone())
             .collect();
-        if subtrees.is_empty() {
+        if removals.is_empty() {
             return;
         }
         if let Ok(mut guard) = engine.lock() {
             if let Some(engine) = guard.as_mut() {
-                for dir in subtrees {
-                    match engine.remove_workspace_subtree(dir) {
-                        Ok(removed) if removed > 0 => {
-                            tracing::info!(dir = ?dir, removed, "removed a vanished subtree from the index")
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(dir = ?dir, "failed to remove a vanished subtree: {e}")
-                        }
+                match engine.remove_vanished_under(&removals) {
+                    Ok(removed) if removed > 0 => {
+                        tracing::info!(removed, "removed vanished files under reported removals")
                     }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("failed to remove vanished files: {e}"),
                 }
             }
         }
@@ -2086,6 +2068,150 @@ mod tests {
         assert!(
             engine.text_search("ИзВерсии", 10, Some("code")).unwrap().is_empty(),
             "a dotted directory name does not save its files from a deletion",
+        );
+    }
+
+    /// A directory whose name ends in `.bsl` looks exactly like a file to everything that
+    /// can only read the name — the hub, and any filter written in terms of extensions.
+    /// Deciding per KEY sidesteps the question: a real file simply has nothing under it.
+    #[test]
+    fn a_vanished_directory_named_like_a_module_still_loses_its_files() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Модули.bsl/One.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "ИзПапкиМодули".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура ИзПапкиМодули()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        let dropped = workspace.join("Модули.bsl");
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: dropped.clone(),
+                raw: dropped,
+                kind: ChangeKind::MaybeRemoved,
+                seq: 1,
+            }],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("ИзПапкиМодули", 10, Some("code")).unwrap().is_empty(),
+            "a module-looking directory name does not save its files",
+        );
+    }
+
+    /// A directory that is back proves only that the NAME is taken again, not that the
+    /// files under it survived: a checkout can restore it with a different set entirely.
+    /// Judging the whole subtree by the directory keeps the ones that are truly gone.
+    #[test]
+    fn a_directory_that_came_back_with_other_files_loses_the_ones_that_did_not() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        let restored = workspace.join("Restored");
+        fs::create_dir_all(&restored).unwrap();
+        fs::write(restored.join("Stays.bsl"), "Процедура Оставшаяся()\nКонецПроцедуры").unwrap();
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let mut index = |path: &str, name: &str| {
+                store
+                    .reindex_file(
+                        bsl_search::CONFIGURATION_ROOT_ID,
+                        path,
+                        b"h",
+                        &[Chunk {
+                            kind: ChunkKind::Procedure,
+                            name: name.to_owned(),
+                            is_export: true,
+                            annotations: vec![],
+                            line_start: 0,
+                            line_end: 1,
+                            text: format!("Процедура {name}()\nКонецПроцедуры"),
+                        }],
+                        None,
+                    )
+                    .unwrap();
+            };
+            index("Restored/Stays.bsl", "Оставшаяся");
+            index("Restored/Gone.bsl", "Пропавшая");
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: restored.clone(),
+                raw: restored,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("Пропавшая", 10, Some("code")).unwrap().is_empty(),
+            "the file that did not come back is gone from the index",
+        );
+        assert!(
+            !engine.text_search("Оставшаяся", 10, Some("code")).unwrap().is_empty(),
+            "the one that did is untouched",
         );
     }
 
