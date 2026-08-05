@@ -181,6 +181,46 @@ pub(crate) struct SinkCursor {
     id: u64,
 }
 
+/// A subscription whose release does not depend on remembering to release it.
+///
+/// A cursor is subscribed before the consumer that will read it exists, and the code
+/// between the two has more ways out than one: an early return, a failed thread spawn
+/// whose closure is simply dropped, a panic. Enumerating them is how one gets missed, and
+/// a cursor nobody drains holds entries back for the life of the process. So the exits are
+/// not enumerated: the lease releases on drop, and only handing the cursor to a consumer
+/// that is actually running takes that duty away from it.
+pub(crate) struct CursorLease {
+    hub: WorkspaceChangeHub,
+    cursor: Option<SinkCursor>,
+}
+
+impl CursorLease {
+    pub(crate) fn new(hub: WorkspaceChangeHub) -> Self {
+        let cursor = Some(hub.subscribe());
+        Self { hub, cursor }
+    }
+
+    /// The cursor to hand to a consumer. `None` once the lease has been handed over.
+    pub(crate) fn cursor(&self) -> Option<SinkCursor> {
+        self.cursor
+    }
+
+    /// Give up the duty to release: the consumer is running and owns the cursor now.
+    /// Called only AFTER the consumer exists — disarming on the attempt would put the
+    /// leak back under the name of a fix.
+    pub(crate) fn handed_over(&mut self) {
+        self.cursor = None;
+    }
+}
+
+impl Drop for CursorLease {
+    fn drop(&mut self) {
+        if let Some(cursor) = self.cursor.take() {
+            self.hub.unsubscribe(cursor);
+        }
+    }
+}
+
 /// The result of draining a cursor: the entries newer than the cursor's last
 /// position, the cursor to reuse, and whether this cursor must reconcile with a
 /// full scan (delivered exactly once per overflow).
@@ -1210,7 +1250,6 @@ impl WorkspaceChangeHub {
     }
 
     /// Drop a cursor and reclaim any entries it was the last to hold back.
-    #[allow(dead_code)]
     pub(crate) fn unsubscribe(&self, cursor: SinkCursor) {
         self.inner.lock_acc().unsubscribe(cursor.id);
     }

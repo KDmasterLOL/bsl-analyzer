@@ -59,10 +59,6 @@ pub struct SharedState {
     /// sink already runs off a clone taken at construction.
     #[allow(dead_code)]
     change_hub: Option<WorkspaceChangeHub>,
-    /// The ONE embed single-flight shared by the boot pass and the post-refresh re-embed kick,
-    /// held here so `init_search` reuses the same flight the publish hook does — otherwise the
-    /// two could race an index swap and last-writer-wins would install a stale index.
-    embed_flight: Arc<embed::EmbedFlight>,
     /// This daemon's claim on the workspace's derived caches, held so the serve loop can retire
     /// a superseded backend early. Unmanaged for profiles with no workspace to coordinate over.
     workspace_lease: crate::workspace_lease::WorkspaceLease,

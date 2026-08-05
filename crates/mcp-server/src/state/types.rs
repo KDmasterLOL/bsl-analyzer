@@ -96,6 +96,10 @@ pub(super) struct WorkspaceSearchInit {
     pub(super) pending_embed: Option<PendingEmbed>,
     /// How to bring the workspace overlay online for this boot branch.
     pub(super) overlay_init: OverlayInit,
+    /// Whether the change hub was watching by the time this init read disk. Only then is
+    /// the event stream complete from the baseline onwards, and only then may a sink be
+    /// started to trust it.
+    pub(super) watch_armed: bool,
 }
 
 /// Inputs for the background embedding pass: its own database path and embedder config

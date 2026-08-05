@@ -12,7 +12,7 @@ use crate::diagnostics_state::DiagnosticsState;
 use crate::graph::GraphState;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::{
     env,
@@ -65,7 +65,6 @@ impl SharedState {
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let overlay_warmup = Arc::new(Mutex::new(OverlayWarmupState::Pending));
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         // Only the cheap, local part of baseline resolution runs here (config, env,
         // credential helper); the PG connect itself is deferred to a background thread
         // so a slow or unreachable server never delays the daemon's socket. The search
@@ -92,6 +91,13 @@ impl SharedState {
             &project.root,
             &scan_roots,
         ));
+
+        // Subscribed here, synchronously, before the thread that reads disk even exists —
+        // the same order the graph and the resident already keep, where the cursor is taken
+        // first and the baseline scan second, so only what lands after the baseline needs
+        // replaying. Search used to take it last, on a third thread, which left the window
+        // between the two paid for by a full rescan of every root on essentially every boot.
+        let sink_lease = crate::change_hub::CursorLease::new(change_hub.clone());
 
         // Created before the search-init thread so it can own the workspace graph: for
         // a local SQLite workspace the search-init drives a single fused parse pass
@@ -155,12 +161,17 @@ impl SharedState {
                 None
             };
 
+        // The sink is started by this thread, once there is an engine to feed and a watch
+        // to feed it from; the lease rides along so the cursor is released on every way out
+        // that does not end in a running sink — including this spawn failing, where the
+        // closure is dropped unrun.
         Self::spawn_workspace_search_init(
             Arc::clone(&search_engine),
             Arc::clone(&index_progress),
             Arc::clone(&semantic_runtime),
             source_dir.clone(),
-            Arc::clone(&watcher_ready),
+            change_hub.clone(),
+            sink_lease,
             baseline.clone(),
             workspace_search_mode.clone(),
             graph.clone(),
@@ -168,15 +179,6 @@ impl SharedState {
             Arc::clone(&snapshot_source),
             workspace_lease.clone(),
             overlay_retry.clone(),
-        );
-
-        Self::spawn_search_sink(
-            change_hub.clone(),
-            Arc::clone(&search_engine),
-            Arc::clone(&watcher_ready),
-            graph.clone(),
-            overlay_retry.clone(),
-            super::sync::WatchWaitPolicy::PRODUCTION,
         );
 
         Ok(Self {
@@ -194,7 +196,6 @@ impl SharedState {
             graph,
             diagnostics,
             change_hub: Some(change_hub),
-            embed_flight,
             workspace_lease,
             overlay_retry,
         })
@@ -210,7 +211,8 @@ impl SharedState {
         index_progress: Arc<IndexProgress>,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         workspace_root: PathBuf,
-        watcher_ready: Arc<AtomicBool>,
+        change_hub: WorkspaceChangeHub,
+        sink_lease: crate::change_hub::CursorLease,
         baseline: DeferredBaselineRuntime,
         mode: WorkspaceSearchMode,
         graph: GraphState,
@@ -258,9 +260,10 @@ impl SharedState {
                     }
                     WorkspaceSearchMode::SqliteLocal => None,
                 };
+                let mut sink_lease = sink_lease;
                 let init = Self::init_workspace_search_engine(
                     &workspace_root,
-                    &watcher_ready,
+                    Some((&change_hub, super::sync::WatchWaitPolicy::PRODUCTION)),
                     mode,
                     external_baseline,
                     &graph,
@@ -357,6 +360,23 @@ impl SharedState {
 
                 if let Ok(mut guard) = search_engine.lock() {
                     *guard = Some(init.engine);
+                }
+
+                // Only now, and only if the watch is up: the sink drains into the published
+                // engine, and a sink started before this point would drop every batch it
+                // read into an engine that was not there yet.
+                if init.watch_armed {
+                    if let Some(cursor) = sink_lease.cursor() {
+                        if Self::spawn_search_sink(
+                            change_hub.clone(),
+                            cursor,
+                            Arc::clone(&search_engine),
+                            graph.clone(),
+                            overlay_retry.clone(),
+                        ) {
+                            sink_lease.handed_over();
+                        }
+                    }
                 }
 
                 if has_leftover_marks {
@@ -489,7 +509,6 @@ impl SharedState {
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
-            embed_flight: EmbedFlight::new(),
             workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
             overlay_retry: None,
         }
@@ -511,7 +530,6 @@ impl SharedState {
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
-            embed_flight: EmbedFlight::new(),
             workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
             overlay_retry: None,
         }
@@ -632,14 +650,10 @@ impl SharedState {
     fn configure_workspace_engine(
         engine: &mut SearchEngine,
         workspace_roots: bsl_search::WorkspaceRoots,
-        watcher_ready: &AtomicBool,
         hash_mode: BaselineHashMode,
     ) {
         engine.set_workspace_roots(workspace_roots);
         engine.set_workspace_baseline_hash_mode(hash_mode);
-        if watcher_ready.load(Ordering::SeqCst) {
-            engine.enable_workspace_watcher_mode();
-        }
     }
 
     /// The engine's root table for one project: the configuration root plus every declared
@@ -697,13 +711,24 @@ impl SharedState {
         }
     }
 
+    /// `watch` is the change hub this boot's baseline must not outrun, with how long to
+    /// wait for it. Every read below is a baseline, and a baseline taken before the watch
+    /// armed can be older than the oldest change anyone will ever report — a window that
+    /// used to be paid for afterwards by a full rescan of every root. Waiting instead of
+    /// paying costs the arming time once; the rescan cost a walk plus a stat and a full
+    /// read of every file in the configuration, on every boot. `None` (tests, and the
+    /// entry points that have no hub) waits for nothing and reports no watch.
     pub(super) fn init_workspace_search_engine(
         workspace_root: &std::path::Path,
-        watcher_ready: &Arc<AtomicBool>,
+        watch: Option<(&WorkspaceChangeHub, super::sync::WatchWaitPolicy)>,
         mode: WorkspaceSearchMode,
         external_baseline: Option<Arc<ExternalBaselineService>>,
         graph: &GraphState,
     ) -> Option<WorkspaceSearchInit> {
+        let watch_armed = match watch {
+            Some((hub, policy)) => Self::await_watch(hub, policy),
+            None => false,
+        };
         crate::cache::ensure_workspace_cache_dir(workspace_root).ok();
         let db_path = crate::cache::search_db_path(workspace_root);
 
@@ -738,7 +763,6 @@ impl SharedState {
             Self::configure_workspace_engine(
                 &mut engine,
                 Self::workspace_roots_of(&project),
-                watcher_ready,
                 BaselineHashMode::NormalizedChunks,
             );
             if let Err(error) = engine.set_serves_external_baseline(true) {
@@ -828,6 +852,7 @@ impl SharedState {
             );
 
             return Some(WorkspaceSearchInit {
+                watch_armed,
                 engine,
                 mode: WorkspaceSearchMode::PostgresRemoteOverlay,
                 pending_embed: None,
@@ -848,7 +873,6 @@ impl SharedState {
         Self::configure_workspace_engine(
             &mut engine,
             Self::workspace_roots_of(&project),
-            watcher_ready,
             BaselineHashMode::RawFileBytes,
         );
         // Declaring the local mode also clears inherited fingerprint rows: they claim
@@ -885,6 +909,7 @@ impl SharedState {
                 OverlayInit::Prime
             };
             return Some(WorkspaceSearchInit {
+                watch_armed,
                 engine,
                 mode: WorkspaceSearchMode::SqliteLocal,
                 pending_embed,
@@ -961,6 +986,7 @@ impl SharedState {
                 OverlayInit::Prime
             };
             return Some(WorkspaceSearchInit {
+                watch_armed,
                 engine,
                 mode: WorkspaceSearchMode::SqliteLocal,
                 pending_embed,
@@ -1005,6 +1031,7 @@ impl SharedState {
         };
 
         Some(WorkspaceSearchInit {
+            watch_armed,
             engine,
             mode: WorkspaceSearchMode::SqliteLocal,
             pending_embed: None,
@@ -1248,28 +1275,6 @@ impl SharedState {
         }
     }
 
-    pub fn init_search(&self) {
-        if let Some(root) = self.workspace_root.clone() {
-            let watcher_ready = Arc::new(AtomicBool::new(false));
-            Self::spawn_workspace_search_init(
-                Arc::clone(&self.search_engine),
-                Arc::clone(&self.index_progress),
-                Arc::clone(&self.semantic_runtime),
-                root,
-                watcher_ready,
-                self.baseline.clone(),
-                self.workspace_search_mode.clone(),
-                self.graph.clone(),
-                Arc::clone(&self.embed_flight),
-                Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
-                    self.diagnostics.clone(),
-                )),
-                self.workspace_lease.clone(),
-                self.overlay_retry.clone(),
-            );
-        }
-    }
-
     fn reference_search_db_path() -> Option<PathBuf> {
         if let Some(base) = dirs::cache_dir() {
             return Some(base.join("bsl-analyzer").join("reference-search.db"));
@@ -1298,12 +1303,13 @@ mod tests {
         BaselineBootstrap, BaselineRuntime, ConfiguredBaselineStatus, DeferredBaselineRuntime,
         ExternalBaselineService, RefreshableExternalBaselineSource,
     };
+    use crate::change_hub::WorkspaceChangeHub;
     use bsl_search::{
         BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexProgress, IndexedDocument,
         SearchEngine,
     };
     use std::fs;
-    use std::sync::atomic::AtomicBool;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
@@ -1355,12 +1361,18 @@ mod tests {
             external_baseline: None,
         });
 
+        // Armed before the boot starts, so the wait for it costs nothing and the branch under
+        // test is the one that bails on the baseline, not the one that waits on the watch.
+        let hub = WorkspaceChangeHub::start(vec![workspace.clone()]);
+        assert!(hub.wait_until_watching(std::time::Duration::from_secs(5)), "the watch must arm");
+
         SharedState::spawn_workspace_search_init(
             Arc::new(Mutex::new(None)),
             IndexProgress::new(),
             Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             workspace.clone(),
-            Arc::new(AtomicBool::new(false)),
+            hub.clone(),
+            crate::change_hub::CursorLease::new(hub),
             baseline,
             WorkspaceSearchMode::PostgresRemoteOverlay,
             graph.clone(),
@@ -1380,6 +1392,125 @@ mod tests {
             }
         }
         panic!("the boot left the graph at {:?}; it must not stay lazy", graph.status());
+    }
+
+    fn local_workspace_for_boot(dir: &std::path::Path) -> (PathBuf, DeferredBaselineRuntime) {
+        let workspace = dir.to_path_buf();
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &workspace,
+            "Сервер",
+            "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
+        );
+        let baseline = DeferredBaselineRuntime::ready(BaselineRuntime {
+            configured_baseline: ConfiguredBaselineStatus {
+                backend: "sqlite",
+                selection: "test".to_owned(),
+                issue: None,
+                support: None,
+            },
+            external_baseline: None,
+        });
+        (workspace, baseline)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_local_boot(
+        workspace: PathBuf,
+        hub: WorkspaceChangeHub,
+        lease: crate::change_hub::CursorLease,
+        baseline: DeferredBaselineRuntime,
+        engine: super::SharedSearchEngine,
+    ) {
+        SharedState::spawn_workspace_search_init(
+            engine,
+            IndexProgress::new(),
+            Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            workspace,
+            hub,
+            lease,
+            baseline,
+            WorkspaceSearchMode::SqliteLocal,
+            GraphState::disabled(),
+            EmbedFlight::new(),
+            Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
+                DiagnosticsState::disabled(),
+            )),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
+            None,
+        );
+    }
+
+    /// A cursor is subscribed before the thread that will read it exists, so every way out
+    /// that does not end in a running sink has to release it — and there are more of those
+    /// than a list would hold: a watch that never arms, an init that publishes nothing, a
+    /// spawn the operating system refuses. A cursor nobody drains holds entries back for
+    /// the life of the process.
+    #[test]
+    fn a_boot_without_a_watch_leaves_no_cursor_behind() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+
+        let dir = tempdir().unwrap();
+        let (workspace, baseline) = local_workspace_for_boot(dir.path());
+        let hub = WorkspaceChangeHub::start_with_unstartable_thread(vec![
+            crate::change_hub::WatchTarget::recursive(workspace.clone()),
+        ]);
+        let lease = crate::change_hub::CursorLease::new(hub.clone());
+        assert_eq!(hub.active_cursor_count(), 1, "the boot holds a cursor from the start");
+
+        spawn_local_boot(workspace, hub.clone(), lease, baseline, Arc::new(Mutex::new(None)));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while hub.active_cursor_count() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            hub.active_cursor_count(),
+            0,
+            "a boot that started no sink must not leave its cursor subscribed",
+        );
+    }
+
+    /// Watcher mode is one-way in the store and doubles as "skip the full rescan", so it may
+    /// only be asked for by something that is actually feeding the overlay. Asserting the
+    /// mode rather than one delivered change is the point: a polling overlay delivers changes
+    /// too, through the full scan, so a delivery test would pass either way.
+    #[test]
+    fn a_boot_with_a_watch_hands_the_cursor_to_a_running_sink() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+
+        let dir = tempdir().unwrap();
+        let (workspace, baseline) = local_workspace_for_boot(dir.path());
+        let hub = WorkspaceChangeHub::start(vec![workspace.clone()]);
+        assert!(hub.wait_until_watching(std::time::Duration::from_secs(5)), "the watch must arm");
+        let lease = crate::change_hub::CursorLease::new(hub.clone());
+        let engine: super::SharedSearchEngine = Arc::new(Mutex::new(None));
+
+        spawn_local_boot(workspace, hub.clone(), lease, baseline, Arc::clone(&engine));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut watching = false;
+        while std::time::Instant::now() < deadline {
+            let mode = engine
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|engine| engine.workspace_overlay_stats().ok().flatten())
+                .map(|stats| stats.watcher_mode);
+            if mode == Some(true) {
+                watching = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(watching, "an armed boot must end with a sink feeding the overlay");
+        assert_eq!(hub.active_cursor_count(), 1, "and the sink owns the cursor it was handed");
     }
 
     /// A postgres config failure (unconfigured section, credential rejection) must NOT
@@ -1452,7 +1583,6 @@ mod tests {
         assert!(stale_engine.store().load_baseline_manifest().unwrap().is_some());
         drop(stale_engine);
 
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         let external = ExternalBaselineService::for_test(
             RefreshableExternalBaselineSource::for_test(
                 ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
@@ -1468,7 +1598,7 @@ mod tests {
 
         let init = SharedState::init_workspace_search_engine(
             workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(external),
             &crate::graph::GraphState::disabled(),
@@ -1539,7 +1669,6 @@ mod tests {
             .unwrap();
         drop(stale_engine);
 
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         let external = ExternalBaselineService::for_test(
             RefreshableExternalBaselineSource::for_test(
                 ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
@@ -1555,7 +1684,7 @@ mod tests {
 
         let init = SharedState::init_workspace_search_engine(
             workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(external),
             &crate::graph::GraphState::disabled(),
@@ -1584,12 +1713,11 @@ mod tests {
         fs::write(workspace.join("CommonModule.bsl"), "Процедура СделатьЧтоТо()\nКонецПроцедуры")
             .unwrap();
 
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         // A disabled graph has no workspace root, so the fused path is skipped and the
         // standalone semantic branch runs — the path that previously embedded inline.
         let init = SharedState::init_workspace_search_engine(
             workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -1848,13 +1976,12 @@ mod tests {
             "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n",
         );
         let module = workspace.join("CommonModules").join("Сервер").join("Ext").join("Module.bsl");
-        let watcher_ready = Arc::new(AtomicBool::new(false));
 
         // First (cold) boot: an empty store, so the FTS index is built from v1 disk and the branch
         // reconciles -> Clean. Dropping the init persists the store under the workspace cache dir.
         let cold = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -1876,7 +2003,7 @@ mod tests {
         // and the store is NOT reconciled with the while-down edit -> this branch must prime.
         let warm = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -1940,12 +2067,11 @@ mod tests {
             "Улетевший",
             "&НаСервере\nФункция ИсчезнувшийСимвол() Экспорт Возврат 1; КонецФункции\n",
         );
-        let watcher_ready = Arc::new(AtomicBool::new(false));
 
         // Cold boot: the deferred branch indexes both modules -> Clean; drop persists the store.
         let cold = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -1964,7 +2090,7 @@ mod tests {
         // files, so ONLY the boot reconcile can remove the deleted module's rows.
         let warm = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -2083,11 +2209,10 @@ mod tests {
     fn boot_registers_every_declared_extension_under_a_workspace_relative_id() {
         let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let (_dir, workspace) = workspace_with_two_extensions();
-        let watcher_ready = Arc::new(AtomicBool::new(false));
 
         let init = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -2177,13 +2302,12 @@ mod tests {
              { name = \"outer\", path = \".\" }]\n",
         )
         .unwrap();
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         let project = crate::project::at(&workspace);
         assert!(project.is_ok(), "the fixture project parses: {:?}", project.err());
 
         let init = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -2256,11 +2380,10 @@ mod tests {
             "[source]\nroot = \"src/cf\"\nextensions = [{ name = \"a\", path = \"ext-a\" }]\n",
         )
         .unwrap();
-        let watcher_ready = Arc::new(AtomicBool::new(false));
 
         let init = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -2328,10 +2451,9 @@ mod tests {
         // First boot: the extension is not declared yet, so the store warms up on the
         // configuration alone.
         fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         let cold = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -2349,7 +2471,7 @@ mod tests {
         .unwrap();
         let warm = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -2396,10 +2518,9 @@ mod tests {
         let _embedding_model = EnvVarGuard::set("EMBEDDING_MODEL", "test-model");
 
         let (_dir, workspace) = workspace_with_two_extensions();
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         let init = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -2429,11 +2550,10 @@ mod tests {
         let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let (_dir, workspace) = workspace_with_two_extensions();
         fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
-        let watcher_ready = Arc::new(AtomicBool::new(false));
 
         let init = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
