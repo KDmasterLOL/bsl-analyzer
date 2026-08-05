@@ -165,13 +165,20 @@ impl WorkspaceRoots {
     /// only handle on a file the walk reached through a symlink that leaves
     /// every root. Such a file is not dropped — the graph has always seen it —
     /// it is keyed by the walking root instead.
-    /// Both spellings are compared BYTE for byte. A path that reached the caller through a
-    /// lossy rendering — the graph keeps its file paths as strings, so a root whose name
-    /// holds bytes no `str` can carry comes back with those bytes replaced — therefore
-    /// belongs to no root here, and its caller must degrade rather than receive a guess.
-    /// Matching such a path in the rendered alphabet was tried and taken out: the rendering
-    /// is not reversible, so every answer it gives is a guess, and a guessed key does not
-    /// merely mark the wrong file — this is the same seam a removal reaches through.
+    ///
+    /// Both spellings are matched against the roots BYTE for byte, which decides what
+    /// happens to a path that reached the caller already rendered — the graph keeps its
+    /// file paths as strings, so bytes no `str` can carry come back replaced:
+    ///
+    /// - rendered BELOW a root, the answer is the same key the row lives under, because the
+    ///   key of the relative part is a rendering too ([`key_of`]). Nothing is guessed;
+    /// - rendered INSIDE a root's own name, no root matches and the answer is `None`. The
+    ///   caller degrades — skips its mark — rather than receiving a guess. Ranking such a
+    ///   path in the rendered alphabet was tried and taken out: the rendering is not
+    ///   reversible, so it fits several roots at once (two roots differing only in those
+    ///   bytes; a root and a neighbour with a genuine `U+FFFD`; a nesting that exists only
+    ///   after rendering), and a guessed key does not merely mark the wrong file — this is
+    ///   the seam a REMOVAL resolves its keys through.
     pub fn root_of(&self, walked: &Path, canonical: &Path) -> Option<FileKey> {
         self.longest_match(canonical, |root| &root.canonical)
             .or_else(|| self.longest_match(walked, |root| &root.declared))
@@ -678,27 +685,44 @@ mod tests {
         }
     }
 
-    /// A root directory whose name holds bytes no `str` can carry. Its files are indexed
-    /// and its identifier is a rendering of those bytes already — but a PATH that arrives
-    /// rendered belongs to nobody, and saying so is the whole behaviour.
+    /// Paths that arrive already rendered, bytes no `str` can carry replaced. Where those
+    /// bytes sat decides the answer: below a root the key is the row's own, in a root's own
+    /// name there is no answer to give.
     #[cfg(unix)]
     mod rendered_paths {
         use super::*;
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
-        /// Attribution answers the real bytes and only them. Ranking the rendering against
-        /// rendered roots was tried and taken out: the rendering is not reversible, so two
-        /// roots differing only in those bytes become one, a root and a genuine `U+FFFD`
-        /// neighbour become one, and a root nested under another after rendering wins by a
-        /// depth that exists only in the rendering. Every answer is a guess, and this seam
-        /// is the one a REMOVAL resolves its keys through — a guess there does not merely
-        /// mark the wrong file.
-        ///
-        /// What the caller gets instead is `None`, which every caller already handles as
-        /// "not ours": the graph-sourced context mark is skipped and the module keeps its
-        /// stale context until a whole-collection mark. Marks driven by the watcher carry
-        /// the real bytes and are unaffected.
+        /// Below the root the rendering costs nothing, because the stored key is a rendering
+        /// too: `key_of` puts the relative path through the same conversion, so the real
+        /// bytes and what came back from a string-keyed store name ONE key — the one the row
+        /// lives under. What stays true of that key space is what has always been true of it:
+        /// two files whose names differ only in unrepresentable bytes share a key, whichever
+        /// spelling reaches it.
+        #[test]
+        fn a_rendering_below_the_root_names_the_key_the_row_lives_under() {
+            let dir = tempfile::tempdir().unwrap();
+            let made = dirs(dir.path(), &["cf"]);
+            let (roots, _) = WorkspaceRoots::build(dir.path(), &made[0], &[]);
+
+            let file =
+                made[0].join(OsString::from_vec(b"CommonModules/M\xff/Ext/Module.bsl".to_vec()));
+            let rendered = PathBuf::from(file.to_string_lossy().into_owned());
+            assert_eq!(
+                owner(&roots, &rendered),
+                owner(&roots, &file),
+                "both spellings key the same row",
+            );
+            assert!(owner(&roots, &file).is_some(), "and that row exists to be keyed");
+        }
+
+        /// A rendering of the ROOT's own name fits several roots at once — two that differ
+        /// only in those bytes, a root and a neighbour holding a genuine `U+FFFD`, a nesting
+        /// that exists only after rendering — so it names no file anyone may act on. Every
+        /// caller already reads `None` as "not ours": the graph-sourced context mark is
+        /// skipped and the module waits for a wider mark. Marks driven by the watcher carry
+        /// the real bytes and are untouched by this.
         #[test]
         fn a_path_that_arrives_rendered_belongs_to_no_root() {
             let dir = tempfile::tempdir().unwrap();
