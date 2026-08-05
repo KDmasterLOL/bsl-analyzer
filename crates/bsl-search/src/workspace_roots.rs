@@ -165,75 +165,16 @@ impl WorkspaceRoots {
     /// only handle on a file the walk reached through a symlink that leaves
     /// every root. Such a file is not dropped — the graph has always seen it —
     /// it is keyed by the walking root instead.
+    /// Both spellings are compared BYTE for byte. A path that reached the caller through a
+    /// lossy rendering — the graph keeps its file paths as strings, so a root whose name
+    /// holds bytes no `str` can carry comes back with those bytes replaced — therefore
+    /// belongs to no root here, and its caller must degrade rather than receive a guess.
+    /// Matching such a path in the rendered alphabet was tried and taken out: the rendering
+    /// is not reversible, so every answer it gives is a guess, and a guessed key does not
+    /// merely mark the wrong file — this is the same seam a removal reaches through.
     pub fn root_of(&self, walked: &Path, canonical: &Path) -> Option<FileKey> {
         self.longest_match(canonical, |root| &root.canonical)
             .or_else(|| self.longest_match(walked, |root| &root.declared))
-            .or_else(|| self.lossy_match(walked, canonical))
-    }
-
-    /// The same ranking for a path that reached us through a LOSSY rendering: the graph
-    /// keeps its file paths as strings, so a root directory whose name holds bytes no
-    /// `str` can carry comes back with those bytes replaced, and no byte comparison finds
-    /// it any more. Re-render the roots the same way and both sides speak one alphabet.
-    ///
-    /// The ranking is the same one, and the rendering is built only when the path actually
-    /// carries a replacement character and nothing else matched, so the walking callers
-    /// never pay for it.
-    ///
-    /// What the rendering CAN do is make two roots that the byte comparison keeps apart
-    /// look alike — the identifier check at build time does not prevent it, because the
-    /// configuration's identifier is reserved and never collides with anything, and
-    /// identifiers are built from the canonical spellings while the second pass here ranks
-    /// the declared ones. A tie is therefore answered with "unknown", not with the deeper
-    /// or the later root: the two candidates are equally plausible, and a key guessed from
-    /// them would mark a file that is not the one that changed.
-    fn lossy_match(&self, walked: &Path, canonical: &Path) -> Option<FileKey> {
-        let rendered = |path: &Path| {
-            path.to_str().is_some_and(|path| path.contains(char::REPLACEMENT_CHARACTER))
-        };
-        if !rendered(walked) && !rendered(canonical) {
-            return None;
-        }
-        let lossy = |path: &Path| PathBuf::from(path.to_string_lossy().into_owned());
-        let view = Self {
-            workspace: self.workspace.clone(),
-            roots: self
-                .roots
-                .iter()
-                .map(|root| Root {
-                    id: root.id.clone(),
-                    declared: lossy(&root.declared),
-                    canonical: lossy(&root.canonical),
-                })
-                .collect(),
-        };
-        view.unambiguous_match(canonical, |root| &root.canonical)
-            .or_else(|| view.unambiguous_match(walked, |root| &root.declared))
-    }
-
-    /// [`Self::longest_match`] that refuses a tie: the deepest match, and only when one
-    /// root reaches that deep.
-    fn unambiguous_match(
-        &self,
-        path: &Path,
-        spelling: impl Fn(&Root) -> &PathBuf,
-    ) -> Option<FileKey> {
-        let mut matches: Vec<(usize, FileKey)> = self
-            .roots
-            .iter()
-            .filter_map(|root| {
-                let rel = path.strip_prefix(spelling(root)).ok()?;
-                rel.components().next().is_some().then(|| {
-                    (spelling(root).components().count(), FileKey::new(&root.id, key_of(rel)))
-                })
-            })
-            .collect();
-        let deepest = matches.iter().map(|(depth, _)| *depth).max()?;
-        matches.retain(|(depth, _)| *depth == deepest);
-        match matches.as_slice() {
-            [(_, key)] => Some(key.clone()),
-            _ => None,
-        }
     }
 
     /// The owning root ranked by the DECLARED spellings alone. For a file whose canonical
@@ -737,69 +678,56 @@ mod tests {
         }
     }
 
-    /// A root directory whose name holds bytes no `str` can carry. Its files are indexed and
-    /// its identifier is a lossy rendering already; what must not happen is a path coming
-    /// back from a string-keyed store and finding no root at all.
+    /// A root directory whose name holds bytes no `str` can carry. Its files are indexed
+    /// and its identifier is a rendering of those bytes already — but a PATH that arrives
+    /// rendered belongs to nobody, and saying so is the whole behaviour.
     #[cfg(unix)]
-    mod lossy_paths {
+    mod rendered_paths {
         use super::*;
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
+        /// Attribution answers the real bytes and only them. Ranking the rendering against
+        /// rendered roots was tried and taken out: the rendering is not reversible, so two
+        /// roots differing only in those bytes become one, a root and a genuine `U+FFFD`
+        /// neighbour become one, and a root nested under another after rendering wins by a
+        /// depth that exists only in the rendering. Every answer is a guess, and this seam
+        /// is the one a REMOVAL resolves its keys through — a guess there does not merely
+        /// mark the wrong file.
+        ///
+        /// What the caller gets instead is `None`, which every caller already handles as
+        /// "not ours": the graph-sourced context mark is skipped and the module keeps its
+        /// stale context until a whole-collection mark. Marks driven by the watcher carry
+        /// the real bytes and are unaffected.
         #[test]
-        fn a_path_that_survived_a_lossy_rendering_still_finds_its_root() {
+        fn a_path_that_arrives_rendered_belongs_to_no_root() {
             let dir = tempfile::tempdir().unwrap();
             let workspace = dir.path().join(OsString::from_vec(b"ws\xff".to_vec()));
             let made = dirs(&workspace, &["cf", "cfe"]);
             let (roots, _) = WorkspaceRoots::build(&workspace, &made[0], &[made[1].clone()]);
-            let expected = Some(FileKey::new("cfe", MODULE.to_owned()));
 
             let file = made[1].join(MODULE);
-            assert_eq!(owner(&roots, &file), expected, "the real bytes attribute as always");
-
-            let rendered = PathBuf::from(file.to_string_lossy().into_owned());
-            assert_eq!(owner(&roots, &rendered), expected, "and so does what a store gave back");
-        }
-
-        /// Two roots that differ only in bytes no `str` can hold render alike, and the
-        /// identifier check does not reject the pair: the configuration's identifier is
-        /// reserved, so it collides with nothing. Neither candidate is more plausible than
-        /// the other, and a key picked from them would name a file that did not change —
-        /// so the rendering answers "unknown" and the byte-exact spelling keeps working.
-        #[test]
-        fn a_rendering_that_fits_two_roots_attributes_to_neither() {
-            let dir = tempfile::tempdir().unwrap();
-            let configuration = dir.path().join(OsString::from_vec(b"c\xff".to_vec()));
-            let extension = dir.path().join(OsString::from_vec(b"c\xfe".to_vec()));
-            std::fs::create_dir_all(&configuration).unwrap();
-            std::fs::create_dir_all(&extension).unwrap();
-            let (roots, rejected) =
-                WorkspaceRoots::build(dir.path(), &configuration, std::slice::from_ref(&extension));
-            assert!(rejected.is_empty(), "the reserved identifier collides with nothing");
-
-            let file = configuration.join(MODULE);
             assert_eq!(
                 owner(&roots, &file),
-                Some(FileKey::configuration(MODULE.to_owned())),
-                "the real bytes still tell the two apart",
+                Some(FileKey::new("cfe", MODULE.to_owned())),
+                "the real bytes attribute as always",
             );
+
             let rendered = PathBuf::from(file.to_string_lossy().into_owned());
-            assert_eq!(owner(&roots, &rendered), None, "the rendering tells them apart no more");
+            assert_eq!(owner(&roots, &rendered), None, "the rendering names no file we can act on");
         }
 
-        /// The fallback ranks, it does not wave through: a rendered path outside every root
-        /// stays outside.
+        /// The identifier of such a root IS a rendering, and that is not the same question:
+        /// it names a key space, it is never resolved back to bytes.
         #[test]
-        fn a_rendered_path_outside_every_root_still_has_no_key() {
+        fn the_identifier_of_an_unrepresentable_root_is_still_usable() {
             let dir = tempfile::tempdir().unwrap();
-            let outside = tempfile::tempdir().unwrap();
             let workspace = dir.path().join(OsString::from_vec(b"ws\xff".to_vec()));
-            let made = dirs(&workspace, &["cf"]);
-            let (roots, _) = WorkspaceRoots::build(&workspace, &made[0], &[]);
+            let made = dirs(&workspace, &["cf", "cfe"]);
+            let (roots, _) = WorkspaceRoots::build(&workspace, &made[0], &[made[1].clone()]);
 
-            let file = outside.path().join(OsString::from_vec(b"tree\xff".to_vec())).join(MODULE);
-            let rendered = PathBuf::from(file.to_string_lossy().into_owned());
-            assert_eq!(owner(&roots, &rendered), None);
+            let key = owner(&roots, &made[1].join(MODULE)).unwrap();
+            assert_eq!(roots.resolve(&key).as_deref(), Some(made[1].join(MODULE).as_path()));
         }
     }
 

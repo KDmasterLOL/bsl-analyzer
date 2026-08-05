@@ -423,6 +423,11 @@ impl SharedState {
     /// able to strip only ONE root's prefix is exactly how the modules of every other root
     /// used to fall out of the result.
     ///
+    /// The graph keeps these paths as strings, so under a root whose name holds bytes no
+    /// `str` can carry they come back rendered and attribute to nothing. Those marks are
+    /// skipped and the modules wait for a wider mark — a rendering fits several roots at
+    /// once, and the key guessed from it would name a file that did not change.
+    ///
     /// Queries the CURRENTLY PUBLISHED graph via [`GraphState::snapshot`], which gates on a
     /// published build and opens the read-only db off the graph's inner lock. Pre-drift edges
     /// are exactly right here: the set of referencing modules is defined by OTHER modules'
@@ -2057,22 +2062,55 @@ mod tests {
         #[test]
         fn a_referencing_module_of_an_extension_is_marked_under_its_own_root() {
             let dir = tempdir().unwrap();
-            referencing_module_is_marked_in(dir.path(), &dir.path().join("ws"));
+            let marks = referencing_marks_in(dir.path(), &dir.path().join("ws"));
+            let reader = FileKey::new("cfe", "CommonModules/Б/Ext/Module.bsl");
+            assert!(
+                marks.dirty.contains(&reader),
+                "the extension's reader is marked under its own root: {marks:?}",
+            );
+            assert!(
+                !marks.dirty.contains(&FileKey::new("cfe", "CommonModules/В/Ext/Module.bsl")),
+                "a module that reads nothing about the object is untouched: {marks:?}",
+            );
+            assert!(
+                marks.rows.contains(&reader),
+                "the mark names the key the row lives under: {marks:?}",
+            );
+            for key in &marks.dirty {
+                assert!(
+                    marks.rows.contains(key),
+                    "no mark names a root the table does not hold: {key:?} vs {marks:?}",
+                );
+            }
         }
 
-        /// The same, under a root directory holding bytes no `str` can carry. The graph keeps
-        /// its file paths as strings, so what comes back from it is a rendering — and a
-        /// rendering that finds no root marks nothing at all.
+        /// Under a root directory holding bytes no `str` can carry, the graph — which keeps
+        /// its file paths as strings — hands back a rendering, and a rendering belongs to no
+        /// root. The reader keeps its stale context until a whole-collection mark, and that
+        /// is the deliberate answer: the alternative is a key guessed from a rendering that
+        /// several different roots fit, and the seam that key would travel is the one
+        /// removals resolve through.
         #[cfg(unix)]
         #[test]
-        fn a_referencing_module_under_an_unrepresentable_root_is_marked_too() {
+        fn a_referencing_module_under_an_unrepresentable_root_is_left_to_a_wider_mark() {
             use std::os::unix::ffi::OsStringExt;
             let dir = tempdir().unwrap();
             let workspace = dir.path().join(std::ffi::OsString::from_vec(b"ws\xff".to_vec()));
-            referencing_module_is_marked_in(dir.path(), &workspace);
+            let marks = referencing_marks_in(dir.path(), &workspace);
+            assert!(
+                marks.dirty.is_empty(),
+                "a rendering marks nothing rather than the wrong thing: {marks:?}",
+            );
+            assert!(!marks.rows.is_empty(), "the files themselves are indexed as always");
         }
 
-        fn referencing_module_is_marked_in(dir: &Path, workspace: &Path) {
+        #[derive(Debug)]
+        struct Marks {
+            dirty: std::collections::HashSet<FileKey>,
+            rows: Vec<FileKey>,
+        }
+
+        fn referencing_marks_in(dir: &Path, workspace: &Path) -> Marks {
             let (configuration, extension) = two_root_workspace(workspace);
 
             let xml = configuration.join("Catalogs/Х.xml");
@@ -2121,29 +2159,15 @@ mod tests {
 
             let guard = engine.lock().unwrap();
             let engine = guard.as_ref().unwrap();
-            let dirty = engine.context_dirty_paths("code").unwrap();
-            let reader = FileKey::new("cfe", "CommonModules/Б/Ext/Module.bsl");
-            assert!(
-                dirty.contains(&reader),
-                "the extension's reader is marked under its own root: {dirty:?}",
-            );
-            assert!(
-                !dirty.contains(&FileKey::new("cfe", "CommonModules/В/Ext/Module.bsl")),
-                "a module that reads nothing about the object is untouched: {dirty:?}",
-            );
-            let rows: Vec<FileKey> = engine
-                .store()
-                .all_files_in_collection("code")
-                .unwrap()
-                .into_iter()
-                .map(|(k, _)| k)
-                .collect();
-            assert!(rows.contains(&reader), "the mark names the key the row lives under: {rows:?}");
-            for key in &dirty {
-                assert!(
-                    rows.contains(key),
-                    "no mark names a root the table does not hold: {key:?} vs {rows:?}",
-                );
+            Marks {
+                dirty: engine.context_dirty_paths("code").unwrap(),
+                rows: engine
+                    .store()
+                    .all_files_in_collection("code")
+                    .unwrap()
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect(),
             }
         }
 
