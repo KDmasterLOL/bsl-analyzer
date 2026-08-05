@@ -288,7 +288,10 @@ impl SharedState {
             // link whose target is gone is gone, and asking about the link itself would
             // answer that the subtree is still there while the hub says otherwise.
             .filter(|dir| match std::fs::metadata(dir) {
-                Ok(_) => false,
+                // Only a DIRECTORY back in place means the subtree is back. Anything else
+                // occupying that name — a file, a socket — proves the descendants are gone
+                // more firmly than the `NotADirectory` case below: a file holds no files.
+                Ok(meta) => !meta.is_dir(),
                 // Only a PROVEN absence. A stat that could not be answered (permissions on
                 // a parent, a momentary race) says nothing about whether the files are there.
                 Err(err) => matches!(
@@ -2002,6 +2005,74 @@ mod tests {
         assert!(
             !engine.text_search("Уцелевшая", 10, Some("code")).unwrap().is_empty(),
             "and nothing else is touched",
+        );
+    }
+
+    /// A name taken by something that is not a directory is not the subtree coming back: a
+    /// file holds no files, so its descendants are gone as surely as if nothing were there.
+    #[test]
+    fn a_subtree_replaced_by_a_file_is_still_removed() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Replaced/One.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "ПодЗамену".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура ПодЗамену()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        // The directory is gone and a plain file now carries its name.
+        let replaced = workspace.join("Replaced");
+        fs::write(&replaced, "не каталог").unwrap();
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: replaced.clone(),
+                raw: replaced,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("ПодЗамену", 10, Some("code")).unwrap().is_empty(),
+            "a name taken by a file cannot hold the subtree's files",
         );
     }
 

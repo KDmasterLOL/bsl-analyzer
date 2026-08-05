@@ -2537,11 +2537,18 @@ mod tests {
         state.reconcile_tick();
 
         let late = module_path(root, "Поздний");
+        // The BASELINE is the observable for this path, not the resident. Step 4 applies the
+        // diff computed at step 2, and removals from the resident come only from that diff's
+        // own list — the late file is not in it, so the resident keeps it either way. What
+        // step 4 does move is the baseline, wholesale, onto its pre-move snapshot.
+        assert!(
+            lock_recover(&state.inner).stats.keys().any(|p| p.contains("Поздний")),
+            "the late file is in the baseline: the stale snapshot did not rebase it away",
+        );
         let found = state.read(|resident, _| resident.file_id_for(&late).is_some());
         assert!(
             matches!(found, ResidentOutcome::Ready(true, _)),
-            "the file delivered after the snapshot is in the resident, not waiting for the \
-             cache to cool",
+            "and it is in the resident, not waiting for the cache to cool",
         );
     }
 
