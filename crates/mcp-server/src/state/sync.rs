@@ -245,11 +245,6 @@ impl SharedState {
         }
     }
 
-    /// Remove a batch of deleted `.bsl` files from the workspace store. Each removal
-    /// evicts exactly that file's vectors from the live index incrementally (no full
-    /// rebuild, no sidecar rewrite — the row deletion already invalidates the persisted
-    /// sidecar), so a large deletion no longer stalls under the engine lock. A path that
-    /// is not a workspace `.bsl` is skipped.
     /// Apply the deletions a batch delivered, whatever else that batch also demanded.
     ///
     /// A vanished directory is applied through the engine's subtree removal rather than as a
@@ -264,10 +259,15 @@ impl SharedState {
         if !class.bsl_removed.is_empty() {
             Self::remove_search_paths(engine, class.bsl_removed.iter().map(|d| d.raw.as_path()));
         }
+        // An event reports what was true when it fired. Disk is truth at APPLY time, the
+        // same rule the classifier follows by re-stating every path — and it matters more
+        // here, because one entry stands for a whole subtree and the walk that would undo a
+        // wrong deletion is skipped precisely when it is incomplete.
         let subtrees: Vec<&Path> = entries
             .iter()
             .filter(|e| e.kind == crate::change_hub::ChangeKind::SubtreeRemoved)
             .map(|e| e.raw.as_path())
+            .filter(|dir| std::fs::symlink_metadata(dir).is_err())
             .collect();
         if subtrees.is_empty() {
             return;
@@ -289,6 +289,11 @@ impl SharedState {
         }
     }
 
+    /// Remove a batch of deleted `.bsl` files from the workspace store. Each removal
+    /// evicts exactly that file's vectors from the live index incrementally (no full
+    /// rebuild, no sidecar rewrite — the row deletion already invalidates the persisted
+    /// sidecar), so a large deletion no longer stalls under the engine lock. A path that
+    /// is not a workspace `.bsl` is skipped.
     fn remove_search_paths<'a>(engine: &SharedSearchEngine, paths: impl Iterator<Item = &'a Path>) {
         if let Ok(mut guard) = engine.lock() {
             if let Some(engine) = guard.as_mut() {
@@ -1815,6 +1820,79 @@ mod tests {
         assert!(
             !engine.text_search("Оставшаяся", 10, Some("code")).unwrap().is_empty(),
             "a file nobody reported deleted is untouched",
+        );
+    }
+
+    /// An event says what was true when it fired, not what is true when it is consumed: a
+    /// directory removed and restored (a checkout, an editor's atomic replace) arrives as a
+    /// removal for a subtree that exists again. The classifier re-stats every path for this
+    /// reason, and a subtree removal must too — it deletes far more at once, and the walk
+    /// that would restore it is skipped exactly when it is incomplete.
+    #[test]
+    fn a_subtree_removal_for_a_directory_that_came_back_deletes_nothing() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        fs::create_dir_all(workspace.join("Restored")).unwrap();
+        fs::write(workspace.join("Restored/Alive.bsl"), "Процедура Живущая()\nКонецПроцедуры")
+            .unwrap();
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Restored/Alive.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Живущая".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Живущая()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        // The walk cannot vouch for anything, so nothing would restore a wrong deletion.
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        let restored = workspace.join("Restored");
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: restored.clone(),
+                raw: restored,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            !engine.text_search("Живущая", 10, Some("code")).unwrap().is_empty(),
+            "a directory that is on disk when the removal is applied keeps its files",
         );
     }
 

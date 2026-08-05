@@ -1448,9 +1448,22 @@ impl SearchEngine {
         // Attributed by the DECLARED spellings alone: the directory is gone, so there is
         // nothing left on disk to canonicalise, and its keys were spelled the way the walk
         // reached it.
-        let Some(prefix) = roots.root_of_declared(&walked) else {
+        //
+        // Two kinds of key go with a directory, and attribution alone finds only the first.
+        // It answers "which root owns this file", and a root owns no file at its own path,
+        // so a directory that IS a root — an extension deleted whole, a configuration that
+        // is the workspace — attributes to nothing at all. Its keys are its root's.
+        let prefix = roots.root_of_declared(&walked);
+        let swallowed_roots: HashSet<&str> = roots
+            .entries()
+            .filter(|(_, declared)| declared.starts_with(&walked))
+            .map(|(id, _)| id)
+            .collect();
+        if prefix.is_none() && swallowed_roots.is_empty() {
             return Ok(0);
-        };
+        }
+        let swallowed_roots: HashSet<String> =
+            swallowed_roots.into_iter().map(str::to_owned).collect();
         let carriers = self.carrier_keys()?;
         let hidden = match self.workspace_overlay_cache.lock() {
             Ok(cache) => cache.hidden_keys(),
@@ -1459,8 +1472,14 @@ impl SearchEngine {
                 HashSet::new()
             }
         };
-        let candidates =
-            carriers.all_keys().into_iter().filter(|key| key.is_under(&prefix)).collect();
+        let candidates = carriers
+            .all_keys()
+            .into_iter()
+            .filter(|key| {
+                swallowed_roots.contains(&key.root_id)
+                    || prefix.as_ref().is_some_and(|prefix| key.is_under(prefix))
+            })
+            .collect();
         let batch = self.remove_key_batch(candidates, &carriers, &hidden);
         if let Some(error) = batch.first_error {
             return Err(SearchError::Index(format!(
@@ -3959,6 +3978,74 @@ mod tests {
         assert!(
             !engine.text_search("Соседка", 10, Some("code")).unwrap().is_empty(),
             "and its file still answers searches",
+        );
+    }
+
+    /// A root can vanish as a whole — an extension directory deleted, a configuration that
+    /// IS the workspace. Attribution answers "which root owns this file", and a root owns no
+    /// file at its own path, so asking it about the root itself yields nothing: the removal
+    /// has to take the root's own keys, not just the keys under some enclosing root.
+    #[test]
+    fn removing_a_registered_root_clears_the_files_it_held() {
+        use crate::{Chunk, ChunkKind, Store};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("src/cf");
+        let extension = workspace.join("ext");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let db_path = workspace.join("bsl-search.db");
+
+        let (roots, rejected) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        assert!(rejected.is_empty(), "both roots are registered");
+        let extension_id = roots
+            .entries()
+            .find(|(_, declared)| *declared == extension)
+            .map(|(id, _)| id.to_owned())
+            .expect("the extension root is registered");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let mut index = |root_id: &str, path: &str, name: &str| {
+                store
+                    .reindex_file(
+                        root_id,
+                        path,
+                        b"h",
+                        &[Chunk {
+                            kind: ChunkKind::Procedure,
+                            name: name.to_owned(),
+                            is_export: true,
+                            annotations: vec![],
+                            line_start: 0,
+                            line_end: 1,
+                            text: format!("Процедура {name}()\nКонецПроцедуры"),
+                        }],
+                        None,
+                    )
+                    .unwrap();
+            };
+            index(&extension_id, "A.bsl", "ИзРасширения");
+            index(CONFIGURATION_ROOT_ID, "B.bsl", "ИзКонфигурации");
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_roots(roots);
+
+        fs::remove_dir_all(&extension).unwrap();
+        let removed = engine.remove_workspace_subtree(&extension).unwrap();
+
+        assert_eq!(removed, 1, "the vanished root gave up its file");
+        assert!(
+            engine.text_search("ИзРасширения", 10, Some("code")).unwrap().is_empty(),
+            "a root that vanished stops answering searches",
+        );
+        assert!(
+            !engine.text_search("ИзКонфигурации", 10, Some("code")).unwrap().is_empty(),
+            "the other root is untouched",
         );
     }
 
