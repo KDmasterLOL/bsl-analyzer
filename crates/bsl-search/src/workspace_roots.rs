@@ -170,15 +170,22 @@ impl WorkspaceRoots {
     /// happens to a path that reached the caller already rendered — the graph keeps its
     /// file paths as strings, so bytes no `str` can carry come back replaced:
     ///
-    /// - rendered BELOW a root, the answer is the same key the row lives under, because the
-    ///   key of the relative part is a rendering too ([`key_of`]). Nothing is guessed;
-    /// - rendered INSIDE a root's own name, no root matches and the answer is `None`. The
-    ///   caller degrades — skips its mark — rather than receiving a guess. Ranking such a
-    ///   path in the rendered alphabet was tried and taken out: the rendering is not
-    ///   reversible, so it fits several roots at once (two roots differing only in those
-    ///   bytes; a root and a neighbour with a genuine `U+FFFD`; a nesting that exists only
-    ///   after rendering), and a guessed key does not merely mark the wrong file — this is
-    ///   the seam a REMOVAL resolves its keys through.
+    /// - rendered BELOW the deepest root that still matches, the answer is the key the row
+    ///   lives under: the key of the relative part is a rendering too ([`key_of`]), so both
+    ///   spellings arrive at one key. This is the ordinary case and nothing is guessed;
+    /// - rendered inside a root's own name, that root stops matching. An ANCESTOR root may
+    ///   still match — nested extension roots are legal — and then the answer is the
+    ///   ancestor's key, which no indexed row carries: the file's row is keyed by the inner
+    ///   root. The mark written under it is inert and clears itself on the next refresh;
+    /// - with no root matching at all, the answer is `None` and the caller skips its mark.
+    ///
+    /// What is deliberately NOT done is ranking such a path in the rendered alphabet. That
+    /// was tried and taken out: the rendering is not reversible, so it fits several roots at
+    /// once (two roots differing only in those bytes; a root and a neighbour holding a
+    /// genuine `U+FFFD`; a nesting that exists only after rendering), and a key guessed from
+    /// it does not merely mark the wrong file — this is the seam a REMOVAL resolves its keys
+    /// through. What remains is the key space's own long-standing property: two names that
+    /// differ only in unrepresentable bytes share a key, whichever spelling reaches it.
     pub fn root_of(&self, walked: &Path, canonical: &Path) -> Option<FileKey> {
         self.longest_match(canonical, |root| &root.canonical)
             .or_else(|| self.longest_match(walked, |root| &root.declared))
@@ -715,6 +722,35 @@ mod tests {
                 "both spellings key the same row",
             );
             assert!(owner(&roots, &file).is_some(), "and that row exists to be keyed");
+        }
+
+        /// Roots may nest, so a rendering that unseats the inner root can still land on an
+        /// ancestor. The key it gets belongs to no indexed row — the file's row is the inner
+        /// root's — and a mark written under it is inert: nothing has chunks there, so the
+        /// next refresh clears it. Said plainly here because the alternative reading, that
+        /// such a path attributes to nothing, is what a shorter contract would promise.
+        #[test]
+        fn a_rendering_inside_a_nested_roots_name_lands_on_the_ancestor() {
+            let dir = tempfile::tempdir().unwrap();
+            let made = dirs(dir.path(), &["cf", "ext"]);
+            let inner = made[1].join(OsString::from_vec(b"d\xff".to_vec())).join("e");
+            std::fs::create_dir_all(&inner).unwrap();
+            let (roots, rejected) =
+                WorkspaceRoots::build(dir.path(), &made[0], &[made[1].clone(), inner.clone()]);
+            assert!(rejected.is_empty(), "an extension inside an extension is a root of its own");
+
+            let file = inner.join(MODULE);
+            assert_eq!(
+                owner(&roots, &file),
+                Some(FileKey::new("ext/d\u{FFFD}/e", MODULE.to_owned())),
+                "the real bytes key the file under the innermost root",
+            );
+            let rendered = PathBuf::from(file.to_string_lossy().into_owned());
+            assert_eq!(
+                owner(&roots, &rendered),
+                Some(FileKey::new("ext", format!("d\u{FFFD}/e/{MODULE}"))),
+                "the rendering keeps the ancestor, whose key no row carries",
+            );
         }
 
         /// A rendering of the ROOT's own name fits several roots at once — two that differ
