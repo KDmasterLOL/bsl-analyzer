@@ -488,10 +488,13 @@ impl DiagnosticsState {
             return;
         };
         let mut slot = lock_recover(&self.hub_cursor);
-        if let Some(old) = slot.take() {
-            hub.unsubscribe(old);
-        }
-        *slot = Some(hub.subscribe());
+        *slot = Some(match slot.take() {
+            // The rebuild this precedes can fail, and a failed rebuild leaves the OLD
+            // resident serving. Its outstanding reconcile has to survive the swap, or it
+            // would be settled against a baseline that was never taken.
+            Some(old) => hub.resubscribe(old),
+            None => hub.subscribe(),
+        });
     }
 
     fn config_file_paths(&self) -> std::collections::HashSet<PathBuf> {
@@ -1760,6 +1763,31 @@ mod tests {
             }
             _ => panic!("expected Ready"),
         }
+    }
+
+    /// A rebuild starts by taking a fresh cursor, and the rebuild can fail — in which case
+    /// the OLD resident keeps serving requests. So an outstanding reconcile has to survive
+    /// the swap: settling it against a baseline that was never taken would leave the stale
+    /// resident looking healthy, with the events it missed already reclaimed.
+    #[test]
+    fn a_rebuild_that_takes_a_fresh_cursor_keeps_the_reconcile_it_owed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+        assert!(state.has_hub_cursor(), "a built resident holds a cursor");
+
+        hub.degrade_external();
+        state.resubscribe_cursor();
+
+        let cursor = lock_recover(&state.hub_cursor).expect("the resident still holds a cursor");
+        assert!(
+            hub.drain(cursor).rescan_required,
+            "the debt belongs to the resident, not to the cursor it happened to hold",
+        );
     }
 
     /// Idle eviction releases the hub cursor so an evicted resident does not pin the

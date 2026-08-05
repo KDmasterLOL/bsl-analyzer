@@ -1448,15 +1448,42 @@ mod tests {
     /// Every read this init does is a baseline, and a baseline taken before the watch armed
     /// can be older than the oldest change anyone will ever report — the window this node
     /// exists to close. Closing it is nothing but statement order, which is exactly the kind
-    /// of guarantee a later edit erases without noticing, so it is pinned by its earliest
-    /// visible effect: the store on disk. Nothing may exist until the hub is released.
+    /// of guarantee a later edit erases without noticing, so both reads the init performs
+    /// are pinned, each by its own effect.
+    ///
+    /// The store is pinned by its file: none may exist while the hub is held. The project
+    /// load is pinned by its input: the extension is declared only in the instant before
+    /// release, so an init that read the project early would register one root and an init
+    /// that waited registers two. Checking only the store would leave the project read free
+    /// to drift back above the wait — reopening the window on exactly the input whose drift
+    /// this node is about.
     #[test]
     fn the_boot_read_waits_for_the_watch_to_arm() {
         let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
 
         let dir = tempdir().unwrap();
-        let (workspace, _baseline) = local_workspace_for_boot(dir.path());
+        let workspace = dir.path().to_path_buf();
+        // The configuration sits in its own subdirectory and the extension beside it: an
+        // extension nested inside the configuration root is rejected as an overlap, and the
+        // test would then measure the rejection instead of the read order.
+        let configuration = workspace.join("src").join("cf");
+        let extension = workspace.join("ext");
+        for (dir, name) in [(&configuration, "Конфа"), (&extension, "Расширение")] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(
+                dir.join("Configuration.xml"),
+                format!("<Configuration><Name>{name}</Name></Configuration>"),
+            )
+            .unwrap();
+            write_common_module_tree(
+                dir,
+                "Сервер",
+                "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
+            );
+        }
+        fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
+
         let db_path = crate::cache::search_db_path(&workspace);
         let (hub, hold) = WorkspaceChangeHub::start_targets_held(vec![
             crate::change_hub::WatchTarget::recursive(workspace.clone()),
@@ -1479,7 +1506,9 @@ mod tests {
                     None,
                     &GraphState::disabled(),
                 )
-                .is_some()
+                .map(|init| {
+                    init.engine.workspace_roots().map_or(0, |roots| roots.entries().count())
+                })
             })
         };
 
@@ -1490,9 +1519,20 @@ mod tests {
             db_path.display(),
         );
 
+        // Only now is the extension part of the project.
+        fs::write(
+            workspace.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\nextensions = [{ name = \"e\", path = \"ext\" }]\n",
+        )
+        .unwrap();
         hold.release();
-        assert!(init.join().unwrap(), "and once the watch is up the init runs to completion");
-        assert!(db_path.exists(), "which it proves by leaving a store behind");
+
+        let roots = init.join().unwrap().expect("the init runs to completion once the watch is up");
+        assert_eq!(
+            roots, 2,
+            "the project was read after the watch, so the extension declared meanwhile is registered",
+        );
+        assert!(db_path.exists(), "and the store the init opened is on disk");
     }
 
     /// A cursor is subscribed before the thread that will read it exists, so every way out

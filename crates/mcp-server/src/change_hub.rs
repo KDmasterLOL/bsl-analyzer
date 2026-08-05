@@ -315,6 +315,11 @@ impl Accumulator {
         self.reclaim();
     }
 
+    /// What this cursor still owes, if anything.
+    fn pending_of(&self, id: u64) -> Option<DegradeReason> {
+        self.cursors.get(&id).and_then(|cursor| cursor.pending.clone())
+    }
+
     fn record(&mut self, canonical: PathBuf, raw: PathBuf, kind: ChangeKind) {
         // A brand-new key past the cap means more than `cap` distinct paths are waiting
         // undrained — but they are waiting for SOMEBODY, and the accumulator is held at
@@ -1260,7 +1265,25 @@ impl WorkspaceChangeHub {
         SinkCursor { id: self.inner.lock_acc().subscribe(blind) }
     }
 
-    /// Drop a cursor and reclaim any entries it was the last to hold back.
+    /// Replace one consumer's cursor, carrying whatever it still owes onto the new one.
+    ///
+    /// Re-subscribing is not leaving. A consumer does it to take a fresh baseline — the
+    /// resident does exactly this at the start of a rebuild — and that rebuild can fail,
+    /// leaving the old state still being served. Letting the debt die with the old cursor
+    /// would be settling it against a baseline that was never taken: the events the window
+    /// was opened for are gone, and the only record that they were missed would go with it.
+    pub(crate) fn resubscribe(&self, cursor: SinkCursor) -> SinkCursor {
+        // Read before taking the accumulator, so no path holds one of the two locks while
+        // asking for the other.
+        let blind = self.inner.is_partially_blind().then_some(DegradeReason::RewatchFailed);
+        let mut acc = self.inner.lock_acc();
+        let carried = acc.pending_of(cursor.id);
+        acc.unsubscribe(cursor.id);
+        SinkCursor { id: acc.subscribe(carried.or(blind)) }
+    }
+
+    /// Drop a cursor and reclaim any entries it was the last to hold back. For a consumer
+    /// that is gone; one that is coming back uses [`Self::resubscribe`].
     pub(crate) fn unsubscribe(&self, cursor: SinkCursor) {
         self.inner.lock_acc().unsubscribe(cursor.id);
     }
@@ -3840,6 +3863,29 @@ mod tests {
         assert!(
             !hub.drain(newcomer).rescan_required,
             "and a newcomer inherits nothing it could not have observed",
+        );
+    }
+
+    /// Taking a fresh cursor is not the same as going away, and only the second settles a
+    /// debt. A consumer re-subscribes to take a new baseline, and the build that follows can
+    /// fail — leaving the old state served by a cursor that now owes nothing, with the
+    /// events it was owed for long gone. The debt belongs to the consumer, not to the id.
+    #[test]
+    fn a_consumer_taking_a_fresh_cursor_carries_its_debt_with_it() {
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+
+        let sink = hub.subscribe();
+        let diagnostics = hub.subscribe();
+        hub.degrade_external();
+        assert!(hub.drain(sink).rescan_required, "the sink acknowledges the window");
+
+        let diagnostics = hub.resubscribe(diagnostics);
+
+        assert!(
+            hub.drain(diagnostics).rescan_required,
+            "a rebuild that has not happened yet cannot have settled the debt",
         );
     }
 
