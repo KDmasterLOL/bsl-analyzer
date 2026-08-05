@@ -650,12 +650,7 @@ impl DiagnosticsState {
         // 5. Degrade only if a FILE change (bsl/xml) was genuinely undelivered. Config drift
         //    is already fully rebuilt above and is expected to reach the reconciler in nested
         //    layouts (the config file sits above the watched root), so it is not a miss.
-        let missed = changes
-            .added
-            .iter()
-            .chain(&changes.removed)
-            .chain(&changes.modified)
-            .any(|p| !delivered.covers(p));
+        let missed = has_undelivered_drift(&changes, &delivered);
         if missed {
             tracing::warn!(
                 "diagnostics reconciler found drift the change hub did not deliver; \
@@ -749,12 +744,33 @@ impl DeliveredPaths {
         self.subtrees.extend(other.subtrees);
     }
 
-    /// Whether this path was delivered — itself, or as part of a directory that vanished.
-    /// Containment is by whole components, so `Dir` never answers for `Dir2`.
+    /// Whether this path was delivered by name.
     fn covers(&self, path: &str) -> bool {
         self.exact.contains(path)
-            || self.subtrees.iter().any(|dir| Path::new(path).starts_with(dir))
     }
+
+    /// Whether this path's DISAPPEARANCE was delivered — by name, or as part of a directory
+    /// that vanished. Containment is by whole components, so `Dir` never answers for `Dir2`.
+    ///
+    /// Separate from [`Self::covers`] because an event carries a direction. "This directory
+    /// is gone" accounts for the files that were under it and for nothing else: a file that
+    /// appeared after the directory was recreated is a change nobody reported, and counting
+    /// the removal as its delivery would hide a watcher that stopped seeing that subtree.
+    fn covers_removal(&self, path: &str) -> bool {
+        self.covers(path) || self.subtrees.iter().any(|dir| Path::new(path).starts_with(dir))
+    }
+}
+
+/// Whether the scan found drift the hub never handed over — the question a degrade answers,
+/// and the reason the two directions are not interchangeable.
+///
+/// A disappearance may be accounted for by the directory that vanished with it. An
+/// appearance or an edit may not: the entry that reported the directory gone says nothing
+/// about what showed up there afterwards, and treating it as delivery would silently forgive
+/// a watcher that stopped seeing that subtree.
+fn has_undelivered_drift(changes: &WorkspaceDiff, delivered: &DeliveredPaths) -> bool {
+    changes.removed.iter().any(|p| !delivered.covers_removal(p))
+        || changes.added.iter().chain(&changes.modified).any(|p| !delivered.covers(p))
 }
 
 pub(super) struct OwnedScan {
@@ -2075,15 +2091,43 @@ mod tests {
         #[test]
         fn a_vanished_directory_answers_for_its_descendants() {
             let delivered = DeliveredPaths::of(&[subtree_removal("/w/Dir")]);
-            assert!(delivered.covers("/w/Dir/A.bsl"));
-            assert!(delivered.covers("/w/Dir/Deep/B.bsl"));
-            assert!(delivered.covers("/w/Dir"), "and for itself");
+            assert!(delivered.covers_removal("/w/Dir/A.bsl"));
+            assert!(delivered.covers_removal("/w/Dir/Deep/B.bsl"));
+            assert!(delivered.covers_removal("/w/Dir"), "and for itself");
         }
 
         #[test]
         fn a_namesake_directory_is_not_covered() {
             let delivered = DeliveredPaths::of(&[subtree_removal("/w/Dir")]);
-            assert!(!delivered.covers("/w/Dir2/A.bsl"));
+            assert!(!delivered.covers_removal("/w/Dir2/A.bsl"));
+        }
+
+        /// An event has a direction. A directory reported gone accounts for what was under
+        /// it disappearing — not for a file that appeared there afterwards, whose own event
+        /// the watcher may well have lost. Checked through the miss decision itself, so it
+        /// pins which rule that decision applies, not merely that both rules exist.
+        #[test]
+        fn a_vanished_directory_does_not_answer_for_what_appears_after_it() {
+            let delivered = DeliveredPaths::of(&[subtree_removal("/w/Dir")]);
+            let gone = WorkspaceDiff {
+                added: vec![],
+                removed: vec!["/w/Dir/A.bsl".to_owned()],
+                modified: vec![],
+            };
+            assert!(
+                !has_undelivered_drift(&gone, &delivered),
+                "the vanished directory accounts for its descendants disappearing",
+            );
+
+            let reborn = WorkspaceDiff {
+                added: vec!["/w/Dir/New.bsl".to_owned()],
+                removed: vec![],
+                modified: vec![],
+            };
+            assert!(
+                has_undelivered_drift(&reborn, &delivered),
+                "but not for a file that appeared there afterwards",
+            );
         }
 
         /// Only a vanished DIRECTORY stands for what is under it. An ordinary change to a
