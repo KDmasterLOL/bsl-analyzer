@@ -168,6 +168,41 @@ impl WorkspaceRoots {
     pub fn root_of(&self, walked: &Path, canonical: &Path) -> Option<FileKey> {
         self.longest_match(canonical, |root| &root.canonical)
             .or_else(|| self.longest_match(walked, |root| &root.declared))
+            .or_else(|| self.lossy_match(walked, canonical))
+    }
+
+    /// The same ranking for a path that reached us through a LOSSY rendering: the graph
+    /// keeps its file paths as strings, so a root directory whose name holds bytes no
+    /// `str` can carry comes back with those bytes replaced, and no byte comparison finds
+    /// it any more. Re-render the roots the same way and both sides speak one alphabet.
+    ///
+    /// Not a second rule: the ranking is the same, and the table's identifiers are lossy
+    /// strings already — two roots that render alike are rejected when it is built — so
+    /// this equates nothing the key space kept apart. The rendering is built only when the
+    /// path actually carries a replacement character and nothing else matched, so the
+    /// walking callers never pay for it.
+    fn lossy_match(&self, walked: &Path, canonical: &Path) -> Option<FileKey> {
+        let rendered = |path: &Path| {
+            path.to_str().is_some_and(|path| path.contains(char::REPLACEMENT_CHARACTER))
+        };
+        if !rendered(walked) && !rendered(canonical) {
+            return None;
+        }
+        let lossy = |path: &Path| PathBuf::from(path.to_string_lossy().into_owned());
+        let view = Self {
+            workspace: self.workspace.clone(),
+            roots: self
+                .roots
+                .iter()
+                .map(|root| Root {
+                    id: root.id.clone(),
+                    declared: lossy(&root.declared),
+                    canonical: lossy(&root.canonical),
+                })
+                .collect(),
+        };
+        view.longest_match(canonical, |root| &root.canonical)
+            .or_else(|| view.longest_match(walked, |root| &root.declared))
     }
 
     /// The owning root ranked by the DECLARED spellings alone. For a file whose canonical
@@ -668,6 +703,46 @@ mod tests {
             let (roots, _) = WorkspaceRoots::build(dir.path(), &made[0], &[]);
 
             assert_eq!(roots.key_of_path(&outside.path().join("Configuration.xml")), None);
+        }
+    }
+
+    /// A root directory whose name holds bytes no `str` can carry. Its files are indexed and
+    /// its identifier is a lossy rendering already; what must not happen is a path coming
+    /// back from a string-keyed store and finding no root at all.
+    #[cfg(unix)]
+    mod lossy_paths {
+        use super::*;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        #[test]
+        fn a_path_that_survived_a_lossy_rendering_still_finds_its_root() {
+            let dir = tempfile::tempdir().unwrap();
+            let workspace = dir.path().join(OsString::from_vec(b"ws\xff".to_vec()));
+            let made = dirs(&workspace, &["cf", "cfe"]);
+            let (roots, _) = WorkspaceRoots::build(&workspace, &made[0], &[made[1].clone()]);
+            let expected = Some(FileKey::new("cfe", MODULE.to_owned()));
+
+            let file = made[1].join(MODULE);
+            assert_eq!(owner(&roots, &file), expected, "the real bytes attribute as always");
+
+            let rendered = PathBuf::from(file.to_string_lossy().into_owned());
+            assert_eq!(owner(&roots, &rendered), expected, "and so does what a store gave back");
+        }
+
+        /// The fallback ranks, it does not wave through: a rendered path outside every root
+        /// stays outside.
+        #[test]
+        fn a_rendered_path_outside_every_root_still_has_no_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let workspace = dir.path().join(OsString::from_vec(b"ws\xff".to_vec()));
+            let made = dirs(&workspace, &["cf"]);
+            let (roots, _) = WorkspaceRoots::build(&workspace, &made[0], &[]);
+
+            let file = outside.path().join(OsString::from_vec(b"tree\xff".to_vec())).join(MODULE);
+            let rendered = PathBuf::from(file.to_string_lossy().into_owned());
+            assert_eq!(owner(&roots, &rendered), None);
         }
     }
 

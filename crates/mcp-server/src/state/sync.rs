@@ -343,7 +343,7 @@ impl SharedState {
     /// conservatively marks the whole collection. REFERENCING modules (a module that
     /// merely READS the changed MDO — its rendered `graph_context` embeds the object's
     /// metadata reads) are additionally resolved through the persisted graph's inbound read
-    /// edges (see [`Self::resolve_referencing_module_rels`]).
+    /// edges (see [`Self::resolve_referencing_module_files`]).
     ///
     /// The filesystem walk (owned-subtree resolution) and the graph db read (referencing
     /// resolution) both run OUTSIDE the engine lock; the lock is taken only briefly for the
@@ -1499,7 +1499,7 @@ mod tests {
     /// through the persisted graph's inbound read edges. A module that references nothing about
     /// the object is left untouched.
     ///
-    /// Revert-proof: drop the `resolve_referencing_module_rels` call in
+    /// Revert-proof: drop the `resolve_referencing_module_files` call in
     /// `mark_xml_affected_context_dirty` and the referencing module `Б` is no longer marked —
     /// the referencing assertion fails.
     #[test]
@@ -2057,8 +2057,23 @@ mod tests {
         #[test]
         fn a_referencing_module_of_an_extension_is_marked_under_its_own_root() {
             let dir = tempdir().unwrap();
-            let workspace = dir.path().join("ws");
-            let (configuration, extension) = two_root_workspace(&workspace);
+            referencing_module_is_marked_in(dir.path(), &dir.path().join("ws"));
+        }
+
+        /// The same, under a root directory holding bytes no `str` can carry. The graph keeps
+        /// its file paths as strings, so what comes back from it is a rendering — and a
+        /// rendering that finds no root marks nothing at all.
+        #[cfg(unix)]
+        #[test]
+        fn a_referencing_module_under_an_unrepresentable_root_is_marked_too() {
+            use std::os::unix::ffi::OsStringExt;
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join(std::ffi::OsString::from_vec(b"ws\xff".to_vec()));
+            referencing_module_is_marked_in(dir.path(), &workspace);
+        }
+
+        fn referencing_module_is_marked_in(dir: &Path, workspace: &Path) {
+            let (configuration, extension) = two_root_workspace(workspace);
 
             let xml = configuration.join("Catalogs/Х.xml");
             write(
@@ -2081,9 +2096,9 @@ mod tests {
                 "&НаСервере\nПроцедура НичегоНеЧитает() Экспорт\nВозврат;\nКонецПроцедуры",
             );
 
-            let out = crate::cache::graph_db_path(&workspace);
+            let out = crate::cache::graph_db_path(workspace);
             fs::create_dir_all(out.parent().unwrap()).unwrap();
-            let project = crate::graph::ProjectSnapshot::load(&workspace);
+            let project = crate::graph::ProjectSnapshot::load(workspace);
             let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
             let summary = crate::graph_db::build_graph_database(
                 &project,
@@ -2098,11 +2113,10 @@ mod tests {
                 },
             )
             .expect("graph builds");
-            let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+            let graph = crate::graph::GraphState::for_workspace(workspace.to_path_buf());
             graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules);
 
-            let engine =
-                engine_over(&dir.path().join("search.db"), &workspace, &configuration, &extension);
+            let engine = engine_over(&dir.join("search.db"), workspace, &configuration, &extension);
             drift(&engine, &xml, &graph);
 
             let guard = engine.lock().unwrap();
