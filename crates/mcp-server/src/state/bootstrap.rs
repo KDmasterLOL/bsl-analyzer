@@ -1445,6 +1445,56 @@ mod tests {
         );
     }
 
+    /// Every read this init does is a baseline, and a baseline taken before the watch armed
+    /// can be older than the oldest change anyone will ever report — the window this node
+    /// exists to close. Closing it is nothing but statement order, which is exactly the kind
+    /// of guarantee a later edit erases without noticing, so it is pinned by its earliest
+    /// visible effect: the store on disk. Nothing may exist until the hub is released.
+    #[test]
+    fn the_boot_read_waits_for_the_watch_to_arm() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+
+        let dir = tempdir().unwrap();
+        let (workspace, _baseline) = local_workspace_for_boot(dir.path());
+        let db_path = crate::cache::search_db_path(&workspace);
+        let (hub, hold) = WorkspaceChangeHub::start_targets_held(vec![
+            crate::change_hub::WatchTarget::recursive(workspace.clone()),
+        ]);
+
+        let init = {
+            let workspace = workspace.clone();
+            let hub = hub.clone();
+            std::thread::spawn(move || {
+                SharedState::init_workspace_search_engine(
+                    &workspace,
+                    Some((
+                        &hub,
+                        crate::state::sync::WatchWaitPolicy::new(
+                            std::time::Duration::from_millis(5),
+                            std::time::Duration::from_secs(30),
+                        ),
+                    )),
+                    WorkspaceSearchMode::SqliteLocal,
+                    None,
+                    &GraphState::disabled(),
+                )
+                .is_some()
+            })
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !db_path.exists(),
+            "the boot opened its store before the watch was up: {}",
+            db_path.display(),
+        );
+
+        hold.release();
+        assert!(init.join().unwrap(), "and once the watch is up the init runs to completion");
+        assert!(db_path.exists(), "which it proves by leaving a store behind");
+    }
+
     /// A cursor is subscribed before the thread that will read it exists, so every way out
     /// that does not end in a running sink has to release it — and there are more of those
     /// than a list would hold: a watch that never arms, an init that publishes nothing, a

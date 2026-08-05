@@ -311,6 +311,7 @@ impl Accumulator {
 
     fn unsubscribe(&mut self, id: u64) {
         self.cursors.remove(&id);
+        self.close_window_if_settled();
         self.reclaim();
     }
 
@@ -409,17 +410,27 @@ impl Accumulator {
             None => false,
         };
 
-        // Recover once no live cursor still owes THE WINDOW. A private lag debt does not
-        // count: it belongs to one cursor, and letting it hold the window open would put
-        // the shared verdict back under one consumer's silence — and charge every
-        // newcomer, which inherits the window, a reconcile it owes to nobody.
+        self.close_window_if_settled();
+        self.reclaim();
+
+        DrainBatch { entries, cursor: SinkCursor { id }, rescan_required }
+    }
+
+    /// Recover once no live cursor still owes THE WINDOW.
+    ///
+    /// A private lag debt does not count: it belongs to one cursor, and letting it hold the
+    /// window open would put the shared verdict back under one consumer's silence — and
+    /// charge every newcomer, which inherits the window, a reconcile it owes to nobody.
+    ///
+    /// A debt is settled two ways, and the second one is easy to miss: acknowledged by a
+    /// drain, or carried off by a cursor that leaves. Leaving is the ordinary end for a
+    /// consumer that never started, so a window closed only on drain would outlive everyone
+    /// who was ever party to it and be inherited by whoever subscribes next.
+    fn close_window_if_settled(&mut self) {
         let owes_window = |cursor: &CursorState| matches!(&cursor.pending, Some(reason) if *reason != DegradeReason::CursorLagged);
         if self.degrade_reason.is_some() && !self.cursors.values().any(owes_window) {
             self.degrade_reason = None;
         }
-        self.reclaim();
-
-        DrainBatch { entries, cursor: SinkCursor { id }, rescan_required }
     }
 
     /// Drop entries every live cursor has already advanced past. With no cursors
@@ -3805,6 +3816,31 @@ mod tests {
 
         assert!(acc.drain(b).rescan_required);
         assert_eq!(acc.health(), Health::Healthy, "recovers once all cursors confirm");
+    }
+
+    /// A debt can be settled by leaving as well as by acknowledging. A consumer that never
+    /// started releases its cursor and takes its share of the window with it; if only a
+    /// drain could close the window, one that nobody is left to acknowledge would outlive
+    /// every party to it and be inherited by whoever subscribes next — who would pay for it
+    /// with a full reconcile of a loss that happened before it existed.
+    #[test]
+    fn a_window_nobody_is_left_to_acknowledge_does_not_outlive_them() {
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+
+        let lease = CursorLease::new(hub.clone());
+        hub.degrade_external();
+        assert!(matches!(hub.health(), Health::Degraded(_)), "the window is open");
+
+        drop(lease);
+
+        assert_eq!(hub.health(), Health::Healthy, "the last party to the window took it away");
+        let newcomer = hub.subscribe();
+        assert!(
+            !hub.drain(newcomer).rescan_required,
+            "and a newcomer inherits nothing it could not have observed",
+        );
     }
 
     /// The backend dropping events is the loss that belongs to everyone: the paths were
