@@ -390,6 +390,12 @@ impl DiagnosticsState {
                 // sends every following read back down the drain path and the drift the hub
                 // lost stays unapplied until the watchdog tick, with `stale` reading false.
                 self.force_scan.store(true, Ordering::SeqCst);
+                // And drop the snapshot itself: `throttled_scan` caches unconditionally, so
+                // a snapshot taken before the move is cached after it and would be handed
+                // to every read until it cools — each one refusing it again. The epoch only
+                // grows, so this one can never become applicable.
+                drop(inner);
+                *lock_recover(&self.scan) = None;
                 return;
             }
             let Inner {
@@ -2238,6 +2244,54 @@ mod tests {
         assert!(
             state.scan_count() > scans,
             "the refused snapshot leaves the obligation to scan standing",
+        );
+    }
+
+    /// Re-arming alone does not make the next poll walk. `throttled_scan` caches whatever it
+    /// produced, so a walk that STARTED before the baseline moved lands its snapshot in the
+    /// cache after it — and every read inside the drift interval is then handed the same
+    /// snapshot and refuses it again. The epoch only grows, so it can never become
+    /// applicable: the refusal has to drop it.
+    #[test]
+    fn a_refused_snapshot_does_not_stay_in_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (mut state, _hub) = state_with_hub(root);
+        state.drift_interval = Duration::from_secs(60);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let snapshot = state.throttled_scan(root).expect("a scan");
+        write_common_module(root, "Обгон", true, "&НаСервере\nФункция О() Экспорт КонецФункции");
+        let overtaken = module_path(root, "Обгон");
+        state.apply_drained_entries(&[ChangeEntry {
+            canonical: overtaken.clone(),
+            raw: overtaken,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        }]);
+
+        // A walk that began before the move finishing after it: its snapshot is cached
+        // carrying the older epoch.
+        *lock_recover(&state.scan) = Some(ScanCache {
+            at: Instant::now(),
+            stats: snapshot.stats.clone(),
+            config_fp: snapshot.config_fp,
+            baseline_epoch: snapshot.baseline_epoch,
+        });
+
+        // Set directly rather than through `force_rescan`, whose storm guard declines to arm
+        // anything while the cache is fresh — which is exactly the state under test.
+        state.force_scan.store(true, Ordering::SeqCst);
+        let _ = state.read(|_, _| ());
+        let scans = state.scan_count();
+        let _ = state.read(|_, _| ());
+
+        assert!(
+            state.scan_count() > scans,
+            "the refused snapshot is gone, so the re-armed scan actually walks",
         );
     }
 

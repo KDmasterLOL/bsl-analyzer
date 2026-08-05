@@ -188,6 +188,11 @@ impl SharedState {
             Self::remove_search_paths(engine, class.bsl_removed.iter().map(|d| d.raw.as_path()));
         }
 
+        // A vanished directory: the classifier calls it structural and skips it, and the
+        // re-walk below refuses to reconcile when it is incomplete, so without this its
+        // files answer searches until some later clean pass.
+        Self::remove_delivered_subtrees(engine, entries);
+
         // Changed `.xml` metadata: mark the affected documents' stored context stale, then
         // nudge the graph to catch up. The context re-render only runs on a graph publish;
         // without this nudge a user who only calls `search_code` never triggers a rebuild,
@@ -259,6 +264,18 @@ impl SharedState {
         if !class.bsl_removed.is_empty() {
             Self::remove_search_paths(engine, class.bsl_removed.iter().map(|d| d.raw.as_path()));
         }
+        Self::remove_delivered_subtrees(engine, entries);
+    }
+
+    /// Take the subtrees a batch reported gone out of the index.
+    ///
+    /// Needed on every branch, not just after an overflow: the classifier treats a subtree
+    /// removal as structural and skips it, so nothing else removes the descendants — and
+    /// they are precisely the paths no event ever names.
+    fn remove_delivered_subtrees(
+        engine: &SharedSearchEngine,
+        entries: &[crate::change_hub::ChangeEntry],
+    ) {
         // An event reports what was true when it fired. Disk is truth at APPLY time, the
         // same rule the classifier follows by re-stating every path — and it matters more
         // here, because one entry stands for a whole subtree and the walk that would undo a
@@ -1904,6 +1921,87 @@ mod tests {
         assert!(
             !engine.text_search("Живущая", 10, Some("code")).unwrap().is_empty(),
             "a directory that is on disk when the removal is applied keeps its files",
+        );
+    }
+
+    /// A vanished directory has to leave the index whether or not the batch also demanded a
+    /// full reconcile. The ordinary branch answers a subtree removal with a re-walk, and
+    /// that re-walk refuses to reconcile when it is incomplete — deliberately, so it cannot
+    /// evict healthy files. Then nothing removes the descendants: the classifier calls a
+    /// subtree removal structural and skips it, and no event ever names them.
+    #[test]
+    fn a_vanished_directory_leaves_the_index_when_the_ordinary_branch_cannot_walk() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        fs::write(workspace.join("Kept.bsl"), "Процедура Уцелевшая()\nКонецПроцедуры").unwrap();
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let mut index = |path: &str, name: &str| {
+                store
+                    .reindex_file(
+                        bsl_search::CONFIGURATION_ROOT_ID,
+                        path,
+                        b"h",
+                        &[Chunk {
+                            kind: ChunkKind::Procedure,
+                            name: name.to_owned(),
+                            is_export: true,
+                            annotations: vec![],
+                            line_start: 0,
+                            line_end: 1,
+                            text: format!("Процедура {name}()\nКонецПроцедуры"),
+                        }],
+                        None,
+                    )
+                    .unwrap();
+            };
+            index("Dropped/One.bsl", "ПерваяУшедшая");
+            index("Kept.bsl", "Уцелевшая");
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        assert_eq!(engine.file_count().unwrap(), 2, "both files are indexed");
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        // The re-walk this branch performs cannot vouch for anything, so its reconcile —
+        // the only other thing that would remove the descendants — is skipped.
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        let dropped = workspace.join("Dropped");
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: dropped.clone(),
+                raw: dropped,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("ПерваяУшедшая", 10, Some("code")).unwrap().is_empty(),
+            "the descendants of a vanished directory stop answering searches",
+        );
+        assert!(
+            !engine.text_search("Уцелевшая", 10, Some("code")).unwrap().is_empty(),
+            "and nothing else is touched",
         );
     }
 
