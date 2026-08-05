@@ -731,7 +731,18 @@ impl DeliveredPaths {
     fn of(entries: &[ChangeEntry]) -> Self {
         let mut delivered = Self::default();
         for entry in entries {
-            if entry.kind == crate::change_hub::ChangeKind::SubtreeRemoved {
+            // EVERY reported removal stands for what was under it. The hub names a vanished
+            // path a subtree by the absence of an extension — the only thing knowable about
+            // a path that is gone — so a directory called `Dir.v1` arrives as an ordinary
+            // removal. Taking only the explicit kind turns its descendants, which the scan
+            // does list, into a miss, and a miss costs every consumer a full reconcile.
+            // A path that really was a file loses nothing by this: no scan path lies under
+            // it, so it answers for itself alone anyway.
+            if matches!(
+                entry.kind,
+                crate::change_hub::ChangeKind::SubtreeRemoved
+                    | crate::change_hub::ChangeKind::MaybeRemoved
+            ) {
                 delivered.subtrees.push(entry.canonical.clone());
             }
             delivered.exact.insert(entry.canonical.to_string_lossy().into_owned());
@@ -2100,6 +2111,29 @@ mod tests {
         fn a_namesake_directory_is_not_covered() {
             let delivered = DeliveredPaths::of(&[subtree_removal("/w/Dir")]);
             assert!(!delivered.covers_removal("/w/Dir2/A.bsl"));
+        }
+
+        /// The hub cannot tell a vanished directory from a vanished file when the name has a
+        /// dot in it, so `Dir.v1` arrives as an ordinary removal while the scan still lists
+        /// every file that was inside. Counting only the explicit kind would call all of
+        /// them missed and charge every consumer of the hub a reconcile for it.
+        #[test]
+        fn a_dotted_directory_still_answers_for_its_descendants() {
+            let delivered = DeliveredPaths::of(&[ChangeEntry {
+                canonical: PathBuf::from("/w/Dir.v1"),
+                raw: PathBuf::from("/w/Dir.v1"),
+                kind: ChangeKind::MaybeRemoved,
+                seq: 1,
+            }]);
+            let gone = WorkspaceDiff {
+                added: vec![],
+                removed: vec!["/w/Dir.v1/A.bsl".to_owned(), "/w/Dir.v1/B.bsl".to_owned()],
+                modified: vec![],
+            };
+            assert!(
+                !has_undelivered_drift(&gone, &delivered),
+                "the removal of a dotted directory accounts for the files under it",
+            );
         }
 
         /// An event has a direction. A directory reported gone accounts for what was under

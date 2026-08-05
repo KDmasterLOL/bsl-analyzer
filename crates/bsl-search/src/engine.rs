@@ -1464,11 +1464,19 @@ impl SearchEngine {
             } else {
                 roots.configuration().unwrap_or_else(|| roots.workspace()).join(dir)
             };
+            // Both spellings, for the same reason point removal canonicalises: a root
+            // declared through a link owns the files physically under its target, and the
+            // declared path alone would hand the subtree to the enclosing alias root —
+            // whose keys are not the ones in the store.
+            let canonical = crate::workspace_roots::canonical_spelling(&walked);
             prefixes.extend(roots.root_of_declared(&walked));
+            prefixes.extend(roots.root_of(&walked, &canonical));
             swallowed_roots.extend(
                 roots
                     .entries()
-                    .filter(|(_, declared)| declared.starts_with(&walked))
+                    .filter(|(_, declared)| {
+                        declared.starts_with(&walked) || declared.starts_with(&canonical)
+                    })
                     .map(|(id, _)| id.to_owned()),
             );
         }
@@ -4396,6 +4404,52 @@ mod tests {
             engine.file_count().unwrap(),
             0,
             "the row of the root the file lived under is the one removed",
+        );
+    }
+
+    /// The same argument one level up: a DIRECTORY removed through an alias must reach the
+    /// keys of the root its files physically lived under. Declared spellings alone hand the
+    /// subtree to the alias root, whose keys are not the ones in the store.
+    #[cfg(unix)]
+    #[test]
+    fn a_subtree_removed_through_an_alias_clears_the_root_it_lived_under() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        let outer = outside.path().join("outer");
+        let inner = outer.join("inner");
+        let gone = inner.join("Gone");
+        fs::create_dir_all(&gone).unwrap();
+        let alias = workspace.join("alias");
+        std::os::unix::fs::symlink(&outer, &alias).unwrap();
+
+        let file = gone.join("A.bsl");
+        fs::write(&file, "Процедура ЧерезАлиас()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, rejected) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            &[alias.clone(), inner.clone()],
+        );
+        assert!(rejected.is_empty(), "both roots register: {rejected:?}");
+        engine.set_workspace_roots(roots);
+
+        let lived_under =
+            engine.workspace_file_key(&file).expect("a live file attributes to its own root");
+        engine.store().upsert_file(&lived_under.root_id, &lived_under.path, b"h", "code").unwrap();
+        assert_eq!(engine.file_count().unwrap(), 1);
+
+        fs::remove_dir_all(&gone).unwrap();
+        let removed = engine.remove_vanished_under(&[alias.join("inner/Gone")]).unwrap();
+
+        assert_eq!(removed, 1, "the subtree is found through the alias");
+        assert_eq!(
+            engine.file_count().unwrap(),
+            0,
+            "the row of the root the files lived under is the one cleared",
         );
     }
 
