@@ -267,7 +267,16 @@ impl SharedState {
             .iter()
             .filter(|e| e.kind == crate::change_hub::ChangeKind::SubtreeRemoved)
             .map(|e| e.raw.as_path())
-            .filter(|dir| std::fs::symlink_metadata(dir).is_err())
+            .filter(|dir| match std::fs::symlink_metadata(dir) {
+                Ok(_) => false,
+                // Only a PROVEN absence, the same rule the hub applies when deciding a path
+                // vanished: a stat that could not be answered (permissions on a parent, a
+                // momentary race) says nothing about whether the files are there.
+                Err(err) => matches!(
+                    err.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ),
+            })
             .collect();
         if subtrees.is_empty() {
             return;
@@ -1893,6 +1902,86 @@ mod tests {
         assert!(
             !engine.text_search("Живущая", 10, Some("code")).unwrap().is_empty(),
             "a directory that is on disk when the removal is applied keeps its files",
+        );
+    }
+
+    /// "Could not check" is not "is gone". A subtree whose parent is momentarily unreadable
+    /// answers `PermissionDenied`, and treating that as proof of deletion clears rows,
+    /// overlay entries and vectors for files that are on disk — while the walk that would
+    /// restore them is skipped for exactly the same reason.
+    #[cfg(unix)]
+    #[test]
+    fn a_subtree_removal_that_cannot_be_verified_deletes_nothing() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        let blocked = workspace.join("Blocked");
+        fs::create_dir_all(blocked.join("Gone")).unwrap();
+        fs::write(blocked.join("Gone/A.bsl"), "Процедура Недоступная()\nКонецПроцедуры").unwrap();
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Blocked/Gone/A.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Недоступная".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Недоступная()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&blocked).is_ok() {
+            // Running as root: permissions cannot make the parent unreadable.
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let gone = blocked.join("Gone");
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: gone.clone(),
+                raw: gone,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            !engine.text_search("Недоступная", 10, Some("code")).unwrap().is_empty(),
+            "a subtree that could not be checked keeps its files",
         );
     }
 
