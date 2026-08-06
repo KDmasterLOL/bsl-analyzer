@@ -5,6 +5,36 @@ use super::{
     SearchBaselinePublishArgs,
 };
 
+/// Whether a walk may stand behind a published snapshot.
+///
+/// A snapshot is not a best effort: `snapshot_files` says what the corpus holds and
+/// `snapshot_deletions` says the rest is gone from the tree. So a walk that could not read the
+/// tree whole publishes two lies at once — it drops files, and it tells every consumer those
+/// files were deleted. The barrier next to this one only asks whether the corpus is EMPTY, and
+/// an unreadable subtree leaves it comfortably non-empty.
+///
+/// Both counters are asked, because they answer different questions. `unreadable` says the file
+/// list is short. `canonical_fallbacks` says a file's identity is a guess: its key may have
+/// shifted, and a shifted key reads downstream as one file deleted and another created. Loops
+/// and dead links are deliberately not consulted — neither hides anything.
+fn ensure_the_walk_can_speak_for_the_tree(
+    walk: &project_model::SourceSet,
+) -> Result<(), io::Error> {
+    if walk.clean() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "refusing to publish a corpus built from a tree this walk could not read whole: \
+             {} unreadable place(s), {} file(s) whose physical name could not be resolved. \
+             A snapshot asserts both what exists and what was deleted, so an incomplete walk \
+             would report live files as removed. Fix the tree and publish again.",
+            walk.unreadable, walk.canonical_fallbacks
+        ),
+    ))
+}
+
 pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
     use bsl_search::{
         fingerprint_documents, fingerprint_indexed_documents, BaselinePublisher, CorpusId,
@@ -46,7 +76,13 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
 
     eprintln!("[1/5] Indexing source files...");
     let (indexed_files, indexed_documents) = match corpus {
-        CorpusId::WorkspaceCode => documents::build_workspace_code(&source_path)?,
+        CorpusId::WorkspaceCode => {
+            let corpus = documents::build_workspace_code(&source_path)?;
+            // Before anything is sent anywhere: a snapshot does not merely omit what its walk
+            // could not read — `snapshot_deletions` tells every consumer those files are GONE.
+            ensure_the_walk_can_speak_for_the_tree(&corpus.walk)?;
+            (corpus.indexed_files, corpus.documents)
+        }
         CorpusId::Reference => documents::build_reference()?,
         CorpusId::Custom(_) => unreachable!("CLI corpus variants are exhaustive"),
     };
@@ -246,4 +282,165 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn write(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn module(name: &str) -> String {
+        format!("Процедура {name}()\n    Сообщить(\"{name}\");\nКонецПроцедуры\n")
+    }
+
+    /// A tree with one readable module and one subtree the walk cannot enter.
+    /// Returns `None` where permissions cannot hide anything — under an effective UID 0 a
+    /// mode of 000 is not a barrier, and a stand that cannot build its own precondition must
+    /// say so rather than pass.
+    #[cfg(unix)]
+    fn tree_with_a_closed_subtree(dir: &Path) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = dir.join("configuration");
+        write(&root.join("CommonModules/Видимый/Ext/Module.bsl"), &module("Видимый"));
+        let closed = root.join("CommonModules/Закрытый");
+        write(&closed.join("Ext/Module.bsl"), &module("Закрытый"));
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&closed).is_ok() {
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return None;
+        }
+        Some(root)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_that_could_not_be_read_whole_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(root) = tree_with_a_closed_subtree(dir.path()) else { return };
+
+        let corpus = documents::build_workspace_code(&root).unwrap();
+
+        assert!(
+            ensure_the_walk_can_speak_for_the_tree(&corpus.walk).is_err(),
+            "a snapshot claims both what exists and what was deleted, so a walk that saw less \
+             than the tree holds may not stand behind one"
+        );
+    }
+
+    /// The positive control for the refusal above: without it, an implementation that refuses
+    /// everything would look just as correct.
+    #[test]
+    fn a_tree_read_whole_is_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("configuration");
+        write(&root.join("CommonModules/Видимый/Ext/Module.bsl"), &module("Видимый"));
+
+        let corpus = documents::build_workspace_code(&root).unwrap();
+
+        assert!(!corpus.documents.is_empty(), "the stand must produce a corpus to judge");
+        assert!(
+            ensure_the_walk_can_speak_for_the_tree(&corpus.walk).is_ok(),
+            "a complete walk publishes; the gate must be able to say yes"
+        );
+    }
+
+    /// The pre-existing barrier next to this one asks only whether the corpus is EMPTY, and an
+    /// unreadable subtree leaves it comfortably non-empty. This pins that the new refusal is a
+    /// different question, not a louder version of the old one.
+    #[cfg(unix)]
+    #[test]
+    fn an_incomplete_walk_is_refused_while_its_corpus_is_not_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(root) = tree_with_a_closed_subtree(dir.path()) else { return };
+
+        let corpus = documents::build_workspace_code(&root).unwrap();
+
+        assert!(
+            !corpus.documents.is_empty(),
+            "the readable part must reach the corpus, or this test proves nothing about the \
+             emptiness barrier"
+        );
+        assert!(ensure_the_walk_can_speak_for_the_tree(&corpus.walk).is_err());
+    }
+
+    /// The refusal must be WIRED, not merely defined. Proving the decision function in isolation
+    /// says nothing about whether the publisher consults it, and that gap is the whole defect
+    /// wearing a different hat: a correct policy nobody applies publishes exactly what a missing
+    /// policy would.
+    ///
+    /// No live database is needed, and that is the point — the refusal is placed before the
+    /// adapter is built, so a run that reaches PostgreSQL has already failed this test's premise.
+    /// Credentials are resolved earlier still, by an external helper program, so the stand
+    /// supplies one that answers without a network.
+    #[cfg(unix)]
+    #[test]
+    fn the_publisher_refuses_before_it_reaches_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(root) = tree_with_a_closed_subtree(dir.path()) else { return };
+        std::fs::write(
+            root.join("bsl-analyzer.toml"),
+            "[search.baseline.postgres]\n\
+             host = \"127.0.0.1\"\n\
+             port = 1\n\
+             dbname = \"unreachable\"\n\
+             schema = \"bsl_search\"\n\
+             vault_role_base = \"probe\"\n\
+             [search.baseline.postgres.credential_helper]\n\
+             program = \"/bin/sh\"\n\
+             args = [\"-c\", \"cat > /dev/null;              printf '{\\\"protocol\\\":\\\"bsl-analyzer.postgres-helper.v1\\\",\\\"ok\\\":true,\\\"url\\\":\\\"postgres://u:p@127.0.0.1:1/unreachable\\\"}'\"]\n",
+        )
+        .unwrap();
+
+        let error = run(SearchBaselinePublishArgs {
+            corpus: SearchBaselineCorpusCli::WorkspaceCode,
+            source_dir: root.clone(),
+            snapshot_id: Some("probe:incomplete".to_owned()),
+            branch: None,
+            commit: None,
+            parent_snapshot_id: None,
+            allow_non_policy_branch: true,
+        })
+        .expect_err("an incomplete walk must stop the publish");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("could not read whole"),
+            "the run must stop on the incomplete walk, not on something later; got: {message}"
+        );
+    }
+
+    /// Completeness has two legs and they fail differently: a short list, and a file whose
+    /// identity is a guess. No filesystem stand can produce the second one — a walk either
+    /// resolves a path or has no path — so the decision is asked about each leg directly.
+    /// Without this, an implementation consulting only `unreadable` passes every other test here.
+    #[test]
+    fn each_leg_of_completeness_refuses_on_its_own() {
+        use project_model::SourceSet;
+
+        let short = SourceSet { unreadable: 1, ..SourceSet::default() };
+        assert!(
+            ensure_the_walk_can_speak_for_the_tree(&short).is_err(),
+            "a walk that was kept out of somewhere cannot say what the tree holds"
+        );
+
+        let degraded = SourceSet { canonical_fallbacks: 1, ..SourceSet::default() };
+        assert!(
+            ensure_the_walk_can_speak_for_the_tree(&degraded).is_err(),
+            "a file whose physical name could not be resolved may carry a shifted key, and a \
+             shifted key reads downstream as one file deleted and another created"
+        );
+
+        let benign = SourceSet { loops: 3, dangling: 2, ..SourceSet::default() };
+        assert!(
+            ensure_the_walk_can_speak_for_the_tree(&benign).is_ok(),
+            "a loop and a dead link hide nothing; refusing on them would block publication for \
+             a tree that is entirely readable"
+        );
+    }
 }

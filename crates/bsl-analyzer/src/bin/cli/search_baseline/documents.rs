@@ -1,16 +1,39 @@
 use std::error::Error;
 
+/// The corpus of a source tree, together with the walk that produced it.
+///
+/// The walk is returned rather than consumed here because completeness is a publishing
+/// POLICY: whether a tree that could not be read whole may still be shipped is the
+/// publisher's decision, not the corpus builder's. Handing back the scan itself — not a
+/// summary of it — keeps that decision answerable about THIS corpus.
+pub(super) struct WorkspaceCorpus {
+    pub(super) indexed_files: usize,
+    pub(super) documents: Vec<bsl_search::IndexedDocument>,
+    pub(super) walk: project_model::SourceSet,
+}
+
+/// Walk the source tree ONCE and index what it found.
+///
+/// The walk happens here, not inside the engine, so that its verdict and its corpus cannot
+/// come from different traversals: a tree can change between two walks, and then a clean
+/// verdict would answer for files some later, shorter walk collected.
 pub(super) fn build_workspace_code(
     source_path: &std::path::Path,
-) -> Result<(usize, Vec<bsl_search::IndexedDocument>), Box<dyn Error + Send + Sync>> {
+) -> Result<WorkspaceCorpus, Box<dyn Error + Send + Sync>> {
     use bsl_search::SearchEngine;
 
     let temp_dir = tempfile::tempdir()?;
     let db_path = temp_dir.path().join("baseline-sync.db");
     let mut engine = SearchEngine::fts_only(&db_path)?;
-    let indexed_files = engine.index_directory_fts(source_path)?;
+    // Everything under this directory is the configuration's — the honest contract for a
+    // one-shot indexer with no project model to consult. Declaring it makes the publisher key
+    // its rows through the same attribution the daemon reading them uses.
+    engine.set_workspace_root(source_path);
+
+    let walk = project_model::SourceSet::scan(std::slice::from_ref(&source_path.to_path_buf()));
+    let indexed_files = engine.ingest_scanned_fts(&walk)?;
     let documents = engine.load_indexed_documents(Some("code"))?;
-    Ok((indexed_files, documents))
+    Ok(WorkspaceCorpus { indexed_files, documents, walk })
 }
 
 pub(super) fn build_reference(
@@ -132,8 +155,12 @@ mod tests {
 
     /// The keys the published corpus carries, one entry per file however many chunks it holds.
     fn published_keys(root: &Path) -> Keys {
-        let (_, documents) = build_workspace_code(root).unwrap();
-        documents.into_iter().map(|d| (d.root_id, d.path)).collect()
+        build_workspace_code(root)
+            .unwrap()
+            .documents
+            .into_iter()
+            .map(|d| (d.root_id, d.path))
+            .collect()
     }
 
     /// The keys the CONSUMER derives from the same tree: the daemon's own attribution
@@ -208,6 +235,46 @@ mod tests {
             "the writer of the baseline and its reader must agree on what a file is called; \
              a key only one of them can produce is a row the other can never match, update or drop"
         );
+    }
+
+    /// The corpus and the completeness verdict must describe ONE traversal. Two walks of a tree
+    /// that changed in between let a clean verdict answer for a short corpus — the very defect
+    /// the refusal exists to prevent, rebuilt inside its own fix.
+    ///
+    /// The count proves no SECOND `SourceSet::scan`; that no walk happens OUTSIDE `SourceSet` is
+    /// what the structural gate below proves, since a hand-rolled traversal would not move this
+    /// counter at all.
+    #[test]
+    fn building_the_corpus_walks_the_tree_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("configuration");
+        write(&root.join("CommonModules/Прямой/Ext/Module.bsl"), &module("Прямой"));
+
+        let before = project_model::source_set::scans_performed_on_thread();
+        build_workspace_code(&root).unwrap();
+        let walked = project_model::source_set::scans_performed_on_thread() - before;
+
+        assert_eq!(walked, 1, "the corpus and its verdict must come from one and the same walk");
+    }
+
+    /// The publisher must not grow a traversal of its own. It holds the only walk the corpus is
+    /// built from, so a second one here would be exactly the divergence the counter above cannot
+    /// see: a private `read_dir` or `WalkDir` never reaches `SourceSet::scan`.
+    #[test]
+    fn the_publisher_does_not_carry_its_own_tree_walk() {
+        let source = include_str!("documents.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap_or(source);
+        assert!(
+            production.contains("fn build_workspace_code"),
+            "the production/test cut moved; this gate scans only what it can prove it scanned"
+        );
+        for needle in [["walk", "dir::Walk", "Dir"].concat(), ["read", "_dir("].concat()] {
+            assert!(
+                !production.contains(&needle),
+                "the corpus must come from project_model::SourceSet::scan and nothing else, \
+                 or its completeness verdict answers for a walk it did not describe ({needle})"
+            );
+        }
     }
 
     #[test]
