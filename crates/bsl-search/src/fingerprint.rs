@@ -47,6 +47,43 @@ mod tests {
         assert_eq!(fingerprint_documents(&docs_a), fingerprint_documents(&docs_b));
     }
 
+    /// The workspace corpus is assembled by a tree walk, and a walk's order is a property of
+    /// the walk, not of the tree: change how the tree is traversed and the same files arrive in
+    /// a different sequence. If that reordering moved the snapshot fingerprint, every consumer
+    /// would see a snapshot it already holds as a new one and re-fetch the whole corpus.
+    ///
+    /// Its sibling above pins the same property for the reference corpus, which is built from
+    /// platform data rather than from a walk — a different function with its own sort.
+    #[test]
+    fn indexed_document_fingerprint_is_order_independent() {
+        let one = IndexedDocument {
+            collection: "code".to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+            path: "CommonModules/Первый/Ext/Module.bsl".to_owned(),
+            symbol_name: "Первый".to_owned(),
+            kind: "procedure".to_owned(),
+            line_start: 1,
+            line_end: 3,
+            text: "Процедура Первый()".to_owned(),
+            content_hash: "hash-1".to_owned(),
+            graph_context: None,
+        };
+        let two = IndexedDocument {
+            path: "CommonModules/Второй/Ext/Module.bsl".to_owned(),
+            symbol_name: "Второй".to_owned(),
+            content_hash: "hash-2".to_owned(),
+            ..one.clone()
+        };
+        let forwards = vec![one.clone(), two.clone()];
+        let backwards = vec![two, one];
+
+        assert_eq!(
+            fingerprint_indexed_documents(&forwards),
+            fingerprint_indexed_documents(&backwards),
+            "the same corpus in a different order is the same corpus"
+        );
+    }
+
     #[test]
     fn indexed_document_fingerprint_changes_when_content_changes() {
         let docs_a = vec![IndexedDocument {
