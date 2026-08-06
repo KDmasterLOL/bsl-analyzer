@@ -455,12 +455,7 @@ impl SearchEngine {
         root: &Path,
         progress: Option<&Arc<IndexProgress>>,
     ) -> Result<usize, SearchError> {
-        let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| bsl_conventions::has_extension(e.path(), bsl_conventions::BSL_EXTENSION))
-            .map(|e| e.into_path())
-            .collect();
+        let bsl_files = self.boot_ingest_files(root);
 
         info!(total_files = bsl_files.len(), "scanning BSL files");
 
@@ -473,7 +468,7 @@ impl SearchEngine {
         let mut tasks: Vec<FileTask> = Vec::new();
         let mut total_chunks = 0usize;
 
-        for file_path in &bsl_files {
+        for (key, file_path) in &bsl_files {
             let content = match std::fs::read_to_string(file_path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -483,10 +478,8 @@ impl SearchEngine {
             };
 
             let hash = blake3::hash(content.as_bytes());
-            let rel_path =
-                file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            if let Some(stored_hash) = self.store.file_hash(CONFIGURATION_ROOT_ID, &rel_path)? {
+            if let Some(stored_hash) = self.store.file_hash(&key.root_id, &key.path)? {
                 if stored_hash == hash.as_bytes() {
                     continue;
                 }
@@ -500,13 +493,7 @@ impl SearchEngine {
             let provider = self.graph_context_provider.as_deref();
             let docs: Vec<crate::IndexedDocument> = chunks
                 .iter()
-                .map(|c| {
-                    crate::document::indexed_document_for_chunk(
-                        &FileKey::configuration(&rel_path),
-                        c,
-                        provider,
-                    )
-                })
+                .map(|c| crate::document::indexed_document_for_chunk(key, c, provider))
                 .collect();
             let texts: Vec<String> =
                 docs.iter().map(crate::document::semantic_text_for_indexed_document).collect();
@@ -515,7 +502,7 @@ impl SearchEngine {
 
             total_chunks += chunks.len();
             tasks.push(FileTask {
-                rel_path,
+                key: key.clone(),
                 hash: hash.as_bytes().to_vec(),
                 chunks,
                 texts,
@@ -583,7 +570,7 @@ impl SearchEngine {
                         }
 
                         let _ = tx.send(FileResult {
-                            rel_path: task.rel_path,
+                            key: task.key,
                             hash: task.hash,
                             chunks: task.chunks,
                             graph_contexts: task.graph_contexts,
@@ -614,18 +601,18 @@ impl SearchEngine {
             match result.embeddings {
                 Ok(embeddings) => {
                     self.store.reindex_file_with_context(
-                        CONFIGURATION_ROOT_ID,
-                        &result.rel_path,
+                        &result.key.root_id,
+                        &result.key.path,
                         &result.hash,
                         &result.chunks,
                         Some(&embeddings),
                         Some(&result.graph_contexts),
                     )?;
                     indexed += 1;
-                    debug!(file = %result.rel_path, chunks = result.chunks.len(), "file indexed");
+                    debug!(file = %result.key.path, chunks = result.chunks.len(), "file indexed");
                 }
                 Err(e) => {
-                    warn!(file = %result.rel_path, "embedding failed after retries, skipping: {e}");
+                    warn!(file = %result.key.path, "embedding failed after retries, skipping: {e}");
                     errors += 1;
                 }
             }
@@ -875,8 +862,13 @@ impl SearchEngine {
     /// row when roots nest and the walk reaches it twice.
     ///
     /// Without a table the caller is not a workspace daemon but a one-shot indexer (the baseline
-    /// publisher, a reference corpus), and the old contract stands: walk the given directory and
-    /// key everything as the configuration.
+    /// publisher, a reference corpus). The contract it gets is the same one stated by
+    /// [`Self::set_workspace_root`] — everything found belongs to the configuration — and it is
+    /// honoured by giving that caller a one-root table rather than a second way to walk. A walk
+    /// of its own would answer "which file is this" differently from the daemon that later reads
+    /// the rows: attribution ranks the CANONICAL spelling first, so two names for one file inside
+    /// the root are one key to the reader and would have been two to a writer keying by the name
+    /// it walked through.
     fn boot_ingest_files(&self, root: &Path) -> Vec<(FileKey, std::path::PathBuf)> {
         let walked: Option<Vec<std::path::PathBuf>> = self
             .workspace_roots
@@ -893,20 +885,13 @@ impl SearchEngine {
         root: &Path,
         walk: Option<&[std::path::PathBuf]>,
     ) -> Vec<(FileKey, std::path::PathBuf)> {
-        let Some(roots) = self.workspace_roots.as_ref() else {
-            return walkdir::WalkDir::new(root)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    bsl_conventions::has_extension(e.path(), bsl_conventions::BSL_EXTENSION)
-                })
-                .map(|e| {
-                    let path = e.into_path();
-                    let rel =
-                        path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
-                    (FileKey::configuration(rel), path)
-                })
-                .collect();
+        let ephemeral;
+        let roots = match self.workspace_roots.as_ref() {
+            Some(roots) => roots,
+            None => {
+                ephemeral = WorkspaceRoots::build(root, root, &[]).0;
+                &ephemeral
+            }
         };
         let owned: Vec<std::path::PathBuf>;
         let declared: &[std::path::PathBuf] = match walk {
@@ -917,6 +902,21 @@ impl SearchEngine {
             }
         };
         let set = project_model::SourceSet::scan(declared);
+        Self::files_from_scan(roots, &set)
+    }
+
+    /// The corpus a walk describes: every source file it reached, under the key its owning root
+    /// gives it. Pure — it reaches no further than the set handed in, so the files it names and
+    /// the completeness its caller reads off that same set always describe one traversal.
+    ///
+    /// De-duplication is by key, and that is what keeps one file one row when roots nest and the
+    /// walk arrives twice. It does NOT merge two spellings of one file that attribution keeps
+    /// apart: a link leaving every root keeps the name it was walked through, because that name
+    /// is the only handle its root has on it.
+    fn files_from_scan(
+        roots: &WorkspaceRoots,
+        set: &project_model::SourceSet,
+    ) -> Vec<(FileKey, std::path::PathBuf)> {
         let mut seen = HashSet::new();
         let mut files = Vec::new();
         for file in &set.files {
@@ -932,6 +932,31 @@ impl SearchEngine {
             files.push((key, file.walked.clone()));
         }
         files
+    }
+
+    /// Ingest the corpus of a walk the CALLER performed, for a caller that must also judge that
+    /// walk's completeness — the baseline publisher, which may not ship a corpus built from a
+    /// tree it could not read whole.
+    ///
+    /// Taking the scan itself, rather than a ready list of files, is the point: a list could have
+    /// come from any traversal, and then the verdict its holder consulted would answer for a
+    /// corpus some other traversal produced. Here the files are derived from the very value whose
+    /// completeness the caller read.
+    pub fn ingest_scanned_fts(
+        &mut self,
+        set: &project_model::SourceSet,
+    ) -> Result<usize, SearchError> {
+        let files = {
+            let Some(roots) = self.workspace_roots.as_ref() else {
+                return Err(SearchError::Index(
+                    "ingesting a scanned source set needs a root table: without one there is no \
+                     way to say which root a file belongs to"
+                        .into(),
+                ));
+            };
+            Self::files_from_scan(roots, set)
+        };
+        self.ingest_files_fts(&files)
     }
 
     /// Index workspace files for *deferred* embedding: chunk each changed file, attach
@@ -2671,7 +2696,7 @@ struct RemovedBatch {
 }
 
 struct FileTask {
-    rel_path: String,
+    key: FileKey,
     hash: Vec<u8>,
     chunks: Vec<code_chunk::Chunk>,
     texts: Vec<String>,
@@ -2681,11 +2706,42 @@ struct FileTask {
 }
 
 struct FileResult {
-    rel_path: String,
+    key: FileKey,
     hash: Vec<u8>,
     chunks: Vec<code_chunk::Chunk>,
     graph_contexts: Vec<Option<String>>,
     embeddings: Result<Vec<Vec<f32>>, SearchError>,
+}
+
+#[cfg(test)]
+mod walk_ownership {
+    /// The engine must not walk the tree itself. The walk policy — which links are followed,
+    /// how an error is classified, which spelling a file is keyed by — lives in `project-model`
+    /// and `WorkspaceRoots`, and a private traversal here diverges from it silently: the corpus
+    /// it produces answers to a completeness verdict some other traversal computed.
+    ///
+    /// The ban names the traversal APIs rather than the word, so a mention in prose cannot fail
+    /// the gate, and it covers `read_dir` as well as the walk crate: a hand-rolled recursion is
+    /// the same divergence wearing different letters.
+    #[test]
+    fn the_engine_does_not_carry_its_own_tree_walk() {
+        let source = include_str!("engine.rs");
+        // Test code walks legitimately (a stand has to build and probe trees), so the ban
+        // covers production only. The cut is asserted below: a marker that stopped matching
+        // would shrink the scanned region to nothing and quietly pass everything.
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap_or(source);
+        assert!(
+            production.contains("fn ingest_scanned_fts"),
+            "the production/test cut moved; this gate scans only what it can prove it scanned"
+        );
+        for needle in [["walk", "dir::Walk", "Dir"].concat(), ["read", "_dir("].concat()] {
+            assert!(
+                !production.contains(&needle),
+                "engine.rs must reach the filesystem through project_model::SourceSet::scan, \
+                 not through its own traversal ({needle})"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
