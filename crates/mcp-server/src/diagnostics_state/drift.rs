@@ -150,9 +150,12 @@ impl DiagnosticsState {
         // `.xml` add/remove/edit, `.bsl` body edits, AND `.bsl` files appearing or
         // vanishing — is reconciled into the live resident in place. A removed subtree
         // needs no special case here: the scan diff enumerates every descendant.
-        // Set when the rebuild a config edit asked for was postponed: the resident is then
-        // serving a configuration known to be out of date.
-        let mut config_pending = false;
+        // The same question the drain asks before admitting a file, answered here from the
+        // snapshot already in hand: `config_changed` IS "the configuration the resident
+        // serves is not the one on disk". Deriving it in both places, rather than raising a
+        // flag in one and reading it in the other, is what keeps the two appliers agreeing
+        // about a state neither of them owns.
+        let config_pending = config_changed && !scan.verdict.clean();
         if config_changed {
             // The rebuild this asks for would be built over the same tree this scan just
             // failed to read whole, and `run_reload` declines to swap such a build in. Not
@@ -170,7 +173,6 @@ impl DiagnosticsState {
             tracing::debug!(
                 "postponing the config rebuild: this scan could not read the tree whole"
             );
-            config_pending = true;
         }
 
         // XML drift spans all three buckets: an added/removed object is a structural
@@ -289,21 +291,53 @@ impl DiagnosticsState {
         }
         let xml_paths: Vec<PathBuf> =
             class.xml_paths.iter().map(|d| PathBuf::from(&d.key)).collect();
-        let added_bsl: Vec<String> = class.bsl_added.iter().map(|d| d.key.clone()).collect();
+        let mut added_bsl: Vec<String> = class.bsl_added.iter().map(|d| d.key.clone()).collect();
         let modified_bsl: Vec<String> = class.bsl_modified.iter().map(|d| d.key.clone()).collect();
         let removed_bsl: Vec<String> = class.bsl_removed.iter().map(|d| d.key.clone()).collect();
+        let mut new_fp = class.new_fp;
+        // Admitting a file asserts it belongs to the configuration this resident serves,
+        // and the question is asked here rather than remembered from wherever a rebuild
+        // was last postponed: this path never learns that one was. Costs a config parse
+        // and an extension discovery — no tree walk — and only when there is something to
+        // admit. Their fingerprints go with them: recording a key we did not apply would
+        // turn the wait into a cancellation.
+        if !added_bsl.is_empty() && !self.resident_config_is_current() {
+            tracing::debug!(
+                admitted = added_bsl.len(),
+                "holding new files back: the resident's configuration is out of date"
+            );
+            for key in &added_bsl {
+                new_fp.remove(key);
+            }
+            added_bsl.clear();
+        }
         self.apply_drained_resident(
             &xml_paths,
             &added_bsl,
             &modified_bsl,
             &removed_bsl,
             &class.removed_keys,
-            &class.new_fp,
+            &new_fp,
         );
         // The baseline just moved, which leaves every cached snapshot describing the world
         // before the move. Dropping the cache is what stops the next scan within the drift
         // interval from being compared against a baseline it predates.
         *lock_recover(&self.scan) = None;
+    }
+
+    /// Whether the resident is serving the configuration that is on disk right now.
+    ///
+    /// Asked, never remembered. A postponed rebuild leaves no mark anywhere, and a flag
+    /// raised where it was postponed would have to be lowered by every path that later
+    /// adopts a configuration — including the ones that never learn a postponement
+    /// happened. Derived, the answer cannot go stale and cannot differ between the two
+    /// appliers.
+    fn resident_config_is_current(&self) -> bool {
+        let Some(root) = self.workspace_root.as_deref() else {
+            return true;
+        };
+        let live = config_identity_now(root);
+        lock_recover(&self.inner).config_fp == live
     }
 
     fn apply_drained_resident(
@@ -3608,6 +3642,74 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert!(admitted, "and it is admitted by the rebuild the healed tree allows");
+        }
+
+        /// The same refusal reached through the event path. A postponed configuration is
+        /// not a fact either applier can hold privately: the drain never learns that a
+        /// rebuild was declined, so a rule computed inside the scan would leave the
+        /// healthy-hub path admitting files the scan path had just refused.
+        #[test]
+        fn a_pending_config_edit_admits_no_new_files_through_the_drain() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Скрытый", true, "Процедура С()\nКонецПроцедуры");
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+            let (state, hub) = state_with_hub(root);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let closed = root.join("CommonModules/Скрытый");
+            if !close_dir(&closed) {
+                return;
+            }
+            let mut observer = hub.subscribe();
+            std::thread::sleep(Duration::from_millis(10));
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+            assert!(
+                wait_for_delivery(&hub, &mut observer, "bsl-analyzer.toml"),
+                "the hub delivered the config edit",
+            );
+            // Let the rebuild be asked for, declined, and its forced scan run.
+            for _ in 0..50 {
+                let _ = state.read(|_, _| ());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            // Now a brand-new file arrives by event, with the configuration still pending.
+            let object_module = root.join("Catalogs/Товары/Ext/ObjectModule.bsl");
+            write(
+                root,
+                "Catalogs/Товары/Ext/ObjectModule.bsl",
+                "Процедура ПередЗаписью(Отказ) КонецПроцедуры",
+            );
+            assert!(
+                wait_for_delivery(&hub, &mut observer, "ObjectModule.bsl"),
+                "the hub delivered the new file",
+            );
+            for _ in 0..20 {
+                let _ = state.read(|_, _| ());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                file_id(&state, &object_module),
+                None,
+                "the drain admits no file while the resident's configuration is out of date",
+            );
+
+            open_dir(&closed);
+            let mut admitted = false;
+            for _ in 0..200 {
+                let _ = state.read(|_, _| ());
+                state.reconcile_tick();
+                if file_id(&state, &object_module).is_some() {
+                    admitted = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(admitted, "and admits it once the configuration is adopted");
         }
 
         /// The reconciler charges every hub consumer for a miss, so it must only charge
