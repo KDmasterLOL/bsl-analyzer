@@ -289,28 +289,35 @@ impl DiagnosticsState {
         {
             return;
         }
-        let xml_paths: Vec<PathBuf> =
-            class.xml_paths.iter().map(|d| PathBuf::from(&d.key)).collect();
         let mut added_bsl: Vec<String> = class.bsl_added.iter().map(|d| d.key.clone()).collect();
         let modified_bsl: Vec<String> = class.bsl_modified.iter().map(|d| d.key.clone()).collect();
         let removed_bsl: Vec<String> = class.bsl_removed.iter().map(|d| d.key.clone()).collect();
         let mut new_fp = class.new_fp;
+        // The drain reports `.xml` drift in one bucket whatever its direction, so a
+        // descriptor being ADMITTED is told from one being edited or removed the only way
+        // available here: by whether the baseline ever held its key.
+        let mut xml_keys: Vec<&str> = class.xml_paths.iter().map(|d| d.key.as_str()).collect();
+        let admits_a_descriptor = xml_keys.iter().any(|key| !baseline.contains_key(*key));
         // Admitting a file asserts it belongs to the configuration this resident serves,
         // and the question is asked here rather than remembered from wherever a rebuild
         // was last postponed: this path never learns that one was. Costs a config parse
         // and an extension discovery — no tree walk — and only when there is something to
         // admit. Their fingerprints go with them: recording a key we did not apply would
         // turn the wait into a cancellation.
-        if !added_bsl.is_empty() && !self.resident_config_is_current() {
+        if (!added_bsl.is_empty() || admits_a_descriptor) && !self.resident_config_is_current() {
             tracing::debug!(
-                admitted = added_bsl.len(),
+                bodies = added_bsl.len(),
                 "holding new files back: the resident's configuration is out of date"
             );
             for key in &added_bsl {
                 new_fp.remove(key);
             }
             added_bsl.clear();
+            xml_keys.retain(|key| baseline.contains_key(*key));
+
+            new_fp.retain(|key, _| baseline.contains_key(key) || modified_bsl.contains(key));
         }
+        let xml_paths: Vec<PathBuf> = xml_keys.into_iter().map(PathBuf::from).collect();
         self.apply_drained_resident(
             &xml_paths,
             &added_bsl,
@@ -3710,6 +3717,68 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert!(admitted, "and admits it once the configuration is adopted");
+        }
+
+        /// A descriptor is admitted the same way a body is — by appearing — so the same
+        /// refusal covers it. The drain sees `.xml` drift as one bucket regardless of
+        /// direction, which is why the new ones have to be told apart by the baseline:
+        /// a key it never held is an admission, a key it holds is an edit or a removal.
+        #[test]
+        fn a_pending_config_edit_admits_no_new_descriptors_through_the_drain() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Скрытый", true, "Процедура С()\nКонецПроцедуры");
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+            let (state, hub) = state_with_hub(root);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let closed = root.join("CommonModules/Скрытый");
+            if !close_dir(&closed) {
+                return;
+            }
+            let mut observer = hub.subscribe();
+            std::thread::sleep(Duration::from_millis(10));
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+            assert!(
+                wait_for_delivery(&hub, &mut observer, "bsl-analyzer.toml"),
+                "the hub delivered the config edit",
+            );
+            for _ in 0..50 {
+                let _ = state.read(|_, _| ());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            write_catalog(root, "Товары", 9);
+            assert!(
+                wait_for_delivery(&hub, &mut observer, "Товары.xml"),
+                "the hub delivered the new descriptor",
+            );
+            for _ in 0..20 {
+                let _ = state.read(|_, _| ());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            let module = module_path(root, "Сервер");
+            assert!(
+                !catalog_resolves(&state, &module),
+                "a descriptor is admitted no more freely than a body is",
+            );
+
+            open_dir(&closed);
+            let mut admitted = false;
+            for _ in 0..200 {
+                let _ = state.read(|_, _| ());
+                state.reconcile_tick();
+                if catalog_resolves(&state, &module) {
+                    admitted = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(admitted, "and resolves once the configuration is adopted");
         }
 
         /// The reconciler charges every hub consumer for a miss, so it must only charge
