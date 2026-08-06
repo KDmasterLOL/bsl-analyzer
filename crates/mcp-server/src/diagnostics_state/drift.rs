@@ -151,6 +151,17 @@ impl DiagnosticsState {
         // vanishing — is reconciled into the live resident in place. A removed subtree
         // needs no special case here: the scan diff enumerates every descendant.
         if config_changed {
+            // The rebuild this asks for would be built over the same tree this scan just
+            // failed to read whole, and `run_reload` declines to swap such a build in. Not
+            // asking for it at all is what keeps that refusal cheap: the config edit stays
+            // on disk, so every window would otherwise pay a full resident build only to
+            // throw it away. The edit lands on the first window whose scan reads whole.
+            if !scan.verdict.clean() {
+                tracing::debug!(
+                    "postponing the config rebuild: this scan could not read the tree whole"
+                );
+                return false;
+            }
             self.kick_full_reload();
             return true;
         }
@@ -1704,7 +1715,7 @@ mod tests {
             stats: Vec::new(),
             config_fp: 0,
             baseline_epoch: 0,
-            verdict: ScanVerdict::default(),
+            verdict: ScanVerdict::for_test(0, 0),
         });
         state.force_rescan();
         assert!(
@@ -1722,7 +1733,7 @@ mod tests {
             stats: Vec::new(),
             config_fp: 0,
             baseline_epoch: 0,
-            verdict: ScanVerdict::default(),
+            verdict: ScanVerdict::for_test(0, 0),
         });
         state.force_rescan();
         assert!(
@@ -3133,6 +3144,144 @@ mod tests {
                 None,
                 "the removal is only visible if the baseline still remembered the file",
             );
+        }
+
+        /// A config edit is the one drift that cannot be applied in place, so it goes
+        /// through a full rebuild — and a rebuild is a wholesale assertion about which
+        /// files exist. Built over a tree it could not fully read, it would replace the
+        /// serving resident with a shorter one, dropping live files by the back door the
+        /// narrowing closed at the front.
+        ///
+        /// The control is the second half: once the tree is readable the config change
+        /// must actually land, or the refusal would be a silent freeze.
+        #[test]
+        fn a_config_edit_does_not_rebuild_over_a_tree_it_cannot_read() {
+            use ide::DiagnosticCode;
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Скрытый", true, "Процедура С()\nКонецПроцедуры");
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+            let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+            state.drift_interval = Duration::from_millis(0);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let hidden = module_path(root, "Скрытый");
+            let before = file_id(&state, &hidden).expect("the module resolves before the hiding");
+
+            let closed = root.join("CommonModules/Скрытый");
+            if !close_dir(&closed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+
+            // Give a rebuild every chance to run and publish before asserting.
+            for _ in 0..50 {
+                let _ = state.read(|_, _| ());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                file_id(&state, &hidden),
+                Some(before),
+                "a rebuild over a half-read tree must not replace the resident",
+            );
+            // And it was not merely refused at the swap: fifty windows of a config edit
+            // that cannot be applied must not have started fifty resident builds. Only the
+            // operation's own counter can say so — a declined build leaves nothing behind.
+            assert_eq!(
+                state.rebuilds_started.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "a rebuild that would be declined is not started at all",
+            );
+
+            open_dir(&closed);
+            let mut landed = false;
+            for _ in 0..200 {
+                if let ResidentOutcome::Ready(false, _) =
+                    state.read(|r, _| r.config().is_disabled(DiagnosticCode::Typo))
+                {
+                    landed = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(landed, "the postponed config change lands once the tree can be read");
+            assert!(
+                file_id(&state, &hidden).is_some(),
+                "and the module the rebuild once dropped is back in the universe",
+            );
+        }
+
+        /// The same rebuild reached through the event path, which holds no scan and so
+        /// cannot decline to ask for one. Here the refusal has to live at the swap: the
+        /// build knows what its own walk saw, and a build that saw part of the tree may
+        /// not retire a resident that saw all of it.
+        ///
+        /// Deliberately paired with the scan-path test above rather than folded into it:
+        /// the two are stopped by different code, and one test passing for either reason
+        /// would leave the other half unguarded.
+        #[test]
+        fn a_delivered_config_edit_does_not_rebuild_over_a_tree_it_cannot_read() {
+            use ide::DiagnosticCode;
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Скрытый", true, "Процедура С()\nКонецПроцедуры");
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+            let (state, hub) = state_with_hub(root);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let hidden = module_path(root, "Скрытый");
+            let before = file_id(&state, &hidden).expect("the module resolves before the hiding");
+
+            let closed = root.join("CommonModules/Скрытый");
+            if !close_dir(&closed) {
+                return;
+            }
+            let mut observer = hub.subscribe();
+            std::thread::sleep(Duration::from_millis(10));
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+            // Without this the test could pass having never triggered a rebuild at all.
+            assert!(
+                wait_for_delivery(&hub, &mut observer, "bsl-analyzer.toml"),
+                "the hub delivered the config edit, so the drain will ask for a rebuild",
+            );
+
+            for _ in 0..50 {
+                let _ = state.read(|_, _| ());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                file_id(&state, &hidden),
+                Some(before),
+                "a rebuild asked for by an event is still a rebuild over a half-read tree",
+            );
+
+            open_dir(&closed);
+            // The event that asked for this rebuild was consumed when it was refused, and a
+            // healthy hub answers reads from the drain, which never re-compares the config.
+            // The watchdog's scan is what asks again — a bounded wait, and the deliberate
+            // alternative to re-walking the tree on every drift window while it stays
+            // unreadable.
+            state.reconcile_tick();
+            let mut landed = false;
+            for _ in 0..200 {
+                if let ResidentOutcome::Ready(false, _) =
+                    state.read(|r, _| r.config().is_disabled(DiagnosticCode::Typo))
+                {
+                    landed = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(landed, "the postponed config change lands once the tree can be read");
         }
 
         /// The reconciler charges every hub consumer for a miss, so it must only charge

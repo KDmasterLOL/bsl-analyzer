@@ -32,8 +32,11 @@ use super::scan::FileStat;
 /// compiles, reads plausibly, and disables one leg of the policy silently. No test can
 /// catch it either — a canonicalisation fallback is not producible through a real tree,
 /// so every filesystem stand exercises `unreadable` alone. Making the shape
-/// unconstructible is the only closure that cannot be forgotten.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// unconstructible is the only closure that cannot be forgotten. `Default` is NOT
+/// derived for the same reason: a derived one is a second crate-wide constructor, and
+/// the verdict it yields — every counter zero — is precisely the one that says "this
+/// walk speaks for the whole tree".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ScanVerdict {
     unreadable: usize,
     canonical_fallbacks: usize,

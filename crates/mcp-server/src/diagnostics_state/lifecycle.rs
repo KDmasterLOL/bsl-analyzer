@@ -34,6 +34,8 @@ struct ResidentBuild {
     scan_roots: Vec<PathBuf>,
     /// The build snapshot's topology hash, for the hub re-arm supersession guard.
     topology: u64,
+    /// Whether the walk this resident was built from could speak for the whole tree.
+    scan_clean: bool,
 }
 
 /// Everything mutable about the resident db, guarded by one `Mutex`. The lock is held
@@ -92,6 +94,11 @@ pub(crate) struct DiagnosticsState {
     /// When the drift poll last compared the scope's resolved git refs, so the
     /// ref-only-movement check stays off the per-request hot path.
     pub(super) scope_ref_check_at: Arc<Mutex<Option<Instant>>>,
+    /// Full rebuilds STARTED — the operation itself, not one of its effects. A rebuild
+    /// that is declined at the swap leaves no trace in the resident, so nothing else can
+    /// tell "asked for and thrown away" from "never asked for".
+    #[cfg(test)]
+    pub(super) rebuilds_started: Arc<AtomicUsize>,
     /// One-shot test seam fired between the reconciler's first drain and its scan.
     #[cfg(test)]
     pub(super) reconcile_probe: ReconcileProbe,
@@ -147,6 +154,8 @@ impl DiagnosticsState {
             reconcile_interval: reconcile_interval(),
             scan_count: Arc::new(AtomicUsize::new(0)),
             scope_ref_check_at: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            rebuilds_started: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             reconcile_probe: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -441,11 +450,30 @@ impl DiagnosticsState {
         let Some(root) = self.workspace_root.clone() else {
             return;
         };
+        #[cfg(test)]
+        self.rebuilds_started.fetch_add(1, Ordering::SeqCst);
         // Fresh cursor snapshot at rebuild start; events during the rebuild replay onto
         // the new resident, events before it are covered by the rebuild's baseline scan.
         self.resubscribe_cursor();
         match Self::catch_build(|| Self::build_resident(&root)) {
             Ok(built) => {
+                // A swap states outright which files exist, so a build that could not read
+                // the whole tree may not perform one: it would retire a serving resident in
+                // favour of a shorter universe, dropping live files — the same loss the
+                // incremental path refuses, arriving by the one route that bypasses it.
+                // The drift that asked for this rebuild is left unanswered on purpose; it
+                // is still on disk, so the next window asks again, and the request is
+                // granted the first time the tree can be read whole. A first build has no
+                // resident to protect and publishes regardless: half a universe beats none.
+                if !built.scan_clean && lock_recover(&self.inner).resident.is_some() {
+                    tracing::info!(
+                        "declining to swap in a resident built over a partially unreadable \
+                         tree; the pending drift is retried once the tree reads whole"
+                    );
+                    let mut inner = lock_recover(&self.inner);
+                    inner.reload = ReloadState::Idle;
+                    return;
+                }
                 let files = built.resident.file_count();
                 let mut inner = lock_recover(&self.inner);
                 inner.resident = Some(built.resident);
@@ -510,6 +538,7 @@ impl DiagnosticsState {
         // sit in the resident forever, invisible to every later drift scan,
         // because the baseline never contained it).
         let universe = crate::graph::universe::ScannedUniverse::scan(&snapshot.scan_roots);
+        let scan_clean = universe.clean();
         let files = &universe.files;
         // `ProjectSnapshot` already registers canonical roots, matching the
         // canonical `.bsl` universe the scan produces.
@@ -589,6 +618,7 @@ impl DiagnosticsState {
             config_fp,
             scan_roots: snapshot.scan_roots,
             topology,
+            scan_clean,
         })
     }
 
