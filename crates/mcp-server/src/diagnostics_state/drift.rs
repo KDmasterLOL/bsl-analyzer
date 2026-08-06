@@ -150,6 +150,9 @@ impl DiagnosticsState {
         // `.xml` add/remove/edit, `.bsl` body edits, AND `.bsl` files appearing or
         // vanishing — is reconciled into the live resident in place. A removed subtree
         // needs no special case here: the scan diff enumerates every descendant.
+        // Set when the rebuild a config edit asked for was postponed: the resident is then
+        // serving a configuration known to be out of date.
+        let mut config_pending = false;
         if config_changed {
             // The rebuild this asks for would be built over the same tree this scan just
             // failed to read whole, and `run_reload` declines to swap such a build in. Not
@@ -167,6 +170,7 @@ impl DiagnosticsState {
             tracing::debug!(
                 "postponing the config rebuild: this scan could not read the tree whole"
             );
+            config_pending = true;
         }
 
         // XML drift spans all three buckets: an added/removed object is a structural
@@ -175,17 +179,29 @@ impl DiagnosticsState {
         let xml_paths: Vec<PathBuf> = changes
             .added
             .iter()
+            .filter(|_| !config_pending)
             .chain(&changes.removed)
             .chain(&changes.modified)
             .filter(|p| bsl_conventions::str_has_extension(p, bsl_conventions::XML_EXTENSION))
             .map(PathBuf::from)
             .collect();
-        let added_bsl: Vec<String> = changes
-            .added
-            .iter()
-            .filter(|p| !bsl_conventions::str_has_extension(p, bsl_conventions::XML_EXTENSION))
-            .cloned()
-            .collect();
+        // A file is ADMITTED to the resident by an addition, and admission is a claim that
+        // this file belongs to the configuration the resident serves. While the rebuild
+        // that would adopt the edited configuration is postponed, that claim cannot be
+        // made: the path may be new precisely because the postponed edit added the root it
+        // lies in. Refreshing files the resident already holds is a different act and
+        // continues. Nothing is lost by waiting — an unapplied addition is not recorded in
+        // the baseline, so it is offered again by every later scan.
+        let added_bsl: Vec<String> = if config_pending {
+            Vec::new()
+        } else {
+            changes
+                .added
+                .iter()
+                .filter(|p| !bsl_conventions::str_has_extension(p, bsl_conventions::XML_EXTENSION))
+                .cloned()
+                .collect()
+        };
         let modified_bsl: Vec<String> = changes
             .modified
             .iter()
@@ -3534,6 +3550,64 @@ mod tests {
                 "one walk answers the postponed config edit; the rest are served from its cache",
             );
             open_dir(&closed);
+        }
+
+        /// While the configuration the resident was built from is known to be out of
+        /// date, the resident must not ADMIT files. A path can be new precisely because
+        /// the postponed edit added the root it lies in, and serving a file from a
+        /// topology this resident never adopted answers it against the wrong
+        /// configuration. Refreshing the files it already has is a different act and
+        /// keeps working.
+        #[test]
+        fn a_pending_config_edit_admits_no_new_files() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Скрытый", true, "Процедура С()\nКонецПроцедуры");
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+            let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+            state.drift_interval = Duration::from_millis(0);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let closed = root.join("CommonModules/Скрытый");
+            if !close_dir(&closed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            // An object module: ordinary source, so the structure rule lets it through —
+            // the only thing that may hold it back is the pending configuration.
+            write_catalog(root, "Товары", 9);
+            write(
+                root,
+                "Catalogs/Товары/Ext/ObjectModule.bsl",
+                "Процедура ПередЗаписью(Отказ) КонецПроцедуры",
+            );
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+
+            let object_module = root.join("Catalogs/Товары/Ext/ObjectModule.bsl");
+            for _ in 0..50 {
+                let _ = state.read(|_, _| ());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                file_id(&state, &object_module),
+                None,
+                "a file is not admitted to a resident whose configuration is out of date",
+            );
+
+            open_dir(&closed);
+            let mut admitted = false;
+            for _ in 0..200 {
+                let _ = state.read(|_, _| ());
+                if file_id(&state, &object_module).is_some() {
+                    admitted = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(admitted, "and it is admitted by the rebuild the healed tree allows");
         }
 
         /// The reconciler charges every hub consumer for a miss, so it must only charge
