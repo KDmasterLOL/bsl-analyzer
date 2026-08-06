@@ -10,6 +10,10 @@ pub(super) struct WorkspaceCorpus {
     pub(super) indexed_files: usize,
     pub(super) documents: Vec<bsl_search::IndexedDocument>,
     pub(super) walk: project_model::SourceSet,
+    /// Files the walk reached and called source, whose bytes the ingest could not read. The
+    /// walk's own counters are blind to these — `stat` needs no read permission — so a corpus
+    /// can be short while the walk reports itself whole.
+    pub(super) unreadable_files: usize,
 }
 
 /// Walk the source tree ONCE and index what it found.
@@ -31,9 +35,14 @@ pub(super) fn build_workspace_code(
     engine.set_workspace_root(source_path);
 
     let walk = project_model::SourceSet::scan(std::slice::from_ref(&source_path.to_path_buf()));
-    let indexed_files = engine.ingest_scanned_fts(&walk)?;
+    let ingest = engine.ingest_scanned_fts(&walk)?;
     let documents = engine.load_indexed_documents(Some("code"))?;
-    Ok(WorkspaceCorpus { indexed_files, documents, walk })
+    Ok(WorkspaceCorpus {
+        indexed_files: ingest.indexed,
+        documents,
+        walk,
+        unreadable_files: ingest.unread,
+    })
 }
 
 pub(super) fn build_reference(

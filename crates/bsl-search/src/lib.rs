@@ -41,7 +41,9 @@ pub use domain::{
     SemanticHit, Snapshot, SnapshotId, SnapshotPublishMetadata, SnapshotPublishStats,
 };
 pub use embedder::{Embedder, EmbedderConfig};
-pub use engine::{IndexProgress, OverlayRetrySignals, SearchConfig, SearchEngine, SearchHit};
+pub use engine::{
+    FtsIngest, IndexProgress, OverlayRetrySignals, SearchConfig, SearchEngine, SearchHit,
+};
 pub use error::SearchError;
 pub use error::SCHEMA_VERSION_CURRENT;
 pub use external_baseline::ExternalBaselineAdapter;

@@ -945,7 +945,7 @@ impl SearchEngine {
     pub fn ingest_scanned_fts(
         &mut self,
         set: &project_model::SourceSet,
-    ) -> Result<usize, SearchError> {
+    ) -> Result<FtsIngest, SearchError> {
         let files = {
             let Some(roots) = self.workspace_roots.as_ref() else {
                 return Err(SearchError::Index(
@@ -1036,7 +1036,10 @@ impl SearchEngine {
 
     pub fn index_directory_fts(&mut self, root: &Path) -> Result<usize, SearchError> {
         let bsl_files = self.boot_ingest_files(root);
-        self.ingest_files_fts(&bsl_files)
+        // The daemon does not act on unread files here: its own boot decides completeness with
+        // `reconcile_boot_store_with_disk`, which asks its own scan and falls back to priming
+        // the overlay rather than asserting a clean store.
+        Ok(self.ingest_files_fts(&bsl_files)?.indexed)
     }
 
     /// Index only the registered roots that have no rows at all yet.
@@ -1071,21 +1074,23 @@ impl SearchEngine {
         if files.is_empty() {
             return Ok(0);
         }
-        self.ingest_files_fts(&files)
+        Ok(self.ingest_files_fts(&files)?.indexed)
     }
 
     fn ingest_files_fts(
         &mut self,
         bsl_files: &[(FileKey, std::path::PathBuf)],
-    ) -> Result<usize, SearchError> {
+    ) -> Result<FtsIngest, SearchError> {
         info!(total_files = bsl_files.len(), "scanning BSL files (FTS-only)");
 
         let mut indexed = 0;
+        let mut unread = 0;
         for (key, file_path) in bsl_files {
             let content = match std::fs::read_to_string(file_path) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(?file_path, "failed to read file: {e}");
+                    unread += 1;
                     continue;
                 }
             };
@@ -1123,8 +1128,8 @@ impl SearchEngine {
             indexed += 1;
         }
 
-        info!(indexed, total_chunks = self.store.chunk_count()?, "FTS indexing complete");
-        Ok(indexed)
+        info!(indexed, unread, total_chunks = self.store.chunk_count()?, "FTS indexing complete");
+        Ok(FtsIngest { indexed, unread })
     }
 
     pub fn index_documents(
@@ -2693,6 +2698,18 @@ struct RemovedBatch {
     removed: usize,
     failed: usize,
     first_error: Option<SearchError>,
+}
+
+/// What one FTS ingest did, and what it could not do.
+///
+/// `unread` counts files the WALK reached and classified as source but whose bytes could not be
+/// read — a permission change, a file removed between the walk and the read, bytes that are not
+/// UTF-8. The walk's own counters cannot see this: `stat` needs no read permission, so such a
+/// file is enumerated and counted as healthy. A caller that must not stand behind an incomplete
+/// corpus has to ask separately, which is why the count travels instead of only being logged.
+pub struct FtsIngest {
+    pub indexed: usize,
+    pub unread: usize,
 }
 
 struct FileTask {

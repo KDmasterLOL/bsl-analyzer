@@ -5,32 +5,39 @@ use super::{
     SearchBaselinePublishArgs,
 };
 
-/// Whether a walk may stand behind a published snapshot.
+/// Whether a corpus may stand behind a published snapshot.
 ///
 /// A snapshot is not a best effort: `snapshot_files` says what the corpus holds and
-/// `snapshot_deletions` says the rest is gone from the tree. So a walk that could not read the
-/// tree whole publishes two lies at once — it drops files, and it tells every consumer those
-/// files were deleted. The barrier next to this one only asks whether the corpus is EMPTY, and
-/// an unreadable subtree leaves it comfortably non-empty.
+/// `snapshot_deletions` says the rest is gone from the tree. So anything missing from the corpus
+/// is published as a DELETION, and the barrier next to this one — is the corpus empty? — is
+/// comfortably satisfied by a corpus missing most of a configuration.
 ///
-/// Both counters are asked, because they answer different questions. `unreadable` says the file
-/// list is short. `canonical_fallbacks` says a file's identity is a guess: its key may have
-/// shifted, and a shifted key reads downstream as one file deleted and another created. Loops
-/// and dead links are deliberately not consulted — neither hides anything.
-fn ensure_the_walk_can_speak_for_the_tree(
+/// A file can go missing in three ways, and no one of them implies the others:
+///
+/// - `unreadable`: the walk was kept out of somewhere, so the file list is short;
+/// - `canonical_fallbacks`: a file's physical name could not be resolved, so its key is a guess,
+///   and a shifted key reads downstream as one file deleted and another created;
+/// - `unread`: the walk reached the file and the ingest could not read its bytes. The walk's own
+///   counters are blind here, because `stat` needs no read permission — such a file is
+///   enumerated, classified and counted as perfectly healthy.
+///
+/// Loops and dead links are deliberately not consulted: neither hides anything.
+fn ensure_the_corpus_covers_the_walk(
     walk: &project_model::SourceSet,
+    unreadable_files: usize,
 ) -> Result<(), io::Error> {
-    if walk.clean() {
+    if walk.clean() && unreadable_files == 0 {
         return Ok(());
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         format!(
-            "refusing to publish a corpus built from a tree this walk could not read whole: \
-             {} unreadable place(s), {} file(s) whose physical name could not be resolved. \
-             A snapshot asserts both what exists and what was deleted, so an incomplete walk \
-             would report live files as removed. Fix the tree and publish again.",
-            walk.unreadable, walk.canonical_fallbacks
+            "refusing to publish a corpus that does not cover its own source tree: \
+             {} unreadable place(s), {} file(s) whose physical name could not be resolved, \
+             {} file(s) found but not readable. A snapshot asserts both what exists and what \
+             was deleted, so every one of these would be published as a removal of a live file. \
+             Fix the tree and publish again.",
+            walk.unreadable, walk.canonical_fallbacks, unreadable_files
         ),
     ))
 }
@@ -80,7 +87,7 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
             let corpus = documents::build_workspace_code(&source_path)?;
             // Before anything is sent anywhere: a snapshot does not merely omit what its walk
             // could not read — `snapshot_deletions` tells every consumer those files are GONE.
-            ensure_the_walk_can_speak_for_the_tree(&corpus.walk)?;
+            ensure_the_corpus_covers_the_walk(&corpus.walk, corpus.unreadable_files)?;
             (corpus.indexed_files, corpus.documents)
         }
         CorpusId::Reference => documents::build_reference()?,
@@ -327,7 +334,7 @@ mod tests {
         let corpus = documents::build_workspace_code(&root).unwrap();
 
         assert!(
-            ensure_the_walk_can_speak_for_the_tree(&corpus.walk).is_err(),
+            ensure_the_corpus_covers_the_walk(&corpus.walk, corpus.unreadable_files).is_err(),
             "a snapshot claims both what exists and what was deleted, so a walk that saw less \
              than the tree holds may not stand behind one"
         );
@@ -345,7 +352,7 @@ mod tests {
 
         assert!(!corpus.documents.is_empty(), "the stand must produce a corpus to judge");
         assert!(
-            ensure_the_walk_can_speak_for_the_tree(&corpus.walk).is_ok(),
+            ensure_the_corpus_covers_the_walk(&corpus.walk, corpus.unreadable_files).is_ok(),
             "a complete walk publishes; the gate must be able to say yes"
         );
     }
@@ -366,7 +373,7 @@ mod tests {
             "the readable part must reach the corpus, or this test proves nothing about the \
              emptiness barrier"
         );
-        assert!(ensure_the_walk_can_speak_for_the_tree(&corpus.walk).is_err());
+        assert!(ensure_the_corpus_covers_the_walk(&corpus.walk, corpus.unreadable_files).is_err());
     }
 
     /// The refusal must be WIRED, not merely defined. Proving the decision function in isolation
@@ -410,8 +417,36 @@ mod tests {
 
         let message = error.to_string();
         assert!(
-            message.contains("could not read whole"),
+            message.contains("does not cover its own source tree"),
             "the run must stop on the incomplete walk, not on something later; got: {message}"
+        );
+    }
+
+    /// A file the walk REACHED but whose bytes could not be read is the same lie as a directory
+    /// the walk could not enter: the corpus is short, and `snapshot_deletions` reports the file
+    /// as removed from the tree. The walk's own counters cannot see it — `stat` needs no read
+    /// permission, so such a file is enumerated, classified and counted as healthy.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_the_walk_found_but_could_not_read_stops_the_publish() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("configuration");
+        write(&root.join("CommonModules/Читаемый/Ext/Module.bsl"), &module("Читаемый"));
+        let closed = root.join("CommonModules/Закрытый/Ext/Module.bsl");
+        write(&closed, &module("Закрытый"));
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&closed).is_ok() {
+            return;
+        }
+
+        let corpus = documents::build_workspace_code(&root).unwrap();
+
+        assert_eq!(corpus.walk.unreadable, 0, "the walk reaches such a file and reports health");
+        assert!(
+            ensure_the_corpus_covers_the_walk(&corpus.walk, corpus.unreadable_files).is_err(),
+            "a file that was found but not read is missing from the corpus just the same"
         );
     }
 
@@ -425,20 +460,27 @@ mod tests {
 
         let short = SourceSet { unreadable: 1, ..SourceSet::default() };
         assert!(
-            ensure_the_walk_can_speak_for_the_tree(&short).is_err(),
+            ensure_the_corpus_covers_the_walk(&short, 0).is_err(),
             "a walk that was kept out of somewhere cannot say what the tree holds"
         );
 
         let degraded = SourceSet { canonical_fallbacks: 1, ..SourceSet::default() };
         assert!(
-            ensure_the_walk_can_speak_for_the_tree(&degraded).is_err(),
+            ensure_the_corpus_covers_the_walk(&degraded, 0).is_err(),
             "a file whose physical name could not be resolved may carry a shifted key, and a \
              shifted key reads downstream as one file deleted and another created"
         );
 
+        let unread = SourceSet::default();
+        assert!(
+            ensure_the_corpus_covers_the_walk(&unread, 1).is_err(),
+            "a file the walk reached but the ingest could not read is missing from the corpus \
+             just as surely, and the walk's own counters cannot see it"
+        );
+
         let benign = SourceSet { loops: 3, dangling: 2, ..SourceSet::default() };
         assert!(
-            ensure_the_walk_can_speak_for_the_tree(&benign).is_ok(),
+            ensure_the_corpus_covers_the_walk(&benign, 0).is_ok(),
             "a loop and a dead link hide nothing; refusing on them would block publication for \
              a tree that is entirely readable"
         );
