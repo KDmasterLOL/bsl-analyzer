@@ -20,6 +20,13 @@ pub(crate) struct FileStat {
 }
 
 impl FileStat {
+    /// A row built without touching disk, for tests about what a consumer DOES with
+    /// stats rather than how they are produced.
+    #[cfg(test)]
+    pub(crate) fn for_test(path: &str, mtime: u128, len: u64) -> FileStat {
+        FileStat { path: path.to_string(), mtime, len }
+    }
+
     /// The per-file fingerprint stored in (and compared against) the `files` table.
     /// Must stay deterministic across runs so a reload's recomputed value matches the
     /// stored one for an unchanged file.
@@ -58,17 +65,25 @@ pub(crate) fn file_fingerprint(path: &Path) -> Option<u64> {
 /// explicit `ProjectSnapshot` so stats and topology come from one project state).
 #[cfg(test)]
 pub(crate) fn scan_file_stats(workspace_root: &Path) -> Vec<FileStat> {
-    scan_stats_over_roots(&super::input::scan_roots(workspace_root))
+    scan_stats_over_roots(&super::input::scan_roots(workspace_root)).0
 }
 
 /// The scan over an explicit set of roots (each a directory, or occasionally a
-/// single file for a misconfigured extension path), projected into stats shape.
+/// single file for a misconfigured extension path), projected into stats shape —
+/// together with the verdict of the walk that produced them.
+///
+/// The verdict is returned, not dropped, because the rows alone cannot be told
+/// apart from a shorter tree: a caller reconciling a store against them would
+/// read a subtree it could not enter as a batch of deletions.
 ///
 /// One call is one traversal (parallel across top-level directories inside
 /// [`SourceSet::scan`]). An operation with several passes over the same universe
 /// must take ONE `SourceSet` and project it instead of calling this per pass.
-pub(crate) fn scan_stats_over_roots(roots: &[PathBuf]) -> Vec<FileStat> {
-    super::universe::file_stats_from(&SourceSet::scan(roots))
+pub(crate) fn scan_stats_over_roots(
+    roots: &[PathBuf],
+) -> (Vec<FileStat>, super::universe::ScanVerdict) {
+    let set = SourceSet::scan(roots);
+    (super::universe::file_stats_from(&set), super::universe::ScanVerdict::of(&set))
 }
 
 /// A cheap fingerprint of the workspace identity: the order-independent fold of
@@ -87,7 +102,7 @@ pub(super) fn workspace_fingerprint(workspace_root: &Path) -> crate::graph_db::G
 pub(crate) fn workspace_fingerprint_over(
     project: &super::input::ProjectSnapshot,
 ) -> crate::graph_db::GraphFp {
-    fingerprint_of(&scan_stats_over_roots(&project.scan_roots), &project.configs)
+    fingerprint_of(&scan_stats_over_roots(&project.scan_roots).0, &project.configs)
 }
 
 /// The fold over ALREADY-SCANNED stats — the piece of the fingerprint an operation

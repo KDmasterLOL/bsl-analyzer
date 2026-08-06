@@ -16,6 +16,59 @@ use vfs::FileId;
 
 use super::scan::FileStat;
 
+/// What one walk may speak for, carried alongside its projections.
+///
+/// The two counters are NOT interchangeable and are kept apart on purpose.
+/// `unreadable` says the file list is SHORT: a file the walk did not list may
+/// still be on disk. `canonical_fallbacks` says a listed file kept its walked
+/// spelling, so its KEY may differ from the one an earlier walk produced for the
+/// same file — a shifted key looks exactly like a removal paired with an
+/// addition. A consumer that folds both into one flag can still act correctly,
+/// but one that must decide per direction needs to tell them apart.
+///
+/// The counters are PRIVATE, and production code has exactly one constructor —
+/// [`ScanVerdict::of`]. That is not tidiness: a verdict assembled field by field at a
+/// call site (`ScanVerdict { unreadable: set.unreadable, canonical_fallbacks: 0 }`)
+/// compiles, reads plausibly, and disables one leg of the policy silently. No test can
+/// catch it either — a canonicalisation fallback is not producible through a real tree,
+/// so every filesystem stand exercises `unreadable` alone. Making the shape
+/// unconstructible is the only closure that cannot be forgotten.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScanVerdict {
+    unreadable: usize,
+    canonical_fallbacks: usize,
+}
+
+impl ScanVerdict {
+    /// The only way a verdict comes into being: read off a walk that produced it.
+    pub(crate) fn of(set: &SourceSet) -> ScanVerdict {
+        ScanVerdict { unreadable: set.unreadable, canonical_fallbacks: set.canonical_fallbacks }
+    }
+
+    /// A verdict stated outright, for tests about what a consumer DOES with one.
+    #[cfg(test)]
+    pub(crate) fn for_test(unreadable: usize, canonical_fallbacks: usize) -> ScanVerdict {
+        ScanVerdict { unreadable, canonical_fallbacks }
+    }
+
+    /// Whether this walk may speak for the whole tree — see [`SourceSet::clean`].
+    pub(crate) fn clean(&self) -> bool {
+        self.coverage_complete() && self.identity_exact()
+    }
+
+    /// Nothing was hidden from the walk, so a file it did not list is genuinely
+    /// absent.
+    pub(crate) fn coverage_complete(&self) -> bool {
+        self.unreadable == 0
+    }
+
+    /// Every listed file carries its physical spelling, so its key is comparable
+    /// with the keys an earlier walk produced.
+    pub(crate) fn identity_exact(&self) -> bool {
+        self.canonical_fallbacks == 0
+    }
+}
+
 /// One traversal of the scan roots, projected into every shape the graph's passes
 /// consume. Passes handed the same instance provably share one universe: the
 /// enumeration a build lowers, the stats its `files` table persists and the
@@ -26,7 +79,7 @@ pub(crate) struct ScannedUniverse {
     pub(crate) files: Vec<(FileId, PathBuf)>,
     /// The `.bsl` + `.xml` stats rows — see [`file_stats_from`].
     pub(crate) stats: Vec<FileStat>,
-    clean: bool,
+    verdict: ScanVerdict,
 }
 
 impl ScannedUniverse {
@@ -36,7 +89,7 @@ impl ScannedUniverse {
         ScannedUniverse {
             files: bsl_files_from(&set),
             stats: file_stats_from(&set),
-            clean: set.clean(),
+            verdict: ScanVerdict::of(&set),
         }
     }
 
@@ -45,7 +98,7 @@ impl ScannedUniverse {
     /// claim a coherent snapshot, and a cache must not be adopted as fresh
     /// against one.
     pub(crate) fn clean(&self) -> bool {
-        self.clean
+        self.verdict.clean()
     }
 }
 
@@ -112,6 +165,73 @@ mod tests {
 
     fn scan(root: &Path) -> SourceSet {
         SourceSet::scan(std::slice::from_ref(&root.to_path_buf()))
+    }
+
+    /// Both counters reach the verdict, each answering its own question.
+    ///
+    /// The canonicalisation-fallback leg has no filesystem stand anywhere — no real
+    /// tree produces a fallback (the walk resolves the path or the path does not
+    /// exist) — so this is the only place that leg is exercised at all. What keeps a
+    /// hand-assembled verdict from disabling it elsewhere is not a test but the
+    /// private fields: `of` is the sole way production code obtains one.
+    #[test]
+    fn the_verdict_carries_both_counters_apart() {
+        let hidden = SourceSet { unreadable: 1, ..SourceSet::default() };
+        let verdict = ScanVerdict::of(&hidden);
+        assert!(!verdict.coverage_complete(), "a subtree stayed unread");
+        assert!(verdict.identity_exact(), "but every listed file kept its physical spelling");
+        assert!(!verdict.clean());
+
+        let degraded = SourceSet { canonical_fallbacks: 1, ..SourceSet::default() };
+        let verdict = ScanVerdict::of(&degraded);
+        assert!(verdict.coverage_complete(), "the walk reached everything");
+        assert!(!verdict.identity_exact(), "yet one file's key is a walked spelling");
+        assert!(!verdict.clean());
+
+        let both = SourceSet { unreadable: 2, canonical_fallbacks: 3, ..SourceSet::default() };
+        assert_eq!(
+            ScanVerdict::of(&both),
+            ScanVerdict::for_test(2, 3),
+            "neither counter is derived from the other",
+        );
+
+        // Loops and dangling links leave coverage complete: they must not reach the
+        // verdict at all, or a tree with one dead symlink would be permanently suspect.
+        let benign = SourceSet { loops: 4, dangling: 5, ..SourceSet::default() };
+        assert!(ScanVerdict::of(&benign).clean());
+    }
+
+    /// The verdict a stats scan hands back describes the walk it just performed — the
+    /// step between `SourceSet::scan` and the consumer, which the unit test above does
+    /// not cross.
+    #[cfg(unix)]
+    #[test]
+    fn the_stats_scan_reports_the_walk_it_performed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("CommonModules/M/Ext/Module.bsl"), "");
+        write(&root.join("Configuration.xml"), "<x/>");
+
+        let roots = vec![root.to_path_buf()];
+        let (stats, verdict) = super::super::scan::scan_stats_over_roots(&roots);
+        assert!(verdict.clean(), "a healthy tree yields a verdict that may speak for it");
+        assert_eq!(stats.len(), 2);
+
+        let closed = root.join("Closed");
+        fs::create_dir(&closed).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&closed).is_ok() {
+            // Permissions do not bind this user (UID 0): the input cannot exist.
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let (_, verdict) = super::super::scan::scan_stats_over_roots(&roots);
+        assert!(!verdict.coverage_complete(), "a door it could not open shortens the list");
+        assert!(!verdict.clean());
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     /// An independent sequential reference for the enumeration universe: its own

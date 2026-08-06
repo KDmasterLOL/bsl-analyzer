@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::change_hub::{ChangeEntry, Health, WorkspaceChangeHub};
 use crate::graph::scan::{classify_changes, FileStat, WorkspaceDiff};
+use crate::graph::universe::ScanVerdict;
 
 use super::lifecycle::{lock_recover, DiagnosticsState, Inner};
 use super::resident::apply_resident_changes;
@@ -44,6 +45,10 @@ pub(super) struct ScanCache {
     pub(super) config_fp: u64,
     /// The baseline this snapshot is comparable against — see `Inner::baseline_epoch`.
     pub(super) baseline_epoch: u64,
+    /// What the walk behind `stats` may speak for — see [`ScanVerdict`]. Cached with
+    /// the rows it describes: a verdict paired with another walk's rows would vouch
+    /// for a tree these rows never came from.
+    pub(super) verdict: ScanVerdict,
 }
 
 impl DiagnosticsState {
@@ -125,8 +130,7 @@ impl DiagnosticsState {
         // Diff under a short read lock against the last-applied stats.
         let (changes, config_changed) = {
             let inner = lock_recover(&self.inner);
-            let stored: HashMap<String, u64> = inner.stats.clone();
-            (classify_changes(&stored, &scan.stats), inner.config_fp != scan.config_fp)
+            scan_drift(&inner, &scan)
         };
         self.apply_scan_drift(&changes, config_changed, &scan)
     }
@@ -368,9 +372,8 @@ impl DiagnosticsState {
             // Another caller may have reconciled this exact scan already (both passed the
             // throttle, then serialised here); bail so we neither re-walk the roots nor
             // double-bump the generation.
-            if classify_changes(&inner.stats, &scan.stats).is_empty()
-                && inner.config_fp == scan.config_fp
-            {
+            let (residual, config_moved) = scan_drift(&inner, scan);
+            if residual.is_empty() && !config_moved {
                 return;
             }
             // The baseline moved after this snapshot was taken, so the two describe
@@ -430,7 +433,15 @@ impl DiagnosticsState {
                 // resident, so its state equals `scan`. Rebasing even when nothing moved
                 // (a pure mtime touch with unchanged content) stops us re-scanning it
                 // every window.
-                *stats = scan.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+                //
+                // Only a scan that may speak for the whole tree replaces the baseline
+                // outright; one that may not merges into it, so the keys it was not
+                // entitled to call gone survive to be compared against the next scan.
+                if scan.verdict.clean() {
+                    *stats = scan.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+                } else {
+                    rebase_over_incomplete_scan(stats, scan);
+                }
                 *baseline_epoch += 1;
                 if moved {
                     *generation += 1;
@@ -631,7 +642,7 @@ impl DiagnosticsState {
         };
         let (changes, config_changed) = {
             let inner = lock_recover(&self.inner);
-            (classify_changes(&inner.stats, &scan.stats), inner.config_fp != scan.config_fp)
+            scan_drift(&inner, &scan)
         };
         if changes.is_empty() && !config_changed {
             return;
@@ -692,6 +703,7 @@ impl DiagnosticsState {
                     stats: c.stats.clone(),
                     config_fp: c.config_fp,
                     baseline_epoch: c.baseline_epoch,
+                    verdict: c.verdict,
                 });
             }
         }
@@ -706,11 +718,16 @@ impl DiagnosticsState {
         // another's topology and mask (or fabricate) drift.
         let config_files_fp = config_files_fingerprint(root);
         let project = crate::graph::input::ProjectSnapshot::load(root);
-        let stats = crate::graph::scan::scan_stats_over_roots(&project.scan_roots);
+        let (stats, verdict) = crate::graph::scan::scan_stats_over_roots(&project.scan_roots);
         let config_fp = config_identity(config_files_fp, &project.configs);
-        *cache =
-            Some(ScanCache { at: Instant::now(), stats: stats.clone(), config_fp, baseline_epoch });
-        Some(OwnedScan { stats, config_fp, baseline_epoch })
+        *cache = Some(ScanCache {
+            at: Instant::now(),
+            stats: stats.clone(),
+            config_fp,
+            baseline_epoch,
+            verdict,
+        });
+        Some(OwnedScan { stats, config_fp, baseline_epoch, verdict })
     }
 }
 
@@ -788,12 +805,74 @@ pub(super) struct OwnedScan {
     pub(super) stats: Vec<FileStat>,
     pub(super) config_fp: u64,
     pub(super) baseline_epoch: u64,
+    pub(super) verdict: ScanVerdict,
+}
+
+/// The one place a scan becomes drift: classify it against the live baseline, then keep
+/// only what the walk behind it is entitled to assert.
+///
+/// Every consumer of the scan goes through here — the apply, the reconciler's miss
+/// verdict and the freshness answer — because a rule that decides which files exist
+/// cannot live in three procedures and stay one rule. The config comparison rides along
+/// for the same reason: it is answered from the same snapshot, never re-sampled.
+fn scan_drift(inner: &Inner, scan: &OwnedScan) -> (WorkspaceDiff, bool) {
+    let changes = classify_changes(&inner.stats, &scan.stats);
+    (drift_the_scan_may_assert(changes, scan.verdict), inner.config_fp != scan.config_fp)
+}
+
+/// Narrow a scan's drift to what its walk can actually vouch for.
+///
+/// A short file list is not a list of deletions, and a degraded key is not a new file.
+/// The two counters are answered separately because they invalidate different
+/// directions:
+///
+/// - identity degraded (`canonical_fallbacks`): a file whose key fell back to the walked
+///   spelling arrives as a removal of its canonical key AND an addition of the walked
+///   one. Applying either half is wrong in its own way — the removal unregisters a live
+///   file, the addition registers the same physical file a second time — so neither is
+///   asserted. What stays are the keys present on both sides: those matched, so no
+///   spelling moved under them;
+/// - coverage incomplete (`unreadable`): a file the walk did list was seen, keys and all,
+///   so additions and edits stand. Only absences fall: the walk cannot tell "gone" from
+///   "behind a door it could not open".
+///
+/// Both at once is the identity case: a walk that also lost coverage has no stronger
+/// claim than one that only lost identity.
+fn drift_the_scan_may_assert(mut changes: WorkspaceDiff, verdict: ScanVerdict) -> WorkspaceDiff {
+    if !verdict.identity_exact() {
+        changes.added.clear();
+        changes.removed.clear();
+    } else if !verdict.coverage_complete() {
+        changes.removed.clear();
+    }
+    changes
+}
+
+/// Advance the drift baseline over a scan the walk could not fully vouch for.
+///
+/// The wholesale rebase the clean path does would drop every key the scan did not list —
+/// exactly the keys whose absence is unproven. Losing them is worse than the phantom
+/// removal it replaces: the file stays registered in the resident while the baseline
+/// forgets it ever existed, so its REAL removal later has nothing left to compare
+/// against and never lands.
+///
+/// A key the scan is not entitled to introduce (a spelling that may have shifted) is not
+/// recorded either: writing it down would make it "known" and its addition would never be
+/// applied once the tree heals.
+fn rebase_over_incomplete_scan(stats: &mut HashMap<String, u64>, scan: &OwnedScan) {
+    let identity_exact = scan.verdict.identity_exact();
+    for stat in &scan.stats {
+        if identity_exact || stats.contains_key(&stat.path) {
+            stats.insert(stat.path.clone(), stat.fingerprint());
+        }
+    }
 }
 
 pub(super) fn compute_freshness(inner: &Inner, scan: Option<&OwnedScan>) -> Freshness {
     let drifted = match scan {
         Some(s) => {
-            inner.config_fp != s.config_fp || !classify_changes(&inner.stats, &s.stats).is_empty()
+            let (changes, config_changed) = scan_drift(inner, s);
+            config_changed || !changes.is_empty()
         }
         None => false,
     };
@@ -1625,6 +1704,7 @@ mod tests {
             stats: Vec::new(),
             config_fp: 0,
             baseline_epoch: 0,
+            verdict: ScanVerdict::default(),
         });
         state.force_rescan();
         assert!(
@@ -1637,8 +1717,13 @@ mod tests {
         let stale_at = Instant::now()
             .checked_sub(FORCE_RESCAN_FLOOR + Duration::from_millis(50))
             .expect("a valid past instant");
-        *lock_recover(&state.scan) =
-            Some(ScanCache { at: stale_at, stats: Vec::new(), config_fp: 0, baseline_epoch: 0 });
+        *lock_recover(&state.scan) = Some(ScanCache {
+            at: stale_at,
+            stats: Vec::new(),
+            config_fp: 0,
+            baseline_epoch: 0,
+            verdict: ScanVerdict::default(),
+        });
         state.force_rescan();
         assert!(
             lock_recover(&state.scan).is_none(),
@@ -2358,6 +2443,7 @@ mod tests {
             stats: snapshot.stats.clone(),
             config_fp: snapshot.config_fp,
             baseline_epoch: snapshot.baseline_epoch,
+            verdict: snapshot.verdict,
         });
 
         // Set directly rather than through `force_rescan`, whose storm guard declines to arm
@@ -2803,5 +2889,285 @@ mod tests {
         let _ = state.read(|_, _| ());
         assert_eq!(raw_generation(&state), gen0, "a non-scan file does not move the resident");
         assert_eq!(state.scan_count(), 0, "and triggers no scan on the healthy path");
+    }
+
+    /// What a scan may assert, per verdict. The clean row is the positive control: a
+    /// narrowing that refused everything would pass the other three.
+    ///
+    /// The combined row is not implied by the two single-counter ones: an implementation
+    /// asking about coverage FIRST answers the axes correctly and still lets an addition
+    /// through when identity is degraded too. No filesystem stand can catch that — none
+    /// of them produces a canonicalisation fallback.
+    #[test]
+    fn a_scan_asserts_only_what_its_walk_can_vouch_for() {
+        let drift = || WorkspaceDiff {
+            added: vec!["Новый.bsl".to_string()],
+            removed: vec!["Ушедший.bsl".to_string()],
+            modified: vec!["Правленый.bsl".to_string()],
+        };
+        let buckets = |d: WorkspaceDiff| (d.added.len(), d.removed.len(), d.modified.len());
+        let verdict = ScanVerdict::for_test;
+
+        assert_eq!(
+            buckets(drift_the_scan_may_assert(drift(), verdict(0, 0))),
+            (1, 1, 1),
+            "a complete walk with exact keys speaks for the whole tree",
+        );
+        assert_eq!(
+            buckets(drift_the_scan_may_assert(drift(), verdict(1, 0))),
+            (1, 0, 1),
+            "a file it did not reach is not a file that is gone",
+        );
+        assert_eq!(
+            buckets(drift_the_scan_may_assert(drift(), verdict(0, 1))),
+            (0, 0, 1),
+            "a shifted key arrives as a removal and an addition; neither half is true",
+        );
+        assert_eq!(
+            buckets(drift_the_scan_may_assert(drift(), verdict(1, 1))),
+            (0, 0, 1),
+            "losing coverage on top of identity grants no stronger claim",
+        );
+    }
+
+    /// The baseline of a scan that may not speak for everything moves only where the scan
+    /// had something to say. Keys it never listed keep their fingerprints — they are the
+    /// only record that those files were ever there.
+    #[test]
+    fn an_incomplete_scan_moves_the_baseline_only_where_it_could_see() {
+        let baseline =
+            || HashMap::from([("Виден.bsl".to_string(), 1u64), ("Скрыт.bsl".to_string(), 2u64)]);
+        let seen = FileStat::for_test("Виден.bsl", 77, 5);
+        let fresh = FileStat::for_test("Новый.bsl", 88, 6);
+        let scan = |verdict, stats: Vec<FileStat>| OwnedScan {
+            stats,
+            config_fp: 0,
+            baseline_epoch: 0,
+            verdict,
+        };
+
+        let mut stats = baseline();
+        rebase_over_incomplete_scan(
+            &mut stats,
+            &scan(ScanVerdict::for_test(1, 0), vec![seen.clone(), fresh.clone()]),
+        );
+        assert_eq!(stats.get("Виден.bsl"), Some(&seen.fingerprint()), "a seen file moves");
+        assert_eq!(stats.get("Скрыт.bsl"), Some(&2), "an unseen file keeps its old record");
+        assert_eq!(
+            stats.get("Новый.bsl"),
+            Some(&fresh.fingerprint()),
+            "with exact keys a new file is genuinely new",
+        );
+
+        let mut stats = baseline();
+        rebase_over_incomplete_scan(
+            &mut stats,
+            &scan(ScanVerdict::for_test(0, 1), vec![seen.clone(), fresh.clone()]),
+        );
+        assert_eq!(stats.get("Виден.bsl"), Some(&seen.fingerprint()), "a matched key still moves");
+        assert_eq!(stats.get("Скрыт.bsl"), Some(&2));
+        assert_eq!(
+            stats.get("Новый.bsl"),
+            None,
+            "a key that may be a shifted spelling is not written down as known",
+        );
+
+        // Control on the shape: when the scan lists every baseline key, the merge must
+        // agree with the wholesale rebase — an implementation that only ever preserves
+        // the old values fails here.
+        let rows = vec![seen.clone(), FileStat::for_test("Скрыт.bsl", 99, 7)];
+        let mut stats = baseline();
+        rebase_over_incomplete_scan(&mut stats, &scan(ScanVerdict::for_test(1, 0), rows.clone()));
+        let wholesale: HashMap<String, u64> =
+            rows.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+        assert_eq!(stats, wholesale, "nothing hidden, nothing to preserve — the two agree");
+    }
+
+    /// A scan that could not read part of the tree saw LESS than the tree holds, so the
+    /// files it did not list are not gone — they are unproven. Reconciling against such a
+    /// scan unregisters live files, loses their baseline keys and blames the change hub
+    /// for deliveries it never owed.
+    #[cfg(unix)]
+    mod incomplete_scan {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        /// Hide a directory from the walk. `false` when permissions do not bind this
+        /// user (UID 0): the input cannot exist, so the test has nothing to assert.
+        fn close_dir(path: &std::path::Path) -> bool {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+            if fs::read_dir(path).is_ok() {
+                open_dir(path);
+                return false;
+            }
+            true
+        }
+
+        fn open_dir(path: &std::path::Path) {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn file_id(state: &DiagnosticsState, path: &std::path::Path) -> Option<vfs::FileId> {
+            match state.read(|resident, _| resident.file_id_for(path)) {
+                ResidentOutcome::Ready(id, _) => id,
+                _ => panic!("expected Ready outcome"),
+            }
+        }
+
+        /// A module whose directory became unreadable is still on disk: it keeps its
+        /// registration and its `FileId`. The positive control is the second half — with
+        /// the directory readable again, a REAL removal does unregister it.
+        #[test]
+        fn an_unreadable_directory_does_not_unregister_a_live_module() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Скрытый", true, "Процедура С()\nКонецПроцедуры");
+
+            let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+            state.drift_interval = Duration::from_millis(0);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let hidden = module_path(root, "Скрытый");
+            let before = file_id(&state, &hidden).expect("the module resolves before the hiding");
+
+            let closed = root.join("CommonModules/Скрытый");
+            if !close_dir(&closed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+
+            assert_eq!(
+                file_id(&state, &hidden),
+                Some(before),
+                "a directory the scan cannot enter is not a removal: the file is still there",
+            );
+
+            open_dir(&closed);
+            fs::remove_file(&hidden).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            assert_eq!(
+                file_id(&state, &hidden),
+                None,
+                "a real removal seen by a complete scan still unregisters the module",
+            );
+        }
+
+        /// The same class through the metadata path: a `.xml` hidden by an unreadable
+        /// directory must not un-discover its object (that route is the substrate
+        /// point-refresh, not the `.bsl` removal bucket).
+        #[test]
+        fn an_unreadable_directory_does_not_undiscover_a_metadata_object() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_catalog(root, "Товары", 9);
+
+            let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+            state.drift_interval = Duration::from_millis(0);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let module = module_path(root, "Сервер");
+            assert!(catalog_resolves(&state, &module), "the catalog resolves before the hiding");
+
+            let closed = root.join("Catalogs");
+            if !close_dir(&closed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+
+            assert!(
+                catalog_resolves(&state, &module),
+                "a descriptor the scan cannot reach is not a deleted descriptor",
+            );
+
+            open_dir(&closed);
+            fs::remove_file(root.join("Catalogs/Товары.xml")).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            assert!(
+                !catalog_resolves(&state, &module),
+                "a real removal seen by a complete scan still tombstones the object",
+            );
+        }
+
+        /// An edit elsewhere makes the baseline move WHILE part of the tree is hidden —
+        /// the only way the rebase runs at all, since hiding a directory on its own
+        /// produces no drift the scan may assert. The hidden file's key has to survive
+        /// that move: it is the sole record that the file was ever there, and without it
+        /// the real removal below has nothing to be compared against.
+        #[test]
+        fn an_edit_beside_a_hidden_subtree_keeps_its_keys() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Скрытый", true, "Процедура С()\nКонецПроцедуры");
+
+            let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+            state.drift_interval = Duration::from_millis(0);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let hidden = module_path(root, "Скрытый");
+            let closed = root.join("CommonModules/Скрытый");
+            if !close_dir(&closed) {
+                return;
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
+            fs::write(
+                module_path(root, "Сервер"),
+                "&НаСервере\nФункция Считать() Экспорт Возврат 7; КонецФункции\n",
+            )
+            .unwrap();
+            // Apply that edit: this is the pass whose baseline move must not take the
+            // hidden key with it.
+            let _ = state.read(|_, _| ());
+
+            open_dir(&closed);
+            fs::remove_file(&hidden).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            assert_eq!(
+                file_id(&state, &hidden),
+                None,
+                "the removal is only visible if the baseline still remembered the file",
+            );
+        }
+
+        /// The reconciler charges every hub consumer for a miss, so it must only charge
+        /// for drift the scan may speak for. An unreadable subtree is not a miss: the hub
+        /// owed no event, because nothing changed.
+        #[test]
+        fn an_unproven_removal_does_not_degrade_the_hub() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Скрытый", true, "Процедура С()\nКонецПроцедуры");
+
+            let (state, hub) = state_with_hub(root);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let closed = root.join("CommonModules/Скрытый");
+            if !close_dir(&closed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            // Whatever the permission change itself delivered is discarded: with those
+            // entries in hand the reconciler could call the phantom removals delivered,
+            // and the gate would pass without proving anything.
+            state.drain_and_discard_cursor();
+            assert_eq!(hub.health(), Health::Healthy, "healthy before the reconcile");
+
+            state.reconcile_tick();
+
+            assert_eq!(
+                hub.health().label(),
+                "healthy",
+                "an unreadable subtree is not an undelivered change",
+            );
+            open_dir(&closed);
+        }
     }
 }

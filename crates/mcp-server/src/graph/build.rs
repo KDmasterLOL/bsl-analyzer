@@ -1391,6 +1391,7 @@ mod tests {
         let walk = workspace_fingerprint(root);
         let project = crate::graph::ProjectSnapshot::load(root);
         let mut entries: Vec<(String, u128, u64)> = scan_stats_over_roots(&project.scan_roots)
+            .0
             .into_iter()
             .map(|s| (s.path, s.mtime, s.len))
             .collect();
@@ -4053,7 +4054,7 @@ mod tests {
         roots.push(file_root.clone());
 
         let key = |s: &FileStat| (s.path.clone(), s.fingerprint());
-        let mut got: Vec<_> = scan_stats_over_roots(&roots).iter().map(key).collect();
+        let mut got: Vec<_> = scan_stats_over_roots(&roots).0.iter().map(key).collect();
         let mut want: Vec<_> = scan_stats_over_roots_reference(&roots).iter().map(key).collect();
         got.sort();
         want.sort();
