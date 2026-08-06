@@ -451,17 +451,20 @@ impl DiagnosticsState {
                 // Only a scan that may speak for the whole tree replaces the baseline
                 // outright; one that may not merges into it, so the keys it was not
                 // entitled to call gone survive to be compared against the next scan.
-                if scan.verdict.clean() {
+                let baseline_moved = if scan.verdict.clean() {
                     *stats = scan.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
+                    true
                 } else {
                     let applied = xml_paths
                         .iter()
                         .filter_map(|p| p.to_str())
                         .chain(added_bsl.iter().map(String::as_str))
                         .chain(modified_bsl.iter().map(String::as_str));
-                    rebase_over_incomplete_scan(stats, applied, &new_fp);
+                    rebase_over_incomplete_scan(stats, applied, &new_fp)
+                };
+                if baseline_moved {
+                    *baseline_epoch += 1;
                 }
-                *baseline_epoch += 1;
                 if moved {
                     *generation += 1;
                     // An add/remove changed the served file universe; keep the
@@ -908,16 +911,22 @@ fn is_metadata_xml(path: &str) -> bool {
 /// Recording a key whose drift was REFUSED is the mirror-image mistake: the baseline
 /// would then agree with disk, the next scan would see no drift, and the refusal — meant
 /// to postpone the change until the tree reads whole — would have cancelled it instead.
+///
+/// Returns whether the baseline actually moved, because the caller stamps an epoch on
+/// that answer and a stamp over a no-op is not free: it declares every snapshot taken
+/// before it incomparable, starting with the scan's own cache.
 fn rebase_over_incomplete_scan<'a>(
     stats: &mut HashMap<String, u64>,
     applied: impl Iterator<Item = &'a str>,
     new_fp: &HashMap<&str, u64>,
-) {
+) -> bool {
+    let mut moved = false;
     for key in applied {
         if let Some(&fp) = new_fp.get(key) {
-            stats.insert(key.to_string(), fp);
+            moved |= stats.insert(key.to_string(), fp) != Some(fp);
         }
     }
+    moved
 }
 
 pub(super) fn compute_freshness(inner: &Inner, scan: Option<&OwnedScan>) -> Freshness {
@@ -3486,6 +3495,44 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert!(landed, "the body edit the declined rebuild consumed is found again");
+            open_dir(&closed);
+        }
+
+        /// A scan that applied nothing did not move the baseline, and must not say it
+        /// did: the epoch is what tells a cached snapshot it is comparing against a world
+        /// that has since changed. Bumping it over a no-op makes the scan's own cache
+        /// incomparable, so every second read throws the cache away and walks the whole
+        /// tree again — at the very moment the postponement was meant to stop paying for
+        /// walks.
+        #[test]
+        fn a_postponed_config_edit_does_not_cost_a_walk_per_read() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Скрытый", true, "Процедура С()\nКонецПроцедуры");
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+            let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+            // Long enough that every walk after the first is the defect, not the throttle.
+            state.drift_interval = Duration::from_secs(3600);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let closed = root.join("CommonModules/Скрытый");
+            if !close_dir(&closed) {
+                return;
+            }
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+
+            let before = state.scan_count();
+            for _ in 0..3 {
+                let _ = state.read(|_, _| ());
+            }
+            assert_eq!(
+                state.scan_count(),
+                before + 1,
+                "one walk answers the postponed config edit; the rest are served from its cache",
+            );
             open_dir(&closed);
         }
 
