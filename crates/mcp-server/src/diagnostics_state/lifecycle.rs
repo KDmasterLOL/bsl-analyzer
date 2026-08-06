@@ -470,8 +470,19 @@ impl DiagnosticsState {
                         "declining to swap in a resident built over a partially unreadable \
                          tree; the pending drift is retried once the tree reads whole"
                     );
-                    let mut inner = lock_recover(&self.inner);
-                    inner.reload = ReloadState::Idle;
+                    {
+                        let mut inner = lock_recover(&self.inner);
+                        inner.reload = ReloadState::Idle;
+                    }
+                    // This rebuild's cursor was resubscribed at its start, which advances
+                    // past every event the build was assumed to cover. Declining the build
+                    // makes that assumption false: those events are now recorded nowhere.
+                    // A scan re-derives them from disk, so route the next poll through one
+                    // instead of leaving them to the watchdog a minute and a half later.
+                    // What that scan may then apply is its own question — body text yes,
+                    // structure not until the tree reads whole.
+                    *lock_recover(&self.scan) = None;
+                    self.force_scan.store(true, Ordering::SeqCst);
                     return;
                 }
                 let files = built.resident.file_count();

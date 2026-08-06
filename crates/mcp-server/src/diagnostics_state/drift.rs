@@ -156,14 +156,17 @@ impl DiagnosticsState {
             // asking for it at all is what keeps that refusal cheap: the config edit stays
             // on disk, so every window would otherwise pay a full resident build only to
             // throw it away. The edit lands on the first window whose scan reads whole.
-            if !scan.verdict.clean() {
-                tracing::debug!(
-                    "postponing the config rebuild: this scan could not read the tree whole"
-                );
-                return false;
+            //
+            // Postponing the rebuild does NOT postpone the rest of this scan's drift: the
+            // usual reason to return here is that the rebuild answers everything, and a
+            // rebuild that will not happen answers nothing. Body edits keep landing.
+            if scan.verdict.clean() {
+                self.kick_full_reload();
+                return true;
             }
-            self.kick_full_reload();
-            return true;
+            tracing::debug!(
+                "postponing the config rebuild: this scan could not read the tree whole"
+            );
         }
 
         // XML drift spans all three buckets: an added/removed object is a structural
@@ -451,7 +454,12 @@ impl DiagnosticsState {
                 if scan.verdict.clean() {
                     *stats = scan.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
                 } else {
-                    rebase_over_incomplete_scan(stats, scan);
+                    let applied = xml_paths
+                        .iter()
+                        .filter_map(|p| p.to_str())
+                        .chain(added_bsl.iter().map(String::as_str))
+                        .chain(modified_bsl.iter().map(String::as_str));
+                    rebase_over_incomplete_scan(stats, applied, &new_fp);
                 }
                 *baseline_epoch += 1;
                 if moved {
@@ -849,6 +857,15 @@ fn scan_drift(inner: &Inner, scan: &OwnedScan) -> (WorkspaceDiff, bool) {
 ///
 /// Both at once is the identity case: a walk that also lost coverage has no stronger
 /// claim than one that only lost identity.
+///
+/// Incomplete coverage also drops every path that would RESTATE a config root's
+/// structure rather than describe one file. `refresh_metadata_substrate` re-discovers
+/// each affected root by walking it and publishes what it found, so a single permitted
+/// `.xml` edit would hand a half-read tree the authority to say which objects that root
+/// contains — and the ones behind the closed door would be dropped from the listing.
+/// A `.bsl` body added under a listing that names it (`CommonModules` and the service
+/// families) reaches the same re-discovery, so it goes with them. Plain body text is
+/// unaffected: re-reading one file states nothing about the tree around it.
 fn drift_the_scan_may_assert(mut changes: WorkspaceDiff, verdict: ScanVerdict) -> WorkspaceDiff {
     if !verdict.identity_exact() {
         changes.added.clear();
@@ -856,10 +873,31 @@ fn drift_the_scan_may_assert(mut changes: WorkspaceDiff, verdict: ScanVerdict) -
     } else if !verdict.coverage_complete() {
         changes.removed.clear();
     }
+    if !verdict.coverage_complete() {
+        changes.added.retain(|p| !restates_a_root_when_added(p));
+        // Only an `.xml` EDIT reaches the re-discovery. A body edit re-reads that one
+        // file: the listing already names it, and its text says nothing about which
+        // objects the root contains.
+        changes.modified.retain(|p| !is_metadata_xml(p));
+    }
     changes
 }
 
-/// Advance the drift baseline over a scan the walk could not fully vouch for.
+/// Whether this path's APPEARANCE would re-discover a whole config root instead of
+/// registering one file — see [`drift_the_scan_may_assert`]. A descriptor obviously
+/// restates its root; a body under a listing that names it (`CommonModules` and the
+/// service families) does too, because its `module_file` back-link is published by the
+/// same re-discovery.
+fn restates_a_root_when_added(path: &str) -> bool {
+    is_metadata_xml(path) || project_model::is_substrate_listed_body_path(Path::new(path))
+}
+
+fn is_metadata_xml(path: &str) -> bool {
+    bsl_conventions::str_has_extension(path, bsl_conventions::XML_EXTENSION)
+}
+
+/// Advance the drift baseline over a scan the walk could not fully vouch for: the
+/// baseline moves for the keys whose drift was APPLIED, and for nothing else.
 ///
 /// The wholesale rebase the clean path does would drop every key the scan did not list —
 /// exactly the keys whose absence is unproven. Losing them is worse than the phantom
@@ -867,14 +905,17 @@ fn drift_the_scan_may_assert(mut changes: WorkspaceDiff, verdict: ScanVerdict) -
 /// forgets it ever existed, so its REAL removal later has nothing left to compare
 /// against and never lands.
 ///
-/// A key the scan is not entitled to introduce (a spelling that may have shifted) is not
-/// recorded either: writing it down would make it "known" and its addition would never be
-/// applied once the tree heals.
-fn rebase_over_incomplete_scan(stats: &mut HashMap<String, u64>, scan: &OwnedScan) {
-    let identity_exact = scan.verdict.identity_exact();
-    for stat in &scan.stats {
-        if identity_exact || stats.contains_key(&stat.path) {
-            stats.insert(stat.path.clone(), stat.fingerprint());
+/// Recording a key whose drift was REFUSED is the mirror-image mistake: the baseline
+/// would then agree with disk, the next scan would see no drift, and the refusal — meant
+/// to postpone the change until the tree reads whole — would have cancelled it instead.
+fn rebase_over_incomplete_scan<'a>(
+    stats: &mut HashMap<String, u64>,
+    applied: impl Iterator<Item = &'a str>,
+    new_fp: &HashMap<&str, u64>,
+) {
+    for key in applied {
+        if let Some(&fp) = new_fp.get(key) {
+            stats.insert(key.to_string(), fp);
         }
     }
 }
@@ -2941,57 +2982,102 @@ mod tests {
         );
     }
 
+    /// Incomplete coverage additionally drops whatever would restate a root's structure,
+    /// because the applier behind those paths re-discovers the whole root by walking it.
+    /// Both members of that class are checked here — a descriptor and a body under a
+    /// listing that names it — and so is the line between them: a body EDIT reaches no
+    /// re-discovery and must survive, or the resident would freeze on every edit while
+    /// one subtree is unreadable.
+    #[test]
+    fn an_incomplete_walk_may_change_text_but_not_restate_a_root() {
+        let drift = || WorkspaceDiff {
+            added: vec![
+                "cf/Catalogs/Товары.xml".to_string(),
+                "cf/CommonModules/Новый/Ext/Module.bsl".to_string(),
+                "cf/Catalogs/Товары/Ext/ObjectModule.bsl".to_string(),
+            ],
+            removed: Vec::new(),
+            modified: vec![
+                "cf/Catalogs/Склады.xml".to_string(),
+                "cf/CommonModules/Сервер/Ext/Module.bsl".to_string(),
+            ],
+        };
+
+        let complete = drift_the_scan_may_assert(drift(), ScanVerdict::for_test(0, 0));
+        assert_eq!(complete.added.len(), 3, "a complete walk restates whatever it likes");
+        assert_eq!(complete.modified.len(), 2);
+
+        let short = drift_the_scan_may_assert(drift(), ScanVerdict::for_test(1, 0));
+        assert_eq!(
+            short.added,
+            vec!["cf/Catalogs/Товары/Ext/ObjectModule.bsl".to_string()],
+            "a descriptor and a listed body would re-discover their root; an object \
+             module is registered without touching the listing",
+        );
+        assert_eq!(
+            short.modified,
+            vec!["cf/CommonModules/Сервер/Ext/Module.bsl".to_string()],
+            "an edited descriptor re-discovers its root, an edited body re-reads itself",
+        );
+    }
+
     /// The baseline of a scan that may not speak for everything moves only where the scan
     /// had something to say. Keys it never listed keep their fingerprints — they are the
     /// only record that those files were ever there.
     #[test]
-    fn an_incomplete_scan_moves_the_baseline_only_where_it_could_see() {
-        let baseline =
-            || HashMap::from([("Виден.bsl".to_string(), 1u64), ("Скрыт.bsl".to_string(), 2u64)]);
-        let seen = FileStat::for_test("Виден.bsl", 77, 5);
-        let fresh = FileStat::for_test("Новый.bsl", 88, 6);
-        let scan = |verdict, stats: Vec<FileStat>| OwnedScan {
-            stats,
-            config_fp: 0,
-            baseline_epoch: 0,
-            verdict,
+    fn an_incomplete_scan_moves_the_baseline_only_where_it_applied() {
+        let baseline = || {
+            HashMap::from([
+                ("Правленый.bsl".to_string(), 1u64),
+                ("Скрыт.bsl".to_string(), 2u64),
+                ("Отложен.xml".to_string(), 3u64),
+            ])
         };
+        let edited = FileStat::for_test("Правленый.bsl", 77, 5);
+        let postponed = FileStat::for_test("Отложен.xml", 88, 6);
+        let new_fp: HashMap<&str, u64> = [
+            (edited.path.as_str(), edited.fingerprint()),
+            (postponed.path.as_str(), postponed.fingerprint()),
+        ]
+        .into_iter()
+        .collect();
 
+        let mut stats = baseline();
+        rebase_over_incomplete_scan(&mut stats, ["Правленый.bsl"].into_iter(), &new_fp);
+        assert_eq!(
+            stats.get("Правленый.bsl"),
+            Some(&edited.fingerprint()),
+            "the key whose drift was applied moves to what the scan saw",
+        );
+        assert_eq!(
+            stats.get("Скрыт.bsl"),
+            Some(&2),
+            "a key the scan never listed keeps the only record that it exists",
+        );
+        assert_eq!(
+            stats.get("Отложен.xml"),
+            Some(&3),
+            "and a key whose drift was refused keeps its old value, or the refusal \
+             would read as a cancellation: the next scan would see no drift at all",
+        );
+
+        // Control on the shape: apply every drifted key and the merge must agree with
+        // the wholesale rebase over them — an implementation that preserves everything
+        // fails here.
         let mut stats = baseline();
         rebase_over_incomplete_scan(
             &mut stats,
-            &scan(ScanVerdict::for_test(1, 0), vec![seen.clone(), fresh.clone()]),
+            ["Правленый.bsl", "Отложен.xml"].into_iter(),
+            &new_fp,
         );
-        assert_eq!(stats.get("Виден.bsl"), Some(&seen.fingerprint()), "a seen file moves");
-        assert_eq!(stats.get("Скрыт.bsl"), Some(&2), "an unseen file keeps its old record");
         assert_eq!(
-            stats.get("Новый.bsl"),
-            Some(&fresh.fingerprint()),
-            "with exact keys a new file is genuinely new",
+            stats,
+            HashMap::from([
+                ("Правленый.bsl".to_string(), edited.fingerprint()),
+                ("Отложен.xml".to_string(), postponed.fingerprint()),
+                ("Скрыт.bsl".to_string(), 2),
+            ]),
         );
-
-        let mut stats = baseline();
-        rebase_over_incomplete_scan(
-            &mut stats,
-            &scan(ScanVerdict::for_test(0, 1), vec![seen.clone(), fresh.clone()]),
-        );
-        assert_eq!(stats.get("Виден.bsl"), Some(&seen.fingerprint()), "a matched key still moves");
-        assert_eq!(stats.get("Скрыт.bsl"), Some(&2));
-        assert_eq!(
-            stats.get("Новый.bsl"),
-            None,
-            "a key that may be a shifted spelling is not written down as known",
-        );
-
-        // Control on the shape: when the scan lists every baseline key, the merge must
-        // agree with the wholesale rebase — an implementation that only ever preserves
-        // the old values fails here.
-        let rows = vec![seen.clone(), FileStat::for_test("Скрыт.bsl", 99, 7)];
-        let mut stats = baseline();
-        rebase_over_incomplete_scan(&mut stats, &scan(ScanVerdict::for_test(1, 0), rows.clone()));
-        let wholesale: HashMap<String, u64> =
-            rows.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
-        assert_eq!(stats, wholesale, "nothing hidden, nothing to preserve — the two agree");
     }
 
     /// A scan that could not read part of the tree saw LESS than the tree holds, so the
@@ -3216,6 +3302,50 @@ mod tests {
             );
         }
 
+        /// The substrate refresh is not the point operation its arguments suggest: it
+        /// re-discovers every affected config root by walking it, then publishes the
+        /// listing it found. So one permitted `.xml` edit hands a half-read tree the
+        /// authority to restate a whole root, and the objects behind the closed door
+        /// vanish from the listing — the loss the narrowing refused, arriving through the
+        /// applier instead of the diff.
+        #[test]
+        fn a_visible_xml_edit_does_not_restate_a_root_through_a_closed_door() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_catalog(root, "Товары", 9);
+            write(root, "Configuration.xml", "<Configuration><Name>Конфа</Name></Configuration>");
+
+            let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+            state.drift_interval = Duration::from_millis(0);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let module = module_path(root, "Сервер");
+            assert!(catalog_resolves(&state, &module), "the catalog resolves before the hiding");
+
+            let closed = root.join("Catalogs");
+            if !close_dir(&closed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            write(root, "Configuration.xml", "<Configuration><Name>Другая</Name></Configuration>");
+            let _ = state.read(|_, _| ());
+
+            assert!(
+                catalog_resolves(&state, &module),
+                "an edit the scan may assert does not license restating what it could not read",
+            );
+
+            open_dir(&closed);
+            std::thread::sleep(Duration::from_millis(10));
+            let _ = state.read(|_, _| ());
+            assert!(
+                catalog_resolves(&state, &module),
+                "and the postponed edit lands without costing the object",
+            );
+        }
+
         /// The same rebuild reached through the event path, which holds no scan and so
         /// cannot decline to ask for one. Here the refusal has to live at the swap: the
         /// build knows what its own walk saw, and a build that saw part of the tree may
@@ -3282,6 +3412,81 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert!(landed, "the postponed config change lands once the tree can be read");
+        }
+
+        /// A declined rebuild has already consumed the events that asked for it: its
+        /// cursor was resubscribed at the start, on the assumption that the build's own
+        /// scan covered them. Declining makes that assumption false, so an edit delivered
+        /// in that window is recorded nowhere — and with a healthy hub every later read
+        /// answers from the drain, which has nothing left to hand over. Only a scan can
+        /// find it again, and the refusal is what has to ask for one.
+        #[test]
+        fn a_declined_rebuild_does_not_swallow_the_events_it_consumed() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Скрытый", true, "Процедура С()\nКонецПроцедуры");
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = false\n");
+
+            let (state, hub) = state_with_hub(root);
+            state.ensure_loading();
+            wait_ready(&state);
+
+            let closed = root.join("CommonModules/Скрытый");
+            if !close_dir(&closed) {
+                return;
+            }
+            let mut observer = hub.subscribe();
+            std::thread::sleep(Duration::from_millis(10));
+            // One window carrying both: the config edit asks for the rebuild that will be
+            // declined, and the body edit is the bystander whose delivery it consumes.
+            write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
+            write(
+                root,
+                "CommonModules/Сервер/Ext/Module.bsl",
+                "&НаСервере\nФункция Считать() Экспорт Возврат 42; КонецФункции\n",
+            );
+            // Both needles are counted across one draining loop rather than by two calls
+            // to `wait_for_delivery`: that helper advances the cursor past everything it
+            // drained, so the first call would consume the delivery the second is waiting
+            // for and the setup would fail for a reason that is not the subject.
+            let (mut config_seen, mut body_seen) = (false, false);
+            for _ in 0..300 {
+                let batch = hub.drain(observer);
+                observer = batch.cursor;
+                for entry in &batch.entries {
+                    let path = entry.raw.to_string_lossy();
+                    config_seen |= path.contains("bsl-analyzer.toml");
+                    body_seen |= path.contains("Module.bsl");
+                }
+                if config_seen && body_seen {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                config_seen && body_seen,
+                "the hub delivered the config edit and the body edit"
+            );
+
+            // Observed through the generation, not through the file text: a resident whose
+            // recorded revision no longer matches disk refuses to hand its text over at all
+            // (`file_text revision mismatch`), so the very state under test would panic the
+            // probe instead of failing it. Applying a body edit bumps the generation, and
+            // nothing else in this window can: the config rebuild is declined, and the
+            // hidden directory is unchanged.
+            let generation_before = raw_generation(&state);
+            let mut landed = false;
+            for _ in 0..200 {
+                let _ = state.read(|_, _| ());
+                if raw_generation(&state) > generation_before {
+                    landed = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(landed, "the body edit the declined rebuild consumed is found again");
+            open_dir(&closed);
         }
 
         /// The reconciler charges every hub consumer for a miss, so it must only charge
