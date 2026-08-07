@@ -3177,9 +3177,9 @@ fn collect_active_embedding_keys(
 /// Counts visible files per collection with one server-side aggregate instead of
 /// materializing every visible `snapshot_files` row over the wire (25k+ rows on large
 /// corpora) just to count them in Rust. The aggregate mirrors the visibility rules of
-/// `materialize_visible_snapshot_file_map`: the first occurrence of a `(collection, path)`
-/// key in child-first ancestry order wins, and on a position tie a deletion shadows a file
-/// published by the same snapshot (`is_deletion DESC`).
+/// `materialize_visible_snapshot_file_map`: the first occurrence of a
+/// `(collection, root_id, path)` key in child-first ancestry order wins, and on a position tie
+/// a deletion shadows a file published by the same snapshot (`is_deletion DESC`).
 fn effective_snapshot_summary(
     client: &mut impl GenericClient,
     adapter: &PostgresBaselineAdapter,
@@ -4659,6 +4659,105 @@ mod tests {
             vec![CONFIGURATION_ROOT_ID.to_owned(), "Расш".to_owned()],
             "a manifest that flattens both files onto the configuration makes the consumer \
              compare an extension's file against the configuration's fingerprint"
+        );
+    }
+
+    /// The collector does not mistake a live vector for an orphan on a rooted corpus.
+    ///
+    /// This is the other half of a connection that is invisible where either half is written:
+    /// the collector rebuilds live keys from `sf.path` with NO root, which is correct only
+    /// because the embedding key ignores the root. Whoever adds the root to the recipe breaks
+    /// the collector in silence, and the price is deleting vectors that are in use — expensive
+    /// to recompute and, until recomputed, semantic search answers nothing for those files.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn the_collector_keeps_the_vectors_of_a_rooted_corpus() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("gc");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        const TEXT: &str = "Процедура Общий() КонецПроцедуры";
+        const OWN_PATH: &str = "CommonModules/ТолькоРасширение/Ext/Module.bsl";
+        const OWN_TEXT: &str = "Процедура ТолькоРасширение() КонецПроцедуры";
+        let configuration = indexed_document("code", PATH, "Общий", 1, "hash-один", TEXT);
+        let extension = IndexedDocument { root_id: "Расш".to_owned(), ..configuration.clone() };
+        // A file living ONLY under a non-empty root. Without it this test cannot see the root
+        // leaking into the key at all: the configuration's root is the empty string, so any
+        // recipe that mixes it in leaves that file's key byte-for-byte unchanged, and a
+        // fixture of shared files alone stays green for a collector that reads the root.
+        let extension_only = IndexedDocument {
+            root_id: "Расш".to_owned(),
+            path: OWN_PATH.to_owned(),
+            symbol_name: "ТолькоРасширение".to_owned(),
+            content_hash: "hash-два".to_owned(),
+            text: OWN_TEXT.to_owned(),
+            ..configuration.clone()
+        };
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("snap-gc".to_owned(), CorpusId::WorkspaceCode),
+                &SnapshotPublishMetadata::default(),
+                &[configuration.clone(), extension, extension_only.clone()],
+            )
+            .unwrap();
+
+        let live_key = crate::document::semantic_key_from_parts(
+            PATH,
+            &configuration.kind,
+            &configuration.symbol_name,
+            "",
+            TEXT,
+        );
+        let extension_only_key = crate::document::semantic_key_from_parts(
+            OWN_PATH,
+            &extension_only.kind,
+            &extension_only.symbol_name,
+            "",
+            OWN_TEXT,
+        );
+        adapter
+            .store_embeddings(
+                "model",
+                4,
+                &[
+                    (live_key.clone(), vec![0.1, 0.2, 0.3, 0.4]),
+                    (extension_only_key.clone(), vec![0.5, 0.6, 0.7, 0.8]),
+                ],
+            )
+            .unwrap();
+        // Positive control: without a key that MUST be collected, this test is green for a
+        // collector that deletes nothing at all.
+        adapter
+            .store_embeddings("model", 4, &[("ключ-сироты".to_owned(), vec![0.4, 0.3, 0.2, 0.1])])
+            .unwrap();
+
+        let report = adapter.garbage_collect(true).unwrap();
+
+        assert_eq!(report.deleted_semantic_embeddings, 1, "exactly the orphan must go: {report:?}");
+        let survivors: Vec<String> = adapter
+            .connect()
+            .unwrap()
+            .query(
+                &format!("SELECT embedding_key FROM {schema}.semantic_embeddings ORDER BY 1"),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect();
+        let mut expected = vec![live_key, extension_only_key];
+        expected.sort();
+        assert_eq!(
+            survivors, expected,
+            "both vectors are live: one for a file published under two roots, one for a file \
+             that exists only under the extension"
         );
     }
 
