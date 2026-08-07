@@ -195,10 +195,57 @@ impl PostgresBaselineAdapter {
             return Err(SearchError::StorageNotInitialized { schema: self.schema.clone() });
         }
 
+        self.check_carriers_key_by_root(&mut client)?;
+
         if let Ok(mut verified_at) = self.storage_verified_at.lock() {
             *verified_at = Some(Instant::now());
         }
         Ok(())
+    }
+
+    /// Every mandatory carrier of file identity must have the root IN ITS KEY.
+    ///
+    /// Asking whether the column exists would be weaker than needed, and not in theory: after a
+    /// failure between `DROP CONSTRAINT` and `ADD PRIMARY KEY` the column is already there while
+    /// the key is not, and such a table would pass as healthy. Migration through this build
+    /// makes that state unreachable, but readiness also answers for schemas brought to it by
+    /// another hand.
+    ///
+    /// `serving_semantic` is deliberately absent: it is optional — a database without the
+    /// `vector` extension is fully usable for everything else — and it is keyed by the root in a
+    /// separate step.
+    fn check_carriers_key_by_root(
+        &self,
+        client: &mut PgPooledConnection,
+    ) -> Result<(), SearchError> {
+        const ROOTED_CARRIERS: [&str; 3] =
+            ["snapshot_files", "snapshot_deletions", "serving_lexical"];
+        let unrooted: Vec<String> = client
+            .query(
+                "SELECT carrier FROM unnest($2::TEXT[]) AS carrier
+                  WHERE NOT EXISTS (
+                      SELECT 1
+                        FROM pg_constraint c
+                        CROSS JOIN LATERAL unnest(c.conkey) AS k(attnum)
+                        JOIN pg_attribute a
+                          ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+                       WHERE c.contype = 'p'
+                         AND c.conrelid = to_regclass($1 || '.' || carrier)
+                         AND a.attname = 'root_id'
+                  )
+                  ORDER BY carrier",
+                &[&self.schema, &ROOTED_CARRIERS.as_slice()],
+            )?
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect();
+
+        if unrooted.is_empty() {
+            return Ok(());
+        }
+        Err(SearchError::StorageNotInitialized {
+            schema: format!("{}; unrooted key on {}", self.schema, unrooted.join(", ")),
+        })
     }
 
     pub fn get_schema_version(&self) -> Result<Option<i32>, SearchError> {
@@ -4071,7 +4118,38 @@ mod tests {
                  CREATE INDEX idx_{schema}_snapshot_files_snapshot_path
                      ON {schema}.snapshot_files (snapshot_id, collection, path);
                  CREATE INDEX idx_{schema}_snapshot_deletions_snapshot_path
-                     ON {schema}.snapshot_deletions (snapshot_id, collection, path);"
+                     ON {schema}.snapshot_deletions (snapshot_id, collection, path);
+                 CREATE TABLE {schema}.content_objects (
+                     content_hash TEXT PRIMARY KEY,
+                     text TEXT NOT NULL
+                 );
+                 CREATE TABLE {schema}.semantic_embeddings (
+                     embedding_key TEXT NOT NULL,
+                     model_id TEXT NOT NULL,
+                     dimension INTEGER NOT NULL,
+                     embedding BYTEA NOT NULL,
+                     PRIMARY KEY (embedding_key, model_id, dimension)
+                 );
+                 CREATE TABLE {schema}.file_object_items (
+                     file_object_id TEXT NOT NULL
+                         REFERENCES {schema}.file_objects(id) ON DELETE CASCADE,
+                     ordinal INTEGER NOT NULL,
+                     symbol_name TEXT NOT NULL,
+                     kind TEXT NOT NULL,
+                     line_start INTEGER NOT NULL,
+                     line_end INTEGER NOT NULL,
+                     content_hash TEXT NOT NULL
+                         REFERENCES {schema}.content_objects(content_hash) ON DELETE RESTRICT,
+                     PRIMARY KEY (file_object_id, ordinal)
+                 );
+                 CREATE TABLE {schema}.snapshot_heads (
+                     corpus TEXT NOT NULL,
+                     branch TEXT NOT NULL,
+                     snapshot_id TEXT NOT NULL
+                         REFERENCES {schema}.snapshots(id) ON DELETE CASCADE,
+                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                     PRIMARY KEY (corpus, branch)
+                 );"
             ))
             .unwrap();
     }
@@ -4229,6 +4307,79 @@ mod tests {
             Some(1),
             "a rolled-back migration must not claim the new version"
         );
+    }
+
+    /// A build that knows roots refuses a pre-root schema by name, and stops refusing once the
+    /// schema is migrated.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_pre_root_schema_is_refused_by_name_until_it_is_migrated() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("version");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        raise_pre_root_schema(&adapter, &schema);
+
+        let error = adapter.check_storage_readiness().unwrap_err();
+        assert!(
+            matches!(error, crate::SearchError::SchemaVersionMismatch { actual: Some(1), .. }),
+            "a pre-root schema must be named, not met with a raw SQL error: {error}"
+        );
+
+        adapter.migrate_storage().unwrap();
+
+        adapter.check_storage_readiness().expect("a migrated schema must be accepted");
+    }
+
+    /// Readiness refuses a carrier whose key lost the root, even though the column is still
+    /// there and the table still has a key.
+    ///
+    /// That exact state is what makes this a control rather than a formality: an implementation
+    /// checking "is the column present" and one checking "is there any key at all" both refuse a
+    /// dropped column and a keyless table, so those inputs would be green for the very
+    /// implementations this test exists to tell apart.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn readiness_refuses_a_carrier_whose_key_lost_the_root() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("keyless");
+        let config = ExternalBaselineConfig::postgres(url).with_schema(&schema);
+        let adapter = PostgresBaselineAdapter::new(config.clone()).unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        raise_pre_root_schema(&adapter, &schema);
+        adapter.migrate_storage().unwrap();
+
+        {
+            let mut client = adapter.connect().unwrap();
+            client
+                .batch_execute(&format!(
+                    "ALTER TABLE {schema}.snapshot_files
+                         DROP CONSTRAINT snapshot_files_pkey;
+                     ALTER TABLE {schema}.snapshot_files
+                         ADD PRIMARY KEY (snapshot_id, collection, path);"
+                ))
+                .unwrap();
+        }
+        assert!(
+            primary_key_columns(&adapter, &format!("{schema}.snapshot_files"))
+                .contains(&"snapshot_id".to_owned()),
+            "the tampered table must still have a key, or weak implementations pass too"
+        );
+
+        // A fresh adapter: a successful check is cached for a minute, and the one above warmed it.
+        let cold = PostgresBaselineAdapter::new(config).unwrap();
+        let error = cold.check_storage_readiness().unwrap_err();
+
+        assert!(
+            error.to_string().contains("snapshot_files"),
+            "the refusal must name the carrier that lost the root: {error}"
+        );
+        assert!(!error.is_retryable(), "a schema this build cannot serve is terminal: {error}");
     }
 
     /// Re-running the migration is a genuine no-op, proved by object identity.
