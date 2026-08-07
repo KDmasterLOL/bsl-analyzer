@@ -39,6 +39,11 @@ pub(crate) fn status(
     if let Some(files) = report.files {
         body["files"] = json!(files);
     }
+    // Assembled field by field, so a new one has to be added here explicitly or the
+    // internal report is right while nothing shows outside.
+    if let Some(unread) = report.unread_files {
+        body["unread_files"] = json!(unread);
+    }
     if let Some(ms) = report.elapsed_ms {
         body["elapsed_ms"] = json!(ms);
     }
@@ -91,6 +96,7 @@ mod tests {
             state: "ready",
             generation: 3,
             files: Some(17),
+            unread_files: Some(0),
             reload: "none",
             error: None,
             elapsed_ms: None,
@@ -145,6 +151,7 @@ mod tests {
             state: "failed",
             generation: 0,
             files: None,
+            unread_files: None,
             reload: "none",
             error: Some("builder panicked".to_owned()),
             elapsed_ms: None,

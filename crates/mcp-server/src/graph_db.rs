@@ -14,6 +14,7 @@
 //! [`hir::graph_index`], byte-identical to the ids the in-memory serving path
 //! emits, so ids an agent holds survive the in-memory → SQLite switch.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,7 +50,11 @@ use crate::graph::input::{build_source_root, db_for_files};
 /// a pre-dependency binary must be rejected and rebuilt. Version 15 records the
 /// extension-topology fingerprint (`topology_fp`) in the freshness meta, so a cached
 /// graph without it can never be mistaken for topology-fresh.
-pub(crate) const SCHEMA_VERSION: u32 = 15;
+// 16: `meta` gained `unread_paths` — the modules whose bytes could not be read when
+// the artefact was built. An older artefact has no such key, and reading its absence
+// as "nothing was unread" would certify a graph built partly blind, so the bump
+// routes it to a rebuild through the existing mismatch path.
+pub(crate) const SCHEMA_VERSION: u32 = 16;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a
@@ -411,6 +416,31 @@ impl GraphDbWriter {
     }
 }
 
+/// Persist the modules whose bytes could not be read, as a JSON array under one
+/// `meta` key.
+///
+/// PATHS, not a count: the patch has to compute a union with what the artefact
+/// already holds, and cardinalities cannot be unioned — an inherited hole that healed
+/// and a freshly unreadable module both read as "1", while the truth is 2.
+pub(crate) fn write_unread_paths(
+    conn: &rusqlite::Connection,
+    unread: &BTreeSet<PathBuf>,
+) -> anyhow::Result<()> {
+    let list: Vec<String> = unread.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('unread_paths', ?1)",
+        rusqlite::params![serde_json::to_string(&list)?],
+    )?;
+    Ok(())
+}
+
+/// The modules an artefact recorded as unreadable when it was built or last patched.
+pub(crate) fn read_unread_paths(conn: &rusqlite::Connection) -> Vec<String> {
+    let raw: Option<String> =
+        conn.query_row("SELECT value FROM meta WHERE key = 'unread_paths'", [], |r| r.get(0)).ok();
+    raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()).unwrap_or_default()
+}
+
 /// Build the whole-workspace call graph straight into a fresh SQLite file at
 /// `out_path`, in RAM-bounded batches. The in-memory graph does not fit on large
 /// configurations (a 25k-module ERP blows past 8 GB in a single database), so this
@@ -425,7 +455,9 @@ impl GraphDbWriter {
 /// size plus that index, not by the whole config.
 ///
 /// Returns the build tally; node/edge counts in the database are recorded in its
-/// `meta` table by [`GraphDbWriter::finalize`].
+/// `meta` table by [`GraphDbWriter::finalize`], and the paths whose bytes could not be
+/// read go beside them under `unread_paths` — the artefact carries its own gaps, so no
+/// caller has to thread them through.
 pub(crate) fn build_graph_database(
     project: &crate::graph::ProjectSnapshot,
     universe: &crate::graph::universe::ScannedUniverse,
@@ -665,6 +697,11 @@ fn build_graph_database_inner(
     let _watchdog =
         spawn_build_watchdog(Arc::clone(&ticker), out_path.parent().map(Path::to_path_buf));
 
+    // A SET, not a counter: `open_batch` is called once per batch per pass, and the
+    // index pass alone re-opens every module, so a file that cannot be read would be
+    // counted many times over.
+    let mut unread: BTreeSet<PathBuf> = BTreeSet::new();
+
     // Scope the closures so their borrows end before `finalize`. `open_batch`
     // loads only the batch's texts (sharing the resident source root + config);
     // `sink` persists the freshly-encoded rows (the sole `&mut writer` borrow).
@@ -672,7 +709,10 @@ fn build_graph_database_inner(
         let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
             let batch_files: Vec<(FileId, PathBuf)> =
                 batch.iter().map(|m| (m.file_id, file_paths[&m.file_id].clone())).collect();
-            db_for_files(&source_root, &batch_files, &project.configs, Some(&config_cache))
+            let loaded =
+                db_for_files(&source_root, &batch_files, &project.configs, Some(&config_cache));
+            unread.extend(loaded.unread);
+            loaded.db
         };
         let mut sink = |nodes: &[NodeRow],
                         edges: &[EdgeRow]|
@@ -723,6 +763,16 @@ fn build_graph_database_inner(
     writer.write_unresolved_calls(&summary.unresolved_calls)?;
 
     writer.finalize(meta)?;
+    // Written by the BUILDER, not by whoever calls it. `finalize` stamps
+    // `schema_version`, and the contract that an absent key means "nothing was
+    // unread" rests on that version gating out older artefacts — so any caller who
+    // forgot to add the key would produce a current-version artefact certifying a
+    // graph it built blind. The set is born in this function; it is recorded here.
+    {
+        let conn = rusqlite::Connection::open(out_path)
+            .with_context(|| format!("reopening {} to record unread paths", out_path.display()))?;
+        write_unread_paths(&conn, &unread)?;
+    }
     Ok(summary)
 }
 
@@ -971,10 +1021,16 @@ pub(crate) fn update_graph_database_bodies(
 
     let source_root = build_source_root(files);
     let config_cache = std::sync::Arc::new(ide::GraphConfigCache::default());
+    // The patch's own report covers the WHOLE universe, not just `changed`: the
+    // index pass opens `all_modules` through this same closure.
+    let mut unread: BTreeSet<PathBuf> = BTreeSet::new();
     let mut open_batch = |batch: &[ModuleId]| -> RootDatabaseImpl {
         let batch_files: Vec<(FileId, PathBuf)> =
             batch.iter().map(|m| (m.file_id, file_paths[&m.file_id].clone())).collect();
-        db_for_files(&source_root, &batch_files, &project.configs, Some(&config_cache))
+        let loaded =
+            db_for_files(&source_root, &batch_files, &project.configs, Some(&config_cache));
+        unread.extend(loaded.unread);
+        loaded.db
     };
 
     // The reprojection's index pass runs the same guarded batch runners as a full
@@ -1127,6 +1183,35 @@ pub(crate) fn update_graph_database_bodies(
             )?;
         }
 
+        // The artefact's hole set changes ONLY for the modules this patch rewrote —
+        // the filter is needed on both sides, and for the same reason. A module's rows
+        // are restored, or dropped, solely by the pass that lowered it: an inherited
+        // hole that merely became readable still has no rows here, and a module that
+        // went dark while nobody edited it still has the rows the build left. Recording
+        // the latter would claim its rows are absent when they are only stale, and
+        // nothing could ever take it back out — the subtraction releases a path only
+        // when a later patch rewrites it, and a module nobody edits is never rewritten.
+        // (That such a module is even a candidate is not an accident of `changed`: the
+        // reprojection's index pass opens the WHOLE universe through the same loader,
+        // so `unread` reports far more than this patch touched.)
+        //
+        // Keyed by the canonical spelling `changed_paths` carries, NOT by the
+        // '/'-normalised `nodes.file` spelling: the unread paths are raw `PathBuf`s,
+        // and on Windows the two differ.
+        {
+            let rewritten: std::collections::HashSet<String> =
+                changed_paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            let mut carried: BTreeSet<PathBuf> = read_unread_paths(&tx)
+                .into_iter()
+                .filter(|p| !rewritten.contains(p))
+                .map(PathBuf::from)
+                .collect();
+            carried.extend(
+                unread.iter().filter(|p| rewritten.contains(p.to_string_lossy().as_ref())).cloned(),
+            );
+            write_unread_paths(&tx, &carried)?;
+        }
+
         // Refresh the reverse index of unresolved calls for the reprojected modules:
         // drop their old rows, insert their fresh ones. Unchanged modules' rows stay.
         for nfile in &changed_files {
@@ -1219,7 +1304,9 @@ pub fn recompute_module_profiles(
 
     let batch_files: Vec<(FileId, PathBuf)> =
         changed.iter().map(|(m, p)| (m.file_id, p.clone())).collect();
-    let db = db_for_files(&source_root, &batch_files, &project.configs, None);
+    // Profiling only compares signature hashes; the unread report belongs to the
+    // passes that publish rows, not here.
+    let db = db_for_files(&source_root, &batch_files, &project.configs, None).db;
     let modules: Vec<ModuleId> = changed.iter().map(|(m, _)| *m).collect();
     let index = GraphIndex::build(&db, &modules);
 

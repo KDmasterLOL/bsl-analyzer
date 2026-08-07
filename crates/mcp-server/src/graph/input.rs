@@ -78,6 +78,19 @@ pub(crate) fn enumerate_bsl_files(project: &ProjectSnapshot) -> Vec<(FileId, Pat
 
 pub(crate) use ide_host_core::build_source_root;
 
+/// A loaded batch database together with the paths whose bytes could not be read.
+///
+/// The report exists because an unreadable file is registered with empty text and is
+/// then indistinguishable from an empty module: every consumer downstream would erase
+/// that module's knowledge on a text nobody could read. Callers accumulate `unread`
+/// into a SET — one batch is opened many times per build, so a per-call count would
+/// multiply.
+#[must_use]
+pub(crate) struct BatchLoad {
+    pub(crate) db: RootDatabaseImpl,
+    pub(crate) unread: Vec<PathBuf>,
+}
+
 /// Build a batch database that shares the whole-workspace `source_root` (so any
 /// target is addressable by path through the module index) but loads text only for
 /// `batch_files` — the only modules this database lowers.
@@ -93,25 +106,30 @@ pub(crate) fn db_for_files(
     batch_files: &[(FileId, PathBuf)],
     configs: &ide::WorkspaceConfigsSnapshot,
     config_cache: Option<&Arc<ide::GraphConfigCache>>,
-) -> RootDatabaseImpl {
+) -> BatchLoad {
     let mut db = RootDatabaseImpl::default();
     if let Some(cache) = config_cache {
         db.set_graph_config_cache(Arc::clone(cache));
     }
     db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
+    let mut unread = Vec::new();
     for (file_id, path) in batch_files {
         db.set_file_source_root(*file_id, GRAPH_SOURCE_ROOT);
         match std::fs::read_to_string(path) {
             Ok(text) => db.set_file_text(*file_id, &text),
             Err(e) => {
                 tracing::warn!(path = %path.display(), "graph scan: read failed: {e}");
+                // The empty overlay is load-bearing, not leniency: without a text
+                // input `file_text_query` re-reads from disk and panics. What changes
+                // is that the substitution stops being silent.
                 db.set_file_text(*file_id, "");
+                unread.push(path.clone());
             }
         }
     }
     db.set_workspace_configs_snapshot(configs.clone());
     ide::warm_batch_config_roots(&db, batch_files);
-    db
+    BatchLoad { db, unread }
 }
 
 /// Like [`db_for_files`] but disk-backed: registers each file's content revision
@@ -132,15 +150,18 @@ pub(crate) fn db_for_files_lazy(
     all_files: &[(FileId, PathBuf)],
     configs: &ide::WorkspaceConfigsSnapshot,
     config_cache: Option<&Arc<ide::GraphConfigCache>>,
-) -> RootDatabaseImpl {
+) -> BatchLoad {
     let mut db = RootDatabaseImpl::default();
     if let Some(cache) = config_cache {
         db.set_graph_config_cache(Arc::clone(cache));
     }
     db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
-    ide_host_core::register_files_disk_backed(&mut db, GRAPH_SOURCE_ROOT, all_files);
+    let unread = ide_host_core::register_files_disk_backed(&mut db, GRAPH_SOURCE_ROOT, all_files)
+        .into_iter()
+        .map(|(path, _err)| path)
+        .collect();
     db.set_workspace_configs_snapshot(configs.clone());
-    db
+    BatchLoad { db, unread }
 }
 
 /// Walk the configuration source and extension directories, load every `.bsl`
@@ -154,6 +175,6 @@ pub(super) fn load_workspace_db(
     let project = ProjectSnapshot::load(workspace_root);
     let files = enumerate_bsl_files(&project);
     let source_root = build_source_root(&files);
-    let db = db_for_files(&source_root, &files, &project.configs, None);
-    Ok((db, files.len()))
+    let loaded = db_for_files(&source_root, &files, &project.configs, None);
+    Ok((loaded.db, files.len()))
 }

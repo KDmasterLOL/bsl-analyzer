@@ -468,6 +468,7 @@ impl GraphState {
         let report = |state: &'static str| GraphStatusReport {
             state,
             files: None,
+            unread_files: None,
             revision: None,
             stale: None,
             reload: None,
@@ -483,6 +484,7 @@ impl GraphState {
                     let freshness = self.freshness(&snapshot);
                     GraphStatusReport {
                         files: Some(files),
+                        unread_files: Some(snapshot.unread_files()),
                         revision: Some(freshness.revision),
                         stale: Some(freshness.stale),
                         reload: Some(freshness.reload),

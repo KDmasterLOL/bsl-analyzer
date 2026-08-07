@@ -152,6 +152,9 @@ struct CallHierarchyBuildContext {
     config_paths: Vec<(Option<String>, PathBuf)>,
     config_cache: Arc<ide::GraphConfigCache>,
     workspace_root: PathBuf,
+    /// Modules no pass could read. Non-empty fails the run: a measurement over a
+    /// silently smaller graph is not a measurement of this workspace.
+    unread: Arc<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>>,
 }
 
 pub(crate) fn boot(source_dir: &Path, boot_budget_ms: u64) -> Result<BenchEnv, RunError> {
@@ -1008,6 +1011,19 @@ pub(crate) fn execute_once(
             .map_err(|err| RunError::Other(format!("call hierarchy index build failed: {err}")))?;
             let build_duration_ns = built.elapsed.as_nanos() as u64;
             let observation = call_hierarchy_index_observation(&built, &context, *batch_size)?;
+            // Checked AFTER both passes, so a file that became unreadable between them
+            // fails the run exactly like one that was unreadable from the start.
+            let unread = context.unread.lock().expect("bench unread set is never poisoned");
+            if !unread.is_empty() {
+                return Err(RunError::Other(format!(
+                    "call hierarchy index build read {} module(s) as empty because their bytes \
+                     could not be read; the measurement would cover a smaller graph than the \
+                     workspace: {}",
+                    unread.len(),
+                    unread.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                )));
+            }
+            drop(unread);
             Ok((build_duration_ns, observation))
         }
         FeatureSpec::InlayHints { range } => {
@@ -1189,9 +1205,19 @@ fn call_hierarchy_build_context(
         config_paths: db.all_config_paths(),
         config_cache: Arc::new(ide::GraphConfigCache::default()),
         workspace_root: env.workspace_root.clone(),
+        unread: Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
     })
 }
 
+/// Opens one batch and RECORDS the modules whose bytes could not be read, into the
+/// shared set on `context`.
+///
+/// A module registered with empty text lowers to no methods at all, so a measurement
+/// taken over it silently reports a smaller, faster graph than the workspace really
+/// has — the run would look better precisely because it analysed less. The set is
+/// shared rather than returned because both passes open batches (the build closure
+/// and the observation below), and a per-pass report would miss whichever pass the
+/// file became unreadable in.
 fn open_call_hierarchy_batch(
     context: &CallHierarchyBuildContext,
     batch: &[ide::ModuleId],
@@ -1203,8 +1229,12 @@ fn open_call_hierarchy_batch(
     let mut db = ide::RootDatabaseImpl::default();
     db.set_graph_config_cache(Arc::clone(&context.config_cache));
     db.set_source_root(context.source_root_id, context.source_root.clone());
-    let _unreadable =
+    let unreadable =
         ide_host_core::register_files_disk_backed(&mut db, context.source_root_id, &batch_files);
+    if !unreadable.is_empty() {
+        let mut seen = context.unread.lock().expect("bench unread set is never poisoned");
+        seen.extend(unreadable.into_iter().map(|(path, _err)| path));
+    }
     db.set_all_config_paths(context.config_paths.clone());
     ide::warm_batch_config_roots(&db, &batch_files);
     db

@@ -99,6 +99,15 @@ impl DiagnosticsState {
         // that can notice it.
         self.check_scope_ref_drift(&root);
 
+        // Holes are retried on EVERY window, ahead of every classifier — including the
+        // forced-scan escape hatch below, which returns early. Neither classifier can
+        // find them: the drift fingerprint is `(mtime, len)` only, so a file that came
+        // back readable under the same stat is no drift at all, and with a healthy hub
+        // there is no scan to re-add it either. Their own list is the only mechanism
+        // that heals them, so skipping it in the window that asked for the MOST
+        // thorough disk reconciliation would be exactly backwards.
+        self.retry_holes();
+
         // The `metadata object` miss escape hatch forces a scan regardless of hub health.
         if self.force_scan.swap(false, Ordering::SeqCst) {
             self.poll_drift_via_scan(&root);
@@ -119,6 +128,106 @@ impl DiagnosticsState {
             _ => {
                 self.poll_drift_via_scan(&root);
             }
+        }
+    }
+
+    /// Re-read every held hole; serve the ones that came back and drop the ones that
+    /// vanished. Cheap in the normal case — the list is empty.
+    fn retry_holes(&self) {
+        let admits = {
+            let inner = lock_recover(&self.inner);
+            let Some(resident) = inner.resident.as_ref() else { return };
+            if resident.holes.is_empty() {
+                return;
+            }
+            resident.holes.values().any(|o| *o == super::resident::HoleOrigin::Pending)
+        };
+        // Throttled on the same interval as the scan beside it, and for the same
+        // reason. A retry is NOT cheap: `read_disk_text` is `read_to_string`, so an
+        // unreadable file is read WHOLE into memory before its bytes fail the UTF-8
+        // check, and the cost is paid per hole. `poll_drift` runs on every request
+        // (`diagnostics file`, `workspace`, `symbol_info`, the search prefetch's
+        // `catch_up`), so an unthrottled retry would put a full re-read of every hole
+        // on the hot path of a workspace whose normal state, for this node, is holes.
+        // Healing is not urgent — the next window is soon enough.
+        {
+            let mut last = lock_recover(&self.last_hole_retry);
+            if let Some(at) = *last {
+                if at.elapsed() < self.drift_interval {
+                    return;
+                }
+            }
+            *last = Some(Instant::now());
+        }
+        // Asked BEFORE the lock, like the drain does: `resident_config_is_current`
+        // takes the same mutex, and asking it under `apply` would deadlock rather
+        // than refuse. Asked ONLY when something can be admitted — it parses the
+        // config and rediscovers extensions, and `poll_drift` runs on every read
+        // (the scan beside it is throttled precisely because of this cost).
+        // Returning a file whose admission was already asserted needs no gate.
+        //
+        // "Nothing to admit" therefore answers NO, not yes. The lock is released
+        // between the sample and the apply, so a concurrent request can open a
+        // `Pending` hole in the gap — and a gate that was never asked must not let it
+        // through. Admitted holes ignore this answer, so they still heal; a newborn
+        // waits for the next window, which does ask.
+        let config_is_current = admits && self.resident_config_is_current();
+
+        let mut rescope: Option<(PathBuf, String)> = None;
+        {
+            let mut inner = lock_recover(&self.inner);
+            if inner.reload == ReloadState::Running {
+                return;
+            }
+            let Inner {
+                resident: Some(resident), stats, generation, baseline_epoch, status, ..
+            } = &mut *inner
+            else {
+                return;
+            };
+            let (healed, vanished) =
+                super::resident::retry_resident_holes(resident, config_is_current);
+            if healed.is_empty() && vanished.is_empty() {
+                return;
+            }
+            // Healing changed the bytes this file serves, so its baseline entry moves
+            // with it — to the fingerprint taken BEFORE the read, the one describing
+            // the text actually applied.
+            for (key, fp) in &healed {
+                match fp {
+                    Some(fp) => {
+                        stats.insert(key.clone(), *fp);
+                    }
+                    None => {
+                        stats.remove(key);
+                    }
+                }
+            }
+            // Gone: the key goes UNCONDITIONALLY. Re-stating it here would restore an
+            // entry for a file just taken out of service — and a recreation matching
+            // it would count as neither added nor modified, never coming back.
+            for key in &vanished {
+                stats.remove(key);
+            }
+            // Both transitions move the served file universe exactly as add/remove do,
+            // so the observable count moves with them.
+            *status = DiagnosticsStatus::Ready { files: resident.by_path.len() };
+            // `stats` moved, so the epoch moves with it — the documented contract of
+            // the field. Without it a scan snapshot taken before this point still
+            // passes the epoch check and overwrites the baseline back to its
+            // pre-heal state, re-reading the same file every window.
+            *baseline_epoch += 1;
+            *generation += 1;
+            // The vendor-diff scope was computed against the working copy this heal
+            // just changed; both existing appliers recompute for the same reason.
+            if let Some(base) = resident.diff_base.clone() {
+                rescope = Some((resident.workspace_root().to_path_buf(), base));
+            }
+        }
+        // Held a stale view of the disk; the next scan must not be compared against it.
+        *lock_recover(&self.scan) = None;
+        if let Some((root, base)) = rescope {
+            self.rescope_out_of_lock(&root, &base);
         }
     }
 
@@ -700,6 +809,14 @@ impl DiagnosticsState {
             return;
         }
 
+        // 0. Retry the holes, ahead of every classifier, exactly as `poll_drift` does.
+        //    A hole is invisible to both of them — the fingerprint is `(mtime, len)`,
+        //    so a file that came back readable under the same stat is no drift — and
+        //    this is the only path a daemon nobody queries ever walks. Without it a
+        //    client that polls `diagnostics status` alone (which reads the state
+        //    directly and never drifts) would watch `unread_files` stay at 1 forever.
+        self.retry_holes();
+
         // 1. Apply everything the hub delivered so far. Draining also clears this cursor's
         //    reconcile flag, so a degraded hub recovers once the scan below is clean. The
         //    delivered paths are remembered so they are not later mistaken for a miss.
@@ -996,7 +1113,12 @@ pub(super) fn compute_freshness(inner: &Inner, scan: Option<&OwnedScan>) -> Fres
     };
     Freshness {
         revision: inner.generation,
-        stale: drifted || inner.reload == ReloadState::Running,
+        // A held hole makes the answer incomplete even over a tree that has not
+        // drifted at all: some workspace file is not being analysed. Saying `stale`
+        // is what keeps that from being silent — it does not schedule a rebuild.
+        stale: drifted
+            || inner.reload == ReloadState::Running
+            || inner.resident.as_ref().is_some_and(|r| r.unread_count() > 0),
         reload: inner.reload.label(),
     }
 }
@@ -1208,6 +1330,377 @@ mod tests {
         assert_eq!(state.status(), DiagnosticsStatus::Disabled);
         let out = state.read(|_, _| 1usize);
         assert!(matches!(out, ResidentOutcome::Disabled));
+    }
+
+    /// Two bytes that `read_to_string` refuses under any UID, so the stand does not
+    /// depend on file permissions (which root ignores).
+    const UNREADABLE: &[u8] = &[0xFF, 0xFE];
+
+    fn mtime_of(path: &Path) -> std::time::SystemTime {
+        fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    fn restore_mtime(path: &Path, want: std::time::SystemTime) {
+        fs::File::options().write(true).open(path).unwrap().set_modified(want).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_module_leaves_service_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+        let gen0 = state.generation();
+        let module = module_path(root, "Сервер");
+
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(&module, UNREADABLE).unwrap();
+        assert!(wait_for_apply(&state, gen0), "the unreadable body is a drift move");
+
+        let filters = crate::tools::diagnostics::FileFilters {
+            min_severity: ide::SeverityBucket::Hint,
+            codes: Vec::new(),
+            range: None,
+            max_findings: 50,
+            max_output_tokens: None,
+            detailed: false,
+        };
+        let out = state.read(|resident, _| {
+            (
+                resident.file_id_for(&module),
+                resident.is_unread(&module),
+                resident.unread_count(),
+                crate::tools::diagnostics::file_findings(resident, &module, &filters, 0),
+            )
+        });
+        let ResidentOutcome::Ready((file_id, is_unread, unread, findings), fresh) = out else {
+            panic!("expected Ready")
+        };
+        assert!(file_id.is_none(), "an unreadable module is not served");
+        assert!(is_unread, "it is known, though");
+        assert_eq!(unread, 1);
+        // The distinction the node exists for: not "clean", not "not in workspace".
+        assert_eq!(findings["error"], "unreadable");
+        assert!(fresh.stale, "an unanalysed workspace file makes the answer stale");
+
+        // Positive control: the same tree with a readable body answers the opposite.
+        // The generation is sampled BEFORE the write — `generation()` polls a window
+        // itself, so sampling after it would already include the heal.
+        let gen1 = state.generation();
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(&module, "&НаСервере\nФункция Считать() Экспорт КонецФункции\n").unwrap();
+        assert!(wait_for_apply(&state, gen1), "the readable body applies");
+        let out = state
+            .read(|resident, _| (resident.file_id_for(&module).is_some(), resident.unread_count()));
+        let ResidentOutcome::Ready((served, unread), _) = out else { panic!("expected Ready") };
+        assert!(served, "control: a readable module is served");
+        assert_eq!(unread, 0, "control: no holes");
+    }
+
+    /// A body that becomes unreadable WHILE SERVING must lose its `module_file`
+    /// back-link, exactly as one that was unreadable at build time. Otherwise the same
+    /// disk state answers differently depending on when it went bad, and consumers of
+    /// a non-empty back-link over an empty symbol tree (the subscription and scheduled
+    /// job handlers) emit blocking "create the procedure" findings against innocent
+    /// files, where an empty back-link makes them return silently.
+    #[test]
+    fn a_body_that_becomes_unreadable_loses_its_back_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_common_module(
+            root,
+            "Сервер",
+            true,
+            "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+        );
+        write_common_module(root, "Клиент", false, "Процедура К() КонецПроцедуры");
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let anchor_path = module_path(root, "Клиент");
+        let out = state.read(|r, _| {
+            let anchor = r.file_id_for(&anchor_path).expect("the healthy neighbour serves");
+            r.db().resolve_common_module_files_for_file(anchor, "Сервер").len()
+        });
+        let ResidentOutcome::Ready(before, _) = out else { panic!("expected Ready") };
+        assert_eq!(before, 1, "control: a readable body HAS a back-link");
+
+        let gen0 = state.generation();
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(module_path(root, "Сервер"), UNREADABLE).unwrap();
+        assert!(wait_for_apply(&state, gen0), "the unreadable body applies as drift");
+
+        let out = state.read(|r, _| {
+            let anchor = r.file_id_for(&anchor_path).expect("the neighbour keeps serving");
+            r.db().resolve_common_module_files_for_file(anchor, "Сервер").len()
+        });
+        let ResidentOutcome::Ready(after, _) = out else { panic!("expected Ready") };
+        assert_eq!(after, 0, "a body nobody could read gets no back-link");
+    }
+
+    /// A file created ALREADY unreadable is not registered at all — and "at all" has
+    /// to include the VFS interner, which is checked directly. A weaker assertion (no
+    /// back-link, not served) passes just as well against a build that interns the
+    /// path and only then fails to read it: the back-link is blanked by the unread
+    /// filter, not by the absence of an id. That state is forbidden because the id
+    /// would have no file-set entry, and the first query through it panics.
+    #[test]
+    fn a_file_born_unreadable_is_never_interned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+        let gen0 = state.generation();
+
+        std::thread::sleep(Duration::from_millis(10));
+        write_common_module_xml(root, "Новый", true);
+        let born_bad = module_path(root, "Новый");
+        fs::create_dir_all(born_bad.parent().unwrap()).unwrap();
+        fs::write(&born_bad, UNREADABLE).unwrap();
+        assert!(wait_for_apply(&state, gen0), "the new unreadable file is drift");
+
+        let out = state.read(|r, _| {
+            let interned = r.vfs_file_id_for_test(&born_bad);
+            (interned, r.file_id_for(&born_bad).is_some(), r.unread_count())
+        });
+        let ResidentOutcome::Ready((interned, served, unread), _) = out else {
+            panic!("expected Ready")
+        };
+        assert!(interned.is_none(), "the VFS must not hold an id for a file never read");
+        assert!(!served, "and it is not served");
+        assert_eq!(unread, 1, "but it IS counted, not silently absent");
+    }
+
+    /// `diagnostics status` reads the state directly and drifts nothing, so a client
+    /// that polls only it depends entirely on the background reconciler to notice a
+    /// hole that healed. Neither classifier can: the fingerprint is `(mtime, len)`,
+    /// and a file that came back readable under the same stat is no drift at all.
+    #[test]
+    fn the_background_reconciler_notices_a_healed_hole() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let module = module_path(root, "Сервер");
+        let readable = "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры";
+        let dark = vec![0xFFu8; readable.len()];
+
+        fs::write(&module, &dark).unwrap();
+        let (state, _hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+        assert_eq!(state.status_report().unread_files, Some(1), "it loads as a hole");
+
+        // Same length, same mtime: nothing a classifier compares has moved.
+        let mtime = mtime_of(&module);
+        fs::write(&module, readable).unwrap();
+        restore_mtime(&module, mtime);
+
+        // Only the two calls a silent daemon makes — never `read`.
+        let mut healed = false;
+        for _ in 0..300 {
+            state.reconcile_tick();
+            if state.status_report().unread_files == Some(0) {
+                healed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(healed, "the reconciler must retire the hole without a single request");
+        assert_eq!(state.status_report().files, Some(1), "and hand the module back to service");
+    }
+
+    /// A hole with no registration behind it is workspace state all the same: it is
+    /// `unread_files`, it is half of `files_total`, and a non-empty list is what makes
+    /// the answer stale. Retiring it therefore moves the resident exactly as creating
+    /// it did — otherwise one `result_id` answers both "unreadable" and "not a
+    /// workspace file".
+    #[test]
+    fn retiring_a_hole_that_never_served_still_moves_the_resident() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_secs(30);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // Deliberately NOT a listing-backed body: for `CommonModules/…/Ext/Module.bsl`
+        // the substrate refresh moves the resident by itself and hides the question.
+        let newborn = root.join("Catalogs/Товары/Ext/ObjectModule.bsl");
+        fs::create_dir_all(newborn.parent().unwrap()).unwrap();
+        std::thread::sleep(FORCE_RESCAN_FLOOR + Duration::from_millis(10));
+        fs::write(&newborn, UNREADABLE).unwrap();
+        state.force_rescan();
+        let out = state.read(|r, _| r.unread_count());
+        assert!(matches!(out, ResidentOutcome::Ready(1, _)), "it is a hole that never served");
+
+        // Arm the retry throttle, so the classifier carries the removal, not the list.
+        let _ = state.read(|_, _| ());
+
+        let before = raw_generation(&state);
+        std::thread::sleep(FORCE_RESCAN_FLOOR + Duration::from_millis(10));
+        fs::remove_file(&newborn).unwrap();
+        state.force_rescan();
+        let out = state.read(|r, _| r.unread_count());
+        assert!(matches!(out, ResidentOutcome::Ready(0, _)), "and it stops being counted");
+        assert!(raw_generation(&state) > before, "the answer changed, so the revision must too");
+    }
+
+    /// The same removal reaches the resident by a SECOND route, and that route is not
+    /// the retry list: with the retry window closed, the drift classifier carries the
+    /// deletion into the ordinary removal branch — which keys off `by_path`, the one
+    /// map a hole left when it stopped serving.
+    #[test]
+    fn a_hole_the_classifier_removes_is_removed_completely() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_common_module(
+            root,
+            "Сервер",
+            true,
+            "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+        );
+        write_common_module(root, "Клиент", false, "Процедура К() КонецПроцедуры");
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        // Wide enough that the retry list stays throttled off for the rest of the test.
+        // The scan beside it is re-armed explicitly, so the classifier still runs.
+        state.drift_interval = Duration::from_secs(30);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let victim = module_path(root, "Сервер");
+        let out = state.read(|r, _| r.file_id_for(&victim));
+        let ResidentOutcome::Ready(Some(victim_id), _) = out else { panic!("serves first") };
+
+        std::thread::sleep(FORCE_RESCAN_FLOOR + Duration::from_millis(10));
+        fs::write(&victim, UNREADABLE).unwrap();
+        state.force_rescan();
+        let out = state.read(|r, _| r.is_unread(&victim));
+        assert!(matches!(out, ResidentOutcome::Ready(true, _)), "it becomes a hole first");
+
+        // Arm the retry throttle. The poll above ran the retry list while `holes` was
+        // still empty, and an empty list leaves no timestamp behind.
+        let _ = state.read(|_, _| ());
+
+        std::thread::sleep(FORCE_RESCAN_FLOOR + Duration::from_millis(10));
+        fs::remove_file(&victim).unwrap();
+        state.force_rescan();
+        let out = state.read(|r, _| (r.unread_count(), r.file_set_has_for_test(victim_id)));
+        let ResidentOutcome::Ready((unread, in_file_set), _) = out else {
+            panic!("expected Ready")
+        };
+        assert_eq!(unread, 0, "a file that is gone is not an unreadable file");
+        assert!(!in_file_set, "the file set must not still map the vanished file's id");
+    }
+
+    /// A hole that disappears from disk owes the full removal, not just its own
+    /// retirement: the file set entry and the metadata back-link outlive the hole
+    /// list otherwise, and the back-link then points at a tombstoned FileId.
+    #[test]
+    fn a_vanished_hole_is_removed_completely() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_common_module(
+            root,
+            "Сервер",
+            true,
+            "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+        );
+        write_common_module(root, "Клиент", false, "Процедура К() КонецПроцедуры");
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let victim = module_path(root, "Сервер");
+        let anchor = module_path(root, "Клиент");
+        // Captured while it still serves: after the removal the interner still answers
+        // for this path, so only the file set can say whether the removal completed.
+        let out = state.read(|r, _| r.file_id_for(&victim));
+        let ResidentOutcome::Ready(Some(victim_id), _) = out else { panic!("serves first") };
+        let gen0 = state.generation();
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(&victim, UNREADABLE).unwrap();
+        assert!(wait_for_apply(&state, gen0), "it becomes a hole first");
+
+        let gen1 = state.generation();
+        std::thread::sleep(Duration::from_millis(10));
+        fs::remove_file(&victim).unwrap();
+        assert!(wait_for_apply(&state, gen1), "removing it moves the resident again");
+
+        let out = state.read(|r, _| {
+            let anchor_id = r.file_id_for(&anchor).expect("the neighbour keeps serving");
+            (
+                r.unread_count(),
+                r.is_unread(&victim),
+                r.db().resolve_common_module_files_for_file(anchor_id, "Сервер").len(),
+                r.file_set_has_for_test(victim_id),
+            )
+        });
+        let ResidentOutcome::Ready((unread, still_hole, links, in_file_set), _) = out else {
+            panic!("expected Ready")
+        };
+        assert_eq!(unread, 0, "a file that is gone is not an unreadable file");
+        assert!(!still_hole, "and the retry list stops probing it");
+        assert_eq!(links, 0, "its back-link is gone with it");
+        // The load-bearing assertion: the other three hold even if the removal stops
+        // half-way, because a deleted file leaves metadata discovery on its own.
+        assert!(!in_file_set, "the file set must not still map the vanished file's id");
+    }
+
+    /// The single test that tells the retry list apart from ordinary drift
+    /// classification: the fingerprint is `(mtime, len)` only, so a heal that keeps
+    /// both is invisible to BOTH classifiers. Nothing but the hole list can notice it.
+    #[test]
+    fn a_hole_heals_under_an_unchanged_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let module = module_path(root, "Сервер");
+        // Exactly two bytes either way, so only the CONTENT differs.
+        fs::write(&module, UNREADABLE).unwrap();
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let out = state.read(|r, _| (r.file_id_for(&module).is_some(), r.unread_count()));
+        let ResidentOutcome::Ready((served, unread), _) = out else { panic!("expected Ready") };
+        assert!(!served, "a module unreadable at build time is not served");
+        assert_eq!(unread, 1);
+
+        // Heal with the SAME length and the SAME mtime: no drift exists to be found.
+        let before = mtime_of(&module);
+        fs::write(&module, b"//").unwrap();
+        restore_mtime(&module, before);
+        assert_eq!(mtime_of(&module), before, "the stand must not move the fingerprint");
+
+        let mut healed = false;
+        for _ in 0..100 {
+            let out = state.read(|r, _| (r.file_id_for(&module).is_some(), r.unread_count()));
+            if let ResidentOutcome::Ready((true, 0), fresh) = out {
+                assert!(!fresh.stale, "with no holes left the answer is fresh again");
+                healed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(healed, "the retry list must heal a hole no fingerprint change reveals");
     }
 
     /// Editing a `.bsl` body drifts the workspace; the next read applies an

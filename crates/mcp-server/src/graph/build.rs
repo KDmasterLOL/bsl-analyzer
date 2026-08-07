@@ -1426,6 +1426,151 @@ mod tests {
         assert_ne!(meta_string(&graph_db_path(root), "built_at"), "cached-build-sentinel");
     }
 
+    /// The graph's half of the node: it cannot PREVENT the loss (an unreadable module
+    /// yields no rows to any build), so it must not be silent about it. The artefact
+    /// records which modules it could not read, and a patch never clears an inherited
+    /// one — only a build that rewrites the module restores its rows.
+    #[test]
+    fn an_unreadable_module_is_recorded_in_the_artefact() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let blind = root.join("CommonModules/Слепой/Ext/Module.bsl");
+        fs::create_dir_all(blind.parent().unwrap()).unwrap();
+        fs::write(&blind, [0xFF, 0xFE]).unwrap();
+
+        let out = root.join(".build/bsl-graph.db");
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let meta = crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: crate::graph_db::GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        crate::graph_db::build_graph_database(&project, &universe, &out, 1, &meta)
+            .expect("graph database builds");
+
+        // The walk verdict cannot see this: `stat` needs no read permission.
+        assert!(universe.clean(), "the tree walk is clean, which is exactly the trap");
+
+        {
+            // No intermediate write: the BUILDER records the key, so an artefact is
+            // never at the current schema version while silently claiming zero holes.
+            let conn = Connection::open(&out).unwrap();
+            let stored = crate::graph_db::read_unread_paths(&conn);
+            assert!(
+                stored.iter().any(|p| p.ends_with("Слепой/Ext/Module.bsl")),
+                "the builder records the module it could not read: {stored:?}"
+            );
+            // ONE path, not one per pass: `open_batch` is called by every pass, and a
+            // counter would multiply the same file.
+            assert_eq!(stored.len(), 1);
+        }
+
+        // Positive control: the same tree, readable, records nothing.
+        fs::write(&blind, "&НаСервере\nПроцедура Пусто() Экспорт КонецПроцедуры").unwrap();
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        let out2 = root.join(".build/bsl-graph2.db");
+        crate::graph_db::build_graph_database(&project, &universe, &out2, 1, &meta)
+            .expect("graph database builds");
+        let conn = Connection::open(&out2).unwrap();
+        assert!(
+            crate::graph_db::read_unread_paths(&conn).is_empty(),
+            "control: nothing unread over a readable tree"
+        );
+    }
+
+    /// A patch may only speak about the modules it rewrote. Its index pass opens the
+    /// WHOLE universe, so it learns about holes it neither deleted nor replaced rows
+    /// for — and recording one would claim rows are absent when they are merely stale,
+    /// with no way back: the inherited set is released only for paths a later patch
+    /// rewrites, and a module nobody edits is never rewritten again.
+    #[test]
+    fn a_patch_records_only_the_holes_whose_rows_it_rewrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write_common_module(
+            root,
+            "Сосед",
+            true,
+            "&НаСервере\nПроцедура Соседняя() Экспорт КонецПроцедуры",
+        );
+        let bystander = root.join("CommonModules/Сосед/Ext/Module.bsl");
+
+        let meta = crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: crate::graph_db::GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let src = root.join(".build/bsl-graph.db");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        build_whole_graph(root, &src, 1, &meta).expect("the whole graph builds");
+        let rows_before = node_rows_for(&src, &bystander);
+        assert!(rows_before > 0, "the neighbour is in the artefact to begin with");
+
+        // The neighbour goes dark, and someone else is edited. The patch never touches
+        // the neighbour's rows — they stay exactly as the build left them.
+        fs::write(&bystander, [0xFF, 0xFE]).unwrap();
+        let edited = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        fs::write(&edited, "&НаСервере\nПроцедура Правка() Экспорт КонецПроцедуры").unwrap();
+        let out = root.join(".build/bsl-graph-patched.db");
+        update_bodies_for_test(root, &src, &out, &[edited], 1, &meta).expect("the patch applies");
+
+        let conn = Connection::open(&out).unwrap();
+        assert_eq!(
+            node_rows_for(&out, &bystander),
+            rows_before,
+            "the patch left the neighbour's rows in place"
+        );
+        assert!(
+            crate::graph_db::read_unread_paths(&conn).is_empty(),
+            "so it must not report the neighbour as a module the artefact is missing: {:?}",
+            crate::graph_db::read_unread_paths(&conn)
+        );
+        drop(conn);
+
+        // Positive control, without which the filter above could be silently swallowing
+        // every hole: the SAME unreadable module, this time inside the patch. Its rows
+        // are deleted and nothing replaces them, so now the artefact owes the record.
+        let dark = root.join(".build/bsl-graph-dark.db");
+        update_bodies_for_test(root, &out, &dark, std::slice::from_ref(&bystander), 1, &meta)
+            .expect("the patch applies over an unreadable module");
+        let conn = Connection::open(&dark).unwrap();
+        assert_eq!(node_rows_for(&dark, &bystander), 0, "its rows went with the patch");
+        assert!(
+            crate::graph_db::read_unread_paths(&conn)
+                .iter()
+                .any(|p| p.ends_with("Сосед/Ext/Module.bsl")),
+            "and a module the patch could not lower IS recorded"
+        );
+        drop(conn);
+
+        // And the record is released by the pass that restores the rows, not before.
+        fs::write(&bystander, "&НаСервере\nПроцедура Снова() Экспорт КонецПроцедуры").unwrap();
+        let healed = root.join(".build/bsl-graph-healed.db");
+        update_bodies_for_test(root, &dark, &healed, std::slice::from_ref(&bystander), 1, &meta)
+            .expect("the patch applies over the restored module");
+        let conn = Connection::open(&healed).unwrap();
+        assert!(node_rows_for(&healed, &bystander) > 0, "the rows are back");
+        assert!(
+            crate::graph_db::read_unread_paths(&conn).is_empty(),
+            "so the record goes with them"
+        );
+    }
+
+    /// Node rows the artefact holds for one module. `nodes.file` is the absolute path
+    /// with separators normalised, the spelling the encoder writes.
+    fn node_rows_for(db: &Path, module: &Path) -> i64 {
+        let key = module.to_string_lossy().replace('\\', "/");
+        let conn = Connection::open(db).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM nodes WHERE file = ?1", [key], |r| r.get(0)).unwrap()
+    }
+
     /// The streaming SQLite build must reproduce the in-memory graph: identical
     /// node-kind tallies, edge counts, durable ids, dispatch and in-degree.
     #[test]

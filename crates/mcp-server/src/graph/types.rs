@@ -67,6 +67,9 @@ pub(crate) struct GraphStatusReport {
     pub state: &'static str,
     /// Indexed `.bsl` file count (when `ready`).
     pub files: Option<usize>,
+    /// Modules the build could not read (when `ready`). They contributed no nodes and
+    /// no edges, so the graph is incomplete in a way no fingerprint reveals.
+    pub unread_files: Option<usize>,
     /// Served snapshot generation (when `ready`).
     pub revision: Option<u64>,
     /// Whether the workspace drifted on disk since the build (when `ready`).

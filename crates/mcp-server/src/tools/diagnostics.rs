@@ -165,6 +165,18 @@ pub(crate) fn file_findings(
     generation: u64,
 ) -> Value {
     let Some(file_id) = resident.file_id_for(path) else {
+        // A workspace file whose bytes could not be read is NOT "not in workspace":
+        // that answer would be a second lie about an existing file, replacing the
+        // first one ("no findings"). The two are kept apart so an agent can tell
+        // "wrong path" from "this module is unanalysed".
+        if resident.is_unread(path) {
+            return json!({
+                "error": "unreadable",
+                "detail": "workspace .bsl file exists but its bytes could not be read; \
+                           it is held out of service and re-read every drift window",
+                "path": path.to_string_lossy(),
+            });
+        }
         return json!({
             "error": "not_in_workspace",
             "detail": "path is not a resident workspace .bsl file",
@@ -328,6 +340,9 @@ pub(crate) fn workspace_findings(
         "truncated": sweep.truncated || budget_exhausted,
         "aggregates": aggregates,
     });
+    if sweep.files_unread > 0 {
+        body["files_unread"] = json!(sweep.files_unread);
+    }
     if sweep.files_out_of_scope > 0 {
         body["files_out_of_scope"] = json!(sweep.files_out_of_scope);
         body["scope_hint"] =
@@ -452,13 +467,14 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "9",
+        "schema_version": "10",
         "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
             "state": "disabled | idle | loading | ready | failed — resident lifecycle",
             "generation": "u64 — bumped on each build/reload (independent of the graph tool's revision)",
-            "files": "usize — resident .bsl count (present when ready)",
+            "files": "usize — SERVED resident .bsl count (present when ready); excludes files counted in unread_files",
+            "unread_files": "usize — workspace .bsl files that exist but could not be read (present when ready); they are held out of service, answered as unreadable, and re-read every drift window",
             "reload": "none | running | failed — background reload state",
             "elapsed_ms": "u64 — ms since the current build started (present while loading)",
             "error": "string — failure message (present when failed)",
@@ -519,7 +535,8 @@ fn schema_json() -> Value {
             "findings_ignored_by_author": "usize — findings suppressed by [analysis].ignored_authors across the sweep; present only when > 0",
             "author_hint": "string — present with findings_ignored_by_author",
             "files_swept": "usize — files actually analyzed",
-            "files_total": "usize — ALL resident files; files_swept can trail it because of the file cap (truncated) AND/OR the analysis scope (files_out_of_scope)",
+            "files_total": "usize — ALL workspace files, including ones that could not be read; files_swept can trail it because of the file cap (truncated), the analysis scope (files_out_of_scope) AND/OR unreadable bytes (files_unread)",
+            "files_unread": "usize — files counted in files_total that could not be read and so were not swept; present only when > 0",
             "files_out_of_scope": "usize — files excluded by [analysis].diff_base (no changed lines); present only when > 0",
             "scope_hint": "string — present with files_out_of_scope",
             "truncated": "bool — the file cap was hit",
@@ -527,7 +544,7 @@ fn schema_json() -> Value {
         },
         "envelope": {
             "revision": "u64 — resident-db generation the answer was computed at",
-            "stale": "bool — workspace drifted on disk since this generation",
+            "stale": "bool — this answer is not current: the workspace drifted on disk since this generation, and/or some workspace file could not be read (see unread_files)",
             "reload": "none | running | failed — background reload state",
             "result": "the action payload (or an {error} object)"
         }
@@ -563,7 +580,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "9");
+        assert_eq!(body["schema_version"], "10");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
@@ -572,6 +589,24 @@ mod tests {
         assert!(body["status_result"]["state"].is_string(), "status action advertised");
         assert!(body["finding"]["graph_id"].is_string(), "graph bridge advertised");
         assert!(body["workspace_result"]["aggregates"].is_string(), "workspace advertised");
+        // Asserting the DESCRIPTIONS, not just the version: a bumped number over an
+        // unchanged text certifies a contract the server no longer honours.
+        assert!(
+            body["status_result"]["unread_files"].is_string(),
+            "unreadable-file count advertised"
+        );
+        assert!(
+            body["workspace_result"]["files_unread"].is_string(),
+            "sweep coverage gap advertised"
+        );
+        assert!(
+            body["envelope"]["stale"].as_str().unwrap().contains("could not be read"),
+            "stale no longer means drift alone, and the contract must say so"
+        );
+        assert!(
+            body["status_result"]["files"].as_str().unwrap().contains("SERVED"),
+            "`files` and `files_total` are now different numbers"
+        );
         let sev = body["severities"].as_array().unwrap();
         assert_eq!(sev.len(), 4);
         assert!(sev.iter().any(|s| s == "error"));

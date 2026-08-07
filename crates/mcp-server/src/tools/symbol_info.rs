@@ -58,10 +58,22 @@ pub(crate) fn resolve_card(
     let position = match path {
         Some(path) => {
             let file_id = resident.file_id_for(Path::new(path)).ok_or_else(|| {
-                McpError::invalid_params(
-                    format!("'{path}' is not a resident workspace .bsl file"),
-                    None,
-                )
+                // Same split as `diagnostics file`: an existing but unreadable file
+                // gets its own answer rather than being called a non-workspace path.
+                if resident.is_unread(Path::new(path)) {
+                    McpError::invalid_params(
+                        format!(
+                            "'{path}' is a workspace .bsl file whose bytes could not be read; \
+                             it is held out of service and re-read every drift window"
+                        ),
+                        None,
+                    )
+                } else {
+                    McpError::invalid_params(
+                        format!("'{path}' is not a resident workspace .bsl file"),
+                        None,
+                    )
+                }
             })?;
             let line = line
                 .ok_or_else(|| McpError::invalid_params("'line' is required with 'path'", None))?;

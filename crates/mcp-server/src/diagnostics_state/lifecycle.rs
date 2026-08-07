@@ -14,7 +14,7 @@ use super::drift::{
     compute_freshness, config_identity, config_identity_now, reconcile_interval, ScanCache,
     DRIFT_CHECK_INTERVAL,
 };
-use super::resident::{canonical_key, DiagnosticsResident, ResidentVfs};
+use super::resident::{canonical_key, DiagnosticsResident, HoleOrigin, ResidentVfs};
 use super::types::{DiagnosticsStatus, ReloadState, ResidentOutcome, StatusReport, WatchReport};
 
 /// Drop the resident database after this long with no `diagnostics file` call, so a
@@ -85,6 +85,10 @@ pub(crate) struct DiagnosticsState {
     /// Set by [`Self::force_rescan`]: forces the next poll onto the scan path even when
     /// the hub is healthy (the `metadata object` miss escape hatch).
     pub(super) force_scan: Arc<AtomicBool>,
+    /// When the hole retry list was last walked. Throttled on `drift_interval` like
+    /// the scan, because a retry reads each hole WHOLE off disk (`read_to_string`
+    /// fails UTF-8 only after reading), and `poll_drift` runs on every request.
+    pub(super) last_hole_retry: Arc<Mutex<Option<Instant>>>,
     /// When the reconciler last ran a watchdog scan.
     pub(super) last_reconcile: Arc<Mutex<Instant>>,
     pub(super) reconcile_interval: Duration,
@@ -150,6 +154,7 @@ impl DiagnosticsState {
             change_hub: None,
             hub_cursor: Arc::new(Mutex::new(None)),
             force_scan: Arc::new(AtomicBool::new(false)),
+            last_hole_retry: Arc::new(Mutex::new(None)),
             last_reconcile: Arc::new(Mutex::new(Instant::now())),
             reconcile_interval: reconcile_interval(),
             scan_count: Arc::new(AtomicUsize::new(0)),
@@ -206,6 +211,7 @@ impl DiagnosticsState {
             state,
             generation: inner.generation,
             files,
+            unread_files: inner.resident.as_ref().map(|r| r.unread_count()),
             reload: inner.reload.label(),
             error,
             elapsed_ms: inner.loading_since.map(|t| t.elapsed().as_millis() as u64),
@@ -577,7 +583,16 @@ impl DiagnosticsState {
         // whole-workspace resident is not pinned as salsa inputs (which OOMs on a large
         // config). `file_text_query` re-reads on demand under its LRU cap — the same
         // model the LSP server and CLI `analyze` use.
-        let mut db = db_for_files_lazy(&source_root, files, &configs, None);
+        let crate::graph::input::BatchLoad { mut db, unread } =
+            db_for_files_lazy(&source_root, files, &configs, None);
+        // A file whose bytes could not be read is NOT served: it is held out of
+        // `by_path` and answered as "known but unreadable", and the retry list
+        // re-reads it every window. Its baseline fingerprint stays — the scan did
+        // parse this state of the disk, so re-adding it every window would storm.
+        // Build holes are `Admitted`: the build IS the admission for the configuration
+        // it was started for.
+        let holes: HashMap<String, HoleOrigin> =
+            unread.iter().map(|p| (canonical_key(p), HoleOrigin::Admitted)).collect();
 
         // Pre-seed the VFS with the SAME FileIds the source root uses for each `.bsl`,
         // in enumerate order, so the interner assigns id `i` to `files[i]`. The metadata
@@ -598,11 +613,19 @@ impl DiagnosticsState {
                 );
             }
         }
-        ide_host_core::bootstrap_metadata_substrate(&mut db, &vfs);
+        // The holes go in so no MDO gets a `module_file` back-link to a body nobody
+        // could read — otherwise module-level diagnostics run against empty text and
+        // conclude the module has no API.
+        let unread_bodies: ide_host_core::UnreadBodies = unread.iter().cloned().collect();
+        ide_host_core::bootstrap_metadata_substrate(&mut db, &vfs, &unread_bodies);
 
         let mut by_path = HashMap::with_capacity(files.len());
         for (file_id, path) in files {
-            by_path.insert(canonical_key(path), *file_id);
+            let key = canonical_key(path);
+            if holes.contains_key(&key) {
+                continue;
+            }
+            by_path.insert(key, *file_id);
         }
         // The drift baseline derives from the SAME scan that gave the resident its
         // files (and the config identity from the same snapshot) — a fresh walk
@@ -618,6 +641,7 @@ impl DiagnosticsState {
                 db,
                 vfs,
                 by_path,
+                holes,
                 config,
                 workspace_root: root.to_path_buf(),
                 diff_base,

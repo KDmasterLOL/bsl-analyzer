@@ -1146,6 +1146,7 @@ mod tests {
             state: "loading",
             generation: 0,
             files: None,
+            unread_files: None,
             reload: "none",
             error: None,
             elapsed_ms: Some(20),

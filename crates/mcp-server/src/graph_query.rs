@@ -228,6 +228,18 @@ impl GraphDb {
         Ok(self.meta("files")?.and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
+    /// How many modules this artefact was built (or last patched) without being able
+    /// to read. Those modules contributed no nodes and no edges, so the graph is
+    /// incomplete in a way no fingerprint comparison reveals — `stat` needs no read
+    /// permission.
+    ///
+    /// A count is derived here rather than stored, because the union the patch
+    /// computes needs the paths themselves. Absent key → 0, which is honest only
+    /// because `SCHEMA_VERSION` gates out artefacts built before the key existed.
+    pub fn unread_files(&self) -> usize {
+        crate::graph_db::read_unread_paths(&self.conn).len()
+    }
+
     fn count(&self, sql: &str) -> anyhow::Result<usize> {
         let n: i64 = self.conn.query_row(sql, [], |r| r.get(0)).context("counting graph rows")?;
         Ok(n as usize)

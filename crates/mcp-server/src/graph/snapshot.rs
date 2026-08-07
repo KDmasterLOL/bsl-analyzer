@@ -64,6 +64,17 @@ pub(crate) struct GraphSnapshot {
     pub(super) generation: u64,
     fingerprint: crate::graph_db::GraphFp,
     force_stale: bool,
+    /// Modules this artefact was built without being able to read. Makes `stale`
+    /// true — the graph is missing their nodes and edges — WITHOUT making
+    /// `wants_reload` true, since rebuilding cannot read them either.
+    unread_files: usize,
+}
+
+impl GraphSnapshot {
+    /// Modules this artefact could not read when it was built or last patched.
+    pub(crate) fn unread_files(&self) -> usize {
+        self.unread_files
+    }
 }
 
 /// A read handle checked out of (and returned to) [`GraphState::snapshot_pool`].
@@ -110,6 +121,7 @@ impl GraphState {
                 if entry.generation == published_generation {
                     let (generation, fingerprint, force_stale) =
                         (entry.generation, entry.fingerprint, entry.force_stale);
+                    let unread_files = entry.db.unread_files();
                     return Some(GraphSnapshot {
                         graph: PooledGraphDb {
                             entry: Some(entry),
@@ -118,6 +130,7 @@ impl GraphState {
                         generation,
                         fingerprint,
                         force_stale,
+                        unread_files,
                     });
                 }
             }
@@ -125,6 +138,10 @@ impl GraphState {
         let path = graph_db_path(self.workspace_root.as_deref()?);
         let graph = GraphDb::open(&path).ok()?;
         let (generation, fingerprint, force_stale) = graph.freshness_token().ok()?;
+        // Read from the artefact itself, like the freshness token beside it: an
+        // adoption path that reconstructed this from elsewhere would report "no holes"
+        // for a graph built blind.
+        let unread_files = graph.unread_files();
         // The file at this path is not necessarily the one WE published: a daemon of another
         // generation over the same workspace (see [`crate::workspace_lease`]) renames its own
         // build into place, and a build made under a different extension topology answers
@@ -154,6 +171,7 @@ impl GraphState {
             generation,
             fingerprint,
             force_stale,
+            unread_files,
         })
     }
 
@@ -164,8 +182,9 @@ impl GraphState {
     /// context.
     pub(crate) fn freshness(&self, snapshot: &GraphSnapshot) -> Freshness {
         let disk = self.current_disk_fp();
-        let stale =
-            snapshot.force_stale || disk.map(|(fp, _)| fp != snapshot.fingerprint).unwrap_or(false);
+        let stale = snapshot.force_stale
+            || snapshot.unread_files > 0
+            || disk.map(|(fp, _)| fp != snapshot.fingerprint).unwrap_or(false);
         // Read before the lock: the lease may go to disk, and the inner mutex serializes every
         // graph query. Drift is still reported (the response says `stale`), but only the daemon
         // that owns the workspace's derived caches acts on it — see [`crate::workspace_lease`].
