@@ -55,6 +55,29 @@ fn distinct_files(documents: &[bsl_search::IndexedDocument]) -> usize {
         .len()
 }
 
+/// Where an empty extension list goes for THIS project, spelled for the config file the
+/// project actually has.
+///
+/// Naming a fixed file would be worse than naming none. `ProjectConfig::load` does not merge
+/// the three conventional names — the first one found wins outright — so telling the owner of
+/// a `.bsl-analyzer.json` to create a `bsl-analyzer.toml` tells them to shadow their whole
+/// configuration, credentials included, and the next run fails somewhere else entirely.
+fn where_to_declare_no_extensions(project_root: &std::path::Path) -> String {
+    let existing =
+        project_model::CONFIG_FILE_NAMES.iter().find(|name| project_root.join(name).exists());
+    match existing {
+        // TOML keeps the source set in its own section; the JSON forms read it at top level.
+        Some(name) if name.ends_with(".toml") => {
+            format!("`extensions = []` under `[source]` in {name}")
+        }
+        Some(name) => format!("`\"extensions\": []` at the top level of {name}"),
+        None => format!(
+            "`extensions = []` under `[source]` in a new {} at the project root",
+            project_model::CONFIG_FILE_NAMES[0]
+        ),
+    }
+}
+
 /// Add the one thing a storage adapter cannot know: which knob of THIS tool put the
 /// extensions into the corpus.
 ///
@@ -66,6 +89,7 @@ fn distinct_files(documents: &[bsl_search::IndexedDocument]) -> usize {
 fn name_the_extension_opt_out(
     error: bsl_search::SearchError,
     documents: &[bsl_search::IndexedDocument],
+    project_root: &std::path::Path,
 ) -> Box<dyn Error + Send + Sync> {
     let has_roots =
         documents.iter().any(|document| document.root_id != bsl_search::CONFIGURATION_ROOT_ID);
@@ -74,9 +98,9 @@ fn name_the_extension_opt_out(
     }
     io::Error::other(format!(
         "{error}\n\nThis corpus covers extension source roots. To publish the configuration \
-         alone, declare an empty extension list for the project — `extensions = []` under \
-         `[source]` in bsl-analyzer.toml — which also turns off discovery of the conventional \
-         src/cfe/* layout."
+         alone, declare an empty extension list for the project — {} — which also turns off \
+         discovery of the conventional src/cfe/* layout.",
+        where_to_declare_no_extensions(project_root)
     ))
     .into()
 }
@@ -205,7 +229,7 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
             embedder.as_ref(),
             if has_embedder { Some(&embedding_progress) } else { None },
         )
-        .map_err(|error| name_the_extension_opt_out(error, &indexed_documents))?;
+        .map_err(|error| name_the_extension_opt_out(error, &indexed_documents, &project.root))?;
     eprintln!(
         "      Reused {} files, wrote {}, deleted {}",
         publish_report.snapshot.reused_files,
@@ -364,21 +388,60 @@ mod tests {
     /// that gets refused may have no config file to look in.
     #[test]
     fn a_refusal_over_a_corpus_with_roots_names_the_knob_that_removes_them() {
+        let dir = tempfile::tempdir().unwrap();
         let refusal = || bsl_search::SearchError::ExternalBaseline("roots unsupported".to_owned());
 
-        let named = name_the_extension_opt_out(refusal(), &[chunk_of("src/cfe/Расш")]);
+        let named = name_the_extension_opt_out(refusal(), &[chunk_of("src/cfe/Расш")], dir.path());
         assert!(
-            named.to_string().contains("extensions = []")
-                && named.to_string().contains("bsl-analyzer.toml"),
+            named.to_string().contains("extensions"),
             "the operator must be told what to change, not only what went wrong: {named}"
         );
 
-        let untouched =
-            name_the_extension_opt_out(refusal(), &[chunk_of(bsl_search::CONFIGURATION_ROOT_ID)]);
+        let untouched = name_the_extension_opt_out(
+            refusal(),
+            &[chunk_of(bsl_search::CONFIGURATION_ROOT_ID)],
+            dir.path(),
+        );
         assert!(
-            !untouched.to_string().contains("extensions = []"),
+            !untouched.to_string().contains("extensions"),
             "a failure that has nothing to do with extensions must not be answered with advice \
              about them: {untouched}"
+        );
+    }
+
+    /// The advice must land in the file the project already uses. `ProjectConfig::load` takes
+    /// the FIRST conventional name it finds and never looks at the rest, so advising a file
+    /// the project does not have is advising it to shadow the one it does — configuration
+    /// root, database credentials and all — and the next run then fails on something
+    /// unrelated.
+    ///
+    /// Checked for every name in the class, not for one of them: which file a project is
+    /// configured through is exactly the variable here.
+    #[test]
+    fn the_advice_lands_in_the_config_file_the_project_already_has() {
+        for name in project_model::CONFIG_FILE_NAMES {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(name), "").unwrap();
+
+            let advice = where_to_declare_no_extensions(dir.path());
+
+            assert!(
+                advice.contains(name),
+                "a project configured through {name} must be told to edit {name}: {advice}"
+            );
+            for other in project_model::CONFIG_FILE_NAMES.iter().filter(|other| **other != name) {
+                assert!(
+                    !advice.contains(other),
+                    "{name} is this project's config, so {other} must not be named: {advice}"
+                );
+            }
+        }
+
+        let empty = tempfile::tempdir().unwrap();
+        let advice = where_to_declare_no_extensions(empty.path());
+        assert!(
+            advice.contains(project_model::CONFIG_FILE_NAMES[0]),
+            "with no config at all, creating the preferred name shadows nothing: {advice}"
         );
     }
 

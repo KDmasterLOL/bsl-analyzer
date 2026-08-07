@@ -14,12 +14,24 @@ fn entry_of(fields: &[&str]) -> String {
     fields.iter().map(|field| format!("{}:{field}", field.len())).collect()
 }
 
+/// The identity of the reference corpus.
+///
+/// Deliberately NOT rendered through [`entry_of`], though its fields are separated the way
+/// [`fingerprint_indexed_documents`] used to be. Both producers of these documents build them
+/// from platform data: `kind` is one of three literals and `title` is `"{name} / {english}"`
+/// of a platform type or method, so moving a field boundary would take a newline inside a
+/// type name. Nothing can put one there.
+///
+/// The cost of changing it, by contrast, is real and lasting. This corpus has no manifest —
+/// its fingerprint feeds exactly one thing, the freshness line of `search status`, which
+/// compares the published value against this function recomputed locally. Any change marks a
+/// reference corpus that is in fact current as stale on every run until someone republishes
+/// it. Revisit only together with that republish, or if a caller ever feeds this arbitrary
+/// documents.
 pub fn fingerprint_documents(documents: &[Document]) -> String {
     let mut entries: Vec<String> = documents
         .iter()
-        .map(|document| {
-            entry_of(&[document.kind.as_str(), document.title.as_str(), document.body.as_str()])
-        })
+        .map(|document| format!("{}\n{}\n{}", document.kind, document.title, document.body))
         .collect();
     entries.sort();
     blake3::hash(entries.join("\n---\n").as_bytes()).to_hex().to_string()
@@ -135,28 +147,6 @@ mod tests {
             fingerprint_indexed_documents(&docs_a),
             fingerprint_indexed_documents(&docs_b),
             "the same path under a different root is a different file, so it is a different corpus"
-        );
-    }
-
-    /// Both recipes must resist the same thing, so both are pinned: a corpus fingerprint that
-    /// two different corpora can share leaves every consumer's manifest looking current after
-    /// a republish that in fact changed what the corpus holds.
-    #[test]
-    fn no_two_field_layouts_share_a_document_fingerprint() {
-        let base = Document {
-            kind: "type".to_owned(),
-            title: "Массив".to_owned(),
-            body: "\nОписание".to_owned(),
-        };
-        let boundary_moved =
-            Document {
-                title: "Массив\n".to_owned(), body: "Описание".to_owned(), ..base.clone()
-            };
-
-        assert_ne!(
-            fingerprint_documents(std::slice::from_ref(&base)),
-            fingerprint_documents(std::slice::from_ref(&boundary_moved)),
-            "two different documents must not hash alike"
         );
     }
 

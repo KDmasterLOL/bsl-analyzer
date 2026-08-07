@@ -410,11 +410,9 @@ mod tests {
     /// is the key they already have in every published baseline. So the publish goes on, and
     /// the files are there.
     ///
-    /// Walked twice — once by the configuration, once as a declared root — the file arrives
-    /// under ONE key both times, and `FileKey` deduplication drops the second copy. This is
-    /// why the publisher must not filter rejected roots out of the walk on its own: a
-    /// deduplication keyed by anything but `FileKey` would collapse two legitimately
-    /// different files living at the same relative path under two roots.
+    /// Nothing has to be deduplicated for that: the walk covers the REGISTERED roots, and a
+    /// root rejected for lying inside the configuration is not among them, so its subtree is
+    /// entered once — by the configuration that contains it.
     #[test]
     fn an_extension_inside_the_configuration_is_published_under_the_configuration_key() {
         let dir = tempfile::tempdir().unwrap();
