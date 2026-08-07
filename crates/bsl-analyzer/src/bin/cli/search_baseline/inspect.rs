@@ -144,11 +144,25 @@ pub(super) fn show_file_object(
     } else {
         println!("  References:");
         for reference in details.references {
-            println!("    {} -> {}", reference.snapshot_id, reference.path);
+            println!("    {}", render_file_object_reference(&reference));
         }
     }
 
     Ok(())
+}
+
+/// One line of the reference list, naming the file the row came from.
+///
+/// A whole function for one line because a struct field added upstream cannot make a
+/// `println!` mention it: the compiler stays silent, and a reference list that omits the root
+/// is exactly as plausible as one that shows it. The only thing that can notice is a test,
+/// and a test needs something to call.
+fn render_file_object_reference(reference: &bsl_search::BaselineFileObjectReference) -> String {
+    if reference.root_id == bsl_search::CONFIGURATION_ROOT_ID {
+        format!("{} -> {}", reference.snapshot_id, reference.path)
+    } else {
+        format!("{} -> [{}] {}", reference.snapshot_id, reference.root_id, reference.path)
+    }
 }
 
 pub(super) fn list_embeddings(
@@ -205,4 +219,39 @@ pub(super) fn show_embedding_coverage(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_file_object_reference;
+    use bsl_search::{BaselineFileObjectReference, CONFIGURATION_ROOT_ID};
+
+    fn reference(root_id: &str) -> BaselineFileObjectReference {
+        BaselineFileObjectReference {
+            snapshot_id: "snap-1".to_owned(),
+            root_id: root_id.to_owned(),
+            path: "CommonModules/Общий/Ext/Module.bsl".to_owned(),
+        }
+    }
+
+    /// Two roots may legitimately share one file object, and then the reference list is the
+    /// only place an operator can see which file each row belongs to. Rendering both the same
+    /// way answers the question with a lie that looks like a duplicate.
+    #[test]
+    fn references_from_two_roots_do_not_render_alike() {
+        assert_ne!(
+            render_file_object_reference(&reference(CONFIGURATION_ROOT_ID)),
+            render_file_object_reference(&reference("src/cfe/Расш")),
+        );
+    }
+
+    /// The configuration's rows keep the shape they had, so the ordinary listing — every row
+    /// in every baseline published so far — does not grow an empty marker.
+    #[test]
+    fn a_configuration_reference_renders_without_a_root_marker() {
+        assert_eq!(
+            render_file_object_reference(&reference(CONFIGURATION_ROOT_ID)),
+            "snap-1 -> CommonModules/Общий/Ext/Module.bsl"
+        );
+    }
 }

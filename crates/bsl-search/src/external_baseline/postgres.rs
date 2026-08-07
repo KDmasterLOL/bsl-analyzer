@@ -718,6 +718,7 @@ impl PostgresBaselineAdapter {
             .into_iter()
             .map(|row| BaselineFileObjectReference {
                 snapshot_id: row.get("snapshot_id"),
+                root_id: CONFIGURATION_ROOT_ID.to_owned(),
                 path: row.get("path"),
             })
             .collect();
@@ -1695,7 +1696,11 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
         let mut snapshot_deletion_rows = Vec::new();
         let normalized_content_started = Instant::now();
         for file_group in &file_groups {
-            let file_key = (file_group.collection.clone(), file_group.path.clone());
+            let file_key = (
+                file_group.collection.clone(),
+                file_group.root_id.clone(),
+                file_group.path.clone(),
+            );
             let parent_entry = remaining_parent_files.remove(&file_key);
             if parent_entry
                 .as_ref()
@@ -1729,7 +1734,10 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
             }
         }
 
-        for ((collection, path), _) in remaining_parent_files {
+        // The root is dropped here because `snapshot_deletions` has no column for it yet. That
+        // loses nothing today: a corpus carrying roots is refused before it reaches this
+        // function, so every key here is the configuration's.
+        for ((collection, _root_id, path), _) in remaining_parent_files {
             snapshot_deletion_rows.push(SnapshotDeletionRow {
                 snapshot_id: snapshot.id.0.clone(),
                 collection,
@@ -1829,6 +1837,7 @@ impl SemanticPublishStrategy {
 #[derive(Debug, Clone)]
 struct PublishedFileGroup {
     collection: String,
+    root_id: String,
     path: String,
     file_fingerprint: String,
     documents: Vec<IndexedDocument>,
@@ -1837,10 +1846,28 @@ struct PublishedFileGroup {
 #[derive(Debug, Clone)]
 struct VisibleSnapshotFile {
     collection: String,
+    /// The source root this file belongs to. The schema has no column for it yet, so every
+    /// row read from it is the configuration's — which is precisely what the schema asserts
+    /// today, and why the constant is honest here rather than a placeholder.
+    root_id: String,
     path: String,
     file_fingerprint: String,
     document_count: usize,
     file_object_id: String,
+}
+
+/// What makes one visible file distinct from another within a snapshot's ancestry:
+/// collection, the source root, and the path relative to that root.
+///
+/// The root is part of it because an extension repeats the configuration's directory layout,
+/// so the same relative path names a different file under each root. Without it a deletion
+/// recorded for one root shadows the live file of another.
+type VisibleFileKey = (String, String, String);
+
+impl VisibleSnapshotFile {
+    fn key(&self) -> VisibleFileKey {
+        (self.collection.clone(), self.root_id.clone(), self.path.clone())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2123,6 +2150,7 @@ fn load_snapshot_file_rows(
         .into_iter()
         .map(|row| VisibleSnapshotFile {
             collection: row.get("collection"),
+            root_id: CONFIGURATION_ROOT_ID.to_owned(),
             path: row.get("path"),
             file_fingerprint: row.get("file_fingerprint"),
             document_count: row.get::<_, i32>("document_count") as usize,
@@ -2382,17 +2410,17 @@ fn ensure_the_schema_can_store_these_roots(
 }
 
 fn group_documents_by_file(documents: &[IndexedDocument]) -> Vec<PublishedFileGroup> {
-    let mut grouped = BTreeMap::<(String, String), Vec<IndexedDocument>>::new();
+    let mut grouped = BTreeMap::<VisibleFileKey, Vec<IndexedDocument>>::new();
     for document in documents {
         grouped
-            .entry((document.collection.clone(), document.path.clone()))
+            .entry((document.collection.clone(), document.root_id.clone(), document.path.clone()))
             .or_default()
             .push(document.clone());
     }
 
     grouped
         .into_iter()
-        .map(|((collection, path), mut documents)| {
+        .map(|((collection, root_id, path), mut documents)| {
             documents.sort_by(|lhs, rhs| {
                 (
                     lhs.line_start,
@@ -2410,7 +2438,7 @@ fn group_documents_by_file(documents: &[IndexedDocument]) -> Vec<PublishedFileGr
                     ))
             });
             let file_fingerprint = fingerprint_file_documents(&documents);
-            PublishedFileGroup { collection, path, file_fingerprint, documents }
+            PublishedFileGroup { collection, root_id, path, file_fingerprint, documents }
         })
         .collect()
 }
@@ -3061,7 +3089,7 @@ fn materialize_visible_snapshot_file_map(
     client: &mut impl GenericClient,
     adapter: &PostgresBaselineAdapter,
     snapshot_id: &str,
-) -> Result<BTreeMap<(String, String), VisibleSnapshotFile>, SearchError> {
+) -> Result<BTreeMap<VisibleFileKey, VisibleSnapshotFile>, SearchError> {
     let ancestry = snapshot_ancestry_ids(client, adapter, snapshot_id)?;
     let file_query = format!(
         "SELECT snapshot_id, collection, path, file_fingerprint, document_count, file_object_id
@@ -3081,40 +3109,56 @@ fn materialize_visible_snapshot_file_map(
         let snapshot_id: String = row.get("snapshot_id");
         files_by_snapshot.entry(snapshot_id).or_default().push(VisibleSnapshotFile {
             collection: row.get("collection"),
+            root_id: CONFIGURATION_ROOT_ID.to_owned(),
             path: row.get("path"),
             file_fingerprint: row.get("file_fingerprint"),
             document_count: row.get::<_, i32>("document_count") as usize,
             file_object_id: row.get("file_object_id"),
         });
     }
-    let mut deletions_by_snapshot = HashMap::<String, Vec<(String, String)>>::new();
+    let mut deletions_by_snapshot = HashMap::<String, Vec<VisibleFileKey>>::new();
     for row in client.query(&deletion_query, &[&ancestry])? {
         let snapshot_id: String = row.get("snapshot_id");
-        deletions_by_snapshot
-            .entry(snapshot_id)
-            .or_default()
-            .push((row.get("collection"), row.get("path")));
+        deletions_by_snapshot.entry(snapshot_id).or_default().push((
+            row.get("collection"),
+            CONFIGURATION_ROOT_ID.to_owned(),
+            row.get("path"),
+        ));
     }
 
-    let mut seen_paths = HashSet::<(String, String)>::new();
-    let mut visible_files = BTreeMap::<(String, String), VisibleSnapshotFile>::new();
+    Ok(fold_visible_files(&ancestry, &mut files_by_snapshot, &mut deletions_by_snapshot))
+}
+
+/// Which file of an ancestry is the one a snapshot serves, walking child-first.
+///
+/// A pure function over rows the caller already read, because this is where the whole
+/// visibility rule lives: the first occurrence of a key wins, and a deletion recorded closer
+/// to the child shadows every ancestor's file under that same key. Reachable only through a
+/// live database in its caller, it would be observable nowhere else — and a rule this central
+/// must be answerable without one.
+fn fold_visible_files(
+    ancestry: &[String],
+    files_by_snapshot: &mut HashMap<String, Vec<VisibleSnapshotFile>>,
+    deletions_by_snapshot: &mut HashMap<String, Vec<VisibleFileKey>>,
+) -> BTreeMap<VisibleFileKey, VisibleSnapshotFile> {
+    let mut seen_paths = HashSet::<VisibleFileKey>::new();
+    let mut visible_files = BTreeMap::<VisibleFileKey, VisibleSnapshotFile>::new();
     for snapshot_id in ancestry {
-        if let Some(deletions) = deletions_by_snapshot.remove(&snapshot_id) {
+        if let Some(deletions) = deletions_by_snapshot.remove(snapshot_id) {
             for key in deletions {
                 seen_paths.insert(key);
             }
         }
-        if let Some(files) = files_by_snapshot.remove(&snapshot_id) {
+        if let Some(files) = files_by_snapshot.remove(snapshot_id) {
             for file in files {
-                let key = (file.collection.clone(), file.path.clone());
+                let key = file.key();
                 if seen_paths.insert(key.clone()) {
                     visible_files.insert(key, file);
                 }
             }
         }
     }
-
-    Ok(visible_files)
+    visible_files
 }
 
 fn materialize_visible_snapshot_files(
@@ -3188,10 +3232,11 @@ fn query_string_column(
 mod tests {
     use super::{
         effective_snapshot_totals_batch, file_object_id_for, fingerprint_file_documents,
-        group_documents_by_file, materialize_visible_snapshot_files, semantic_publish_phase_count,
-        semantic_publish_plan, semantic_publish_strategy, unique_content_object_rows,
-        ContentObjectRow, EffectiveSnapshotSummary, PostgresBaselineAdapter, SemanticPublishPlan,
-        SemanticPublishStrategy, VisibleSnapshotFile,
+        fold_visible_files, group_documents_by_file, materialize_visible_snapshot_files,
+        semantic_publish_phase_count, semantic_publish_plan, semantic_publish_strategy,
+        unique_content_object_rows, ContentObjectRow, EffectiveSnapshotSummary,
+        PostgresBaselineAdapter, SemanticPublishPlan, SemanticPublishStrategy, VisibleFileKey,
+        VisibleSnapshotFile, CONFIGURATION_ROOT_ID,
     };
     use crate::domain::{CorpusId, ExternalBaselineConfig, Snapshot, SnapshotPublishMetadata};
     use crate::external_baseline::BaselineCollectionRecord;
@@ -3199,6 +3244,117 @@ mod tests {
         BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotPublisher,
     };
     use crate::{BaselineRef, IndexedDocument};
+    use std::collections::HashMap;
+
+    /// Two facts hold this file together, and neither is visible from where the other lives.
+    ///
+    /// The garbage collector rebuilds the set of live embedding keys from `snapshot_files.path`
+    /// with no root at all (`collect_active_embedding_keys`), and that is CORRECT only because
+    /// the embedding key ignores the root by construction. Fold the root into the key recipe
+    /// and the collector starts calling live vectors orphans — silently, and the payment is
+    /// their deletion.
+    ///
+    /// So the recipe is pinned here too, next to the storage that depends on it, and not only
+    /// in `document.rs` where it is written.
+    #[test]
+    fn the_serving_side_key_recipe_ignores_the_root() {
+        let source = include_str!("postgres.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap_or(source);
+        let recipe = production
+            .split_once("fn semantic_key_for_semantic_row")
+            .expect("the serving-side key recomputation moved; this gate scans what it can find")
+            .1;
+        let recipe = recipe.split_once("\nfn ").map(|(body, _)| body).unwrap_or(recipe);
+
+        assert!(
+            !recipe.contains("root_id"),
+            "recomputing a stored row's embedding key must not read the root: the collector \
+             that decides which vectors are live cannot see it, and would delete what it \
+             cannot match"
+        );
+    }
+
+    /// A file is a `(collection, root_id, path)`, so the same relative path under two roots is
+    /// two files with two fingerprints — not one file whose chunks got merged.
+    #[test]
+    fn two_roots_sharing_a_relative_path_are_two_published_files() {
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let configuration =
+            indexed_document("code", PATH, "Общий", 1, "hash-конфигурации", "текст");
+        let extension = IndexedDocument {
+            root_id: "Расш".to_owned(),
+            content_hash: "hash-расширения".to_owned(),
+            ..configuration.clone()
+        };
+
+        let groups = group_documents_by_file(&[configuration, extension]);
+
+        assert_eq!(
+            groups.iter().map(|group| group.root_id.as_str()).collect::<Vec<_>>(),
+            vec![CONFIGURATION_ROOT_ID, "Расш"],
+            "merging them would publish one row holding the chunks of two different files"
+        );
+    }
+
+    fn deletion_key(root_id: &str, path: &str) -> VisibleFileKey {
+        visible_file(root_id, path).key()
+    }
+
+    fn visible_file(root_id: &str, path: &str) -> VisibleSnapshotFile {
+        VisibleSnapshotFile {
+            collection: "code".to_owned(),
+            root_id: root_id.to_owned(),
+            path: path.to_owned(),
+            file_fingerprint: format!("fp-{root_id}-{path}"),
+            document_count: 1,
+            file_object_id: format!("obj-{root_id}-{path}"),
+        }
+    }
+
+    /// The whole visibility rule in one place: a deletion recorded by a child shadows the
+    /// ancestor's file under the SAME key — and an extension's file is not the
+    /// configuration's, however identical their relative paths look.
+    #[test]
+    fn a_deletion_shadows_only_its_own_root() {
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let ancestry = vec!["child".to_owned(), "parent".to_owned()];
+        let mut files = HashMap::from([(
+            "parent".to_owned(),
+            vec![visible_file(CONFIGURATION_ROOT_ID, PATH), visible_file("Расш", PATH)],
+        )]);
+        let mut deletions = HashMap::from([("child".to_owned(), vec![deletion_key("Расш", PATH)])]);
+
+        let visible = fold_visible_files(&ancestry, &mut files, &mut deletions);
+
+        assert_eq!(
+            visible.values().map(|file| file.root_id.as_str()).collect::<Vec<_>>(),
+            vec![CONFIGURATION_ROOT_ID],
+            "deleting the extension's file must leave the configuration's alone: they are two \
+             different files that merely share a relative path"
+        );
+    }
+
+    /// The positive control for the rule above: without it, an implementation that shadows
+    /// nothing at all passes just as well.
+    #[test]
+    fn a_deletion_shadows_the_file_of_its_own_root() {
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let ancestry = vec!["child".to_owned(), "parent".to_owned()];
+        let mut files = HashMap::from([(
+            "parent".to_owned(),
+            vec![visible_file(CONFIGURATION_ROOT_ID, PATH), visible_file("Расш", PATH)],
+        )]);
+        let mut deletions =
+            HashMap::from([("child".to_owned(), vec![deletion_key(CONFIGURATION_ROOT_ID, PATH)])]);
+
+        let visible = fold_visible_files(&ancestry, &mut files, &mut deletions);
+
+        assert_eq!(
+            visible.values().map(|file| file.root_id.as_str()).collect::<Vec<_>>(),
+            vec!["Расш"],
+            "a deletion must still shadow the file it names"
+        );
+    }
 
     #[test]
     fn defaults_to_bsl_search_schema() {
@@ -3636,6 +3792,7 @@ mod tests {
     fn visible_snapshot_file(collection: &str, path: &str) -> VisibleSnapshotFile {
         VisibleSnapshotFile {
             collection: collection.to_owned(),
+            root_id: CONFIGURATION_ROOT_ID.to_owned(),
             path: path.to_owned(),
             file_fingerprint: format!("fp:{collection}:{path}"),
             document_count: 1,
