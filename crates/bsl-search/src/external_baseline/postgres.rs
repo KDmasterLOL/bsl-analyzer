@@ -1158,12 +1158,26 @@ impl PostgresBaselineAdapter {
         }
 
         let planning_started = Instant::now();
-        let parent_snapshot_id = snapshot_parent_id(&mut *client, self, snapshot_id)?;
-        let current_snapshot_files = load_snapshot_file_rows(&mut *client, self, snapshot_id)?;
-        let deleted_paths = load_snapshot_deletion_keys(&mut *client, self, snapshot_id)?;
+        // Everything the plan is decided from is read in ONE snapshot of the data, explicitly at
+        // REPEATABLE READ. Under the server default of READ COMMITTED each statement takes its
+        // own snapshot, so "the same transaction" would guarantee nothing: a concurrent
+        // republish of this very snapshot id — legal, `ON CONFLICT` on the id — could commit
+        // rooted rows between the refusal below and the reads that follow it.
+        let mut tx = client
+            .build_transaction()
+            .isolation_level(postgres::IsolationLevel::RepeatableRead)
+            .start()?;
+        #[cfg(test)]
+        observe_planning_isolation(&mut tx)?;
+
+        refuse_semantic_publication_of_rooted_corpus(&mut tx, self, snapshot_id)?;
+
+        let parent_snapshot_id = snapshot_parent_id(&mut tx, self, snapshot_id)?;
+        let current_snapshot_files = load_snapshot_file_rows(&mut tx, self, snapshot_id)?;
+        let deleted_paths = load_snapshot_deletion_keys(&mut tx, self, snapshot_id)?;
         let parent_complete = match parent_snapshot_id.as_deref() {
             Some(parent_snapshot_id) => semantic_publication_complete(
-                &mut *client,
+                &mut tx,
                 self,
                 parent_snapshot_id,
                 model_id,
@@ -1177,6 +1191,16 @@ impl PostgresBaselineAdapter {
             &current_snapshot_files,
             &deleted_paths,
         );
+        // Materialized here, inside the same snapshot, and only for the strategy that needs it:
+        // reading it later — after row preparation — would put it in a different snapshot than
+        // the refusal, which is the whole reason this transaction exists.
+        let visible_files = match plan.strategy {
+            SemanticPublishStrategy::FullRebuild => {
+                Some(materialize_visible_snapshot_files(&mut tx, self, snapshot_id)?)
+            }
+            _ => None,
+        };
+        tx.commit()?;
         let strategy = plan.strategy.clone();
         let phase_count = semantic_publish_phase_count(&strategy);
         if let Some(on_progress) = progress {
@@ -1270,8 +1294,8 @@ impl PostgresBaselineAdapter {
                             .to_owned(),
                     });
                 }
-                let visible_files =
-                    materialize_visible_snapshot_files(&mut *client, self, snapshot_id)?;
+                let visible_files = visible_files
+                    .expect("the full rebuild strategy materializes its files while planning");
                 timings.ancestry_materialization = rebuild_started.elapsed();
 
                 let recompute_started = Instant::now();
@@ -1814,7 +1838,6 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
 
         // Ahead of the readiness check, which connects: what this schema cannot store must be
         // refused without touching the database at all.
-        ensure_the_schema_can_store_these_roots(documents)?;
 
         self.check_storage_readiness()?;
 
@@ -1890,6 +1913,7 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
             snapshot_file_rows.push(SnapshotFileRow {
                 snapshot_id: snapshot.id.0.clone(),
                 collection: file_group.collection.clone(),
+                root_id: file_group.root_id.clone(),
                 path: file_group.path.clone(),
                 file_fingerprint: file_group.file_fingerprint.clone(),
                 document_count: file_group.documents.len() as i32,
@@ -1907,13 +1931,11 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
             }
         }
 
-        // The root is dropped here because `snapshot_deletions` has no column for it yet. That
-        // loses nothing today: a corpus carrying roots is refused before it reaches this
-        // function, so every key here is the configuration's.
-        for ((collection, _root_id, path), _) in remaining_parent_files {
+        for ((collection, root_id, path), _) in remaining_parent_files {
             snapshot_deletion_rows.push(SnapshotDeletionRow {
                 snapshot_id: snapshot.id.0.clone(),
                 collection,
+                root_id,
                 path,
             });
             stats.deleted_files += 1;
@@ -2076,6 +2098,7 @@ struct FileObjectItemRow {
 struct SnapshotFileRow {
     snapshot_id: String,
     collection: String,
+    root_id: String,
     path: String,
     file_fingerprint: String,
     document_count: i32,
@@ -2086,6 +2109,7 @@ struct SnapshotFileRow {
 struct SnapshotDeletionRow {
     snapshot_id: String,
     collection: String,
+    root_id: String,
     path: String,
 }
 
@@ -2093,6 +2117,7 @@ struct SnapshotDeletionRow {
 struct ServingLexicalRow {
     snapshot_id: String,
     collection: String,
+    root_id: String,
     path: String,
     ordinal: i32,
     symbol_name: String,
@@ -2332,6 +2357,70 @@ fn load_snapshot_file_rows(
         .collect())
 }
 
+/// Refuses to publish semantics for a corpus that carries roots.
+///
+/// `serving_semantic` still keys a file by `(collection, path)`, so two rooted versions of one
+/// relative path would collide on its primary key — and `prepare_semantic_rows_for_files` would
+/// lose one of them earlier still, rebuilding file identity backwards from `file_object_id`,
+/// which stops being one-to-one the moment two roots share content. A named refusal is worth
+/// more than either outcome; the corpus becomes correct before there is a place to put it.
+///
+/// The question is asked of the ANCESTRY, not of the snapshot's own rows. A project with
+/// extensions publishes a rooted snapshot first — refused — and then a delta snapshot touching
+/// only configuration files, which owns no rooted rows at all: deciding by its own rows would
+/// let exactly that second, ordinary publish through into the defective path.
+///
+/// Conservative on purpose: a corpus whose rooted files have all since been deleted is refused
+/// too. That errs toward refusing, which is the safe direction here, and costs one indexed
+/// existence check instead of materializing the whole visible set on every semantic publish.
+fn refuse_semantic_publication_of_rooted_corpus(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<(), SearchError> {
+    let ancestry = snapshot_ancestry_ids(client, adapter, snapshot_id)?;
+    let query = format!(
+        "SELECT DISTINCT root_id FROM {}
+          WHERE snapshot_id = ANY($1) AND root_id <> $2
+          ORDER BY root_id
+          LIMIT 8",
+        adapter.table("snapshot_files")
+    );
+    let roots: Vec<String> = client
+        .query(&query, &[&ancestry, &CONFIGURATION_ROOT_ID])?
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect();
+    if roots.is_empty() {
+        return Ok(());
+    }
+    Err(SearchError::ExternalBaseline(format!(
+        "serving_semantic_rootless: semantic serving does not key a file by its source root, \
+         but this corpus carries roots ({}); publish it lexically and leave semantics until \
+         serving_semantic is keyed by the root",
+        roots.join(", ")
+    )))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The isolation level actually in force inside the planning transaction.
+    ///
+    /// Recorded from production's own transaction rather than asserted about the source, because
+    /// the property that matters — one snapshot of the data for the refusal and the reads — is a
+    /// property of the connection at runtime. A structural check ("the same `&mut Transaction`")
+    /// is green for a READ COMMITTED transaction, which is exactly the case this guards against.
+    static OBSERVED_PLANNING_ISOLATION: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_planning_isolation(client: &mut impl GenericClient) -> Result<(), SearchError> {
+    let level: String = client.query_one("SHOW transaction_isolation", &[])?.get(0);
+    OBSERVED_PLANNING_ISOLATION.with(|cell| *cell.borrow_mut() = Some(level));
+    Ok(())
+}
+
 /// `['a', 'b']` as a PostgreSQL text array, for comparing against a catalog composition.
 fn sql_text_array(columns: &[&str]) -> String {
     let items: Vec<String> = columns.iter().map(|column| format!("'{column}'")).collect();
@@ -2560,37 +2649,6 @@ fn insert_serving_semantic_rows(
 
 fn format_pgvector_text(embedding: &[f32]) -> String {
     format!("[{}]", embedding.iter().map(|value| value.to_string()).collect::<Vec<_>>().join(","))
-}
-
-/// Whether this schema can hold the identities the corpus carries.
-///
-/// A file's identity is the pair `(root_id, path)`, but these tables key it by
-/// `(collection, path)` alone. So a corpus with roots does not merely lose a label on the
-/// way in: [`group_documents_by_file`] would MERGE two files that share a relative path
-/// across roots — the ordinary case, since an extension repeats the configuration's
-/// layout — into one row carrying the chunks of both. Nothing downstream can tell that
-/// apart from one large file.
-///
-/// The refusal therefore comes before any statement runs, and before the connection: a
-/// half-merged snapshot is worse than no snapshot, and the caller can act on a named error.
-fn ensure_the_schema_can_store_these_roots(
-    documents: &[IndexedDocument],
-) -> Result<(), SearchError> {
-    let roots: BTreeSet<&str> = documents
-        .iter()
-        .map(|document| document.root_id.as_str())
-        .filter(|root_id| *root_id != CONFIGURATION_ROOT_ID)
-        .collect();
-    if roots.is_empty() {
-        return Ok(());
-    }
-    Err(SearchError::ExternalBaseline(format!(
-        "refusing to publish a corpus whose files belong to source roots this baseline schema \
-         cannot store: {}. Rows here are keyed by (collection, path) with no room for a root, \
-         so files sharing a relative path across roots would be published merged into one. \
-         Publish the configuration alone until the schema carries roots.",
-        roots.into_iter().collect::<Vec<_>>().join(", ")
-    )))
 }
 
 fn group_documents_by_file(documents: &[IndexedDocument]) -> Vec<PublishedFileGroup> {
@@ -2833,20 +2891,22 @@ fn insert_snapshot_file_rows(
     for batch in rows.chunks(SNAPSHOT_FILE_BATCH_SIZE) {
         let mut values = Vec::with_capacity(batch.len());
         let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
-            Vec::with_capacity(batch.len() * 6);
+            Vec::with_capacity(batch.len() * 7);
         for (index, row) in batch.iter().enumerate() {
-            let base = index * 6;
+            let base = index * 7;
             values.push(format!(
-                "(${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
                 base + 4,
                 base + 5,
-                base + 6
+                base + 6,
+                base + 7
             ));
             params.push(&row.snapshot_id);
             params.push(&row.collection);
+            params.push(&row.root_id);
             params.push(&row.path);
             params.push(&row.file_fingerprint);
             params.push(&row.document_count);
@@ -2854,7 +2914,8 @@ fn insert_snapshot_file_rows(
         }
         let query = format!(
             "INSERT INTO {} (
-                snapshot_id, collection, path, file_fingerprint, document_count, file_object_id
+                snapshot_id, collection, root_id, path,
+                file_fingerprint, document_count, file_object_id
              ) VALUES {}",
             adapter.table("snapshot_files"),
             values.join(", ")
@@ -2877,16 +2938,17 @@ fn insert_snapshot_deletion_rows(
     for batch in rows.chunks(SNAPSHOT_DELETION_BATCH_SIZE) {
         let mut values = Vec::with_capacity(batch.len());
         let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
-            Vec::with_capacity(batch.len() * 3);
+            Vec::with_capacity(batch.len() * 4);
         for (index, row) in batch.iter().enumerate() {
-            let base = index * 3;
-            values.push(format!("(${}, ${}, ${})", base + 1, base + 2, base + 3));
+            let base = index * 4;
+            values.push(format!("(${}, ${}, ${}, ${})", base + 1, base + 2, base + 3, base + 4));
             params.push(&row.snapshot_id);
             params.push(&row.collection);
+            params.push(&row.root_id);
             params.push(&row.path);
         }
         let query = format!(
-            "INSERT INTO {} (snapshot_id, collection, path) VALUES {}",
+            "INSERT INTO {} (snapshot_id, collection, root_id, path) VALUES {}",
             adapter.table("snapshot_deletions"),
             values.join(", ")
         );
@@ -2911,6 +2973,7 @@ fn replace_serving_lexical_rows(
             rows.push(ServingLexicalRow {
                 snapshot_id: snapshot_id.to_owned(),
                 collection: file_group.collection.clone(),
+                root_id: file_group.root_id.clone(),
                 path: file_group.path.clone(),
                 ordinal: ordinal as i32,
                 symbol_name: document.symbol_name.clone(),
@@ -2925,11 +2988,11 @@ fn replace_serving_lexical_rows(
     for batch in rows.chunks(SERVING_LEXICAL_BATCH_SIZE) {
         let mut values = Vec::with_capacity(batch.len());
         let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
-            Vec::with_capacity(batch.len() * 9);
+            Vec::with_capacity(batch.len() * 10);
         for (index, row) in batch.iter().enumerate() {
-            let base = index * 9;
+            let base = index * 10;
             values.push(format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, to_tsvector('simple', ${}))",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, to_tsvector('simple', ${}))",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -2939,10 +3002,12 @@ fn replace_serving_lexical_rows(
                 base + 7,
                 base + 8,
                 base + 9,
-                base + 9
+                base + 10,
+                base + 10
             ));
             params.push(&row.snapshot_id);
             params.push(&row.collection);
+            params.push(&row.root_id);
             params.push(&row.path);
             params.push(&row.ordinal);
             params.push(&row.symbol_name);
@@ -2953,7 +3018,7 @@ fn replace_serving_lexical_rows(
         }
         let query = format!(
             "INSERT INTO {} (
-                snapshot_id, collection, path, ordinal, symbol_name, kind,
+                snapshot_id, collection, root_id, path, ordinal, symbol_name, kind,
                 line_start, line_end, text, tsv
              ) VALUES {}",
             adapter.table("serving_lexical"),
@@ -3644,51 +3709,6 @@ mod tests {
 
         let error = adapter.resolve_baseline(&baseline).unwrap_err();
         assert!(error.to_string().contains("connection"));
-    }
-
-    /// This schema keys a file by `(collection, path)` alone, so a corpus that also carries
-    /// roots has no place to put them: two files sharing a relative path across roots would
-    /// merge into one group holding the chunks of both. Refusing is the honest answer, and it
-    /// has to come before anything is written — a partial merge is worse than no publish.
-    ///
-    /// Observed offline, against an address nothing listens on: an implementation that wrote
-    /// first and refused afterwards would have to connect first, and there is no connection to
-    /// be had. The positive control is the same call with a root-free corpus, which must reach
-    /// the network and fail there — without it the assertion passes under any unconditional
-    /// error.
-    #[test]
-    fn a_corpus_with_roots_is_refused_before_the_connection_is_made() {
-        let adapter = PostgresBaselineAdapter::new(ExternalBaselineConfig::postgres(
-            "postgres://127.0.0.1:1",
-        ))
-        .unwrap();
-        let snapshot = Snapshot::new("snap-1", CorpusId::WorkspaceCode);
-        let metadata = SnapshotPublishMetadata::default();
-        let configuration =
-            indexed_document("code", "CommonModules/Общий/Ext/Module.bsl", "Общий", 1, "h", "t");
-        let extension =
-            IndexedDocument { root_id: "Расширение".to_owned(), ..configuration.clone() };
-
-        let refused = adapter
-            .publish_snapshot(&snapshot, &metadata, std::slice::from_ref(&extension))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            refused.contains("Расширение") && !refused.contains("connection"),
-            "the corpus must be refused for its roots, and refused before the adapter goes \
-             anywhere near the database: {refused}"
-        );
-
-        let reached_the_network = adapter
-            .publish_snapshot(&snapshot, &metadata, std::slice::from_ref(&configuration))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            reached_the_network.contains("connection"),
-            "positive control: a root-free corpus must get past the refusal and fail on the \
-             unreachable address, or the assertion above holds under any error at all: \
-             {reached_the_network}"
-        );
     }
 
     #[test]
@@ -4419,6 +4439,170 @@ mod tests {
             (child_row.files, child_row.documents),
             (1, 2),
             "the batch totals must agree with the single-snapshot summary"
+        );
+    }
+
+    /// The publisher writes two files where one relative path lives under two roots, and the
+    /// content of the two is IDENTICAL.
+    ///
+    /// Identical content is not a detail of the stand. With different content the two files get
+    /// different `file_object_id`s and the input stops being the one where a shared file object
+    /// arises at all — and a shared file object is exactly what has to be shown not to fold two
+    /// files into one row of `snapshot_files`.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn publishing_one_path_under_two_roots_writes_two_files_sharing_one_object() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("publish");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let configuration = indexed_document("code", PATH, "Общий", 1, "hash-один", "текст");
+        let extension = IndexedDocument { root_id: "Расш".to_owned(), ..configuration.clone() };
+        let snapshot = Snapshot::new("snap-roots".to_owned(), CorpusId::WorkspaceCode);
+
+        let stats = adapter
+            .publish_snapshot(
+                &snapshot,
+                &SnapshotPublishMetadata::default(),
+                &[configuration, extension],
+            )
+            .expect("a rooted corpus is publishable now that the schema keys files by root");
+
+        assert_eq!(stats.written_files, 2, "two roots are two files, not one merged row");
+
+        let mut client = adapter.connect().unwrap();
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT root_id, file_object_id FROM {schema}.snapshot_files
+                      WHERE snapshot_id = 'snap-roots' ORDER BY root_id"
+                ),
+                &[],
+            )
+            .unwrap();
+        let roots: Vec<String> = rows.iter().map(|row| row.get::<_, String>(0)).collect();
+        let objects: Vec<String> = rows.iter().map(|row| row.get::<_, String>(1)).collect();
+        assert_eq!(roots, vec![CONFIGURATION_ROOT_ID.to_owned(), "Расш".to_owned()]);
+        assert_eq!(
+            objects[0], objects[1],
+            "identical content legitimately shares one file object; identity lives in \
+             snapshot_files, and it is the ROW that must be two"
+        );
+
+        let lexical_roots: Vec<String> = client
+            .query(
+                &format!(
+                    "SELECT DISTINCT root_id FROM {schema}.serving_lexical
+                      WHERE snapshot_id = 'snap-roots' ORDER BY root_id"
+                ),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect();
+        assert_eq!(
+            lexical_roots,
+            vec![CONFIGURATION_ROOT_ID.to_owned(), "Расш".to_owned()],
+            "the lexical serving rows carry the root too, or search answers for the wrong file"
+        );
+    }
+
+    /// Semantic publication refuses a rooted corpus by name — and the third input is the one
+    /// this whole slice nearly failed on.
+    ///
+    /// A delta snapshot that touches only configuration files owns no rooted rows at all, so an
+    /// implementation asking the snapshot's OWN rows passes the first two inputs and silently
+    /// lets the third — the ordinary second publish of any project with extensions — into the
+    /// path where a file is lost.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn semantic_publication_refuses_a_rooted_corpus_including_a_rootless_delta() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("semantic");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        seed_two_rooted_files(&adapter, &schema);
+        {
+            let mut client = adapter.connect().unwrap();
+            client
+                .batch_execute(&format!(
+                    "INSERT INTO {schema}.snapshots (id, corpus) VALUES ('rootless', 'code');
+                     INSERT INTO {schema}.snapshot_files
+                         (snapshot_id, collection, root_id, path,
+                          file_fingerprint, document_count, file_object_id)
+                         VALUES ('rootless', 'code', '', 'src/A.bsl', 'fp-cfg', 2, 'obj-cfg');"
+                ))
+                .unwrap();
+        }
+
+        let rooted = adapter
+            .populate_serving_semantic_with_progress("parent", "model", 8, None)
+            .expect_err("a snapshot carrying roots must be refused");
+        assert!(
+            rooted.to_string().contains("serving_semantic_rootless"),
+            "the refusal must name itself: {rooted}"
+        );
+
+        // The delta owns no rooted rows; only its ancestry does.
+        let delta = adapter
+            .populate_serving_semantic_with_progress("child", "model", 8, None)
+            .expect_err("a delta over a rooted parent must be refused too");
+        assert!(
+            delta.to_string().contains("serving_semantic_rootless"),
+            "deciding by the snapshot's own rows lets the ordinary second publish through: \
+             {delta}"
+        );
+
+        // Positive control: without it, an implementation refusing everything passes both.
+        let rootless =
+            adapter.populate_serving_semantic_with_progress("rootless", "model", 8, None);
+        let rootless_message = rootless.err().map(|error| error.to_string()).unwrap_or_default();
+        assert!(
+            !rootless_message.contains("serving_semantic_rootless"),
+            "a corpus without roots must not meet this refusal: {rootless_message}"
+        );
+    }
+
+    /// The refusal and the reads that follow it see ONE snapshot of the data.
+    ///
+    /// Observed as the value in force inside production's own transaction, not as a property of
+    /// the source: a structural check ("the condition is taken from the same `&mut Transaction`")
+    /// is green for a READ COMMITTED transaction, where every statement takes a fresh snapshot
+    /// and a concurrent republish can commit rooted rows in between.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn the_planning_transaction_holds_one_snapshot_of_the_data() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("isolation");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        seed_two_rooted_files(&adapter, &schema);
+        super::OBSERVED_PLANNING_ISOLATION.with(|cell| *cell.borrow_mut() = None);
+
+        let _ = adapter.populate_serving_semantic_with_progress("parent", "model", 8, None);
+
+        assert_eq!(
+            super::OBSERVED_PLANNING_ISOLATION.with(|cell| cell.borrow().clone()),
+            Some("repeatable read".to_owned()),
+            "planning must run at REPEATABLE READ, or the refusal and the reads may disagree"
         );
     }
 

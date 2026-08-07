@@ -58,10 +58,11 @@ impl FileKey {
 
     /// A file of the configuration root.
     ///
-    /// The publisher walks every registered root, so a published corpus carries other
-    /// identities too. What still holds the PostgreSQL side to this one is the adapter's
-    /// own refusal of a corpus with roots — its tables key a file by `(collection, path)`
-    /// and have nowhere to put one — not any property of the walk.
+    /// A constructor for the common case, not a statement about what a corpus contains: the
+    /// publisher walks every registered root, and the PostgreSQL side now keys a file by
+    /// `(collection, root_id, path)` and stores those identities as they are. What still holds
+    /// to the configuration alone is semantic serving, which refuses a rooted corpus by name
+    /// until its own table is keyed by the root.
     pub fn configuration(path: impl Into<String>) -> Self {
         Self::new(CONFIGURATION_ROOT_ID, path)
     }

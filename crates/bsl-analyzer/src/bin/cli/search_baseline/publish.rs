@@ -55,56 +55,6 @@ fn distinct_files(documents: &[bsl_search::IndexedDocument]) -> usize {
         .len()
 }
 
-/// Where an empty extension list goes for THIS project, spelled for the config file the
-/// project actually has.
-///
-/// Naming a fixed file would be worse than naming none. `ProjectConfig::load` does not merge
-/// the three conventional names — the first one found wins outright — so telling the owner of
-/// a `.bsl-analyzer.json` to create a `bsl-analyzer.toml` tells them to shadow their whole
-/// configuration, credentials included, and the next run fails somewhere else entirely.
-fn where_to_declare_no_extensions(project_root: &std::path::Path) -> String {
-    let existing =
-        project_model::CONFIG_FILE_NAMES.iter().find(|name| project_root.join(name).exists());
-    match existing {
-        // TOML keeps the source set in its own section; the JSON forms read it at top level.
-        Some(name) if name.ends_with(".toml") => {
-            format!("`extensions = []` under `[source]` in {name}")
-        }
-        Some(name) => format!("`\"extensions\": []` at the top level of {name}"),
-        None => format!(
-            "`extensions = []` under `[source]` in a new {} at the project root",
-            project_model::CONFIG_FILE_NAMES[0]
-        ),
-    }
-}
-
-/// Add the one thing a storage adapter cannot know: which knob of THIS tool put the
-/// extensions into the corpus.
-///
-/// Attached whenever the corpus carried roots and the publish failed — the condition is about
-/// the corpus, which is the CLI's own, not about why the store said no, which is the store's.
-/// It earns its place because extension roots are usually not something the operator declared:
-/// the conventional `src/cfe/*` layout is discovered on its own, so a project may have no
-/// config file at all and still be refused, with nothing on screen naming the file to create.
-fn name_the_extension_opt_out(
-    error: bsl_search::SearchError,
-    documents: &[bsl_search::IndexedDocument],
-    project_root: &std::path::Path,
-) -> Box<dyn Error + Send + Sync> {
-    let has_roots =
-        documents.iter().any(|document| document.root_id != bsl_search::CONFIGURATION_ROOT_ID);
-    if !has_roots {
-        return error.into();
-    }
-    io::Error::other(format!(
-        "{error}\n\nThis corpus covers extension source roots. To publish the configuration \
-         alone, declare an empty extension list for the project — {} — which also turns off \
-         discovery of the conventional src/cfe/* layout.",
-        where_to_declare_no_extensions(project_root)
-    ))
-    .into()
-}
-
 pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
     use bsl_search::{
         fingerprint_documents, fingerprint_indexed_documents, BaselinePublisher, CorpusId,
@@ -228,8 +178,7 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
             &indexed_documents,
             embedder.as_ref(),
             if has_embedder { Some(&embedding_progress) } else { None },
-        )
-        .map_err(|error| name_the_extension_opt_out(error, &indexed_documents, &project.root))?;
+        )?;
     eprintln!(
         "      Reused {} files, wrote {}, deleted {}",
         publish_report.snapshot.reused_files,
@@ -366,83 +315,6 @@ mod tests {
 
     fn project_at(root: &Path) -> project_model::Project {
         project_model::Project::new(root).unwrap()
-    }
-
-    fn chunk_of(root_id: &str) -> bsl_search::IndexedDocument {
-        bsl_search::IndexedDocument {
-            collection: "code".to_owned(),
-            root_id: root_id.to_owned(),
-            path: "CommonModules/Общий/Ext/Module.bsl".to_owned(),
-            symbol_name: "Общий".to_owned(),
-            kind: "procedure".to_owned(),
-            line_start: 1,
-            line_end: 3,
-            text: "Процедура Общий()".to_owned(),
-            content_hash: "hash-1".to_owned(),
-            graph_context: None,
-        }
-    }
-
-    /// The store can say the schema holds no roots; only this tool can say which of its knobs
-    /// put them there. Extensions are usually discovered rather than declared, so the project
-    /// that gets refused may have no config file to look in.
-    #[test]
-    fn a_refusal_over_a_corpus_with_roots_names_the_knob_that_removes_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let refusal = || bsl_search::SearchError::ExternalBaseline("roots unsupported".to_owned());
-
-        let named = name_the_extension_opt_out(refusal(), &[chunk_of("src/cfe/Расш")], dir.path());
-        assert!(
-            named.to_string().contains("extensions"),
-            "the operator must be told what to change, not only what went wrong: {named}"
-        );
-
-        let untouched = name_the_extension_opt_out(
-            refusal(),
-            &[chunk_of(bsl_search::CONFIGURATION_ROOT_ID)],
-            dir.path(),
-        );
-        assert!(
-            !untouched.to_string().contains("extensions"),
-            "a failure that has nothing to do with extensions must not be answered with advice \
-             about them: {untouched}"
-        );
-    }
-
-    /// The advice must land in the file the project already uses. `ProjectConfig::load` takes
-    /// the FIRST conventional name it finds and never looks at the rest, so advising a file
-    /// the project does not have is advising it to shadow the one it does — configuration
-    /// root, database credentials and all — and the next run then fails on something
-    /// unrelated.
-    ///
-    /// Checked for every name in the class, not for one of them: which file a project is
-    /// configured through is exactly the variable here.
-    #[test]
-    fn the_advice_lands_in_the_config_file_the_project_already_has() {
-        for name in project_model::CONFIG_FILE_NAMES {
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::write(dir.path().join(name), "").unwrap();
-
-            let advice = where_to_declare_no_extensions(dir.path());
-
-            assert!(
-                advice.contains(name),
-                "a project configured through {name} must be told to edit {name}: {advice}"
-            );
-            for other in project_model::CONFIG_FILE_NAMES.iter().filter(|other| **other != name) {
-                assert!(
-                    !advice.contains(other),
-                    "{name} is this project's config, so {other} must not be named: {advice}"
-                );
-            }
-        }
-
-        let empty = tempfile::tempdir().unwrap();
-        let advice = where_to_declare_no_extensions(empty.path());
-        assert!(
-            advice.contains(project_model::CONFIG_FILE_NAMES[0]),
-            "with no config at all, creating the preferred name shadows nothing: {advice}"
-        );
     }
 
     /// The report tells the operator how many files went out. Two files at one relative path
@@ -631,6 +503,58 @@ mod tests {
         assert!(
             message.contains("does not cover its own source tree"),
             "the run must stop on the incomplete walk, not on something later; got: {message}"
+        );
+    }
+
+    /// A rooted corpus that fails for an unrelated reason gets no advice about extensions.
+    ///
+    /// This is the completeness check for removing the schema's blanket refusal, and it replaces
+    /// an enumeration that was declared complete four times and missed a member each time.
+    /// Clippy cannot stand in for it: clippy catches ORPHANED code, while the hazard here is a
+    /// stale function whose caller survived — reachable, warning-free, with its own tests green.
+    ///
+    /// Two details are load-bearing. The stand runs `run`, not the storage adapter, because the
+    /// advice is attached at exactly one place and the adapter never emits it. And the parent
+    /// snapshot is given explicitly, because otherwise `run` asks the unreachable database for
+    /// the parent and fails before reaching the place under test.
+    #[cfg(unix)]
+    #[test]
+    fn a_rooted_corpus_failing_for_another_reason_is_not_told_to_drop_its_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        for owner in ["src/cf", "src/cfe/Расширение"] {
+            let owner_root = root.join(owner);
+            write(&owner_root.join("Configuration.xml"), "<MetaDataObject/>");
+            write(&owner_root.join("CommonModules/Видимый/Ext/Module.bsl"), &module("Видимый"));
+        }
+        write(
+            &root.join("bsl-analyzer.toml"),
+            "[search.baseline.postgres]\n\
+             host = \"127.0.0.1\"\n\
+             port = 1\n\
+             dbname = \"unreachable\"\n\
+             schema = \"bsl_search\"\n\
+             vault_role_base = \"probe\"\n\
+             [search.baseline.postgres.credential_helper]\n\
+             program = \"/bin/sh\"\n\
+             args = [\"-c\", \"cat > /dev/null;              printf '{\\\"protocol\\\":\\\"bsl-analyzer.postgres-helper.v1\\\",\\\"ok\\\":true,\\\"url\\\":\\\"postgres://u:p@127.0.0.1:1/unreachable\\\"}'\"]\n",
+        );
+
+        let error = run(SearchBaselinePublishArgs {
+            corpus: SearchBaselineCorpusCli::WorkspaceCode,
+            source_dir: root.clone(),
+            snapshot_id: Some("probe:rooted".to_owned()),
+            branch: None,
+            commit: None,
+            parent_snapshot_id: Some("probe:parent".to_owned()),
+            allow_non_policy_branch: true,
+        })
+        .expect_err("an unreachable database must stop the publish");
+
+        let message = error.to_string();
+        assert!(
+            !message.contains("extension"),
+            "a connection failure must not be dressed up as an extension problem; got: {message}"
         );
     }
 
