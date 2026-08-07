@@ -1804,14 +1804,9 @@ impl Store {
                  (root_id, collection, path, file_fingerprint)
                  VALUES (?1, ?2, ?3, ?4)",
             )?;
-            // A published manifest describes the configuration root and nothing
-            // else: the publisher builds its corpus from that root alone, so its
-            // paths are already spelled relative to it. Stamping the id here
-            // rather than leaning on the column default keeps that fact visible
-            // at the one place a manifest enters the store.
             for file in &manifest.files {
                 stmt.execute(params![
-                    CONFIGURATION_ROOT_ID,
+                    file.root_id,
                     file.collection,
                     file.path,
                     file.file_fingerprint
@@ -3818,6 +3813,7 @@ mod tests {
             snapshot_fingerprint: Some("fp-abc".to_owned()),
             files: vec![
                 crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "src/A.bsl".to_owned(),
                     file_fingerprint: "fp-a".to_owned(),
@@ -3825,6 +3821,7 @@ mod tests {
                     file_object_id: "obj-a".to_owned(),
                 },
                 crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "src/B.bsl".to_owned(),
                     file_fingerprint: "fp-b".to_owned(),
@@ -3866,6 +3863,7 @@ mod tests {
             snapshot_fingerprint: Some("fp-abc".to_owned()),
             files: vec![
                 crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "src/A.bsl".to_owned(),
                     file_fingerprint: "fp-a".to_owned(),
@@ -3873,6 +3871,7 @@ mod tests {
                     file_object_id: "obj-a".to_owned(),
                 },
                 crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "src/B.bsl".to_owned(),
                     file_fingerprint: "fp-b".to_owned(),

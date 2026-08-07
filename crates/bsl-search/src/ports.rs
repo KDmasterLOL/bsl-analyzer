@@ -209,6 +209,10 @@ pub trait ResolvedViewService {
 #[derive(Debug, Clone)]
 pub struct BaselineManifestFile {
     pub collection: String,
+    /// The source root the file belongs to; the consumer keys by `(root_id, path)`, and a
+    /// manifest that flattens every file onto the configuration makes it compare an extension's
+    /// file against the configuration's fingerprint.
+    pub root_id: String,
     pub path: String,
     pub file_fingerprint: String,
     pub document_count: usize,

@@ -3016,6 +3016,7 @@ mod tests {
                 snapshot_id: "snap-1".to_owned(),
                 snapshot_fingerprint: Some("fp-1".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "CommonModule.bsl".to_owned(),
                     file_fingerprint: crate::workspace_overlay::fingerprint_content(
@@ -3051,6 +3052,7 @@ mod tests {
                 snapshot_id: "snap-1".to_owned(),
                 snapshot_fingerprint: Some("fp-1".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "CommonModule.bsl".to_owned(),
                     file_fingerprint: "different-fingerprint".to_owned(),
@@ -3198,6 +3200,7 @@ mod tests {
                 snapshot_id: "snap-1".to_owned(),
                 snapshot_fingerprint: Some("fp-1".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "CommonModule.bsl".to_owned(),
                     file_fingerprint: "different-fingerprint".to_owned(),
@@ -3778,6 +3781,7 @@ mod tests {
                 snapshot_id: "snap".to_owned(),
                 snapshot_fingerprint: Some("fp".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "A.bsl".to_owned(),
                     file_fingerprint: "fp-file".to_owned(),
@@ -3833,6 +3837,7 @@ mod tests {
                 snapshot_id: "snap".to_owned(),
                 snapshot_fingerprint: Some("fp".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "Removed.bsl".to_owned(),
                     file_fingerprint: "fp-file".to_owned(),
@@ -3980,6 +3985,7 @@ mod tests {
                 snapshot_id: "snap".to_owned(),
                 snapshot_fingerprint: Some("fp".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "Deleted.bsl".to_owned(),
                     file_fingerprint: "fp-file".to_owned(),
@@ -4213,6 +4219,7 @@ mod tests {
         let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
         engine.set_workspace_root(workspace);
         let baseline_file = |path: &str, id: &str| crate::BaselineManifestFile {
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             collection: "code".to_owned(),
             path: path.to_owned(),
             file_fingerprint: "fp-file".to_owned(),
@@ -4263,6 +4270,7 @@ mod tests {
                 snapshot_id: "stale-snap".to_owned(),
                 snapshot_fingerprint: Some("fp".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "Ghost.bsl".to_owned(),
                     file_fingerprint: "fp-file".to_owned(),
@@ -4305,6 +4313,7 @@ mod tests {
                 snapshot_id: "snap".to_owned(),
                 snapshot_fingerprint: Some("fp".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "Deleted.bsl".to_owned(),
                     file_fingerprint: "fp-file".to_owned(),
@@ -4979,6 +4988,7 @@ mod tests {
                 snapshot_id: "stale-snap".to_owned(),
                 snapshot_fingerprint: Some("fp".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "Removed.bsl".to_owned(),
                     file_fingerprint: crate::workspace_overlay::fingerprint_content(
@@ -5020,6 +5030,7 @@ mod tests {
                 snapshot_id: "stale-snap".to_owned(),
                 snapshot_fingerprint: Some("fp".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "CommonModule.bsl".to_owned(),
                     file_fingerprint: crate::workspace_overlay::fingerprint_content(

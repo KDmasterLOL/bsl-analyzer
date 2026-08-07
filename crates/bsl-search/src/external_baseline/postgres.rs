@@ -857,10 +857,10 @@ impl PostgresBaselineAdapter {
         };
 
         let references_query = format!(
-            "SELECT snapshot_id, path
+            "SELECT snapshot_id, root_id, path
              FROM {}
              WHERE file_object_id = $1
-             ORDER BY snapshot_id, path",
+             ORDER BY snapshot_id, root_id, path",
             self.table("snapshot_files")
         );
         let references = client
@@ -868,7 +868,7 @@ impl PostgresBaselineAdapter {
             .into_iter()
             .map(|row| BaselineFileObjectReference {
                 snapshot_id: row.get("snapshot_id"),
-                root_id: CONFIGURATION_ROOT_ID.to_owned(),
+                root_id: row.get("root_id"),
                 path: row.get("path"),
             })
             .collect();
@@ -1521,9 +1521,7 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
                 for item in items {
                     documents.push(IndexedDocument {
                         collection: file.collection.clone(),
-                        // The published corpus is built from the configuration
-                        // root alone, so its rows carry no other identity.
-                        root_id: CONFIGURATION_ROOT_ID.to_owned(),
+                        root_id: file.root_id.clone(),
                         path: file.path.clone(),
                         symbol_name: item.symbol_name.clone(),
                         kind: item.kind.clone(),
@@ -1595,6 +1593,7 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
         );
         let mut sql = format!(
             "SELECT collection,
+                    root_id,
                     path,
                     symbol_name,
                     kind,
@@ -1612,7 +1611,7 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
             sql.push_str(&format!(" AND collection = ${}", params.len() + 1));
             params.push(collection);
         }
-        sql.push_str(" ORDER BY rank DESC, collection, path, ordinal");
+        sql.push_str(" ORDER BY rank DESC, collection, root_id, path, ordinal");
         sql.push_str(&format!(" LIMIT ${}", params.len() + 1));
         params.push(&limit);
 
@@ -1634,7 +1633,7 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
             .into_iter()
             .map(|row| LexicalHit {
                 collection: row.get("collection"),
-                root_id: CONFIGURATION_ROOT_ID.to_owned(),
+                root_id: row.get("root_id"),
                 path: row.get("path"),
                 symbol_name: row.get("symbol_name"),
                 kind: row.get("kind"),
@@ -1725,6 +1724,10 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
             .into_iter()
             .map(|row| SemanticHit {
                 collection: row.get("collection"),
+                // `serving_semantic` still keys a file by `(collection, path)`, so there is no
+                // root here to return. It is not a gap in this reader: semantic publication
+                // refuses a corpus that carries roots, so every row it can serve is the
+                // configuration's, and the constant is that row's true identity.
                 root_id: CONFIGURATION_ROOT_ID.to_owned(),
                 path: row.get("path"),
                 symbol_name: row.get("symbol_name"),
@@ -1764,6 +1767,7 @@ impl WorkspaceBaselineManifestStore for PostgresBaselineAdapter {
             .filter(|f| f.collection == "code")
             .map(|f| crate::ports::BaselineManifestFile {
                 collection: f.collection,
+                root_id: f.root_id,
                 path: f.path,
                 file_fingerprint: f.file_fingerprint,
                 document_count: f.document_count,
@@ -3492,7 +3496,8 @@ mod tests {
     use crate::domain::{CorpusId, ExternalBaselineConfig, Snapshot, SnapshotPublishMetadata};
     use crate::external_baseline::BaselineCollectionRecord;
     use crate::ports::{
-        BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotPublisher,
+        BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotContentStore,
+        SnapshotPublisher, WorkspaceBaselineManifestStore,
     };
     use crate::{BaselineRef, IndexedDocument};
     use std::collections::HashMap;
@@ -4004,6 +4009,7 @@ mod tests {
             files: groups
                 .iter()
                 .map(|group| crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: group.collection.clone(),
                     path: group.path.clone(),
                     file_fingerprint: group.file_fingerprint.clone(),
@@ -4512,6 +4518,147 @@ mod tests {
             lexical_roots,
             vec![CONFIGURATION_ROOT_ID.to_owned(), "Расш".to_owned()],
             "the lexical serving rows carry the root too, or search answers for the wrong file"
+        );
+    }
+
+    /// What was published under a root comes back under that root, by both lexical routes.
+    ///
+    /// Reading is where the root stops being bookkeeping: a hit that names the configuration's
+    /// file when the match is an extension's sends the caller to the wrong file on disk.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn the_published_root_comes_back_from_both_lexical_routes() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("read");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let configuration = indexed_document(
+            "code",
+            PATH,
+            "Общий",
+            1,
+            "hash-один",
+            "Процедура Общий КонецПроцедуры",
+        );
+        let extension = IndexedDocument { root_id: "Расш".to_owned(), ..configuration.clone() };
+        let snapshot = Snapshot::new("snap-read".to_owned(), CorpusId::WorkspaceCode);
+        adapter
+            .publish_snapshot(
+                &snapshot,
+                &SnapshotPublishMetadata::default(),
+                &[configuration, extension],
+            )
+            .unwrap();
+
+        let mut documents_roots: Vec<String> = adapter
+            .load_snapshot_documents(&snapshot)
+            .unwrap()
+            .into_iter()
+            .map(|document| document.root_id)
+            .collect();
+        documents_roots.sort();
+        documents_roots.dedup();
+        assert_eq!(
+            documents_roots,
+            vec![CONFIGURATION_ROOT_ID.to_owned(), "Расш".to_owned()],
+            "the corpus reader must return the identity the corpus was published under"
+        );
+
+        let mut hit_roots: Vec<String> = adapter
+            .lexical_search_baseline("snap-read", "Общий", Some("code"), 10)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.root_id)
+            .collect();
+        hit_roots.sort();
+        hit_roots.dedup();
+        assert_eq!(
+            hit_roots,
+            vec![CONFIGURATION_ROOT_ID.to_owned(), "Расш".to_owned()],
+            "a hit naming the wrong root sends the caller to the wrong file on disk"
+        );
+    }
+
+    /// Inspection tells apart two files that share one file object.
+    ///
+    /// Sharing is legitimate — identical content under two roots — so the reference list is the
+    /// only place an operator can see which file a row came from, and without the root the two
+    /// rows are indistinguishable from a duplicate.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn inspection_tells_apart_two_files_sharing_one_object() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("inspect");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        seed_two_rooted_files(&adapter, &schema);
+        {
+            let mut client = adapter.connect().unwrap();
+            client
+                .batch_execute(&format!(
+                    "UPDATE {schema}.snapshot_files SET file_object_id = 'obj-cfg'
+                      WHERE snapshot_id = 'parent';"
+                ))
+                .unwrap();
+        }
+
+        let details = adapter.file_object_details("obj-cfg").unwrap().unwrap();
+        let mut roots: Vec<String> =
+            details.references.into_iter().map(|reference| reference.root_id).collect();
+        roots.sort();
+
+        assert_eq!(
+            roots,
+            vec![CONFIGURATION_ROOT_ID.to_owned(), "Расш".to_owned()],
+            "two references to one object must say which file each of them is"
+        );
+    }
+
+    /// The root travels the whole way: PostgreSQL manifest, local store, keys read back.
+    ///
+    /// Started at the production producer rather than at a manifest assembled in the test,
+    /// because a circle that begins with a hand-built manifest cannot tell a correct producer
+    /// from one that still stamps the configuration on every file.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn the_manifest_carries_the_root_to_the_local_store() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("manifest");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        seed_two_rooted_files(&adapter, &schema);
+
+        let manifest = adapter.load_baseline_manifest("parent").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&dir.path().join("bsl-search.db")).unwrap();
+        store.save_baseline_manifest(&manifest).unwrap();
+
+        let keys = store.load_baseline_manifest_fingerprints("code").unwrap().unwrap();
+        let mut roots: Vec<String> = keys.keys().map(|key| key.root_id.clone()).collect();
+        roots.sort();
+
+        assert_eq!(
+            roots,
+            vec![CONFIGURATION_ROOT_ID.to_owned(), "Расш".to_owned()],
+            "a manifest that flattens both files onto the configuration makes the consumer \
+             compare an extension's file against the configuration's fingerprint"
         );
     }
 

@@ -1663,6 +1663,7 @@ mod tests {
                 snapshot_fingerprint: Some("stale-fp".to_owned()),
                 files: vec![bsl_search::BaselineManifestFile {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "GhostModule.bsl".to_owned(),
                     file_fingerprint: "ghost".to_owned(),
                     document_count: 1,
