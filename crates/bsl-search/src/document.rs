@@ -132,6 +132,29 @@ mod tests {
         );
     }
 
+    /// The embedding key must stay deaf to the root, and the cost of breaking that is
+    /// paid twice. Every embedding published so far would be orphaned — a full paid
+    /// re-embed of the corpus — and the serving side, which recomputes the key from the
+    /// columns of a row that has no root to give, would stop matching the publisher's key
+    /// for good.
+    ///
+    /// The property is stated over the key of two documents rather than over "a second
+    /// publish calls no embedder", because that phrasing cannot fail: both publishes
+    /// compute the key with the same function, so the second hits the first's cache under
+    /// ANY recipe, the forbidden one included.
+    #[test]
+    fn the_embedding_key_ignores_the_root() {
+        let configuration = doc();
+        let extension = IndexedDocument { root_id: "Расширение".to_owned(), ..doc() };
+
+        assert_eq!(
+            semantic_key_for_indexed_document(&configuration),
+            semantic_key_for_indexed_document(&extension),
+            "the same chunk under a different root embeds to the same vector, so it must \
+             keep the same key"
+        );
+    }
+
     struct FakeProvider;
     impl GraphContextProvider for FakeProvider {
         fn graph_context(&self, _: &str, symbol_name: &str, _: &str) -> Option<String> {

@@ -10,13 +10,20 @@ pub fn fingerprint_documents(documents: &[Document]) -> String {
     blake3::hash(entries.join("\n---\n").as_bytes()).to_hex().to_string()
 }
 
+/// The identity of a whole corpus: has anything about it moved since the last publish?
+///
+/// The root is part of it because identity of a file is the pair `(root_id, path)` — the
+/// same relative path lives under the configuration and under every extension at once.
+/// This is deliberately not what a FILE fingerprint answers: that one describes CONTENT,
+/// so two identical files in two roots legitimately share one file object.
 pub fn fingerprint_indexed_documents(documents: &[IndexedDocument]) -> String {
     let mut entries: Vec<String> = documents
         .iter()
         .map(|document| {
             format!(
-                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 document.collection,
+                document.root_id,
                 document.path,
                 document.symbol_name,
                 document.kind,
@@ -81,6 +88,37 @@ mod tests {
             fingerprint_indexed_documents(&forwards),
             fingerprint_indexed_documents(&backwards),
             "the same corpus in a different order is the same corpus"
+        );
+    }
+
+    /// The snapshot fingerprint answers one question — is this the same corpus? — and two
+    /// files with the same relative path under two different roots are two different files.
+    /// A republish that moved a file's root attribution while its path and bytes stayed put
+    /// would otherwise leave the fingerprint where it was, and every consumer holding a
+    /// manifest of the old keys would accept it as current.
+    #[test]
+    fn indexed_document_fingerprint_changes_when_the_root_changes() {
+        let docs_a = vec![IndexedDocument {
+            collection: "code".to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+            path: "CommonModules/Общий/Ext/Module.bsl".to_owned(),
+            symbol_name: "Общий".to_owned(),
+            kind: "procedure".to_owned(),
+            line_start: 1,
+            line_end: 3,
+            text: "Процедура Общий()".to_owned(),
+            content_hash: "hash-1".to_owned(),
+            graph_context: None,
+        }];
+        let docs_b = vec![IndexedDocument {
+            root_id: "Расширение".to_owned(),
+            ..docs_a[0].clone()
+        }];
+
+        assert_ne!(
+            fingerprint_indexed_documents(&docs_a),
+            fingerprint_indexed_documents(&docs_b),
+            "the same path under a different root is a different file, so it is a different corpus"
         );
     }
 

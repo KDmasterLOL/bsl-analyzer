@@ -1638,6 +1638,10 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
             ));
         }
 
+        // Ahead of the readiness check, which connects: what this schema cannot store must be
+        // refused without touching the database at all.
+        ensure_the_schema_can_store_these_roots(documents)?;
+
         self.check_storage_readiness()?;
 
         let mut phase_timings = SnapshotPublishPhaseTimings::default();
@@ -2344,6 +2348,37 @@ fn insert_serving_semantic_rows(
 
 fn format_pgvector_text(embedding: &[f32]) -> String {
     format!("[{}]", embedding.iter().map(|value| value.to_string()).collect::<Vec<_>>().join(","))
+}
+
+/// Whether this schema can hold the identities the corpus carries.
+///
+/// A file's identity is the pair `(root_id, path)`, but these tables key it by
+/// `(collection, path)` alone. So a corpus with roots does not merely lose a label on the
+/// way in: [`group_documents_by_file`] would MERGE two files that share a relative path
+/// across roots — the ordinary case, since an extension repeats the configuration's
+/// layout — into one row carrying the chunks of both. Nothing downstream can tell that
+/// apart from one large file.
+///
+/// The refusal therefore comes before any statement runs, and before the connection: a
+/// half-merged snapshot is worse than no snapshot, and the caller can act on a named error.
+fn ensure_the_schema_can_store_these_roots(
+    documents: &[IndexedDocument],
+) -> Result<(), SearchError> {
+    let roots: BTreeSet<&str> = documents
+        .iter()
+        .map(|document| document.root_id.as_str())
+        .filter(|root_id| *root_id != CONFIGURATION_ROOT_ID)
+        .collect();
+    if roots.is_empty() {
+        return Ok(());
+    }
+    Err(SearchError::ExternalBaseline(format!(
+        "refusing to publish a corpus whose files belong to source roots this baseline schema \
+         cannot store: {}. Rows here are keyed by (collection, path) with no room for a root, \
+         so files sharing a relative path across roots would be published merged into one. \
+         Publish the configuration alone until the schema carries roots.",
+        roots.into_iter().collect::<Vec<_>>().join(", ")
+    )))
 }
 
 fn group_documents_by_file(documents: &[IndexedDocument]) -> Vec<PublishedFileGroup> {
@@ -3195,6 +3230,51 @@ mod tests {
 
         let error = adapter.resolve_baseline(&baseline).unwrap_err();
         assert!(error.to_string().contains("connection"));
+    }
+
+    /// This schema keys a file by `(collection, path)` alone, so a corpus that also carries
+    /// roots has no place to put them: two files sharing a relative path across roots would
+    /// merge into one group holding the chunks of both. Refusing is the honest answer, and it
+    /// has to come before anything is written — a partial merge is worse than no publish.
+    ///
+    /// Observed offline, against an address nothing listens on: an implementation that wrote
+    /// first and refused afterwards would have to connect first, and there is no connection to
+    /// be had. The positive control is the same call with a root-free corpus, which must reach
+    /// the network and fail there — without it the assertion passes under any unconditional
+    /// error.
+    #[test]
+    fn a_corpus_with_roots_is_refused_before_the_connection_is_made() {
+        let adapter = PostgresBaselineAdapter::new(ExternalBaselineConfig::postgres(
+            "postgres://127.0.0.1:1",
+        ))
+        .unwrap();
+        let snapshot = Snapshot::new("snap-1", CorpusId::WorkspaceCode);
+        let metadata = SnapshotPublishMetadata::default();
+        let configuration =
+            indexed_document("code", "CommonModules/Общий/Ext/Module.bsl", "Общий", 1, "h", "t");
+        let extension =
+            IndexedDocument { root_id: "Расширение".to_owned(), ..configuration.clone() };
+
+        let refused = adapter
+            .publish_snapshot(&snapshot, &metadata, std::slice::from_ref(&extension))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("Расширение") && !refused.contains("connection"),
+            "the corpus must be refused for its roots, and refused before the adapter goes \
+             anywhere near the database: {refused}"
+        );
+
+        let reached_the_network = adapter
+            .publish_snapshot(&snapshot, &metadata, std::slice::from_ref(&configuration))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            reached_the_network.contains("connection"),
+            "positive control: a root-free corpus must get past the refusal and fail on the \
+             unreachable address, or the assertion above holds under any error at all: \
+             {reached_the_network}"
+        );
     }
 
     #[test]

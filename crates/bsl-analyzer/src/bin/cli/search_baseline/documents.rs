@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::io;
 
 /// The corpus of a source tree, together with the walk that produced it.
 ///
@@ -16,25 +17,80 @@ pub(super) struct WorkspaceCorpus {
     pub(super) unreadable_files: usize,
 }
 
+/// Whether a declared root that did not become a registered one may be published anyway.
+///
+/// For the daemon a rejected root is a warning: the search index is a best effort and the
+/// next scan can improve on it. For a published snapshot it is heavier — the snapshot says
+/// what the corpus holds AND that everything else is gone, so a root whose files end up
+/// under no key of their own is published as a deletion of every file in it.
+///
+/// Decided per variant rather than in bulk, because the two variants differ exactly here.
+fn ensure_every_declared_root_is_accounted_for(
+    rejected: &[bsl_search::RejectedRoot],
+) -> Result<(), io::Error> {
+    for rejection in rejected {
+        match &rejection.reason {
+            // Its files are already in the corpus: the configuration's own walk reaches
+            // them and attribution hands them the configuration's key. Nothing is lost, so
+            // the publish goes on.
+            bsl_search::Rejection::InsideConfiguration { root } => {
+                tracing::info!(
+                    path = %rejection.path.display(),
+                    configuration = %root.display(),
+                    "extension root lies inside the configuration; its files are published \
+                     under the configuration's key",
+                );
+            }
+            // Two directories would share one key space, so one of them silently overwrites
+            // the other. Whichever loses, the snapshot claims files it does not hold.
+            bsl_search::Rejection::IdentifierTaken { id } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "refusing to publish: source root {} could not be registered because \
+                         another root already holds the identifier {id:?}. Two roots sharing \
+                         one key space give the snapshot one row where two files live, so the \
+                         second is published as a deletion of the first. Rename or move the \
+                         root and publish again.",
+                        rejection.path.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Walk the source tree ONCE and index what it found.
 ///
 /// The walk happens here, not inside the engine, so that its verdict and its corpus cannot
 /// come from different traversals: a tree can change between two walks, and then a clean
 /// verdict would answer for files some later, shorter walk collected.
+///
+/// The root table is built by the SAME call the daemon reading these rows makes, off the
+/// same project model — parity of keys has to follow from one construction, not from two
+/// implementations that happen to agree today.
 pub(super) fn build_workspace_code(
-    source_path: &std::path::Path,
+    project: &project_model::Project,
 ) -> Result<WorkspaceCorpus, Box<dyn Error + Send + Sync>> {
     use bsl_search::SearchEngine;
 
     let temp_dir = tempfile::tempdir()?;
     let db_path = temp_dir.path().join("baseline-sync.db");
     let mut engine = SearchEngine::fts_only(&db_path)?;
-    // Everything under this directory is the configuration's — the honest contract for a
-    // one-shot indexer with no project model to consult. Declaring it makes the publisher key
-    // its rows through the same attribution the daemon reading them uses.
-    engine.set_workspace_root(source_path);
+    let extensions: Vec<std::path::PathBuf> =
+        project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
+    let (roots, rejected) =
+        bsl_search::WorkspaceRoots::build(&project.root, project.source_path(), &extensions);
+    ensure_every_declared_root_is_accounted_for(&rejected)?;
+    engine.set_workspace_roots(roots);
 
-    let walk = project_model::SourceSet::scan(std::slice::from_ref(&source_path.to_path_buf()));
+    // Every declared root, rejected ones included: a rejected root's files are not absent
+    // from the tree, and dropping them from the walk would publish them as deletions. Their
+    // attribution is the root table's business, and it hands them the configuration's key —
+    // the same key the configuration's own walk produces, so `FileKey` deduplication keeps
+    // one copy.
+    let walk = project_model::SourceSet::scan(&project.source_roots());
     let ingest = engine.ingest_scanned_fts(&walk)?;
     let documents = engine.load_indexed_documents(Some("code"))?;
     Ok(WorkspaceCorpus {
@@ -162,9 +218,13 @@ mod tests {
         format!("Процедура {name}()\n    Сообщить(\"{name}\");\nКонецПроцедуры\n")
     }
 
+    fn project_at(root: &Path) -> project_model::Project {
+        project_model::Project::new(root).unwrap()
+    }
+
     /// The keys the published corpus carries, one entry per file however many chunks it holds.
     fn published_keys(root: &Path) -> Keys {
-        build_workspace_code(root)
+        build_workspace_code(&project_at(root))
             .unwrap()
             .documents
             .into_iter()
@@ -172,18 +232,46 @@ mod tests {
             .collect()
     }
 
-    /// The keys the CONSUMER derives from the same tree: the daemon's own attribution
-    /// (`WorkspaceRoots::root_of`) over the shared walk, deduplicated exactly as
-    /// `workspace_overlay::scanned_files_from` does.
+    /// The keys the CONSUMER derives from the same tree: the daemon's own root table
+    /// (`bootstrap::workspace_roots_of`), its own walk universe (every REGISTERED root, as
+    /// `workspace_overlay::scan_workspace_files` declares it) and its own attribution
+    /// (`WorkspaceRoots::root_of`).
+    ///
+    /// Both halves matter. A model built with no extensions, or walking the configuration
+    /// root alone, agrees with any publisher on a tree without extensions and cannot
+    /// disagree with one on a tree with them — which is exactly the case this exists for.
     fn consumed_keys(root: &Path) -> Keys {
-        let (roots, _) = bsl_search::WorkspaceRoots::build(root, root, &[]);
-        project_model::SourceSet::scan(std::slice::from_ref(&root.to_path_buf()))
+        let project = project_at(root);
+        let extensions: Vec<std::path::PathBuf> =
+            project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
+        let (roots, _) =
+            bsl_search::WorkspaceRoots::build(&project.root, project.source_path(), &extensions);
+        let declared: Vec<std::path::PathBuf> =
+            roots.entries().map(|(_, path)| path.to_path_buf()).collect();
+        project_model::SourceSet::scan(&declared)
             .files
             .iter()
             .filter(|file| file.role == project_model::FileRole::Source)
             .filter_map(|file| roots.root_of(&file.walked, &file.canonical))
             .map(|key| (key.root_id, key.path))
             .collect()
+    }
+
+    /// A project laid out the conventional way — configuration under `src/cf`, extensions
+    /// under `src/cfe/*` — with the collision the composite key exists for: the first
+    /// extension holds a module at the SAME relative path as the configuration's.
+    fn workspace_with_two_extensions(dir: &Path) -> std::path::PathBuf {
+        let root = dir.join("project");
+        for (owner, relative) in [
+            ("src/cf", "CommonModules/Общий/Ext/Module.bsl"),
+            ("src/cfe/Первое", "CommonModules/Общий/Ext/Module.bsl"),
+            ("src/cfe/Второе", "CommonModules/Второй/Ext/Module.bsl"),
+        ] {
+            let owner_root = root.join(owner);
+            write(&owner_root.join("Configuration.xml"), "<MetaDataObject/>");
+            write(&owner_root.join(relative), &module(&owner.replace('/', "_")));
+        }
+        root
     }
 
     #[cfg(unix)]
@@ -246,6 +334,114 @@ mod tests {
         );
     }
 
+    /// The same parity on a tree that HAS extensions — the case the composite key exists
+    /// for, and the one the test above cannot reach: with no extension declared, a
+    /// publisher that ignores them agrees with the consumer perfectly.
+    ///
+    /// The tree carries one module at a relative path shared with the configuration, so a
+    /// publisher that dropped the root would not merely mislabel a row: it would produce
+    /// ONE key where the consumer looks for two, and the extension's module would read
+    /// downstream as an edit of the configuration's.
+    #[test]
+    fn the_published_keys_match_the_consumer_on_a_tree_with_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = workspace_with_two_extensions(dir.path());
+
+        let published = published_keys(&root);
+
+        assert_eq!(
+            published,
+            consumed_keys(&root),
+            "a baseline whose keys the daemon cannot derive is a baseline it can never match, \
+             update or drop"
+        );
+        assert!(
+            published.contains(&(
+                "src/cfe/Первое".to_owned(),
+                "CommonModules/Общий/Ext/Module.bsl".to_owned()
+            )),
+            "the extension's module must reach the corpus under ITS root, not merged into the \
+             configuration's key; published: {published:?}"
+        );
+    }
+
+    /// A root rejected for lying inside the configuration costs nothing: the configuration's
+    /// own walk reaches its files and attribution hands them the configuration's key, which
+    /// is the key they already have in every published baseline. So the publish goes on, and
+    /// the files are there.
+    ///
+    /// Walked twice — once by the configuration, once as a declared root — the file arrives
+    /// under ONE key both times, and `FileKey` deduplication drops the second copy. This is
+    /// why the publisher must not filter rejected roots out of the walk on its own: a
+    /// deduplication keyed by anything but `FileKey` would collapse two legitimately
+    /// different files living at the same relative path under two roots.
+    #[test]
+    fn an_extension_inside_the_configuration_is_published_under_the_configuration_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        write(&root.join("src/cf/Configuration.xml"), "<MetaDataObject/>");
+        write(&root.join("src/cf/CommonModules/Общий/Ext/Module.bsl"), &module("Общий"));
+        let nested = root.join("src/cf/Вложенное");
+        write(&nested.join("Configuration.xml"), "<MetaDataObject/>");
+        write(&nested.join("CommonModules/Вложенный/Ext/Module.bsl"), &module("Вложенный"));
+        std::fs::write(
+            root.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\nextensions = [\"src/cf/Вложенное\"]\n",
+        )
+        .unwrap();
+
+        let published = published_keys(&root);
+
+        assert_eq!(
+            published
+                .iter()
+                .filter(|(_, path)| path.ends_with("Вложенный/Ext/Module.bsl"))
+                .collect::<Vec<_>>(),
+            vec![&(String::new(), "Вложенное/CommonModules/Вложенный/Ext/Module.bsl".to_owned())],
+            "the nested extension's module belongs in the corpus exactly once, under the \
+             configuration's key; published: {published:?}"
+        );
+        assert_eq!(published, consumed_keys(&root), "and the consumer must derive the same set");
+    }
+
+    /// The other rejection is not survivable. Two roots sharing one identifier share one key
+    /// space, so whichever registers second is not merely mislabelled — its files reach the
+    /// corpus under keys the first root's files already hold, and the snapshot ends up
+    /// claiming one file where two live. Refusing names the collision; publishing hides it.
+    #[cfg(unix)]
+    #[test]
+    fn two_roots_that_would_share_one_identifier_stop_the_publish() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        write(&root.join("src/cf/Configuration.xml"), "<MetaDataObject/>");
+        write(&root.join("src/cf/CommonModules/Общий/Ext/Module.bsl"), &module("Общий"));
+        // The identifier is a lossy rendering of the path, so two names differing only in
+        // bytes no `str` can hold render identically. Discovered rather than declared,
+        // because a config entry is a `String` and could not spell them apart either.
+        for tail in [vec![b'a', 0x80], vec![b'a', 0x81]] {
+            let extension = root.join("src/cfe").join(OsString::from_vec(tail));
+            write(&extension.join("Configuration.xml"), "<MetaDataObject/>");
+            write(&extension.join("CommonModules/Расш/Ext/Module.bsl"), &module("Расш"));
+        }
+
+        let error = match build_workspace_code(&project_at(&root)) {
+            Ok(corpus) => panic!(
+                "a corpus with two roots in one key space may not be published; it produced \
+                 {} keys instead",
+                corpus.documents.len()
+            ),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(
+            error.contains("identifier"),
+            "the refusal must name what collided, or the operator cannot act on it: {error}"
+        );
+    }
+
     /// The corpus and the completeness verdict must describe ONE traversal. Two walks of a tree
     /// that changed in between let a clean verdict answer for a short corpus — the very defect
     /// the refusal exists to prevent, rebuilt inside its own fix.
@@ -253,14 +449,16 @@ mod tests {
     /// The count proves no SECOND `SourceSet::scan`; that no walk happens OUTSIDE `SourceSet` is
     /// what the structural gate below proves, since a hand-rolled traversal would not move this
     /// counter at all.
+    ///
+    /// Measured on a tree with SEVERAL roots, the shape a per-root loop would be written for:
+    /// on a single-root tree one walk per root and one walk in total are the same number.
     #[test]
     fn building_the_corpus_walks_the_tree_exactly_once() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("configuration");
-        write(&root.join("CommonModules/Прямой/Ext/Module.bsl"), &module("Прямой"));
+        let root = workspace_with_two_extensions(dir.path());
 
         let before = project_model::source_set::scans_performed_on_thread();
-        build_workspace_code(&root).unwrap();
+        build_workspace_code(&project_at(&root)).unwrap();
         let walked = project_model::source_set::scans_performed_on_thread() - before;
 
         assert_eq!(walked, 1, "the corpus and its verdict must come from one and the same walk");
@@ -284,6 +482,27 @@ mod tests {
                  or its completeness verdict answers for a walk it did not describe ({needle})"
             );
         }
+    }
+
+    /// The single-root shortcut would silently undo the whole node. `set_workspace_root`
+    /// builds a table of one root and calling it AFTER the project's table is installed
+    /// replaces it, so every extension row would fall back to the configuration's key — with
+    /// nothing to notice it: the method is public, its return is `()`, and no other
+    /// production caller is left to make a dead-code warning fire.
+    #[test]
+    fn the_publisher_does_not_fall_back_to_a_single_root_table() {
+        let source = include_str!("documents.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap_or(source);
+        assert!(
+            production.contains("set_workspace_roots("),
+            "the production/test cut moved, or the root table is no longer installed here; \
+             this gate scans only what it can prove it scanned"
+        );
+        assert!(
+            !production.contains("set_workspace_root("),
+            "the publisher must key its rows through the project's root table, or the baseline \
+             it writes has keys the daemon reading it cannot derive"
+        );
     }
 
     #[test]

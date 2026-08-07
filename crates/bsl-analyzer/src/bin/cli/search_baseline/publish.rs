@@ -50,7 +50,6 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
     };
 
     let project = project_model::Project::new(&args.source_dir)?;
-    let source_path = project.source_path().to_path_buf();
     let branch = publish_policy::resolve_publish_branch(args.branch.as_deref(), &project.root);
     let commit = publish_policy::resolve_publish_commit(args.commit.as_deref(), &project.root);
     let corpus = match args.corpus {
@@ -84,7 +83,7 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
     eprintln!("[1/5] Indexing source files...");
     let (indexed_files, indexed_documents) = match corpus {
         CorpusId::WorkspaceCode => {
-            let corpus = documents::build_workspace_code(&source_path)?;
+            let corpus = documents::build_workspace_code(&project)?;
             // Before anything is sent anywhere: a snapshot does not merely omit what its walk
             // could not read — `snapshot_deletions` tells every consumer those files are GONE.
             ensure_the_corpus_covers_the_walk(&corpus.walk, corpus.unreadable_files)?;
@@ -305,6 +304,10 @@ mod tests {
         format!("Процедура {name}()\n    Сообщить(\"{name}\");\nКонецПроцедуры\n")
     }
 
+    fn project_at(root: &Path) -> project_model::Project {
+        project_model::Project::new(root).unwrap()
+    }
+
     /// A tree with one readable module and one subtree the walk cannot enter.
     /// Returns `None` where permissions cannot hide anything — under an effective UID 0 a
     /// mode of 000 is not a barrier, and a stand that cannot build its own precondition must
@@ -325,13 +328,53 @@ mod tests {
         Some(root)
     }
 
+    /// The same tree, with the closed subtree inside an EXTENSION instead of the
+    /// configuration. Returns `None` under the same precondition as its sibling.
+    #[cfg(unix)]
+    fn tree_with_a_closed_subtree_in_an_extension(dir: &Path) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = dir.join("project");
+        for owner in ["src/cf", "src/cfe/Расширение"] {
+            let owner_root = root.join(owner);
+            write(&owner_root.join("Configuration.xml"), "<MetaDataObject/>");
+            write(&owner_root.join("CommonModules/Видимый/Ext/Module.bsl"), &module("Видимый"));
+        }
+        let closed = root.join("src/cfe/Расширение/CommonModules/Закрытый");
+        write(&closed.join("Ext/Module.bsl"), &module("Закрытый"));
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&closed).is_ok() {
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return None;
+        }
+        Some(root)
+    }
+
+    /// Completeness has to answer for the WHOLE published universe, not for the configuration
+    /// half of it. A walk that never enters an extension reports itself perfectly clean, so
+    /// the extension's files would be published as deletions with the verdict saying nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_place_the_walk_could_not_read_inside_an_extension_is_not_published_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(root) = tree_with_a_closed_subtree_in_an_extension(dir.path()) else { return };
+
+        let corpus = documents::build_workspace_code(&project_at(&root)).unwrap();
+
+        assert!(
+            ensure_the_corpus_covers_the_walk(&corpus.walk, corpus.unreadable_files).is_err(),
+            "an unreadable place inside an extension hides files from the corpus exactly as one \
+             inside the configuration does"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_tree_that_could_not_be_read_whole_is_not_published() {
         let dir = tempfile::tempdir().unwrap();
         let Some(root) = tree_with_a_closed_subtree(dir.path()) else { return };
 
-        let corpus = documents::build_workspace_code(&root).unwrap();
+        let corpus = documents::build_workspace_code(&project_at(&root)).unwrap();
 
         assert!(
             ensure_the_corpus_covers_the_walk(&corpus.walk, corpus.unreadable_files).is_err(),
@@ -348,7 +391,7 @@ mod tests {
         let root = dir.path().join("configuration");
         write(&root.join("CommonModules/Видимый/Ext/Module.bsl"), &module("Видимый"));
 
-        let corpus = documents::build_workspace_code(&root).unwrap();
+        let corpus = documents::build_workspace_code(&project_at(&root)).unwrap();
 
         assert!(!corpus.documents.is_empty(), "the stand must produce a corpus to judge");
         assert!(
@@ -366,7 +409,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let Some(root) = tree_with_a_closed_subtree(dir.path()) else { return };
 
-        let corpus = documents::build_workspace_code(&root).unwrap();
+        let corpus = documents::build_workspace_code(&project_at(&root)).unwrap();
 
         assert!(
             !corpus.documents.is_empty(),
@@ -441,7 +484,7 @@ mod tests {
             return;
         }
 
-        let corpus = documents::build_workspace_code(&root).unwrap();
+        let corpus = documents::build_workspace_code(&project_at(&root)).unwrap();
 
         assert_eq!(corpus.walk.unreadable, 0, "the walk reaches such a file and reports health");
         assert!(
