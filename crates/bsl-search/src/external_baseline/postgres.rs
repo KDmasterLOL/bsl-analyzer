@@ -3356,6 +3356,34 @@ mod tests {
         );
     }
 
+    /// The other half of the rule, and the half no deletion takes part in: with the same key
+    /// published twice, the row closer to the child wins. An ancestor's row is an older
+    /// publication of that same file, so serving it would hand out a fingerprint and a file
+    /// object the corpus has already replaced.
+    #[test]
+    fn the_file_closer_to_the_child_wins_over_its_ancestors() {
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let ancestry = vec!["child".to_owned(), "parent".to_owned()];
+        let republished = VisibleSnapshotFile {
+            file_fingerprint: "fp-republished".to_owned(),
+            ..visible_file(CONFIGURATION_ROOT_ID, PATH)
+        };
+        let mut files = HashMap::from([
+            ("child".to_owned(), vec![republished]),
+            ("parent".to_owned(), vec![visible_file(CONFIGURATION_ROOT_ID, PATH)]),
+        ]);
+        let mut deletions = HashMap::new();
+
+        let visible = fold_visible_files(&ancestry, &mut files, &mut deletions);
+
+        assert_eq!(
+            visible.values().map(|file| file.file_fingerprint.as_str()).collect::<Vec<_>>(),
+            vec!["fp-republished"],
+            "the ancestor's row must not overwrite the republished file: ancestry is walked \
+             child-first precisely so the newest publication of a key is the visible one"
+        );
+    }
+
     #[test]
     fn defaults_to_bsl_search_schema() {
         let adapter =

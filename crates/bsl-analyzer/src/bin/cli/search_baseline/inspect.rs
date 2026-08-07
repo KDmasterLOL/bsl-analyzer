@@ -237,11 +237,15 @@ mod tests {
     /// Two roots may legitimately share one file object, and then the reference list is the
     /// only place an operator can see which file each row belongs to. Rendering both the same
     /// way answers the question with a lie that looks like a duplicate.
+    ///
+    /// Pinned by the exact line rather than by mere difference from the configuration's: this
+    /// function exists because a formatting hole loses a field in silence, and a line naming
+    /// the root but not the file would differ from the configuration's just as well.
     #[test]
-    fn references_from_two_roots_do_not_render_alike() {
-        assert_ne!(
-            render_file_object_reference(&reference(CONFIGURATION_ROOT_ID)),
+    fn a_reference_from_another_root_names_both_the_root_and_the_file() {
+        assert_eq!(
             render_file_object_reference(&reference("src/cfe/Расш")),
+            "snap-1 -> [src/cfe/Расш] CommonModules/Общий/Ext/Module.bsl"
         );
     }
 
