@@ -56,8 +56,12 @@ impl FileKey {
         Self { root_id: root_id.into(), path: path.into() }
     }
 
-    /// A file of the configuration root — the only identity a published baseline
-    /// manifest can carry, since the publisher walks that root alone.
+    /// A file of the configuration root.
+    ///
+    /// The publisher walks every registered root, so a published corpus carries other
+    /// identities too. What still holds the PostgreSQL side to this one is the adapter's
+    /// own refusal of a corpus with roots — its tables key a file by `(collection, path)`
+    /// and have nowhere to put one — not any property of the walk.
     pub fn configuration(path: impl Into<String>) -> Self {
         Self::new(CONFIGURATION_ROOT_ID, path)
     }

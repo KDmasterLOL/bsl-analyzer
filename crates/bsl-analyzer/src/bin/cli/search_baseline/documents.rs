@@ -83,14 +83,17 @@ pub(super) fn build_workspace_code(
     let (roots, rejected) =
         bsl_search::WorkspaceRoots::build(&project.root, project.source_path(), &extensions);
     ensure_every_declared_root_is_accounted_for(&rejected)?;
+    // The REGISTERED roots, which is also what the daemon's own walk covers. Not the declared
+    // list: a rejected root adds no file to it, since `InsideConfiguration` means the
+    // configuration root already contains it and `IdentifierTaken` has just refused the
+    // publish outright. It would only be entered a second time, and every place inside it
+    // classified twice — the walk's own counters have no notion of a file it has already
+    // seen, and those counters are the numbers the refusal reports.
+    let declared: Vec<std::path::PathBuf> =
+        roots.entries().map(|(_, path)| path.to_path_buf()).collect();
     engine.set_workspace_roots(roots);
 
-    // Every declared root, rejected ones included: a rejected root's files are not absent
-    // from the tree, and dropping them from the walk would publish them as deletions. Their
-    // attribution is the root table's business, and it hands them the configuration's key —
-    // the same key the configuration's own walk produces, so `FileKey` deduplication keeps
-    // one copy.
-    let walk = project_model::SourceSet::scan(&project.source_roots());
+    let walk = project_model::SourceSet::scan(&declared);
     let ingest = engine.ingest_scanned_fts(&walk)?;
     let documents = engine.load_indexed_documents(Some("code"))?;
     Ok(WorkspaceCorpus {
@@ -362,6 +365,43 @@ mod tests {
             )),
             "the extension's module must reach the corpus under ITS root, not merged into the \
              configuration's key; published: {published:?}"
+        );
+    }
+
+    /// The numbers in the refusal text tell the operator how many places to fix, so a place
+    /// counted twice sends them looking for a second one that does not exist.
+    ///
+    /// Overlapping roots are not exotic here: an extension inside the configuration is a
+    /// declared root AND a subtree of another declared root, so a walk over the DECLARED list
+    /// enters it twice and classifies everything in it twice.
+    #[cfg(unix)]
+    #[test]
+    fn one_unreadable_place_under_overlapping_roots_is_counted_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        write(&root.join("src/cf/Configuration.xml"), "<MetaDataObject/>");
+        write(&root.join("src/cf/CommonModules/Общий/Ext/Module.bsl"), &module("Общий"));
+        let nested = root.join("src/cf/Вложенное");
+        write(&nested.join("Configuration.xml"), "<MetaDataObject/>");
+        let closed = nested.join("CommonModules/Закрытый");
+        write(&closed.join("Ext/Module.bsl"), &module("Закрытый"));
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&closed).is_ok() {
+            return;
+        }
+        std::fs::write(
+            root.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\nextensions = [\"src/cf/Вложенное\"]\n",
+        )
+        .unwrap();
+
+        let corpus = build_workspace_code(&project_at(&root)).unwrap();
+
+        assert_eq!(
+            corpus.walk.unreadable, 1,
+            "one directory is unreadable, so the operator must be told about one"
         );
     }
 

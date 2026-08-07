@@ -1,10 +1,25 @@
 use crate::domain::IndexedDocument;
 use crate::Document;
 
+/// One document of a corpus, rendered so that its fields cannot trade characters across
+/// their boundary.
+///
+/// Length-prefixed rather than separated by a character, because no character is unavailable
+/// to the fields: a path may hold a newline, source text may hold anything at all. A
+/// separator that can occur inside a field is not a boundary — a root ending in one and a
+/// path beginning after it concatenate to exactly what a shorter root and a longer path
+/// produce, and two different documents then share a fingerprint. A length says where a
+/// field ends without forbidding anything inside it.
+fn entry_of(fields: &[&str]) -> String {
+    fields.iter().map(|field| format!("{}:{field}", field.len())).collect()
+}
+
 pub fn fingerprint_documents(documents: &[Document]) -> String {
     let mut entries: Vec<String> = documents
         .iter()
-        .map(|document| format!("{}\n{}\n{}", document.kind, document.title, document.body))
+        .map(|document| {
+            entry_of(&[document.kind.as_str(), document.title.as_str(), document.body.as_str()])
+        })
         .collect();
     entries.sort();
     blake3::hash(entries.join("\n---\n").as_bytes()).to_hex().to_string()
@@ -20,18 +35,19 @@ pub fn fingerprint_indexed_documents(documents: &[IndexedDocument]) -> String {
     let mut entries: Vec<String> = documents
         .iter()
         .map(|document| {
-            format!(
-                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-                document.collection,
-                document.root_id,
-                document.path,
-                document.symbol_name,
-                document.kind,
-                document.line_start,
-                document.line_end,
-                document.content_hash,
-                document.text
-            )
+            let line_start = document.line_start.to_string();
+            let line_end = document.line_end.to_string();
+            entry_of(&[
+                document.collection.as_str(),
+                document.root_id.as_str(),
+                document.path.as_str(),
+                document.symbol_name.as_str(),
+                document.kind.as_str(),
+                line_start.as_str(),
+                line_end.as_str(),
+                document.content_hash.as_str(),
+                document.text.as_str(),
+            ])
         })
         .collect();
     entries.sort();
@@ -119,6 +135,58 @@ mod tests {
             fingerprint_indexed_documents(&docs_a),
             fingerprint_indexed_documents(&docs_b),
             "the same path under a different root is a different file, so it is a different corpus"
+        );
+    }
+
+    /// Both recipes must resist the same thing, so both are pinned: a corpus fingerprint that
+    /// two different corpora can share leaves every consumer's manifest looking current after
+    /// a republish that in fact changed what the corpus holds.
+    #[test]
+    fn no_two_field_layouts_share_a_document_fingerprint() {
+        let base = Document {
+            kind: "type".to_owned(),
+            title: "Массив".to_owned(),
+            body: "\nОписание".to_owned(),
+        };
+        let boundary_moved =
+            Document {
+                title: "Массив\n".to_owned(), body: "Описание".to_owned(), ..base.clone()
+            };
+
+        assert_ne!(
+            fingerprint_documents(std::slice::from_ref(&base)),
+            fingerprint_documents(std::slice::from_ref(&boundary_moved)),
+            "two different documents must not hash alike"
+        );
+    }
+
+    /// A newline is legal in a Unix directory name, so a root ending in one and a path
+    /// beginning after it concatenate to exactly what a shorter root and a longer path
+    /// produce — and those are two different files.
+    #[test]
+    fn no_two_field_layouts_share_an_indexed_document_fingerprint() {
+        let base = IndexedDocument {
+            collection: "code".to_owned(),
+            root_id: "src/cfe/a".to_owned(),
+            path: "b\nc/Module.bsl".to_owned(),
+            symbol_name: "Общий".to_owned(),
+            kind: "procedure".to_owned(),
+            line_start: 1,
+            line_end: 3,
+            text: "Процедура Общий()".to_owned(),
+            content_hash: "hash-1".to_owned(),
+            graph_context: None,
+        };
+        let boundary_moved = IndexedDocument {
+            root_id: "src/cfe/a\nb".to_owned(),
+            path: "c/Module.bsl".to_owned(),
+            ..base.clone()
+        };
+
+        assert_ne!(
+            fingerprint_indexed_documents(std::slice::from_ref(&base)),
+            fingerprint_indexed_documents(std::slice::from_ref(&boundary_moved)),
+            "two different file keys must not hash alike"
         );
     }
 

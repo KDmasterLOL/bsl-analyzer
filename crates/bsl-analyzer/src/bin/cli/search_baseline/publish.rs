@@ -42,6 +42,45 @@ fn ensure_the_corpus_covers_the_walk(
     ))
 }
 
+/// How many FILES a corpus of chunks stands for.
+///
+/// Counted by the whole identity `(root_id, path)`, not by the path alone: an extension
+/// repeats the configuration's directory layout, so the same relative path under two roots is
+/// the ordinary case, and counting by path would report one file where two were published.
+fn distinct_files(documents: &[bsl_search::IndexedDocument]) -> usize {
+    documents
+        .iter()
+        .map(|document| (document.root_id.as_str(), document.path.as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+/// Add the one thing a storage adapter cannot know: which knob of THIS tool put the
+/// extensions into the corpus.
+///
+/// Attached whenever the corpus carried roots and the publish failed — the condition is about
+/// the corpus, which is the CLI's own, not about why the store said no, which is the store's.
+/// It earns its place because extension roots are usually not something the operator declared:
+/// the conventional `src/cfe/*` layout is discovered on its own, so a project may have no
+/// config file at all and still be refused, with nothing on screen naming the file to create.
+fn name_the_extension_opt_out(
+    error: bsl_search::SearchError,
+    documents: &[bsl_search::IndexedDocument],
+) -> Box<dyn Error + Send + Sync> {
+    let has_roots =
+        documents.iter().any(|document| document.root_id != bsl_search::CONFIGURATION_ROOT_ID);
+    if !has_roots {
+        return error.into();
+    }
+    io::Error::other(format!(
+        "{error}\n\nThis corpus covers extension source roots. To publish the configuration \
+         alone, declare an empty extension list for the project — `extensions = []` under \
+         `[source]` in bsl-analyzer.toml — which also turns off discovery of the conventional \
+         src/cfe/* layout."
+    ))
+    .into()
+}
+
 pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
     use bsl_search::{
         fingerprint_documents, fingerprint_indexed_documents, BaselinePublisher, CorpusId,
@@ -165,7 +204,8 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
             &indexed_documents,
             embedder.as_ref(),
             if has_embedder { Some(&embedding_progress) } else { None },
-        )?;
+        )
+        .map_err(|error| name_the_extension_opt_out(error, &indexed_documents))?;
     eprintln!(
         "      Reused {} files, wrote {}, deleted {}",
         publish_report.snapshot.reused_files,
@@ -253,11 +293,7 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
         eprintln!("[5/5] Skipped (no embeddings)");
     }
 
-    let published_files = indexed_documents
-        .iter()
-        .map(|document| document.path.as_str())
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
+    let published_files = distinct_files(&indexed_documents);
     let branch_label = branch.as_deref().unwrap_or("-");
     let commit_label = commit.as_deref().unwrap_or("-");
 
@@ -306,6 +342,76 @@ mod tests {
 
     fn project_at(root: &Path) -> project_model::Project {
         project_model::Project::new(root).unwrap()
+    }
+
+    fn chunk_of(root_id: &str) -> bsl_search::IndexedDocument {
+        bsl_search::IndexedDocument {
+            collection: "code".to_owned(),
+            root_id: root_id.to_owned(),
+            path: "CommonModules/Общий/Ext/Module.bsl".to_owned(),
+            symbol_name: "Общий".to_owned(),
+            kind: "procedure".to_owned(),
+            line_start: 1,
+            line_end: 3,
+            text: "Процедура Общий()".to_owned(),
+            content_hash: "hash-1".to_owned(),
+            graph_context: None,
+        }
+    }
+
+    /// The store can say the schema holds no roots; only this tool can say which of its knobs
+    /// put them there. Extensions are usually discovered rather than declared, so the project
+    /// that gets refused may have no config file to look in.
+    #[test]
+    fn a_refusal_over_a_corpus_with_roots_names_the_knob_that_removes_them() {
+        let refusal = || bsl_search::SearchError::ExternalBaseline("roots unsupported".to_owned());
+
+        let named = name_the_extension_opt_out(refusal(), &[chunk_of("src/cfe/Расш")]);
+        assert!(
+            named.to_string().contains("extensions = []")
+                && named.to_string().contains("bsl-analyzer.toml"),
+            "the operator must be told what to change, not only what went wrong: {named}"
+        );
+
+        let untouched =
+            name_the_extension_opt_out(refusal(), &[chunk_of(bsl_search::CONFIGURATION_ROOT_ID)]);
+        assert!(
+            !untouched.to_string().contains("extensions = []"),
+            "a failure that has nothing to do with extensions must not be answered with advice \
+             about them: {untouched}"
+        );
+    }
+
+    /// The report tells the operator how many files went out. Two files at one relative path
+    /// under two roots is what the composite key exists for, so a count that folds them into
+    /// one understates the publish by exactly the rows an operator would come looking for.
+    #[test]
+    fn the_report_counts_one_path_under_two_roots_as_two_files() {
+        let chunk = bsl_search::IndexedDocument {
+            collection: "code".to_owned(),
+            root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
+            path: "CommonModules/Общий/Ext/Module.bsl".to_owned(),
+            symbol_name: "Общий".to_owned(),
+            kind: "procedure".to_owned(),
+            line_start: 1,
+            line_end: 3,
+            text: "Процедура Общий()".to_owned(),
+            content_hash: "hash-1".to_owned(),
+            graph_context: None,
+        };
+        let in_extension =
+            bsl_search::IndexedDocument { root_id: "src/cfe/Расш".to_owned(), ..chunk.clone() };
+        let second_chunk_of_the_same_file = bsl_search::IndexedDocument {
+            symbol_name: "Второй".to_owned(),
+            line_start: 5,
+            ..chunk.clone()
+        };
+
+        assert_eq!(
+            distinct_files(&[chunk, in_extension, second_chunk_of_the_same_file]),
+            2,
+            "two files, one of them chunked twice"
+        );
     }
 
     /// A tree with one readable module and one subtree the walk cannot enter.
