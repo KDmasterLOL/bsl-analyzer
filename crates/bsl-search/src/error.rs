@@ -1,4 +1,11 @@
-pub const SCHEMA_VERSION_CURRENT: i32 = 1;
+/// Version 2 keys a file by `(collection, root_id, path)` in the shared PostgreSQL schema.
+///
+/// The bump is deliberate and its cost is a hard stop for older builds: a column added to a
+/// table is invisible to them, but the DATA is not. Once a build that knows roots publishes an
+/// extension, an older one on the same schema folds two files sharing a relative path into one
+/// key and silently serves one of them. The choice was never "hard stop versus rolling upgrade"
+/// — it was a hard stop versus losing a live file in silence.
+pub const SCHEMA_VERSION_CURRENT: i32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SearchError {

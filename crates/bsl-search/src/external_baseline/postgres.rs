@@ -328,6 +328,91 @@ impl PostgresBaselineAdapter {
         )
     }
 
+    /// Gives a carrier the root column on schemas published before roots existed.
+    ///
+    /// `CONFIGURATION_ROOT_ID` is the empty string precisely so this backfill is free: every
+    /// pre-root row belongs to the configuration, so the default is already its true value and
+    /// not one row is rewritten.
+    fn add_root_id_column(&self, table: &str) -> String {
+        format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS root_id TEXT NOT NULL DEFAULT ''",
+            self.table(table)
+        )
+    }
+
+    /// Brings a carrier's primary key to `columns`, deciding by the catalog rather than by name.
+    ///
+    /// The name of a constraint guarantees nothing about its columns — a schema created before
+    /// roots carries `..._pkey` over a two-part key — so the composition is read from
+    /// `pg_constraint` and the rebuild happens only when it actually differs. That is what makes
+    /// re-running the migration a no-op instead of a fresh lock on the largest tables.
+    fn enforce_primary_key(&self, table: &str, columns: &[&str]) -> String {
+        let qualified = self.table(table);
+        format!(
+            "DO $$
+             DECLARE
+                 target_columns TEXT[] := {};
+                 actual_columns TEXT[];
+                 key_name TEXT;
+                 relation OID := to_regclass('{qualified}');
+             BEGIN
+                 IF relation IS NULL THEN
+                     RETURN;
+                 END IF;
+                 SELECT c.conname, array_agg(a.attname ORDER BY k.ord)
+                   INTO key_name, actual_columns
+                   FROM pg_constraint c
+                   CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+                   JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+                  WHERE c.conrelid = relation AND c.contype = 'p'
+                  GROUP BY c.conname;
+                 IF actual_columns IS DISTINCT FROM target_columns THEN
+                     IF key_name IS NOT NULL THEN
+                         EXECUTE format('ALTER TABLE {qualified} DROP CONSTRAINT %I', key_name);
+                     END IF;
+                     EXECUTE 'ALTER TABLE {qualified} ADD PRIMARY KEY {}';
+                 END IF;
+             END $$",
+            sql_text_array(columns),
+            sql_column_list(columns),
+        )
+    }
+
+    /// Same decision for a secondary index, and for the same reason made explicit here.
+    ///
+    /// These indexes are declared with `CREATE INDEX IF NOT EXISTS` under a fixed name, so on a
+    /// live database a re-declaration with new columns is skipped BY NAME and the index silently
+    /// keeps its old composition. Nothing about the answers changes when that happens — only the
+    /// cost of the query — which is why it would otherwise never be noticed.
+    fn enforce_index(&self, index: &str, table: &str, columns: &[&str]) -> String {
+        let qualified = self.table(table);
+        let index_name = format!("idx_{}_{index}", self.schema);
+        let qualified_index = format!("{}.{index_name}", self.schema);
+        format!(
+            "DO $$
+             DECLARE
+                 target_columns TEXT[] := {};
+                 actual_columns TEXT[];
+                 relation OID := to_regclass('{qualified_index}');
+             BEGIN
+                 IF relation IS NOT NULL THEN
+                     SELECT array_agg(a.attname ORDER BY k.ord)
+                       INTO actual_columns
+                       FROM pg_index i
+                       CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                       JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+                      WHERE i.indexrelid = relation;
+                 END IF;
+                 IF actual_columns IS DISTINCT FROM target_columns THEN
+                     EXECUTE 'DROP INDEX IF EXISTS {qualified_index}';
+                     EXECUTE 'CREATE INDEX {index_name} ON {qualified} {}';
+                 END IF;
+             END $$",
+            sql_text_array(columns),
+            sql_column_list(columns),
+        )
+    }
+
     fn ensure_schema_statements(&self) -> Vec<String> {
         vec![
             format!("CREATE SCHEMA IF NOT EXISTS {}", self.schema),
@@ -411,11 +496,12 @@ impl PostgresBaselineAdapter {
                 "CREATE TABLE IF NOT EXISTS {} (
                     snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
                     collection TEXT NOT NULL,
+                    root_id TEXT NOT NULL DEFAULT '',
                     path TEXT NOT NULL,
                     file_fingerprint TEXT NOT NULL,
                     document_count INTEGER NOT NULL,
                     file_object_id TEXT NOT NULL REFERENCES {}(id) ON DELETE RESTRICT,
-                    PRIMARY KEY (snapshot_id, collection, path)
+                    PRIMARY KEY (snapshot_id, collection, root_id, path)
                 )",
                 self.table("snapshot_files"),
                 self.table("snapshots"),
@@ -425,8 +511,9 @@ impl PostgresBaselineAdapter {
                 "CREATE TABLE IF NOT EXISTS {} (
                     snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
                     collection TEXT NOT NULL,
+                    root_id TEXT NOT NULL DEFAULT '',
                     path TEXT NOT NULL,
-                    PRIMARY KEY (snapshot_id, collection, path)
+                    PRIMARY KEY (snapshot_id, collection, root_id, path)
                 )",
                 self.table("snapshot_deletions"),
                 self.table("snapshots"),
@@ -435,6 +522,7 @@ impl PostgresBaselineAdapter {
                 "CREATE TABLE IF NOT EXISTS {} (
                     snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
                     collection TEXT NOT NULL,
+                    root_id TEXT NOT NULL DEFAULT '',
                     path TEXT NOT NULL,
                     ordinal INTEGER NOT NULL,
                     symbol_name TEXT NOT NULL,
@@ -443,7 +531,7 @@ impl PostgresBaselineAdapter {
                     line_end INTEGER NOT NULL,
                     text TEXT NOT NULL,
                     tsv TSVECTOR NOT NULL,
-                    PRIMARY KEY (snapshot_id, collection, path, ordinal)
+                    PRIMARY KEY (snapshot_id, collection, root_id, path, ordinal)
                 )",
                 self.table("serving_lexical"),
                 self.table("snapshots"),
@@ -459,6 +547,23 @@ impl PostgresBaselineAdapter {
                 self.table("snapshot_heads"),
                 self.table("snapshots"),
             ),
+            // The root reaches the three mandatory carriers of file identity. Order matters:
+            // the column exists before anything keys by it.
+            self.add_root_id_column("snapshot_files"),
+            self.add_root_id_column("snapshot_deletions"),
+            self.add_root_id_column("serving_lexical"),
+            self.enforce_primary_key(
+                "snapshot_files",
+                &["snapshot_id", "collection", "root_id", "path"],
+            ),
+            self.enforce_primary_key(
+                "snapshot_deletions",
+                &["snapshot_id", "collection", "root_id", "path"],
+            ),
+            self.enforce_primary_key(
+                "serving_lexical",
+                &["snapshot_id", "collection", "root_id", "path", "ordinal"],
+            ),
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_snapshots_corpus_created_at
                  ON {} (corpus, created_at DESC)",
@@ -471,11 +576,10 @@ impl PostgresBaselineAdapter {
                 self.schema,
                 self.table("snapshots")
             ),
-            format!(
-                "CREATE INDEX IF NOT EXISTS idx_{}_snapshot_files_snapshot_path
-                 ON {} (snapshot_id, collection, path)",
-                self.schema,
-                self.table("snapshot_files")
+            self.enforce_index(
+                "snapshot_files_snapshot_path",
+                "snapshot_files",
+                &["snapshot_id", "collection", "root_id", "path"],
             ),
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_snapshot_files_object
@@ -483,11 +587,10 @@ impl PostgresBaselineAdapter {
                 self.schema,
                 self.table("snapshot_files")
             ),
-            format!(
-                "CREATE INDEX IF NOT EXISTS idx_{}_snapshot_deletions_snapshot_path
-                 ON {} (snapshot_id, collection, path)",
-                self.schema,
-                self.table("snapshot_deletions")
+            self.enforce_index(
+                "snapshot_deletions_snapshot_path",
+                "snapshot_deletions",
+                &["snapshot_id", "collection", "root_id", "path"],
             ),
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_serving_lexical_tsv
@@ -1608,9 +1711,11 @@ impl WorkspaceBaselineManifestStore for PostgresBaselineAdapter {
 impl PostgresBaselineAdapter {
     pub fn migrate_storage(&self) -> Result<(), SearchError> {
         let mut client = self.connect()?;
-        for statement in self.ensure_schema_statements() {
-            client.batch_execute(&statement)?;
-        }
+        let statements = self.ensure_schema_statements();
+        self.migrate_structure(&mut client, &statements)?;
+
+        // The optional half stays outside and stays tolerant: a database without the `vector`
+        // extension is fully usable for everything but semantic serving, which refuses by name.
         for statement in self.pgvector_schema_statements() {
             if let Err(e) = client.batch_execute(&statement) {
                 tracing::warn!("pgvector DDL skipped (semantic serving will be unavailable): {e}");
@@ -1618,10 +1723,31 @@ impl PostgresBaselineAdapter {
             }
         }
 
+        Ok(())
+    }
+
+    /// Applies the mandatory half of the migration as one transaction, version included.
+    ///
+    /// Changing a primary key is not idempotent in the middle: between `DROP CONSTRAINT` and
+    /// `ADD PRIMARY KEY` the table has no key at all, and an interrupted run would leave a state
+    /// a retry cannot repair. PostgreSQL keeps DDL transactional, so one transaction removes
+    /// that state entirely.
+    ///
+    /// The version is stamped inside the same transaction rather than after it. Stamped after,
+    /// a rolled-back structural change would still be followed by version 2 on an unmigrated
+    /// schema, `Ok` from this function, and "storage is ready" printed at the operator — a false
+    /// ready, and a baseline switched off for every consumer.
+    fn migrate_structure(
+        &self,
+        client: &mut PgPooledConnection,
+        statements: &[String],
+    ) -> Result<(), SearchError> {
         let mut tx = client.transaction()?;
+        for statement in statements {
+            tx.batch_execute(statement)?;
+        }
         self.write_schema_version(&mut tx)?;
         tx.commit()?;
-
         Ok(())
     }
 }
@@ -2157,6 +2283,17 @@ fn load_snapshot_file_rows(
             file_object_id: row.get("file_object_id"),
         })
         .collect())
+}
+
+/// `['a', 'b']` as a PostgreSQL text array, for comparing against a catalog composition.
+fn sql_text_array(columns: &[&str]) -> String {
+    let items: Vec<String> = columns.iter().map(|column| format!("'{column}'")).collect();
+    format!("ARRAY[{}]", items.join(", "))
+}
+
+/// `['a', 'b']` as the parenthesised column list of a key or index declaration.
+fn sql_column_list(columns: &[&str]) -> String {
+    format!("({})", columns.join(", "))
 }
 
 fn load_snapshot_deletion_keys(
@@ -3384,6 +3521,50 @@ mod tests {
         );
     }
 
+    /// Every mandatory carrier of file identity keys it by the root, and none of them still
+    /// declares the two-part key.
+    ///
+    /// Looped over the carriers rather than written for one of them: the three are edited by
+    /// hand in three separate statements, and a node that keys two of three leaves the third
+    /// silently merging an extension's file into the configuration's.
+    #[test]
+    fn every_mandatory_carrier_keys_the_file_by_its_root() {
+        const CARRIERS: [(&str, &str); 3] = [
+            ("snapshot_files", "PRIMARY KEY (snapshot_id, collection, root_id, path)"),
+            ("snapshot_deletions", "PRIMARY KEY (snapshot_id, collection, root_id, path)"),
+            ("serving_lexical", "PRIMARY KEY (snapshot_id, collection, root_id, path, ordinal)"),
+        ];
+        let adapter =
+            PostgresBaselineAdapter::new(ExternalBaselineConfig::postgres("postgres://example"))
+                .unwrap();
+        let statements = adapter.ensure_schema_statements();
+
+        for (table, expected_key) in CARRIERS {
+            let qualified = adapter.table(table);
+            let owned: Vec<&String> =
+                statements.iter().filter(|statement| statement.contains(&qualified)).collect();
+            assert!(!owned.is_empty(), "no statement mentions {qualified}");
+
+            assert!(
+                owned.iter().any(|statement| statement.contains(expected_key)),
+                "{table} must declare {expected_key}"
+            );
+            assert!(
+                owned
+                    .iter()
+                    .any(|statement| statement.contains("ADD COLUMN IF NOT EXISTS root_id")),
+                "{table} must gain root_id on schemas that predate roots"
+            );
+            assert!(
+                !owned
+                    .iter()
+                    .any(|statement| statement
+                        .contains("PRIMARY KEY (snapshot_id, collection, path")),
+                "{table} still declares the rootless key, so two roots collapse into one row"
+            );
+        }
+    }
+
     #[test]
     fn defaults_to_bsl_search_schema() {
         let adapter =
@@ -3829,6 +4010,339 @@ mod tests {
     }
 
     /// Drops the throwaway test schema even when an assertion panics mid-test.
+    /// Raises the pre-root shape of the schema with raw SQL.
+    ///
+    /// It cannot be built from the node's own steps: after this node the only producer of DDL
+    /// always emits the root column, so a legacy schema has to be written by hand or the
+    /// migration is never observed doing anything.
+    fn raise_pre_root_schema(adapter: &PostgresBaselineAdapter, schema: &str) {
+        let mut client = adapter.connect().unwrap();
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA IF NOT EXISTS {schema};
+                 CREATE TABLE {schema}._schema_metadata_ (
+                     setting TEXT PRIMARY KEY,
+                     value TEXT NOT NULL
+                 );
+                 INSERT INTO {schema}._schema_metadata_ VALUES ('schema_version', '1');
+                 CREATE TABLE {schema}.snapshots (
+                     id TEXT PRIMARY KEY,
+                     corpus TEXT NOT NULL,
+                     fingerprint TEXT NULL,
+                     parent_snapshot_id TEXT NULL,
+                     branch TEXT NULL,
+                     commit_sha TEXT NULL,
+                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                 );
+                 CREATE TABLE {schema}.file_objects (
+                     id TEXT PRIMARY KEY,
+                     collection TEXT NOT NULL,
+                     file_fingerprint TEXT NOT NULL,
+                     document_count INTEGER NOT NULL
+                 );
+                 CREATE TABLE {schema}.snapshot_files (
+                     snapshot_id TEXT NOT NULL REFERENCES {schema}.snapshots(id) ON DELETE CASCADE,
+                     collection TEXT NOT NULL,
+                     path TEXT NOT NULL,
+                     file_fingerprint TEXT NOT NULL,
+                     document_count INTEGER NOT NULL,
+                     file_object_id TEXT NOT NULL REFERENCES {schema}.file_objects(id),
+                     PRIMARY KEY (snapshot_id, collection, path)
+                 );
+                 CREATE TABLE {schema}.snapshot_deletions (
+                     snapshot_id TEXT NOT NULL REFERENCES {schema}.snapshots(id) ON DELETE CASCADE,
+                     collection TEXT NOT NULL,
+                     path TEXT NOT NULL,
+                     PRIMARY KEY (snapshot_id, collection, path)
+                 );
+                 CREATE TABLE {schema}.serving_lexical (
+                     snapshot_id TEXT NOT NULL REFERENCES {schema}.snapshots(id) ON DELETE CASCADE,
+                     collection TEXT NOT NULL,
+                     path TEXT NOT NULL,
+                     ordinal INTEGER NOT NULL,
+                     symbol_name TEXT NOT NULL,
+                     kind TEXT NOT NULL,
+                     line_start INTEGER NOT NULL,
+                     line_end INTEGER NOT NULL,
+                     text TEXT NOT NULL,
+                     tsv TSVECTOR NOT NULL,
+                     PRIMARY KEY (snapshot_id, collection, path, ordinal)
+                 );
+                 CREATE INDEX idx_{schema}_snapshot_files_snapshot_path
+                     ON {schema}.snapshot_files (snapshot_id, collection, path);
+                 CREATE INDEX idx_{schema}_snapshot_deletions_snapshot_path
+                     ON {schema}.snapshot_deletions (snapshot_id, collection, path);"
+            ))
+            .unwrap();
+    }
+
+    fn primary_key_columns(adapter: &PostgresBaselineAdapter, table: &str) -> Vec<String> {
+        let mut client = adapter.connect().unwrap();
+        client
+            .query_one(
+                "SELECT array_agg(a.attname::text ORDER BY k.ord)
+                   FROM pg_constraint c
+                   CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+                   JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+                  WHERE c.conrelid = to_regclass($1) AND c.contype = 'p'",
+                &[&table],
+            )
+            .unwrap()
+            .get::<_, Option<Vec<String>>>(0)
+            .unwrap_or_default()
+    }
+
+    fn index_columns(adapter: &PostgresBaselineAdapter, index: &str) -> Vec<String> {
+        let mut client = adapter.connect().unwrap();
+        client
+            .query_one(
+                "SELECT array_agg(a.attname::text ORDER BY k.ord)
+                   FROM pg_index i
+                   CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                   JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+                  WHERE i.indexrelid = to_regclass($1)",
+                &[&index],
+            )
+            .unwrap()
+            .get::<_, Option<Vec<String>>>(0)
+            .unwrap_or_default()
+    }
+
+    fn relation_oid(adapter: &PostgresBaselineAdapter, relation: &str) -> u32 {
+        let mut client = adapter.connect().unwrap();
+        client
+            .query_one("SELECT to_regclass($1)::oid::int8", &[&relation])
+            .unwrap()
+            .get::<_, i64>(0) as u32
+    }
+
+    fn constraint_oid(adapter: &PostgresBaselineAdapter, table: &str) -> u32 {
+        let mut client = adapter.connect().unwrap();
+        client
+            .query_one(
+                "SELECT c.oid::int8 FROM pg_constraint c
+                  WHERE c.conrelid = to_regclass($1) AND c.contype = 'p'",
+                &[&table],
+            )
+            .unwrap()
+            .get::<_, i64>(0) as u32
+    }
+
+    fn unique_schema(prefix: &str) -> String {
+        let unique =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        format!("bsl_{prefix}_{}_{unique}", std::process::id())
+    }
+
+    /// The catalog after migration agrees with the generated SQL — for the keys AND for the two
+    /// secondary indexes.
+    ///
+    /// The indexes are not padding. They are declared `CREATE INDEX IF NOT EXISTS` under a fixed
+    /// name, so on a live database a re-declaration is skipped by name and the index keeps its
+    /// old composition; nothing about the answers changes, only their cost, so that failure is
+    /// invisible forever unless it is caught here.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn migrating_a_pre_root_schema_keys_every_carrier_and_index_by_root() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("preroot");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        raise_pre_root_schema(&adapter, &schema);
+
+        assert_eq!(
+            primary_key_columns(&adapter, &format!("{schema}.snapshot_files")),
+            vec!["snapshot_id", "collection", "path"],
+            "the fixture must start from the pre-root shape, or the migration is never observed"
+        );
+
+        adapter.migrate_storage().unwrap();
+
+        for (table, expected) in [
+            ("snapshot_files", vec!["snapshot_id", "collection", "root_id", "path"]),
+            ("snapshot_deletions", vec!["snapshot_id", "collection", "root_id", "path"]),
+            ("serving_lexical", vec!["snapshot_id", "collection", "root_id", "path", "ordinal"]),
+        ] {
+            assert_eq!(
+                primary_key_columns(&adapter, &format!("{schema}.{table}")),
+                expected,
+                "{table} did not reach the rooted key"
+            );
+        }
+        for table in ["snapshot_files", "snapshot_deletions"] {
+            assert_eq!(
+                index_columns(&adapter, &format!("{schema}.idx_{schema}_{table}_snapshot_path")),
+                vec!["snapshot_id", "collection", "root_id", "path"],
+                "the secondary index of {table} kept its pre-root composition"
+            );
+        }
+    }
+
+    /// An interrupted migration leaves the original key, not a half-migrated schema.
+    ///
+    /// What this actually gates is atomicity: applying the statements outside the transaction
+    /// turns it red, because the earlier ones have already keyed the table by the time the last
+    /// one fails. The version assertion below is a consistency check and NOT a second gate — an
+    /// abort inside the statement loop never reaches the version write in any arrangement, so it
+    /// would hold even if the stamp were moved back outside the transaction.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn an_interrupted_migration_leaves_the_original_key() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("interrupted");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        raise_pre_root_schema(&adapter, &schema);
+
+        let mut statements = adapter.ensure_schema_statements();
+        statements.push("SELECT 1 / 0".to_owned());
+        let mut client = adapter.connect().unwrap();
+        let error = adapter.migrate_structure(&mut client, &statements).unwrap_err();
+
+        // Identified by SQLSTATE, not by message text: `SearchError::Postgres` renders as a bare
+        // "db error" and keeps the server's own message in its source — where it arrives in the
+        // server's language, so matching on English would pass or fail by locale.
+        let code = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<postgres::Error>())
+            .and_then(|pg| pg.code())
+            .cloned();
+        assert_eq!(
+            code,
+            Some(postgres::error::SqlState::DIVISION_BY_ZERO),
+            "the interruption must surface, not be swallowed: {error}"
+        );
+        assert_eq!(
+            primary_key_columns(&adapter, &format!("{schema}.snapshot_files")),
+            vec!["snapshot_id", "collection", "path"],
+            "a rolled-back migration must leave the original key"
+        );
+        assert_eq!(
+            adapter.get_schema_version().unwrap(),
+            Some(1),
+            "a rolled-back migration must not claim the new version"
+        );
+    }
+
+    /// Re-running the migration is a genuine no-op, proved by object identity.
+    ///
+    /// Composition alone cannot prove it: an implementation that unconditionally drops and
+    /// recreates already-correct keys shows the same final composition — while taking the heavy
+    /// lock on the largest tables of the schema on every `admin migrate`.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn migrating_an_already_rooted_schema_rebuilds_nothing() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("noop");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        raise_pre_root_schema(&adapter, &schema);
+        adapter.migrate_storage().unwrap();
+
+        let carriers = ["snapshot_files", "snapshot_deletions", "serving_lexical"];
+        let indexes = ["snapshot_files", "snapshot_deletions"];
+        let keys_before: Vec<u32> = carriers
+            .iter()
+            .map(|table| constraint_oid(&adapter, &format!("{schema}.{table}")))
+            .collect();
+        let indexes_before: Vec<u32> = indexes
+            .iter()
+            .map(|table| {
+                relation_oid(&adapter, &format!("{schema}.idx_{schema}_{table}_snapshot_path"))
+            })
+            .collect();
+
+        adapter.migrate_storage().unwrap();
+
+        let keys_after: Vec<u32> = carriers
+            .iter()
+            .map(|table| constraint_oid(&adapter, &format!("{schema}.{table}")))
+            .collect();
+        let indexes_after: Vec<u32> = indexes
+            .iter()
+            .map(|table| {
+                relation_oid(&adapter, &format!("{schema}.idx_{schema}_{table}_snapshot_path"))
+            })
+            .collect();
+
+        assert_eq!(keys_before, keys_after, "a primary key was rebuilt on an unchanged schema");
+        assert_eq!(
+            indexes_before, indexes_after,
+            "a secondary index was rebuilt on an unchanged schema"
+        );
+    }
+
+    /// Existing rows survive the migration without being rewritten.
+    ///
+    /// The third assertion is the one the invariant exists for: the first two are green for an
+    /// implementation that ran `UPDATE … SET root_id = root_id` over every row, and on a corpus
+    /// the size of ERP that is the difference between a cheap migration and a full rewrite.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn migration_backfills_the_root_without_rewriting_a_row() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("backfill");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        raise_pre_root_schema(&adapter, &schema);
+        {
+            let mut client = adapter.connect().unwrap();
+            client
+                .batch_execute(&format!(
+                    "INSERT INTO {schema}.snapshots (id, corpus) VALUES ('snap-1', 'code');
+                     INSERT INTO {schema}.file_objects VALUES ('obj-1', 'code', 'fp-1', 1);
+                     INSERT INTO {schema}.snapshot_files
+                         VALUES ('snap-1', 'code', 'src/A.bsl', 'fp-1', 1, 'obj-1');"
+                ))
+                .unwrap();
+        }
+        let row_version = |adapter: &PostgresBaselineAdapter| -> String {
+            let mut client = adapter.connect().unwrap();
+            client
+                .query_one(&format!("SELECT xmin::text FROM {schema}.snapshot_files"), &[])
+                .unwrap()
+                .get(0)
+        };
+        let before = row_version(&adapter);
+
+        adapter.migrate_storage().unwrap();
+
+        let mut client = adapter.connect().unwrap();
+        let (path, root_id): (String, String) = {
+            let row = client
+                .query_one(&format!("SELECT path, root_id FROM {schema}.snapshot_files"), &[])
+                .unwrap();
+            (row.get(0), row.get(1))
+        };
+        assert_eq!(path, "src/A.bsl", "the row must survive the migration");
+        assert_eq!(root_id, CONFIGURATION_ROOT_ID, "a pre-root row belongs to the configuration");
+        assert_eq!(before, row_version(&adapter), "the migration rewrote the row");
+
+        client
+            .batch_execute(&format!("UPDATE {schema}.snapshot_files SET document_count = 2"))
+            .unwrap();
+        assert_ne!(
+            before,
+            row_version(&adapter),
+            "positive control: a real rewrite must move the row version, or this gate is blind"
+        );
+    }
+
     struct TestSchemaGuard {
         adapter: PostgresBaselineAdapter,
         schema: String,
