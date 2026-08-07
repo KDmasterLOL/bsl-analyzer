@@ -2312,10 +2312,10 @@ fn load_snapshot_file_rows(
     snapshot_id: &str,
 ) -> Result<Vec<VisibleSnapshotFile>, SearchError> {
     let query = format!(
-        "SELECT collection, path, file_fingerprint, document_count, file_object_id
+        "SELECT collection, root_id, path, file_fingerprint, document_count, file_object_id
          FROM {}
          WHERE snapshot_id = $1
-         ORDER BY collection, path",
+         ORDER BY collection, root_id, path",
         adapter.table("snapshot_files")
     );
     Ok(client
@@ -2323,7 +2323,7 @@ fn load_snapshot_file_rows(
         .into_iter()
         .map(|row| VisibleSnapshotFile {
             collection: row.get("collection"),
-            root_id: CONFIGURATION_ROOT_ID.to_owned(),
+            root_id: row.get("root_id"),
             path: row.get("path"),
             file_fingerprint: row.get("file_fingerprint"),
             document_count: row.get::<_, i32>("document_count") as usize,
@@ -3119,20 +3119,20 @@ fn effective_snapshot_summary(
     let ancestry = snapshot_ancestry_ids(client, adapter, snapshot_id)?;
     let query = format!(
         "WITH entries AS (
-             SELECT collection, path, document_count, FALSE AS is_deletion,
+             SELECT collection, root_id, path, document_count, FALSE AS is_deletion,
                     array_position($1::TEXT[], snapshot_id) AS ancestry_position
              FROM {files}
              WHERE snapshot_id = ANY($1)
              UNION ALL
-             SELECT collection, path, 0 AS document_count, TRUE AS is_deletion,
+             SELECT collection, root_id, path, 0 AS document_count, TRUE AS is_deletion,
                     array_position($1::TEXT[], snapshot_id) AS ancestry_position
              FROM {deletions}
              WHERE snapshot_id = ANY($1)
          ),
          winners AS (
-             SELECT DISTINCT ON (collection, path) collection, document_count, is_deletion
+             SELECT DISTINCT ON (collection, root_id, path) collection, document_count, is_deletion
              FROM entries
-             ORDER BY collection, path, ancestry_position, is_deletion DESC
+             ORDER BY collection, root_id, path, ancestry_position, is_deletion DESC
          )
          SELECT collection,
                 COUNT(*)::BIGINT AS files,
@@ -3198,22 +3198,23 @@ fn effective_snapshot_totals_batch(
              WHERE c.next_parent IS NOT NULL
          ) CYCLE snapshot_id SET is_cycle USING cycle_path,
          entries AS (
-             SELECT c.seed_id, f.collection, f.path, f.document_count,
+             SELECT c.seed_id, f.collection, f.root_id, f.path, f.document_count,
                     FALSE AS is_deletion, c.depth AS ancestry_position
              FROM chain c
              JOIN {files} f ON f.snapshot_id = c.snapshot_id
              WHERE NOT c.is_cycle AND NOT c.missing
              UNION ALL
-             SELECT c.seed_id, d.collection, d.path, 0,
+             SELECT c.seed_id, d.collection, d.root_id, d.path, 0,
                     TRUE AS is_deletion, c.depth AS ancestry_position
              FROM chain c
              JOIN {deletions} d ON d.snapshot_id = c.snapshot_id
              WHERE NOT c.is_cycle AND NOT c.missing
          ),
          winners AS (
-             SELECT DISTINCT ON (seed_id, collection, path) seed_id, document_count, is_deletion
+             SELECT DISTINCT ON (seed_id, collection, root_id, path)
+                    seed_id, document_count, is_deletion
              FROM entries
-             ORDER BY seed_id, collection, path, ancestry_position, is_deletion DESC
+             ORDER BY seed_id, collection, root_id, path, ancestry_position, is_deletion DESC
          ),
          totals AS (
              SELECT seed_id,
@@ -3276,13 +3277,14 @@ fn materialize_visible_snapshot_file_map(
 ) -> Result<BTreeMap<VisibleFileKey, VisibleSnapshotFile>, SearchError> {
     let ancestry = snapshot_ancestry_ids(client, adapter, snapshot_id)?;
     let file_query = format!(
-        "SELECT snapshot_id, collection, path, file_fingerprint, document_count, file_object_id
+        "SELECT snapshot_id, collection, root_id, path,
+                file_fingerprint, document_count, file_object_id
          FROM {}
          WHERE snapshot_id = ANY($1)",
         adapter.table("snapshot_files")
     );
     let deletion_query = format!(
-        "SELECT snapshot_id, collection, path
+        "SELECT snapshot_id, collection, root_id, path
          FROM {}
          WHERE snapshot_id = ANY($1)",
         adapter.table("snapshot_deletions")
@@ -3293,7 +3295,7 @@ fn materialize_visible_snapshot_file_map(
         let snapshot_id: String = row.get("snapshot_id");
         files_by_snapshot.entry(snapshot_id).or_default().push(VisibleSnapshotFile {
             collection: row.get("collection"),
-            root_id: CONFIGURATION_ROOT_ID.to_owned(),
+            root_id: row.get("root_id"),
             path: row.get("path"),
             file_fingerprint: row.get("file_fingerprint"),
             document_count: row.get::<_, i32>("document_count") as usize,
@@ -3305,7 +3307,7 @@ fn materialize_visible_snapshot_file_map(
         let snapshot_id: String = row.get("snapshot_id");
         deletions_by_snapshot.entry(snapshot_id).or_default().push((
             row.get("collection"),
-            CONFIGURATION_ROOT_ID.to_owned(),
+            row.get("root_id"),
             row.get("path"),
         ));
     }
@@ -4306,6 +4308,117 @@ mod tests {
             adapter.get_schema_version().unwrap(),
             Some(1),
             "a rolled-back migration must not claim the new version"
+        );
+    }
+
+    /// A parent carrying one relative path under two roots, and a child deleting only the
+    /// extension's copy. Written with raw SQL because the publisher does not carry roots yet.
+    fn seed_two_rooted_files(adapter: &PostgresBaselineAdapter, schema: &str) {
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let mut client = adapter.connect().unwrap();
+        client
+            .batch_execute(&format!(
+                "INSERT INTO {schema}.snapshots (id, corpus) VALUES ('parent', 'code');
+                 INSERT INTO {schema}.snapshots (id, corpus, parent_snapshot_id)
+                     VALUES ('child', 'code', 'parent');
+                 INSERT INTO {schema}.file_objects VALUES
+                     ('obj-cfg', 'code', 'fp-cfg', 2),
+                     ('obj-ext', 'code', 'fp-ext', 1);
+                 INSERT INTO {schema}.snapshot_files
+                     (snapshot_id, collection, root_id, path,
+                      file_fingerprint, document_count, file_object_id)
+                     VALUES
+                     ('parent', 'code', '', '{PATH}', 'fp-cfg', 2, 'obj-cfg'),
+                     ('parent', 'code', 'Расш', '{PATH}', 'fp-ext', 1, 'obj-ext');
+                 INSERT INTO {schema}.snapshot_deletions (snapshot_id, collection, root_id, path)
+                     VALUES ('child', 'code', 'Расш', '{PATH}');"
+            ))
+            .unwrap();
+    }
+
+    /// Visibility distinguishes the roots THROUGH the adapter, not only in the pure fold.
+    ///
+    /// The fold is already gated offline, and it would stay green while the SQL projection fails
+    /// to select the column or fills it wrongly — the central rule of this node broken in the
+    /// plumbing, with every offline gate passing.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_deletion_shadows_only_its_own_root_through_the_adapter() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("visible");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        seed_two_rooted_files(&adapter, &schema);
+
+        let mut client = adapter.connect().unwrap();
+        let mut parent_roots: Vec<String> =
+            materialize_visible_snapshot_files(&mut *client, &adapter, "parent")
+                .unwrap()
+                .into_iter()
+                .map(|file| file.root_id)
+                .collect();
+        parent_roots.sort();
+        let child_roots: Vec<String> =
+            materialize_visible_snapshot_files(&mut *client, &adapter, "child")
+                .unwrap()
+                .into_iter()
+                .map(|file| file.root_id)
+                .collect();
+
+        assert_eq!(
+            parent_roots,
+            vec![CONFIGURATION_ROOT_ID.to_owned(), "Расш".to_owned()],
+            "one relative path under two roots is two files"
+        );
+        assert_eq!(
+            child_roots,
+            vec![CONFIGURATION_ROOT_ID.to_owned()],
+            "deleting the extension's file must leave the configuration's alone"
+        );
+    }
+
+    /// The server-side summaries count two roots as two files AND shadow a deletion by root.
+    ///
+    /// Two inputs, because each CTE has two independent branches. An implementation that added
+    /// the root to the file branch and left the deletion branch rootless passes the first input
+    /// — two live roots, two counted — and then shadows the wrong root on the second, which only
+    /// an operator reading the summary would ever see.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn summaries_count_two_roots_and_shadow_the_deleted_one() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("summary");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        seed_two_rooted_files(&adapter, &schema);
+
+        let parent = adapter.snapshot_details("parent").unwrap().unwrap();
+        assert_eq!(parent.snapshot.files, 2, "two roots are two files");
+        assert_eq!(parent.snapshot.documents, 3, "and their documents are counted apart");
+
+        let child = adapter.snapshot_details("child").unwrap().unwrap();
+        assert_eq!(child.snapshot.files, 1, "the deletion removes exactly one of the two");
+        assert_eq!(
+            child.snapshot.documents, 2,
+            "the surviving file is the configuration's, so its two documents remain"
+        );
+
+        let listed = adapter.list_snapshots(None, None, None, 10).unwrap();
+        let child_row = listed.iter().find(|record| record.snapshot_id == "child").unwrap();
+        assert_eq!(
+            (child_row.files, child_row.documents),
+            (1, 2),
+            "the batch totals must agree with the single-snapshot summary"
         );
     }
 
