@@ -2,7 +2,7 @@ use crate::domain::{
     BaselineRef, CorpusId, ExternalBaselineConfig, IndexedDocument, LexicalHit, SemanticHit,
     Snapshot, SnapshotPublishMetadata, SnapshotPublishStats,
 };
-use crate::error::SearchError;
+use crate::error::{reason, ReasonCode, SearchError};
 use crate::external_baseline::{
     BaselineCollectionRecord, BaselineEmbeddingCoverageRecord, BaselineEmbeddingModelRecord,
     BaselineEmbeddingStats, BaselineFileObjectDetails, BaselineFileObjectRecord,
@@ -92,10 +92,10 @@ impl PostgresBaselineAdapter {
 
     fn connect(&self) -> Result<PgPooledConnection, SearchError> {
         self.pool.get().map_err(|err| {
-            let reason = pool_connection_reason_code(&err.to_string());
-            SearchError::ExternalBaseline(format!(
-                "{reason}: failed to get pooled connection: {err}"
-            ))
+            SearchError::named(
+                pool_connection_reason_code(&err.to_string()),
+                format!("failed to get pooled connection: {err}"),
+            )
         })
     }
 
@@ -1988,7 +1988,7 @@ impl PostgresBaselineAdapter {
         names
     }
 
-    /// Applies the mandatory half of the migration as one transaction, version included.    /// Applies the mandatory half of the migration as one transaction, version included.
+    /// Applies the mandatory half of the migration as one transaction, version included.
     ///
     /// Changing a primary key is not idempotent in the middle: between `DROP CONSTRAINT` and
     /// `ADD PRIMARY KEY` the table has no key at all, and an interrupted run would leave a state
@@ -2009,6 +2009,12 @@ impl PostgresBaselineAdapter {
         // transaction. The version row cannot do it: on a fresh or repaired schema there is no
         // row to lock, so two migrators of different versions would both read "no version",
         // both proceed, and the older one would commit last and win.
+        //
+        // Binds only builds that take this lock, which means builds that know this version and
+        // later ones. A build old enough to predate the lock stamps its own, lower version over
+        // this one and thereby unblocks its own readiness check — nothing here can reach it.
+        // Two builds of different versions must not share a schema; the barrier orders upgrades,
+        // it does not survive a downgrade.
         tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&self.schema])?;
         self.refuse_to_move_a_newer_schema_backwards(&mut tx)?;
         for statement in statements {
@@ -3352,16 +3358,16 @@ fn log_semantic_publish_phase_timings(
     }
 }
 
-fn pool_connection_reason_code(message: &str) -> &'static str {
+fn pool_connection_reason_code(message: &str) -> ReasonCode {
     let message = message.to_ascii_lowercase();
     if message.contains("password authentication failed")
         || message.contains("authentication failed")
         || message.contains("invalid password")
         || message.contains("saslauth")
     {
-        "postgres_auth_failed"
+        reason::POSTGRES_AUTH_FAILED
     } else {
-        "postgres_connect_failed"
+        reason::POSTGRES_CONNECT_FAILED
     }
 }
 
@@ -5720,7 +5726,7 @@ mod tests {
         );
     }
 
-    /// Re-running the migration is a genuine no-op, proved by object identity.    /// Re-running the migration is a genuine no-op, proved by object identity.
+    /// Re-running the migration is a genuine no-op, proved by object identity.
     ///
     /// Composition alone cannot prove it: an implementation that unconditionally drops and
     /// recreates already-correct keys shows the same final composition — while taking the heavy

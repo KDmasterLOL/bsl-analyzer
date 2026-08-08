@@ -65,13 +65,19 @@ impl SearchError {
         }
     }
 
+    /// Builds a named refusal whose name the classifier is guaranteed to recognise.
+    ///
+    /// For refusals whose name is decided at run time. A name written as a literal at the
+    /// construction site can be read there and checked against the vocabulary; one that arrives
+    /// through a binding cannot, so it comes from a [`ReasonCode`] instead.
+    pub(crate) fn named(reason: ReasonCode, detail: impl std::fmt::Display) -> Self {
+        Self::ExternalBaseline(format!("{}: {detail}", reason.as_str()))
+    }
+
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::StorageNotInitialized { .. } | Self::SchemaVersionMismatch { .. } => false,
-            Self::ExternalBaseline(message) => matches!(
-                external_baseline_reason_code(message),
-                Some("postgres_connect_failed" | "postgres_auth_failed")
-            ),
+            Self::ExternalBaseline(message) => message_names(message, RETRYABLE_REASONS),
             Self::Postgres(error) => postgres_error_is_retryable(error),
             Self::Io(_) => true,
             Self::Embedder(_) | Self::Index(_) => false,
@@ -89,41 +95,88 @@ impl SearchError {
         ) || matches!(self, Self::Postgres(error) if !postgres_error_is_retryable(error))
             || matches!(
                 self,
-                Self::ExternalBaseline(message)
-                    if !matches!(
-                        external_baseline_reason_code(message),
-                        Some(
-                            "postgres_connect_failed"
-                                | "postgres_auth_failed"
-                                | "serving_lexical_unavailable"
-                                | "serving_semantic_unavailable"
-                        )
-                    )
+                Self::ExternalBaseline(message) if !message_names(message, NON_TERMINAL_REASONS)
             )
     }
 }
 
-fn external_baseline_reason_code(message: &str) -> Option<&'static str> {
-    const KNOWN_REASON_CODES: &[&str] = &[
-        "helper_spawn_failed",
-        "helper_timeout",
-        "helper_protocol_error",
-        "helper_rejected",
-        "resolved_target_mismatch",
-        "missing_config",
-        "postgres_connect_failed",
-        "postgres_auth_failed",
-        "refresh_retry_exhausted",
-        "serving_lexical_unavailable",
-        "serving_semantic_unavailable",
-        "serving_semantic_rootless",
-        "root_id_not_portable",
-        "schema_name_too_long",
-    ];
+/// A refusal name the classifier is guaranteed to know.
+///
+/// The inner string is unreachable outside this module, so a helper cannot hand
+/// [`SearchError::named`] a name of its own invention: the only names that exist are the
+/// constants below. A code spelled twice — once where the refusal is built, once where it is
+/// classified — is a code that can drift apart, and the drift is silent, because a refusal whose
+/// name nobody recognises is simply an unnamed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReasonCode(&'static str);
 
+impl ReasonCode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+pub(crate) mod reason {
+    use super::ReasonCode;
+
+    pub(crate) const HELPER_SPAWN_FAILED: ReasonCode = ReasonCode("helper_spawn_failed");
+    pub(crate) const HELPER_TIMEOUT: ReasonCode = ReasonCode("helper_timeout");
+    pub(crate) const HELPER_PROTOCOL_ERROR: ReasonCode = ReasonCode("helper_protocol_error");
+    pub(crate) const HELPER_REJECTED: ReasonCode = ReasonCode("helper_rejected");
+    pub(crate) const RESOLVED_TARGET_MISMATCH: ReasonCode = ReasonCode("resolved_target_mismatch");
+    pub(crate) const MISSING_CONFIG: ReasonCode = ReasonCode("missing_config");
+    pub(crate) const POSTGRES_CONNECT_FAILED: ReasonCode = ReasonCode("postgres_connect_failed");
+    pub(crate) const POSTGRES_AUTH_FAILED: ReasonCode = ReasonCode("postgres_auth_failed");
+    pub(crate) const REFRESH_RETRY_EXHAUSTED: ReasonCode = ReasonCode("refresh_retry_exhausted");
+    pub(crate) const SERVING_LEXICAL_UNAVAILABLE: ReasonCode =
+        ReasonCode("serving_lexical_unavailable");
+    pub(crate) const SERVING_SEMANTIC_UNAVAILABLE: ReasonCode =
+        ReasonCode("serving_semantic_unavailable");
+    pub(crate) const SERVING_SEMANTIC_ROOTLESS: ReasonCode =
+        ReasonCode("serving_semantic_rootless");
+    pub(crate) const ROOT_ID_NOT_PORTABLE: ReasonCode = ReasonCode("root_id_not_portable");
+    pub(crate) const SCHEMA_NAME_TOO_LONG: ReasonCode = ReasonCode("schema_name_too_long");
+}
+
+/// The whole vocabulary. A code missing from here is not a named refusal at all.
+const KNOWN_REASON_CODES: &[ReasonCode] = &[
+    reason::HELPER_SPAWN_FAILED,
+    reason::HELPER_TIMEOUT,
+    reason::HELPER_PROTOCOL_ERROR,
+    reason::HELPER_REJECTED,
+    reason::RESOLVED_TARGET_MISMATCH,
+    reason::MISSING_CONFIG,
+    reason::POSTGRES_CONNECT_FAILED,
+    reason::POSTGRES_AUTH_FAILED,
+    reason::REFRESH_RETRY_EXHAUSTED,
+    reason::SERVING_LEXICAL_UNAVAILABLE,
+    reason::SERVING_SEMANTIC_UNAVAILABLE,
+    reason::SERVING_SEMANTIC_ROOTLESS,
+    reason::ROOT_ID_NOT_PORTABLE,
+    reason::SCHEMA_NAME_TOO_LONG,
+];
+
+/// Refusals the caller may retry: the corpus is intact, the way to it was not.
+const RETRYABLE_REASONS: &[ReasonCode] =
+    &[reason::POSTGRES_CONNECT_FAILED, reason::POSTGRES_AUTH_FAILED];
+
+/// Refusals that may yet resolve on their own — serving tables are filled by a later publish.
+const NON_TERMINAL_REASONS: &[ReasonCode] = &[
+    reason::POSTGRES_CONNECT_FAILED,
+    reason::POSTGRES_AUTH_FAILED,
+    reason::SERVING_LEXICAL_UNAVAILABLE,
+    reason::SERVING_SEMANTIC_UNAVAILABLE,
+];
+
+fn message_names(message: &str, codes: &[ReasonCode]) -> bool {
+    external_baseline_reason_code(message)
+        .is_some_and(|named| codes.iter().any(|code| code.as_str() == named))
+}
+
+fn external_baseline_reason_code(message: &str) -> Option<&'static str> {
     KNOWN_REASON_CODES
         .iter()
-        .copied()
+        .map(|code| code.as_str())
         .find(|code| message.strip_prefix(code).is_some_and(|rest| rest.starts_with(':')))
 }
 
@@ -181,6 +234,29 @@ mod tests {
         }
     }
 
+    /// A code that exists as a constant is a code the classifier knows.
+    ///
+    /// The other half of the same drift: a refusal built through `SearchError::named` can only
+    /// name a `reason::` constant, but a constant left out of `KNOWN_REASON_CODES` classifies as
+    /// nothing at all — the refusal comes out unnamed, and only a caller reading `reason_code()`
+    /// would ever notice. Counted out of the source so declaring a code and registering it
+    /// cannot become two separate acts.
+    #[test]
+    fn every_declared_reason_code_is_in_the_vocabulary() {
+        // Spelled in halves so this needle does not count itself: the scan reads the very file
+        // it lives in. Matched on the declaration's type, not on its initialiser, which rustfmt
+        // is free to wrap onto the next line.
+        let declared = include_str!("error.rs").matches(concat!(": ReasonCode", " =")).count();
+
+        assert_eq!(
+            declared,
+            KNOWN_REASON_CODES.len(),
+            "{declared} reason codes are declared but {} are registered; a code outside \
+             KNOWN_REASON_CODES names nothing",
+            KNOWN_REASON_CODES.len()
+        );
+    }
+
     /// Every named refusal in the storage adapter is recognised by the classifier.
     ///
     /// Read out of the SOURCE rather than from a list written here. The previous version of this
@@ -197,8 +273,18 @@ mod tests {
         for occurrence in production.split("ExternalBaseline(").skip(1) {
             // The refusal's name is the prefix before the first colon of its message, whether the
             // message is a literal or a `format!`.
-            let Some(quote) = occurrence.find('"') else { continue };
-            let rest = &occurrence[quote + 1..];
+            let window: String = occurrence.chars().take(200).collect();
+            let Some(quote) = window.find('"') else { continue };
+            let rest = &window[quote + 1..];
+            // A name that arrives through a binding is invisible to a reader AND to this scan,
+            // which used to skip such a site in silence — leaving the drift it guards against
+            // free to happen on exactly the refusals it could not read. Those go through
+            // `SearchError::named`, where the name can only be a declared code.
+            assert!(
+                !rest.starts_with('{'),
+                "this refusal interpolates its name, so nothing here can check it against the \
+                 classifier; construct it with SearchError::named and a `reason::` constant: {rest}"
+            );
             let Some(colon) = rest.find(':') else { continue };
             let name = &rest[..colon];
             if name.is_empty()
@@ -222,7 +308,7 @@ mod tests {
         );
     }
 
-    /// The advice matches the DIRECTION of the mismatch.    /// The advice matches the DIRECTION of the mismatch.
+    /// The advice matches the DIRECTION of the mismatch.
     ///
     /// One message served both directions, and for a schema newer than the build it named the
     /// very command that had just refused it.
