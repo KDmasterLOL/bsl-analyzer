@@ -23,6 +23,26 @@ use std::time::{Duration, Instant};
 const SCHEMA_METADATA_TABLE: &str = "_schema_metadata_";
 const EMBEDDING_MODEL_SETTING: &str = "embedding_model";
 const EMBEDDING_DIMENSION_SETTING: &str = "embedding_dimension";
+/// The mandatory carriers of file identity and the key each one must have.
+///
+/// One list, consulted by the migration that builds the keys and by the readiness check that
+/// answers for them. Two lists would be two answers to the same question, and the one nobody
+/// looked at would be the wrong one.
+const ROOTED_CARRIER_KEYS: [(&str, &[&str]); 3] = [
+    ("snapshot_files", &["snapshot_id", "collection", "root_id", "path"]),
+    ("snapshot_deletions", &["snapshot_id", "collection", "root_id", "path"]),
+    ("serving_lexical", &["snapshot_id", "collection", "root_id", "path", "ordinal"]),
+];
+
+/// The secondary indexes whose composition the migration enforces, as `(suffix, table)`.
+///
+/// Named here rather than at the call site because two things need the same list: the migration
+/// that rebuilds them and the guard that checks their generated names still fit an identifier.
+const ROOTED_SECONDARY_INDEXES: [(&str, &str); 2] = [
+    ("snapshot_files_snapshot_path", "snapshot_files"),
+    ("snapshot_deletions_snapshot_path", "snapshot_deletions"),
+];
+
 const REQUIRED_STORAGE_TABLES: &[&str] = &[
     SCHEMA_METADATA_TABLE,
     "snapshots",
@@ -189,6 +209,7 @@ impl PostgresBaselineAdapter {
                 return Err(SearchError::SchemaVersionMismatch {
                     expected: crate::error::SCHEMA_VERSION_CURRENT,
                     actual: Some(version),
+                    schema: self.schema.clone(),
                 });
             }
         } else {
@@ -203,13 +224,17 @@ impl PostgresBaselineAdapter {
         Ok(())
     }
 
-    /// Every mandatory carrier of file identity must have the root IN ITS KEY.
+    /// Every mandatory carrier of file identity must have EXACTLY the key the migration builds.
     ///
-    /// Asking whether the column exists would be weaker than needed, and not in theory: after a
-    /// failure between `DROP CONSTRAINT` and `ADD PRIMARY KEY` the column is already there while
-    /// the key is not, and such a table would pass as healthy. Migration through this build
-    /// makes that state unreachable, but readiness also answers for schemas brought to it by
-    /// another hand.
+    /// Membership of `root_id` alone would be too weak: a key of `(root_id)` contains it and
+    /// still cannot tell two files apart, so the damage would surface as a duplicate-key error
+    /// in the middle of a publish instead of as a named refusal before one. Asking for the exact
+    /// composition costs the same query and answers the question the storage actually asks.
+    ///
+    /// Checking the presence of the COLUMN would be weaker still, and not in theory: after a
+    /// failure between `DROP CONSTRAINT` and `ADD PRIMARY KEY` the column is there while the key
+    /// is not. Migration through this build makes that unreachable, but readiness also answers
+    /// for schemas brought to it by another hand.
     ///
     /// `serving_semantic` is deliberately absent: it is optional — a database without the
     /// `vector` extension is fully usable for everything else — and it is keyed by the root in a
@@ -218,33 +243,47 @@ impl PostgresBaselineAdapter {
         &self,
         client: &mut PgPooledConnection,
     ) -> Result<(), SearchError> {
-        const ROOTED_CARRIERS: [&str; 3] =
-            ["snapshot_files", "snapshot_deletions", "serving_lexical"];
-        let unrooted: Vec<String> = client
-            .query(
-                "SELECT carrier FROM unnest($2::TEXT[]) AS carrier
-                  WHERE NOT EXISTS (
-                      SELECT 1
-                        FROM pg_constraint c
-                        CROSS JOIN LATERAL unnest(c.conkey) AS k(attnum)
-                        JOIN pg_attribute a
-                          ON a.attrelid = c.conrelid AND a.attnum = k.attnum
-                       WHERE c.contype = 'p'
-                         AND c.conrelid = to_regclass($1 || '.' || carrier)
-                         AND a.attname = 'root_id'
-                  )
-                  ORDER BY carrier",
-                &[&self.schema, &ROOTED_CARRIERS.as_slice()],
-            )?
-            .iter()
-            .map(|row| row.get::<_, String>(0))
-            .collect();
+        let carriers: Vec<&str> = ROOTED_CARRIER_KEYS.iter().map(|(table, _)| *table).collect();
+        let rows = client.query(
+            "SELECT carrier,
+                    (SELECT array_agg(a.attname::TEXT ORDER BY k.ord)
+                       FROM pg_constraint c
+                       CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+                       JOIN pg_attribute a
+                         ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+                      WHERE c.contype = 'p'
+                        AND c.conrelid = to_regclass($1 || '.' || carrier))
+               FROM unnest($2::TEXT[]) AS carrier",
+            &[&self.schema, &carriers.as_slice()],
+        )?;
 
-        if unrooted.is_empty() {
+        let mut wrong = Vec::new();
+        for row in rows {
+            let carrier: String = row.get(0);
+            let actual: Option<Vec<String>> = row.get(1);
+            let Some((_, expected)) =
+                ROOTED_CARRIER_KEYS.iter().find(|(table, _)| *table == carrier)
+            else {
+                continue;
+            };
+            let matches = actual.as_ref().is_some_and(|columns| {
+                columns.iter().map(String::as_str).eq(expected.iter().copied())
+            });
+            if !matches {
+                wrong.push(format!(
+                    "{carrier} keyed by {}",
+                    actual
+                        .map(|columns| columns.join(", "))
+                        .unwrap_or_else(|| "nothing".to_owned())
+                ));
+            }
+        }
+
+        if wrong.is_empty() {
             return Ok(());
         }
         Err(SearchError::StorageNotInitialized {
-            schema: format!("{}; unrooted key on {}", self.schema, unrooted.join(", ")),
+            schema: format!("{}; wrong key on {}", self.schema, wrong.join("; ")),
         })
     }
 
@@ -448,7 +487,8 @@ impl PostgresBaselineAdapter {
                        FROM pg_index i
                        CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
                        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
-                      WHERE i.indexrelid = relation;
+                      WHERE i.indexrelid = relation
+                        AND i.indrelid = to_regclass('{qualified}');
                  END IF;
                  IF actual_columns IS DISTINCT FROM target_columns THEN
                      EXECUTE 'DROP INDEX IF EXISTS {qualified_index}';
@@ -599,18 +639,9 @@ impl PostgresBaselineAdapter {
             self.add_root_id_column("snapshot_files"),
             self.add_root_id_column("snapshot_deletions"),
             self.add_root_id_column("serving_lexical"),
-            self.enforce_primary_key(
-                "snapshot_files",
-                &["snapshot_id", "collection", "root_id", "path"],
-            ),
-            self.enforce_primary_key(
-                "snapshot_deletions",
-                &["snapshot_id", "collection", "root_id", "path"],
-            ),
-            self.enforce_primary_key(
-                "serving_lexical",
-                &["snapshot_id", "collection", "root_id", "path", "ordinal"],
-            ),
+            self.enforce_primary_key(ROOTED_CARRIER_KEYS[0].0, ROOTED_CARRIER_KEYS[0].1),
+            self.enforce_primary_key(ROOTED_CARRIER_KEYS[1].0, ROOTED_CARRIER_KEYS[1].1),
+            self.enforce_primary_key(ROOTED_CARRIER_KEYS[2].0, ROOTED_CARRIER_KEYS[2].1),
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_snapshots_corpus_created_at
                  ON {} (corpus, created_at DESC)",
@@ -624,8 +655,8 @@ impl PostgresBaselineAdapter {
                 self.table("snapshots")
             ),
             self.enforce_index(
-                "snapshot_files_snapshot_path",
-                "snapshot_files",
+                ROOTED_SECONDARY_INDEXES[0].0,
+                ROOTED_SECONDARY_INDEXES[0].1,
                 &["snapshot_id", "collection", "root_id", "path"],
             ),
             format!(
@@ -635,8 +666,8 @@ impl PostgresBaselineAdapter {
                 self.table("snapshot_files")
             ),
             self.enforce_index(
-                "snapshot_deletions_snapshot_path",
-                "snapshot_deletions",
+                ROOTED_SECONDARY_INDEXES[1].0,
+                ROOTED_SECONDARY_INDEXES[1].1,
                 &["snapshot_id", "collection", "root_id", "path"],
             ),
             format!(
@@ -1798,6 +1829,8 @@ impl WorkspaceBaselineManifestStore for PostgresBaselineAdapter {
 
 impl PostgresBaselineAdapter {
     pub fn migrate_storage(&self) -> Result<(), SearchError> {
+        self.ensure_index_names_survive_the_identifier_limit()?;
+
         let mut client = self.connect()?;
 
         // Forward-only has to be enforced, not remembered. An older build's migrator would
@@ -1811,6 +1844,7 @@ impl PostgresBaselineAdapter {
                     return Err(SearchError::SchemaVersionMismatch {
                         expected: crate::error::SCHEMA_VERSION_CURRENT,
                         actual: Some(version),
+                        schema: self.schema.clone(),
                     });
                 }
             }
@@ -1829,6 +1863,38 @@ impl PostgresBaselineAdapter {
         }
 
         Ok(())
+    }
+
+    /// Refuses a schema name that would make two generated index names collide.
+    ///
+    /// PostgreSQL truncates identifiers at 63 bytes, silently and on both sides — declaration
+    /// and lookup — which is why long names appear to work. They stop working when the
+    /// truncation eats the part that TELLS THE NAMES APART: the two secondary indexes here
+    /// differ only after a long common prefix, so past a certain schema name they become one
+    /// name. The migration would then drop one table's index, skip the other's, and still record
+    /// success — a schema quietly missing an index, every answer still correct, only the cost
+    /// changed.
+    ///
+    /// Refused rather than shortened: a shorter generated name would orphan the indexes already
+    /// created under the long one, and an over-long schema name is a configuration the caller
+    /// can simply not choose.
+    fn ensure_index_names_survive_the_identifier_limit(&self) -> Result<(), SearchError> {
+        const IDENTIFIER_LIMIT: usize = 63;
+        let longest = ROOTED_SECONDARY_INDEXES
+            .iter()
+            .map(|(suffix, _)| format!("idx_{}_{suffix}", self.schema))
+            .max_by_key(String::len)
+            .expect("the index list is not empty");
+        if longest.len() <= IDENTIFIER_LIMIT {
+            return Ok(());
+        }
+        Err(SearchError::ExternalBaseline(format!(
+            "schema_name_too_long: index names generated for schema '{}' reach {} bytes, and \
+             PostgreSQL truncates identifiers at {IDENTIFIER_LIMIT}; two of them would collide \
+             and one index would silently go missing. Use a shorter schema name.",
+            self.schema,
+            longest.len()
+        )))
     }
 
     /// Applies the mandatory half of the migration as one transaction, version included.
@@ -2076,9 +2142,10 @@ struct PublishedFileGroup {
 #[derive(Debug, Clone)]
 struct VisibleSnapshotFile {
     collection: String,
-    /// The source root this file belongs to. The schema has no column for it yet, so every
-    /// row read from it is the configuration's — which is precisely what the schema asserts
-    /// today, and why the constant is honest here rather than a placeholder.
+    /// The source root this file belongs to, read from the column the schema now keys by.
+    ///
+    /// Half of the file's identity, not a label on it: the same relative path under two roots
+    /// is two different files, so a row that loses this field silently becomes the other one.
     root_id: String,
     path: String,
     file_fingerprint: String,
@@ -4192,7 +4259,6 @@ mod tests {
         }
     }
 
-    /// Drops the throwaway test schema even when an assertion panics mid-test.
     /// Raises the pre-root shape of the schema with raw SQL.
     ///
     /// It cannot be built from the node's own steps: after this node the only producer of DDL
@@ -4342,10 +4408,14 @@ mod tests {
             .get::<_, i64>(0) as u32
     }
 
+    /// A throwaway schema name short enough that the generated index names still fit an
+    /// identifier: PostgreSQL truncates at 63 bytes, and the longest generated name adds 37 to
+    /// whatever is written here.
     fn unique_schema(prefix: &str) -> String {
-        let unique =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        format!("bsl_{prefix}_{}_{unique}", std::process::id())
+        let nanos =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                as u64;
+        format!("bsl_{prefix}_{:02x}{:08x}", std::process::id() % 256, nanos as u32)
     }
 
     /// The catalog after migration agrees with the generated SQL — for the keys AND for the two
@@ -5129,7 +5199,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                crate::SearchError::SchemaVersionMismatch { actual: Some(3), expected: 2 }
+                crate::SearchError::SchemaVersionMismatch { actual: Some(3), expected: 2, .. }
             ),
             "a newer schema must be named, not quietly downgraded: {error}"
         );
@@ -5137,6 +5207,76 @@ mod tests {
             adapter.get_schema_version().unwrap(),
             Some(3),
             "the refusal must leave the newer version in place"
+        );
+    }
+
+    /// Readiness refuses a key that CONTAINS the root but is not the key the storage needs.
+    ///
+    /// The weaker rule — "root_id appears somewhere in the primary key" — accepts a key of
+    /// `(root_id)`, which cannot tell two files apart at all. Its damage would then surface as a
+    /// duplicate-key error in the middle of a publish, instead of as a named refusal before one.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn readiness_refuses_a_key_that_merely_contains_the_root() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("partialkey");
+        let config = ExternalBaselineConfig::postgres(url).with_schema(&schema);
+        let adapter = PostgresBaselineAdapter::new(config.clone()).unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        adapter
+            .connect()
+            .unwrap()
+            .batch_execute(&format!(
+                "ALTER TABLE {schema}.snapshot_files DROP CONSTRAINT snapshot_files_pkey;
+                 ALTER TABLE {schema}.snapshot_files ADD PRIMARY KEY (root_id, path);"
+            ))
+            .unwrap();
+        assert!(
+            primary_key_columns(&adapter, &format!("{schema}.snapshot_files"))
+                .contains(&"root_id".to_owned()),
+            "the tampered key must still CONTAIN the root, or the weak rule refuses it too and \
+             this control proves nothing"
+        );
+
+        let cold = PostgresBaselineAdapter::new(config).unwrap();
+        let error = cold.check_storage_readiness().unwrap_err();
+
+        assert!(
+            error.to_string().contains("snapshot_files"),
+            "the refusal must name the carrier: {error}"
+        );
+    }
+
+    /// A schema name long enough to make two index names collide is refused before migrating.
+    ///
+    /// Observed offline: the check runs before the connection, so no stand is needed, and the
+    /// positive control is an ordinary name that must get past it and fail on the address.
+    #[test]
+    fn a_schema_name_that_collides_index_names_is_refused_before_migrating() {
+        let long = "a".repeat(50);
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1").with_schema(&long),
+        )
+        .unwrap();
+
+        let refused = adapter.migrate_storage().unwrap_err();
+
+        assert_eq!(
+            refused.reason_code(),
+            Some("schema_name_too_long"),
+            "an index name past the identifier limit must be named, not silently truncated: \
+             {refused}"
+        );
+
+        let ordinary = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1").with_schema("bsl_search"),
+        )
+        .unwrap();
+        assert!(
+            ordinary.migrate_storage().unwrap_err().to_string().contains("connection"),
+            "positive control: an ordinary schema name must reach the database"
         );
     }
 
@@ -5252,6 +5392,7 @@ mod tests {
         );
     }
 
+    /// Drops the throwaway test schema even when an assertion panics mid-test.
     struct TestSchemaGuard {
         adapter: PostgresBaselineAdapter,
         schema: String,
@@ -5304,9 +5445,7 @@ mod tests {
     fn snapshot_summary_aggregate_matches_materialized_visibility_on_live_postgres() {
         let url = std::env::var("BSL_TEST_PG_URL")
             .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
-        let unique =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
-        let schema = format!("bsl_parity_{}_{unique}", std::process::id());
+        let schema = unique_schema("parity");
         let adapter = PostgresBaselineAdapter::new(
             ExternalBaselineConfig::postgres(url).with_schema(&schema),
         )
@@ -5515,9 +5654,7 @@ mod tests {
     fn snapshot_totals_batch_surfaces_corrupt_ancestry_on_live_postgres() {
         let url = std::env::var("BSL_TEST_PG_URL")
             .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
-        let unique =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
-        let schema = format!("bsl_corrupt_{}_{unique}", std::process::id());
+        let schema = unique_schema("corrupt");
         let adapter = PostgresBaselineAdapter::new(
             ExternalBaselineConfig::postgres(url).with_schema(&schema),
         )

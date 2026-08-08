@@ -30,8 +30,12 @@ pub enum SearchError {
     #[error("storage_not_initialized: PostgreSQL baseline storage has not been initialized (schema: {schema}); run `admin migrate` first")]
     StorageNotInitialized { schema: String },
 
-    #[error("schema_version_mismatch: expected {expected}, got {actual:?}")]
-    SchemaVersionMismatch { expected: i32, actual: Option<i32> },
+    #[error(
+        "schema_version_mismatch: schema {schema} is at version {}, and this build needs {expected}; \
+         run `admin migrate` to bring it forward",
+        .actual.map_or_else(|| "none".to_owned(), |version| version.to_string())
+    )]
+    SchemaVersionMismatch { expected: i32, actual: Option<i32>, schema: String },
 }
 
 impl SearchError {
@@ -105,6 +109,7 @@ fn external_baseline_reason_code(message: &str) -> Option<&'static str> {
         "serving_semantic_unavailable",
         "serving_semantic_rootless",
         "root_id_not_portable",
+        "schema_name_too_long",
     ];
 
     KNOWN_REASON_CODES
@@ -148,7 +153,11 @@ mod tests {
 
     #[test]
     fn schema_version_mismatch_is_not_retryable() {
-        let err = SearchError::SchemaVersionMismatch { expected: 1, actual: Some(0) };
+        let err = SearchError::SchemaVersionMismatch {
+            expected: 1,
+            actual: Some(0),
+            schema: "bsl_search".to_owned(),
+        };
         assert!(err.is_schema_version_mismatch());
         assert!(!err.is_retryable());
     }
@@ -176,6 +185,7 @@ mod tests {
             "serving_semantic_unavailable",
             "serving_semantic_rootless",
             "root_id_not_portable",
+            "schema_name_too_long",
             "postgres_connect_failed",
         ] {
             let error = SearchError::ExternalBaseline(format!("{name}: something went wrong"));
@@ -271,7 +281,12 @@ mod tests {
         assert!(
             SearchError::StorageNotInitialized { schema: "bsl_search".to_owned() }.is_terminal()
         );
-        assert!(SearchError::SchemaVersionMismatch { expected: 1, actual: Some(0) }.is_terminal());
+        assert!(SearchError::SchemaVersionMismatch {
+            expected: 1,
+            actual: Some(0),
+            schema: "bsl_search".to_owned(),
+        }
+        .is_terminal());
         assert!(SearchError::ExternalBaseline("refresh failed".to_owned()).is_terminal());
         assert!(SearchError::Embedder("timeout".to_owned()).is_terminal());
         assert!(SearchError::Index("corrupted".to_owned()).is_terminal());
