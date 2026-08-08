@@ -478,21 +478,18 @@ impl PostgresBaselineAdapter {
     /// Driven from `ROOTED_CARRIER_KEYS` rather than written out, so a carrier added to the list
     /// is migrated by the same act that declares it. Order matters across the whole set, not
     /// within one carrier: the column has to exist before anything keys by it.
-    fn give_every_carrier_the_root_key(&self) -> String {
-        let mut script = String::new();
+    fn give_every_carrier_the_root_key(&self) -> Vec<String> {
+        let mut statements = Vec::with_capacity(ROOTED_CARRIER_KEYS.len() * 2);
         for (table, _, obligation) in ROOTED_CARRIER_KEYS {
-            let column = match obligation {
+            statements.push(match obligation {
                 CarrierObligation::Required => self.add_root_id_column(table),
                 CarrierObligation::Optional => self.add_root_id_column_if_the_carrier_exists(table),
-            };
-            script.push_str(&column);
-            script.push_str(";\n");
+            });
         }
         for (table, columns, _) in ROOTED_CARRIER_KEYS {
-            script.push_str(&self.enforce_primary_key(table, columns));
-            script.push_str(";\n");
+            statements.push(self.enforce_primary_key(table, columns));
         }
-        script
+        statements
     }
 
     /// Brings a carrier's primary key to `columns`, deciding by the catalog rather than by name.
@@ -570,7 +567,10 @@ impl PostgresBaselineAdapter {
     }
 
     fn ensure_schema_statements(&self) -> Vec<String> {
-        vec![
+        // One statement per carrier operation, never one script holding them all: the gate that
+        // answers for a carrier picks its statements out by the carrier's own name, and a single
+        // string naming all four satisfies every carrier's check with some other carrier's text.
+        let mut statements = vec![
             format!("CREATE SCHEMA IF NOT EXISTS {}", self.schema),
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (
@@ -703,7 +703,11 @@ impl PostgresBaselineAdapter {
                 self.table("snapshot_heads"),
                 self.table("snapshots"),
             ),
-            self.give_every_carrier_the_root_key(),
+        ];
+        // Между таблицами и индексами: индексы тоже ключуются корнем, поэтому колонка обязана
+        // существовать раньше них, а не только раньше первичных ключей.
+        statements.extend(self.give_every_carrier_the_root_key());
+        statements.extend([
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_snapshots_corpus_created_at
                  ON {} (corpus, created_at DESC)",
@@ -762,7 +766,8 @@ impl PostgresBaselineAdapter {
                 self.schema,
                 self.table("semantic_embeddings")
             ),
-        ]
+        ]);
+        statements
     }
 
     fn pgvector_schema_statements(&self) -> Vec<String> {
@@ -1265,6 +1270,13 @@ impl PostgresBaselineAdapter {
         #[cfg(test)]
         observe_planning_isolation(&mut tx)?;
 
+        // The version of the snapshot ROW the plan is about to be built from. Read here and
+        // compared again under the final lock: a republish that commits in between is invisible
+        // to that lock — it orders only republishes that have not committed yet — and everything
+        // after this transaction (row preparation, embeddings) describes a corpus that no longer
+        // exists. Writing those rows and marking them complete would serve one version of a file
+        // set under the name of another.
+        let planned_snapshot_version = snapshot_row_version(&mut tx, self, snapshot_id)?;
         let parent_snapshot_id = snapshot_parent_id(&mut tx, self, snapshot_id)?;
         let current_snapshot_files = load_snapshot_file_rows(&mut tx, self, snapshot_id)?;
         let deleted_paths = load_snapshot_deletion_keys(&mut tx, self, snapshot_id)?;
@@ -1446,6 +1458,18 @@ impl PostgresBaselineAdapter {
             ),
             &[&locked_snapshots],
         )?;
+        // Asked again now that the row is held: from here on nobody can republish this snapshot
+        // until we commit, so a version equal to the planned one means the plan still describes
+        // what is in the table.
+        let current_snapshot_version = snapshot_row_version(&mut tx, self, snapshot_id)?;
+        if current_snapshot_version != planned_snapshot_version {
+            return Err(SearchError::named(
+                reason::SNAPSHOT_REPUBLISHED_WHILE_PUBLISHING,
+                format!(
+                    "snapshot '{snapshot_id}' was republished while its semantics were being                      computed; nothing was written, publish them again"
+                ),
+            ));
+        }
         clear_semantic_publication_complete(&mut tx, self, snapshot_id, model_id, dimension)?;
         delete_serving_semantic_rows(&mut tx, self, snapshot_id, model_id, dimension)?;
 
@@ -2514,6 +2538,27 @@ fn invalidate_semantic_publication_for_snapshot(
         )?;
     }
     Ok(())
+}
+
+/// How many times the snapshot's own row has been written, as PostgreSQL counts it.
+///
+/// `publish_snapshot` upserts this row as the first write of its own transaction, so the value
+/// changes on every republish of the id — whether the corpus changed its bytes, its roots or
+/// nothing at all. That is stricter than comparing file sets and deliberately so: the cost of a
+/// false alarm is one loud, repeatable refusal, while the cost of a missed one is a stale corpus
+/// wearing a completeness mark.
+fn snapshot_row_version(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<String, SearchError> {
+    let query = format!("SELECT xmin::TEXT FROM {} WHERE id = $1", adapter.table("snapshots"));
+    let Some(row) = client.query_opt(&query, &[&snapshot_id])? else {
+        return Err(SearchError::ExternalBaseline(format!(
+            "snapshot '{snapshot_id}' was not found"
+        )));
+    };
+    Ok(row.get(0))
 }
 
 fn snapshot_parent_id(
@@ -3740,10 +3785,10 @@ mod tests {
     use super::{
         effective_snapshot_totals_batch, file_object_id_for, fingerprint_file_documents,
         fold_visible_files, group_documents_by_file, materialize_visible_snapshot_files,
-        semantic_publish_phase_count, semantic_publish_plan, semantic_publish_strategy,
-        unique_content_object_rows, ContentObjectRow, EffectiveSnapshotSummary,
-        PostgresBaselineAdapter, SemanticPublishPlan, SemanticPublishStrategy, VisibleFileKey,
-        VisibleSnapshotFile, ROOTED_CARRIER_KEYS,
+        semantic_publication_complete, semantic_publish_phase_count, semantic_publish_plan,
+        semantic_publish_strategy, unique_content_object_rows, CarrierObligation, ContentObjectRow,
+        EffectiveSnapshotSummary, PostgresBaselineAdapter, SemanticPublishPlan,
+        SemanticPublishStrategy, VisibleFileKey, VisibleSnapshotFile, ROOTED_CARRIER_KEYS,
     };
     use crate::domain::{CorpusId, ExternalBaselineConfig, Snapshot, SnapshotPublishMetadata};
     use crate::external_baseline::BaselineCollectionRecord;
@@ -3978,14 +4023,34 @@ mod tests {
                 "{table} still declares {rootless_key}, so two roots collapse into one row"
             );
 
-            let backfill: Vec<&String> =
-                mandatory.iter().filter(|statement| statement.contains(&qualified)).collect();
-            assert!(
-                backfill
-                    .iter()
-                    .any(|statement| statement.contains("ADD COLUMN IF NOT EXISTS root_id")),
-                "{table} must gain root_id on schemas that predate roots"
-            );
+            let backfill = mandatory
+                .iter()
+                .position(|statement| {
+                    statement.contains(&qualified)
+                        && statement.contains("ADD COLUMN IF NOT EXISTS root_id")
+                })
+                .unwrap_or_else(|| {
+                    panic!("{table} must gain root_id on schemas that predate roots")
+                });
+
+            // And it must come before everything that KEYS by the root without creating it —
+            // the primary key and the indexes. Those fail outright on a schema where the column
+            // does not exist yet, taking the whole migration down with them; presence alone is
+            // green for a statement list in any order. `CREATE TABLE` is exempt because it
+            // declares the column in the same breath.
+            let keyed_by_root = mandatory.iter().enumerate().filter(|(position, statement)| {
+                *position != backfill
+                    && statement.contains(&qualified)
+                    && statement.contains("root_id")
+                    && !statement.contains("CREATE TABLE")
+            });
+            for (position, statement) in keyed_by_root {
+                assert!(
+                    position > backfill,
+                    "{table} is keyed by root_id before the column is added, at statement \
+                     {position} against a backfill at {backfill}: {statement}"
+                );
+            }
         }
     }
 
@@ -4628,14 +4693,15 @@ mod tests {
 
         adapter.migrate_storage().unwrap();
 
-        for (table, expected) in [
-            ("snapshot_files", vec!["snapshot_id", "collection", "root_id", "path"]),
-            ("snapshot_deletions", vec!["snapshot_id", "collection", "root_id", "path"]),
-            ("serving_lexical", vec!["snapshot_id", "collection", "root_id", "path", "ordinal"]),
-        ] {
+        // Из константы, и только обязательные: фикстура поднимает схему БЕЗ pgvector, поэтому
+        // необязательного носителя в ней нет вовсе, а его миграция закрыта своим тестом.
+        for (table, expected, _) in ROOTED_CARRIER_KEYS
+            .iter()
+            .filter(|(_, _, obligation)| *obligation == CarrierObligation::Required)
+        {
             assert_eq!(
                 primary_key_columns(&adapter, &format!("{schema}.{table}")),
-                expected,
+                *expected,
                 "{table} did not reach the rooted key"
             );
         }
@@ -5236,6 +5302,100 @@ mod tests {
             rows, 0,
             "the republish must be ordered after the write, so its invalidation clears what the \
              write produced; rows surviving mean it slipped in between the check and the insert"
+        );
+    }
+
+    /// A republish that COMMITS between planning and the final write is refused, not served.
+    ///
+    /// The lock taken before the write orders republishes that have not committed yet; one that
+    /// already committed is simply invisible to it, and everything computed since — the file set,
+    /// the strategy, the prepared rows — belongs to a corpus that no longer exists. Writing it
+    /// under a completeness mark would claim the current snapshot is served by semantics of the
+    /// previous one.
+    ///
+    /// The corpus here gains a ROOT rather than changing bytes, which is the case a byte-level
+    /// notion of staleness misses entirely: the file's content is untouched and its identity is
+    /// new. The republish runs synchronously from the `Plan` callback, which fires after the
+    /// planning transaction has committed, so it cannot deadlock against a lock we still hold.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_snapshot_republished_between_planning_and_the_write_is_refused() {
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("restale");
+        let config = ExternalBaselineConfig::postgres(url).with_schema(&schema);
+        let adapter = PostgresBaselineAdapter::new(config.clone()).unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        let configuration = indexed_document("code", PATH, "Общий", 1, "hash-cfg", "текст");
+        let extension = IndexedDocument { root_id: "Расш".to_owned(), ..configuration.clone() };
+        adapter
+            .store_embeddings(
+                "model",
+                4,
+                &[(
+                    crate::document::semantic_key_from_parts(
+                        PATH,
+                        &configuration.kind,
+                        &configuration.symbol_name,
+                        "",
+                        &configuration.text,
+                    ),
+                    vec![0.1, 0.2, 0.3, 0.4],
+                )],
+            )
+            .unwrap();
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("mid".to_owned(), CorpusId::WorkspaceCode),
+                &SnapshotPublishMetadata::default(),
+                std::slice::from_ref(&configuration),
+            )
+            .unwrap();
+
+        let republisher = PostgresBaselineAdapter::new(config).unwrap();
+        let republish_once = std::cell::Cell::new(true);
+        let republish = |event: crate::external_baseline::SemanticPublishProgress| {
+            if matches!(event, crate::external_baseline::SemanticPublishProgress::Plan { .. })
+                && republish_once.replace(false)
+            {
+                republisher
+                    .publish_snapshot(
+                        &Snapshot::new("mid".to_owned(), CorpusId::WorkspaceCode),
+                        &SnapshotPublishMetadata::default(),
+                        &[configuration.clone(), extension.clone()],
+                    )
+                    .unwrap();
+            }
+        };
+
+        let error = adapter
+            .populate_serving_semantic_with_progress("mid", "model", 4, Some(&republish))
+            .expect_err(
+                "a plan built for a corpus that has since been replaced must not be served",
+            );
+        assert_eq!(
+            error.reason_code(),
+            Some("snapshot_republished_while_publishing"),
+            "the refusal must be the named one: {error}"
+        );
+
+        let mut client = adapter.connect().unwrap();
+        let rows: i64 = client
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM {schema}.serving_semantic WHERE snapshot_id = 'mid'"
+                ),
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(rows, 0, "the refusal must roll back with its transaction");
+        assert!(
+            !semantic_publication_complete(&mut *client, &adapter, "mid", "model", 4).unwrap(),
+            "and it must leave no completeness mark behind"
         );
     }
 
@@ -6016,7 +6176,10 @@ mod tests {
         raise_pre_root_schema(&adapter, &schema);
         adapter.migrate_storage().unwrap();
 
-        let carriers = ["snapshot_files", "snapshot_deletions", "serving_lexical"];
+        // Из константы, а не своим списком: носитель, добавленный туда, попадает под проверку
+        // тем же действием, которым объявлен. `serving_semantic` здесь и самый дорогой —
+        // повторная перестройка её ключа берёт ACCESS EXCLUSIVE на таблицу векторов.
+        let carriers: Vec<&str> = ROOTED_CARRIER_KEYS.iter().map(|(table, _, _)| *table).collect();
         let indexes = ["snapshot_files", "snapshot_deletions"];
         let keys_before: Vec<u32> = carriers
             .iter()

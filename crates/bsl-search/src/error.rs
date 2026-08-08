@@ -135,6 +135,8 @@ pub(crate) mod reason {
     pub(crate) const SERVING_SEMANTIC_UNAVAILABLE: ReasonCode =
         ReasonCode("serving_semantic_unavailable");
     pub(crate) const ROOT_ID_NOT_PORTABLE: ReasonCode = ReasonCode("root_id_not_portable");
+    pub(crate) const SNAPSHOT_REPUBLISHED_WHILE_PUBLISHING: ReasonCode =
+        ReasonCode("snapshot_republished_while_publishing");
     pub(crate) const SCHEMA_NAME_TOO_LONG: ReasonCode = ReasonCode("schema_name_too_long");
 }
 
@@ -152,6 +154,7 @@ const KNOWN_REASON_CODES: &[ReasonCode] = &[
     reason::SERVING_LEXICAL_UNAVAILABLE,
     reason::SERVING_SEMANTIC_UNAVAILABLE,
     reason::ROOT_ID_NOT_PORTABLE,
+    reason::SNAPSHOT_REPUBLISHED_WHILE_PUBLISHING,
     reason::SCHEMA_NAME_TOO_LONG,
 ];
 
