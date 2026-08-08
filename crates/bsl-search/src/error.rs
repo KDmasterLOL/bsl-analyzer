@@ -103,6 +103,7 @@ fn external_baseline_reason_code(message: &str) -> Option<&'static str> {
         "refresh_retry_exhausted",
         "serving_lexical_unavailable",
         "serving_semantic_unavailable",
+        "serving_semantic_rootless",
     ];
 
     KNOWN_REASON_CODES
@@ -158,6 +159,25 @@ mod tests {
             let err: SearchError = pg_err.into();
             assert!(!err.is_retryable());
             assert!(err.is_terminal());
+        }
+    }
+
+    /// Every refusal this crate names must be recognised by the classifier, or the name reaches
+    /// nobody: consumers read `reason_code()`, and an unlisted prefix arrives as null there
+    /// while the message still reads as if the failure were identified.
+    ///
+    /// Checked over the whole class rather than for one member, because the list and the
+    /// messages are edited in different files and drift silently apart.
+    #[test]
+    fn every_named_refusal_of_this_crate_has_a_reason_code() {
+        for name in [
+            "serving_lexical_unavailable",
+            "serving_semantic_unavailable",
+            "serving_semantic_rootless",
+            "postgres_connect_failed",
+        ] {
+            let error = SearchError::ExternalBaseline(format!("{name}: something went wrong"));
+            assert_eq!(error.reason_code(), Some(name), "{name} is not classified");
         }
     }
 

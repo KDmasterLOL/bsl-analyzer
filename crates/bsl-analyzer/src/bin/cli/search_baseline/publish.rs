@@ -153,7 +153,20 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
         SnapshotPublishMetadata { branch: branch.clone(), commit: commit.clone() };
 
     eprintln!("[3/5] Publishing snapshot ({} chunks)...", indexed_documents.len());
-    let embedder = postgres::embedder_config(&project).map(Embedder::new);
+    // Semantic serving does not key a file by its source root yet, so a corpus that carries
+    // roots is published lexically and its semantics are skipped. Decided HERE, from the corpus
+    // itself, and not by letting the adapter refuse at the end: the refusal would arrive after
+    // the snapshot is committed, the branch head moved and every embedding computed — leaving a
+    // non-zero exit next to a baseline that really was published, and burning the most
+    // expensive phase of the run on every retry.
+    let corpus_carries_roots = indexed_documents
+        .iter()
+        .any(|document| document.root_id != bsl_search::CONFIGURATION_ROOT_ID);
+    let embedder = if corpus_carries_roots {
+        None
+    } else {
+        postgres::embedder_config(&project).map(Embedder::new)
+    };
     let has_embedder = embedder.is_some();
     let embedding_progress = |event: EmbeddingProgress| match event {
         EmbeddingProgress::Plan { total_unique, cached, to_compute } => {
@@ -261,6 +274,9 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
             Some(&semantic_progress),
         )?;
         eprintln!("      {} rows", serving_count);
+    } else if corpus_carries_roots {
+        eprintln!("[4/5] Skipped (corpus covers extension source roots)");
+        eprintln!("[5/5] Skipped (semantic serving does not key a file by its source root)");
     } else {
         eprintln!("[4/5] Skipped (no embedding config)");
         eprintln!("[5/5] Skipped (no embeddings)");
@@ -556,6 +572,90 @@ mod tests {
             !message.contains("extension"),
             "a connection failure must not be dressed up as an extension problem; got: {message}"
         );
+    }
+
+    /// Publishing a rooted corpus SUCCEEDS, skipping semantics before the expensive phase.
+    ///
+    /// Run end to end rather than against the decision alone: a correct policy nobody applies
+    /// publishes exactly what a missing policy would. The stand names an embedder nothing
+    /// listens on, so an implementation that computes embeddings first — and only then meets
+    /// the adapter's refusal — fails here, while the intended one never contacts it.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_rooted_corpus_publishes_lexically_and_skips_semantics() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        for owner in ["src/cf", "src/cfe/Расш"] {
+            let owner_root = root.join(owner);
+            write(&owner_root.join("Configuration.xml"), "<MetaDataObject/>");
+            write(&owner_root.join("CommonModules/Общий/Ext/Module.bsl"), &module("Общий"));
+        }
+        // A fixed schema, republished under a fixed snapshot id, because this crate has no
+        // PostgreSQL client of its own and so cannot drop a per-run schema afterwards. The
+        // publish upserts by id, so repeated runs leave one schema holding one snapshot rather
+        // than a growing pile.
+        let schema = "bsl_cli_publish_gate".to_owned();
+        write(
+            &root.join("bsl-analyzer.toml"),
+            &format!(
+                "[search.baseline]\n\
+                 backend = \"postgres\"\n\
+                 [search.baseline.postgres]\n\
+                 host = \"{host}\"\n\
+                 port = {port}\n\
+                 dbname = \"{dbname}\"\n\
+                 schema = \"{schema}\"\n\
+                 vault_role_base = \"probe\"\n\
+                 [search.baseline.postgres.credential_helper]\n\
+                 program = \"/bin/sh\"\n\
+                 args = [\"-c\", \"cat > /dev/null; printf '{{\\\"protocol\\\":\\\"bsl-analyzer.postgres-helper.v1\\\",\\\"ok\\\":true,\\\"url\\\":\\\"{url}\\\"}}'\"]\n\
+                 [search.baseline.embedding]\n\
+                 model = \"probe-model\"\n\
+                 dimension = 4\n\
+                 provider = \"nebius\"\n\
+                 url = \"http://127.0.0.1:1\"\n",
+                host = pg_part(&url, "host"),
+                port = pg_part(&url, "port"),
+                dbname = pg_part(&url, "dbname"),
+            ),
+        );
+
+        let adapter = postgres::build_adapter(&url, Some(&schema)).unwrap();
+        adapter.migrate_storage().unwrap();
+
+        run(SearchBaselinePublishArgs {
+            corpus: SearchBaselineCorpusCli::WorkspaceCode,
+            source_dir: root.clone(),
+            snapshot_id: Some("cli:rooted".to_owned()),
+            branch: None,
+            commit: None,
+            parent_snapshot_id: None,
+            allow_non_policy_branch: true,
+        })
+        .expect("a rooted corpus publishes lexically; semantics are skipped, not failed");
+
+        let details = adapter
+            .snapshot_details("cli:rooted")
+            .unwrap()
+            .expect("the snapshot must be published");
+        assert_eq!(details.snapshot.files, 2, "both roots reach the baseline");
+    }
+
+    #[cfg(unix)]
+    fn pg_part(url: &str, part: &str) -> String {
+        let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+        let authority_and_db = rest.split_once('@').map(|(_, rest)| rest).unwrap_or(rest);
+        let (authority, dbname) =
+            authority_and_db.split_once('/').unwrap_or((authority_and_db, "postgres"));
+        let (host, port) = authority.split_once(':').unwrap_or((authority, "5432"));
+        match part {
+            "host" => host.to_owned(),
+            "port" => port.to_owned(),
+            _ => dbname.split('?').next().unwrap_or(dbname).to_owned(),
+        }
     }
 
     /// A file the walk REACHED but whose bytes could not be read is the same lie as a directory

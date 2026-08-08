@@ -1194,12 +1194,14 @@ impl PostgresBaselineAdapter {
         // Materialized here, inside the same snapshot, and only for the strategy that needs it:
         // reading it later — after row preparation — would put it in a different snapshot than
         // the refusal, which is the whole reason this transaction exists.
+        let materialization_started = Instant::now();
         let visible_files = match plan.strategy {
             SemanticPublishStrategy::FullRebuild => {
                 Some(materialize_visible_snapshot_files(&mut tx, self, snapshot_id)?)
             }
             _ => None,
         };
+        let ancestry_materialization = materialization_started.elapsed();
         tx.commit()?;
         let strategy = plan.strategy.clone();
         let phase_count = semantic_publish_phase_count(&strategy);
@@ -1284,7 +1286,6 @@ impl PostgresBaselineAdapter {
                 (prepared.rows, prepared.missing_embeddings)
             }
             SemanticPublishStrategy::FullRebuild => {
-                let rebuild_started = Instant::now();
                 if let Some(on_progress) = progress {
                     on_progress(SemanticPublishProgress::PhaseStarted {
                         phase: SemanticPublishPhase::PrepareRows,
@@ -1296,7 +1297,10 @@ impl PostgresBaselineAdapter {
                 }
                 let visible_files = visible_files
                     .expect("the full rebuild strategy materializes its files while planning");
-                timings.ancestry_materialization = rebuild_started.elapsed();
+                // Measured where the work happens now — in planning — instead of around the
+                // `expect` that merely picks it up, which would report ~0 for the one strategy
+                // whose materialization this field exists to diagnose.
+                timings.ancestry_materialization = ancestry_materialization;
 
                 let recompute_started = Instant::now();
                 let prepared = prepare_semantic_rows_for_files(
@@ -1786,6 +1790,23 @@ impl WorkspaceBaselineManifestStore for PostgresBaselineAdapter {
 impl PostgresBaselineAdapter {
     pub fn migrate_storage(&self) -> Result<(), SearchError> {
         let mut client = self.connect()?;
+
+        // Forward-only has to be enforced, not remembered. An older build's migrator would
+        // otherwise stamp its own version over a newer schema AND rebuild the keys to its own
+        // shape, undoing the version barrier that keeps every other consumer off a schema it
+        // cannot read. Asked only where there is somewhere to ask: on an empty schema this
+        // migration is the thing that creates the metadata table.
+        if self.storage_table_exists(&mut *client, SCHEMA_METADATA_TABLE)? {
+            if let Some(version) = self.get_schema_version()? {
+                if version > crate::error::SCHEMA_VERSION_CURRENT {
+                    return Err(SearchError::SchemaVersionMismatch {
+                        expected: crate::error::SCHEMA_VERSION_CURRENT,
+                        actual: Some(version),
+                    });
+                }
+            }
+        }
+
         let statements = self.ensure_schema_statements();
         self.migrate_structure(&mut client, &statements)?;
 
@@ -1839,9 +1860,6 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
                 "snapshot cannot reference itself as parent".to_owned(),
             ));
         }
-
-        // Ahead of the readiness check, which connects: what this schema cannot store must be
-        // refused without touching the database at all.
 
         self.check_storage_readiness()?;
 
@@ -3238,7 +3256,8 @@ fn effective_snapshot_summary(
 /// round-trip instead of walking each snapshot's ancestry and summarising it separately (which
 /// `effective_snapshot_summary` does per call — `list_snapshots` over N snapshots of depth D would
 /// otherwise issue `1 + N*(D+1)` queries). A `RECURSIVE` CTE expands every seed's ancestry keyed by
-/// the seed it belongs to, so the child-first visibility rule (`DISTINCT ON (seed, collection, path)`
+/// the seed it belongs to, so the child-first visibility rule
+/// (`DISTINCT ON (seed, collection, root_id, path)`
 /// by ancestry depth, a same-position deletion shadowing its file) matches the single-snapshot path.
 /// Only totals are returned: `list_snapshots` does not use the per-collection breakdown.
 ///
@@ -4923,6 +4942,48 @@ mod tests {
             "the refusal must name the carrier that lost the root: {error}"
         );
         assert!(!error.is_retryable(), "a schema this build cannot serve is terminal: {error}");
+    }
+
+    /// A migrator refuses a schema newer than the one it knows, and leaves it untouched.
+    ///
+    /// Forward-only is a property of the migration, not of the operator's memory: running an
+    /// older build's `admin migrate` against a migrated schema would otherwise stamp its own
+    /// version back over the newer one and rebuild the keys to its own shape — undoing the
+    /// version barrier that protects every other consumer.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn migrating_a_newer_schema_is_refused_and_changes_nothing() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("newer");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        adapter
+            .connect()
+            .unwrap()
+            .batch_execute(&format!(
+                "UPDATE {schema}._schema_metadata_ SET value = '3' WHERE setting = 'schema_version'"
+            ))
+            .unwrap();
+
+        let error = adapter.migrate_storage().unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                crate::SearchError::SchemaVersionMismatch { actual: Some(3), expected: 2 }
+            ),
+            "a newer schema must be named, not quietly downgraded: {error}"
+        );
+        assert_eq!(
+            adapter.get_schema_version().unwrap(),
+            Some(3),
+            "the refusal must leave the newer version in place"
+        );
     }
 
     /// Re-running the migration is a genuine no-op, proved by object identity.
