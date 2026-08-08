@@ -237,6 +237,23 @@ pub(crate) struct DiagnosticsResident {
     pub(super) author_filter: Option<std::sync::Arc<vcs::AuthorFilter>>,
 }
 
+/// `..` and `.` resolved textually, without asking the filesystem. That is the point: the
+/// question here is what the caller NAMED, and a name that walks out of its root is not a name
+/// in that root whatever the directory it would have reached.
+fn lexically_normalized(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Why a `(root_id, path)` pair names no file. Every case is answered, never guessed: a pair
 /// that cannot be resolved and a pair resolved against some other root are indistinguishable
 /// to the caller, and the second is a wrong answer wearing the shape of a right one.
@@ -321,6 +338,12 @@ impl DiagnosticsResident {
             };
         }
         let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
+        let root = self
+            .workspace_roots
+            .entries()
+            .find(|(id, _)| *id == root_id)
+            .map(|(_, declared)| declared.to_path_buf())
+            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))?;
         let resolved = self
             .workspace_roots
             .resolve(&key)
@@ -333,17 +356,31 @@ impl DiagnosticsResident {
         // the tree. A containment test would refuse exactly those keys, which the index itself
         // produces, while `root_of` accepts them and still refuses the escapes: a link into
         // another root canonicalises into it and is attributed there, not here.
-        let canonical = resolved.canonicalize();
-        let settled = canonical.as_deref().unwrap_or(&resolved);
-        let owner = self.workspace_roots.root_of(&resolved, settled);
-        if owner.map(|key| key.root_id) != Some(root_id.to_owned()) {
+        // The one thing asked of the pair: the SPELLING stays inside the root it was read
+        // against. `..` is resolved textually first, so `a/../a/M.bsl` is the name of a file
+        // in the root, while `../other/M.bsl` is not a name in this root at all.
+        //
+        // Deliberately NOT asked: where the path finally lands. Two attempts at that question
+        // were wrong in opposite directions. Comparing the canonical target against the root's
+        // directory refuses a key the index itself hands out — the table keeps a file reached
+        // through a directory link out of the tree under the root that walked to it, and its
+        // canonical path is nowhere near that root. Asking `root_of` who OWNS the target is no
+        // better: with nested roots the owner is always the deepest one, so an outer root could
+        // never name anything inside an inner one, and the fallback ranks the WALKED spelling —
+        // which is this very join — so it accepts every `..` that leaves all roots behind.
+        //
+        // What follows from stopping here: a link inside a root is a file OF that root, and
+        // reading it yields its target, exactly as it would for anything else opening that
+        // path. The pair still names one file; it just does not promise that the bytes live
+        // in the same directory tree.
+        let inside = lexically_normalized(&resolved);
+        if !inside.starts_with(root) {
             return Err(RootedPathError::PathClimbsOutOfRoot(root_id.to_owned()));
         }
-        // The CHECKED spelling is what goes back. Returning the one that still contains the
-        // link would leave every consumer to resolve it again, against a filesystem that may
-        // have moved in between — and the answer would come from whatever the link points at
-        // by then, which is the substitution this refuses.
-        Ok(canonical.unwrap_or(resolved))
+        // The CHECKED spelling is what goes back: the declared one, not a canonicalised twin.
+        // Consumers derive the result id from it, and a request by pair would otherwise carry a
+        // different id than the same file requested by absolute path.
+        Ok(inside)
     }
 
     /// Resolve a request path to the resident FileId, canonicalising it the same way
@@ -1233,16 +1270,66 @@ mod tests {
         };
 
         assert_eq!(
-            detour,
-            extension.join(SHARED_MODULE_REL).canonicalize().map_err(|_| unreachable!()),
+            detour.as_deref(),
+            Ok(extension.join(SHARED_MODULE_REL).as_path()),
             "a spelling that stays inside its root names a file there, `..` or not — and what \
-             comes back is the spelling that was CHECKED, not the one that was sent",
+             comes back is the spelling that was CHECKED, with `..` already resolved",
         );
         assert!(
             through_alias.is_some() && through_alias == configuration,
             "the stand is real: followed, the link reaches the configuration's module",
         );
-        assert_eq!(aliased, Err(RootedPathError::PathClimbsOutOfRoot(root_id)));
+        // A link sitting in the extension is a file of the extension, and reading it yields
+        // its target — the same answer any tool opening that path gives. The pair still names
+        // one file; what it does not promise is that the bytes live in this directory tree.
+        assert_eq!(
+            aliased.as_deref(),
+            Ok(extension.join("Alias.bsl").as_path()),
+            "a name that stays inside its root is honoured, link or not",
+        );
+        let _ = root_id;
+    }
+
+    /// An escape does not have to land in ANOTHER root to be an escape. Asking who owns the
+    /// landing place misses exactly this: the target belongs to no root canonically, so the
+    /// attribution falls back to the walked spelling — which is this very join — and the root
+    /// the caller named matches itself, `..` and all. The question that catches it is asked of
+    /// the name, not of the destination.
+    #[cfg(unix)]
+    #[test]
+    fn an_escape_into_ground_no_root_owns_is_still_an_escape() {
+        use super::super::test_support::{
+            extension_root_id, workspace_with_an_outside_extension, write, SHARED_MODULE_REL,
+        };
+        let (dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+        // Served by the resident, under the configuration, but canonically outside every root.
+        let outside = dir.path().join("served-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        write(
+            &outside,
+            SHARED_MODULE_REL,
+            "&НаСервере\nФункция Наружная() Экспорт Возврат 1; КонецФункции\n",
+        );
+        std::os::unix::fs::symlink(&outside, workspace.join("Linked")).unwrap();
+
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let escaping = format!("../ws/Linked/{SHARED_MODULE_REL}");
+        let outcome = state.read(|resident, _| {
+            (
+                resident.resolve_rooted_path(Some(&root_id), Path::new(&escaping)),
+                resident.file_id_for(&outside.join(SHARED_MODULE_REL)).is_some(),
+            )
+        });
+        let ResidentOutcome::Ready((refused, served), _) = outcome else {
+            panic!("expected Ready")
+        };
+
+        assert!(served, "the stand is real: that file is one the resident serves");
+        assert_eq!(refused, Err(RootedPathError::PathClimbsOutOfRoot(root_id)));
     }
 
     /// The table keeps a file that lies outside every root under the root the walk reached it
