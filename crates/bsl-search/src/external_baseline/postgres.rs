@@ -34,15 +34,6 @@ const ROOTED_CARRIER_KEYS: [(&str, &[&str]); 3] = [
     ("serving_lexical", &["snapshot_id", "collection", "root_id", "path", "ordinal"]),
 ];
 
-/// The secondary indexes whose composition the migration enforces, as `(suffix, table)`.
-///
-/// Named here rather than at the call site because two things need the same list: the migration
-/// that rebuilds them and the guard that checks their generated names still fit an identifier.
-const ROOTED_SECONDARY_INDEXES: [(&str, &str); 2] = [
-    ("snapshot_files_snapshot_path", "snapshot_files"),
-    ("snapshot_deletions_snapshot_path", "snapshot_deletions"),
-];
-
 const REQUIRED_STORAGE_TABLES: &[&str] = &[
     SCHEMA_METADATA_TABLE,
     "snapshots",
@@ -655,8 +646,8 @@ impl PostgresBaselineAdapter {
                 self.table("snapshots")
             ),
             self.enforce_index(
-                ROOTED_SECONDARY_INDEXES[0].0,
-                ROOTED_SECONDARY_INDEXES[0].1,
+                "snapshot_files_snapshot_path",
+                "snapshot_files",
                 &["snapshot_id", "collection", "root_id", "path"],
             ),
             format!(
@@ -666,8 +657,8 @@ impl PostgresBaselineAdapter {
                 self.table("snapshot_files")
             ),
             self.enforce_index(
-                ROOTED_SECONDARY_INDEXES[1].0,
-                ROOTED_SECONDARY_INDEXES[1].1,
+                "snapshot_deletions_snapshot_path",
+                "snapshot_deletions",
                 &["snapshot_id", "collection", "root_id", "path"],
             ),
             format!(
@@ -1359,15 +1350,25 @@ impl PostgresBaselineAdapter {
         let changed_files = plan.changed_paths.len();
         let final_sync_started = Instant::now();
         let mut tx = client.transaction()?;
-        // Serialized against a concurrent republish, not merely re-read. `publish_snapshot`
-        // upserts THIS row as the first write of its own transaction, so taking the row lock
-        // here orders the two: a republish that has not committed waits for us, and one that
-        // already committed is visible to the check below. Re-reading without the lock only
-        // narrows the window — a republish committing between the check and the insert still
-        // slips through, and the rows written would describe a corpus that no longer exists.
+        // Serialized against a concurrent republish, over the SAME set of snapshots the check
+        // below reads. `publish_snapshot` upserts a snapshot's row as the first write of its own
+        // transaction, so holding these rows orders the two operations: a republish that has not
+        // committed waits for us, one that already committed is visible to the check.
+        //
+        // The whole ancestry, not just this snapshot: the refusal is decided by the roots of
+        // every ancestor, so locking only our own row leaves the answer free to change under it
+        // — republishing a PARENT with an extension would sail past. A guard narrower than the
+        // property it guards is the same defect wearing a different id.
+        //
+        // Locked in id order so two publications with overlapping ancestries queue instead of
+        // deadlocking.
+        let locked_ancestry = snapshot_ancestry_ids(&mut tx, self, snapshot_id)?;
         tx.execute(
-            &format!("SELECT id FROM {} WHERE id = $1 FOR UPDATE", self.table("snapshots")),
-            &[&snapshot_id],
+            &format!(
+                "SELECT id FROM {} WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+                self.table("snapshots")
+            ),
+            &[&locked_ancestry],
         )?;
         // Asked again, here, because planning released its snapshot long ago: everything since
         // — row preparation, embeddings — happened outside it, and a concurrent republish of
@@ -1852,6 +1853,12 @@ impl PostgresBaselineAdapter {
         parent_snapshot_id: Option<&str>,
         documents: &[IndexedDocument],
     ) -> Result<Vec<String>, SearchError> {
+        // Every sibling method starts here, and this one is now the FIRST thing to touch the
+        // database when the caller supplies the parent explicitly. Without it the two errors an
+        // operator meets on an unmigrated schema — the ones whose text says to run
+        // `admin migrate` — arrive as a raw catalog error with no reason code.
+        self.check_storage_readiness()?;
+
         let mut roots: BTreeSet<String> = documents
             .iter()
             .map(|document| document.root_id.clone())
@@ -1890,10 +1897,9 @@ impl PostgresBaselineAdapter {
     /// rebuild the keys to its own shape, undoing the barrier that keeps consumers off a schema
     /// they cannot read.
     ///
-    /// Read here rather than before the transaction, and with `FOR UPDATE`: a check outside is
-    /// check-then-act — two migrators of different versions both read the old number, and the
-    /// older one commits last and wins. The lock makes the second reader wait for the first and
-    /// then see what it wrote.
+    /// Read inside the transaction, after the advisory lock that serializes migrators: outside
+    /// it this is check-then-act — two migrators of different versions both read the old number,
+    /// and the older one commits last and wins.
     ///
     /// Asked only where there is somewhere to ask: on an empty schema this very migration is
     /// what creates the metadata table.
@@ -1906,7 +1912,7 @@ impl PostgresBaselineAdapter {
         }
         let row = tx.query_opt(
             &format!(
-                "SELECT value::INTEGER FROM {} WHERE setting = 'schema_version' FOR UPDATE",
+                "SELECT value::INTEGER FROM {} WHERE setting = 'schema_version'",
                 self.table(SCHEMA_METADATA_TABLE)
             ),
             &[],
@@ -1999,6 +2005,11 @@ impl PostgresBaselineAdapter {
         statements: &[String],
     ) -> Result<(), SearchError> {
         let mut tx = client.transaction()?;
+        // Serializes migrators of this schema against each other for the life of the
+        // transaction. The version row cannot do it: on a fresh or repaired schema there is no
+        // row to lock, so two migrators of different versions would both read "no version",
+        // both proceed, and the older one would commit last and win.
+        tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&self.schema])?;
         self.refuse_to_move_a_newer_schema_backwards(&mut tx)?;
         for statement in statements {
             tx.batch_execute(statement)?;
@@ -2576,22 +2587,12 @@ pub fn ensure_the_roots_mean_the_same_elsewhere(
     )))
 }
 
-/// Refuses to publish semantics for a corpus that carries roots.
+/// The non-configuration roots present anywhere in a snapshot's ancestry.
 ///
-/// `serving_semantic` still keys a file by `(collection, path)`, so two rooted versions of one
-/// relative path would collide on its primary key — and `prepare_semantic_rows_for_files` would
-/// lose one of them earlier still, rebuilding file identity backwards from `file_object_id`,
-/// which stops being one-to-one the moment two roots share content. A named refusal is worth
-/// more than either outcome; the corpus becomes correct before there is a place to put it.
-///
-/// The question is asked of the ANCESTRY, not of the snapshot's own rows. A project with
-/// extensions publishes a rooted snapshot first — refused — and then a delta snapshot touching
-/// only configuration files, which owns no rooted rows at all: deciding by its own rows would
-/// let exactly that second, ordinary publish through into the defective path.
-///
-/// Conservative on purpose: a corpus whose rooted files have all since been deleted is refused
-/// too. That errs toward refusing, which is the safe direction here, and costs one indexed
-/// existence check instead of materializing the whole visible set on every semantic publish.
+/// A query, not a policy: one caller turns a non-empty answer into a refusal, the other reports
+/// it so the CLI can skip the expensive phase instead of meeting that refusal after it. Asked of
+/// the ANCESTRY rather than of the snapshot's own rows, because a delta snapshot touching only
+/// configuration files owns no rooted rows while the corpus it serves still has them.
 fn roots_in_snapshot_ancestry(
     client: &mut impl GenericClient,
     adapter: &PostgresBaselineAdapter,
@@ -2612,6 +2613,22 @@ fn roots_in_snapshot_ancestry(
         .collect())
 }
 
+/// Refuses to publish semantics for a corpus that carries roots.
+///
+/// `serving_semantic` still keys a file by `(collection, path)`, so two rooted versions of one
+/// relative path would collide on its primary key — and `prepare_semantic_rows_for_files` would
+/// lose one of them earlier still, rebuilding file identity backwards from `file_object_id`,
+/// which stops being one-to-one the moment two roots share content. A named refusal is worth
+/// more than either outcome; the corpus becomes correct before there is a place to put it.
+///
+/// The question is asked of the ANCESTRY, not of the snapshot's own rows. A project with
+/// extensions publishes a rooted snapshot first — refused — and then a delta snapshot touching
+/// only configuration files, which owns no rooted rows at all: deciding by its own rows would
+/// let exactly that second, ordinary publish through into the defective path.
+///
+/// Conservative on purpose: a corpus whose rooted files have all since been deleted is refused
+/// too. That errs toward refusing, which is the safe direction here, and costs one indexed
+/// existence check instead of materializing the whole visible set on every semantic publish.
 fn refuse_semantic_publication_of_rooted_corpus(
     client: &mut impl GenericClient,
     adapter: &PostgresBaselineAdapter,
@@ -5262,7 +5279,7 @@ mod tests {
                 }
             ) {
                 window_open.store(true, Ordering::SeqCst);
-                std::thread::sleep(std::time::Duration::from_millis(400));
+                std::thread::sleep(std::time::Duration::from_millis(3000));
             }
         };
         adapter
@@ -5285,6 +5302,140 @@ mod tests {
             rows, 0,
             "the republish must be ordered after the write, so its invalidation clears what the \
              write produced; rows surviving mean it slipped in between the check and the insert"
+        );
+    }
+
+    /// A PARENT republished during the final write is serialized behind it too.
+    ///
+    /// The refusal is decided by the roots of the whole ancestry, so a lock on the snapshot's own
+    /// row is narrower than the property: republishing a parent with an extension changes the
+    /// answer without ever touching the child's row. This is the same defect the single-row lock
+    /// was introduced to fix, one level up.
+    ///
+    /// Observed by ORDER here, unlike its sibling. A republish of the snapshot ITSELF clears the
+    /// snapshot's semantic rows, so there the end state tells the two designs apart. A republish
+    /// of a PARENT clears only the parent's own rows — nothing invalidates a descendant, which is
+    /// a staleness that predates roots entirely — so the end state is identical either way and
+    /// only the ordering differs.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_parent_republished_during_the_final_write_waits_for_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("ancest");
+        let config = ExternalBaselineConfig::postgres(url).with_schema(&schema);
+        let adapter = PostgresBaselineAdapter::new(config.clone()).unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let configuration = indexed_document("code", PATH, "Общий", 1, "hash-один", "текст");
+        let child_file = indexed_document("code", "src/B.bsl", "Б", 1, "hash-б", "текст-б");
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("parent".to_owned(), CorpusId::WorkspaceCode),
+                &SnapshotPublishMetadata::default(),
+                std::slice::from_ref(&configuration),
+            )
+            .unwrap();
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("child".to_owned(), CorpusId::WorkspaceCode).with_parent("parent"),
+                &SnapshotPublishMetadata::default(),
+                std::slice::from_ref(&child_file),
+            )
+            .unwrap();
+        // Without a stored embedding the write phase produces no rows, and the assertion below
+        // would hold for any implementation.
+        adapter
+            .store_embeddings(
+                "model",
+                4,
+                &[(
+                    crate::document::semantic_key_from_parts(
+                        "src/B.bsl",
+                        &child_file.kind,
+                        &child_file.symbol_name,
+                        "",
+                        &child_file.text,
+                    ),
+                    vec![0.1, 0.2, 0.3, 0.4],
+                )],
+            )
+            .unwrap();
+
+        let window_open = Arc::new(AtomicBool::new(false));
+        let write_finished = Arc::new(AtomicBool::new(false));
+        let republish_waited = Arc::new(AtomicBool::new(false));
+        let republisher = PostgresBaselineAdapter::new(config).unwrap();
+        let extension = IndexedDocument { root_id: "Расш".to_owned(), ..configuration.clone() };
+        let handle = {
+            let window_open = Arc::clone(&window_open);
+            let write_finished = Arc::clone(&write_finished);
+            let waited = Arc::clone(&republish_waited);
+            let configuration = configuration.clone();
+            std::thread::spawn(move || {
+                for _ in 0..500 {
+                    if window_open.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                republisher
+                    .publish_snapshot(
+                        &Snapshot::new("parent".to_owned(), CorpusId::WorkspaceCode),
+                        &SnapshotPublishMetadata::default(),
+                        &[configuration, extension],
+                    )
+                    .unwrap();
+                waited.store(write_finished.load(Ordering::SeqCst), Ordering::SeqCst);
+            })
+        };
+
+        let open_the_window = |event: crate::external_baseline::SemanticPublishProgress| {
+            if matches!(
+                event,
+                crate::external_baseline::SemanticPublishProgress::PhaseStarted {
+                    phase: crate::external_baseline::SemanticPublishPhase::WriteServingRows,
+                    ..
+                }
+            ) {
+                window_open.store(true, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(3000));
+            }
+        };
+        adapter
+            .populate_serving_semantic_with_progress("child", "model", 4, Some(&open_the_window))
+            .expect("the ancestry was rootless when the write began");
+        write_finished.store(true, Ordering::SeqCst);
+        handle.join().unwrap();
+
+        let roots: Vec<String> = adapter
+            .connect()
+            .unwrap()
+            .query(
+                &format!(
+                    "SELECT DISTINCT root_id FROM {schema}.snapshot_files
+                      WHERE snapshot_id = 'parent' ORDER BY 1"
+                ),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect();
+        assert!(
+            roots.iter().any(|root| root == "Расш"),
+            "the republish must have happened, or this test proves nothing: {roots:?}"
+        );
+        assert!(
+            republish_waited.load(Ordering::SeqCst),
+            "the parent's republish committed while the semantic write was still running: the \
+             lock is narrower than the ancestry the refusal reads, so the answer it checked was \
+             already false when the rows went in"
         );
     }
 
