@@ -237,23 +237,6 @@ pub(crate) struct DiagnosticsResident {
     pub(super) author_filter: Option<std::sync::Arc<vcs::AuthorFilter>>,
 }
 
-/// `..` and `.` resolved textually, without asking the filesystem. That is the point: the
-/// question here is what the caller NAMED, and a name that walks out of its root is not a name
-/// in that root whatever the directory it would have reached.
-fn lexically_normalized(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 /// Why a `(root_id, path)` pair names no file. Every case is answered, never guessed: a pair
 /// that cannot be resolved and a pair resolved against some other root are indistinguishable
 /// to the caller, and the second is a wrong answer wearing the shape of a right one.
@@ -337,50 +320,27 @@ impl DiagnosticsResident {
                 Err(RootedPathError::AbsolutePathWithRootId(root_id.to_owned()))
             };
         }
-        let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
-        let root = self
-            .workspace_roots
-            .entries()
-            .find(|(id, _)| *id == root_id)
-            .map(|(_, declared)| declared.to_path_buf())
-            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))?;
-        let resolved = self
-            .workspace_roots
-            .resolve(&key)
-            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))?;
-        // Ownership is asked of the SAME procedure that assigned the key in the first place,
-        // not of a prefix comparison invented here. That matters beyond tidiness: the table
-        // deliberately keeps a file that lies outside every root under the root the walk
-        // reached it through, so a configuration hit can legitimately name a file whose
-        // canonical path is nowhere near the configuration — through a directory link out of
-        // the tree. A containment test would refuse exactly those keys, which the index itself
-        // produces, while `root_of` accepts them and still refuses the escapes: a link into
-        // another root canonicalises into it and is attributed there, not here.
-        // The one thing asked of the pair: the SPELLING stays inside the root it was read
-        // against. `..` is resolved textually first, so `a/../a/M.bsl` is the name of a file
-        // in the root, while `../other/M.bsl` is not a name in this root at all.
+        // `..` is refused outright rather than resolved. Resolving it correctly is not this
+        // code's to do: the kernel collapses `..` AFTER dereferencing each component, so a
+        // `..` behind a directory link lands somewhere a textual fold never predicts, and a
+        // fold that disagrees with the filesystem is a second, wrong procedure for naming
+        // files. Two attempts to be cleverer both failed on exactly that — one comparing the
+        // canonical target against the root, one asking the table who owned it.
         //
-        // Deliberately NOT asked: where the path finally lands. Two attempts at that question
-        // were wrong in opposite directions. Comparing the canonical target against the root's
-        // directory refuses a key the index itself hands out — the table keeps a file reached
-        // through a directory link out of the tree under the root that walked to it, and its
-        // canonical path is nowhere near that root. Asking `root_of` who OWNS the target is no
-        // better: with nested roots the owner is always the deepest one, so an outer root could
-        // never name anything inside an inner one, and the fallback ranks the WALKED spelling —
-        // which is this very join — so it accepts every `..` that leaves all roots behind.
-        //
-        // What follows from stopping here: a link inside a root is a file OF that root, and
-        // reading it yields its target, exactly as it would for anything else opening that
-        // path. The pair still names one file; it just does not promise that the bytes live
-        // in the same directory tree.
-        let inside = lexically_normalized(&resolved);
-        if !inside.starts_with(root) {
+        // The refusal costs nothing real: a key comes from a walk INSIDE its root, so no
+        // producer of `(root_id, path)` ever emits `..`. A hand-written `a/../a/M.bsl` names a
+        // file that is perfectly reachable by its plain spelling, and that spelling is what
+        // this accepts.
+        if path.components().any(|component| component == std::path::Component::ParentDir) {
             return Err(RootedPathError::PathClimbsOutOfRoot(root_id.to_owned()));
         }
-        // The CHECKED spelling is what goes back: the declared one, not a canonicalised twin.
-        // Consumers derive the result id from it, and a request by pair would otherwise carry a
-        // different id than the same file requested by absolute path.
-        Ok(inside)
+        // What follows from stopping here: a link sitting inside a root is a file OF that root,
+        // and reading it yields its target, exactly as it would for anything else opening that
+        // path. The pair names one file; it does not promise the bytes live in this tree.
+        let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
+        self.workspace_roots
+            .resolve(&key)
+            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))
     }
 
     /// Resolve a request path to the resident FileId, canonicalising it the same way
@@ -1234,13 +1194,14 @@ mod tests {
         assert_eq!(refused, Err(RootedPathError::PathClimbsOutOfRoot(root_id)));
     }
 
-    /// Containment is about where the path LANDS, so both halves of that have to hold: a
-    /// spelling that walks up and back down inside its own root is a legitimate name for a
-    /// file there, and a link that carries no `..` at all still leaves the root the moment the
-    /// lookup follows it.
+    /// Two spellings that look like corner cases and are decided by one rule. `..` is refused
+    /// whether or not it would have come back inside the root — resolving it is the kernel's
+    /// job, and no producer of keys emits it. A link is not refused at all: it sits inside the
+    /// root, so it is a file of that root, and it reads as its target the way it would for
+    /// anything else opening that path.
     #[cfg(unix)]
     #[test]
-    fn containment_follows_the_path_rather_than_its_spelling() {
+    fn a_link_inside_the_root_is_its_file_while_any_dotdot_is_refused() {
         use super::super::test_support::{
             extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
         };
@@ -1270,10 +1231,10 @@ mod tests {
         };
 
         assert_eq!(
-            detour.as_deref(),
-            Ok(extension.join(SHARED_MODULE_REL).as_path()),
-            "a spelling that stays inside its root names a file there, `..` or not — and what \
-             comes back is the spelling that was CHECKED, with `..` already resolved",
+            detour,
+            Err(RootedPathError::PathClimbsOutOfRoot(root_id.clone())),
+            "`..` is refused by its name, not by where it would have landed: the same file is \
+             reachable by its plain spelling, and that is the one to send",
         );
         assert!(
             through_alias.is_some() && through_alias == configuration,
@@ -1287,7 +1248,6 @@ mod tests {
             Ok(extension.join("Alias.bsl").as_path()),
             "a name that stays inside its root is honoured, link or not",
         );
-        let _ = root_id;
     }
 
     /// An escape does not have to land in ANOTHER root to be an escape. Asking who owns the
