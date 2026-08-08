@@ -1461,11 +1461,14 @@ impl PostgresBaselineAdapter {
         // about to write, which would leave the corpus marked complete over semantics of a
         // version it no longer has.
         //
-        // Exactly the snapshots the PLAN was read from — for a full rebuild the ancestry it
-        // folded, for an incremental copy the one parent it names, for a standalone publish only
-        // itself. Not the ancestry as it stands NOW, which would be a different set: what the
-        // rows below are copied from is the parent the plan chose, not whoever this snapshot's
-        // parent has become since planning.
+        // Exactly the snapshots the PLAN was read from. Always this one — its own file rows and
+        // its own semantics are what everything here is built on — plus, for a full rebuild, the
+        // ancestry it folded into its visible set, or, for an incremental copy, the one parent
+        // whose rows are carried forward below.
+        //
+        // Not the ancestry as it stands NOW, which is a different set: the rows copied below
+        // belong to the parent the plan chose, not to whoever this snapshot's parent has become
+        // since planning.
         //
         // Locked in id order so two publications sharing a parent queue instead of deadlocking.
         tx.execute(
@@ -1479,19 +1482,24 @@ impl PostgresBaselineAdapter {
         // until we commit, so versions equal to the planned ones mean the plan still describes
         // what is in the tables it was read from.
         let current_versions = snapshot_row_versions(&mut tx, self, &plan_dependencies)?;
-        if let Some(republished) = plan_dependencies.iter().find(|id| {
-            // Missing on EITHER side counts as moved. Absent from both would otherwise compare
-            // equal, and a plan read from a snapshot that was already gone would sail through on
-            // the strength of two identical absences.
-            match (planned_versions.get(*id), current_versions.get(*id)) {
-                (Some(planned), Some(current)) => planned != current,
-                _ => true,
+        // Absence counts as movement, and it is reported as ITSELF. Two identical absences would
+        // otherwise compare equal and let a plan read from a snapshot that was already gone sail
+        // through; and an operator told "republished" about a snapshot that is simply not there
+        // would go looking through the catalogue for a publication that never happened.
+        let moved = plan_dependencies.iter().find_map(|id| {
+            match (planned_versions.get(id), current_versions.get(id)) {
+                (Some(planned), Some(current)) if planned == current => None,
+                (Some(_), Some(_)) => Some((id, "was republished")),
+                (Some(_), None) => Some((id, "was deleted")),
+                (None, _) => Some((id, "was already gone when the plan was read")),
             }
-        }) {
+        });
+        if let Some((moved_snapshot, what_happened)) = moved {
             return Err(SearchError::named(
                 reason::SNAPSHOT_REPUBLISHED_WHILE_PUBLISHING,
                 format!(
-                    "snapshot '{republished}' was republished while the semantics of \'{snapshot_id}\' were being computed; nothing was written, publish them again"
+                    "snapshot '{moved_snapshot}' {what_happened} while the semantics of \
+                     '{snapshot_id}' were being computed; nothing was written, publish them again"
                 ),
             ));
         }
@@ -5521,6 +5529,19 @@ mod tests {
             error.reason_code(),
             Some("snapshot_republished_while_publishing"),
             "the refusal must be the named one: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("was already gone"),
+            "a snapshot that is not there must not be reported as republished, or the operator \
+             hunts the catalogue for a publication that never happened: {message}"
+        );
+        // The refusal is the one text this node shows an operator, and a line continuation that
+        // loses its backslash pulls the indentation into the sentence. Neither rustfmt nor clippy
+        // reads string contents, so the only thing that can notice is this.
+        assert!(
+            !message.contains("  "),
+            "the message carries the source's indentation into the text: {message}"
         );
 
         let mut client = adapter.connect().unwrap();
