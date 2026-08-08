@@ -219,6 +219,16 @@ pub(super) fn search_status_with_cap(
                     "  not read (a long operation holds the index; the roots are unchanged)"
                 );
             }
+            // An empty engine slot is not one state. The index may still be building, or its
+            // initialization may have failed — and on that path nothing will publish a table
+            // later, so telling the reader to wait would be advice to wait forever.
+            None if matches!(semantic_runtime, SemanticRuntimeStatus::Failed(_)) => {
+                let _ = writeln!(
+                    out,
+                    "  unavailable (search index initialization failed; see the runtime status \
+                     above — waiting will not publish them)"
+                );
+            }
             None => {
                 let _ = writeln!(out, "  not published yet (the index is still building)");
             }
@@ -975,6 +985,30 @@ mod tests {
         let busy = busy.content[0].raw.as_text().expect("text").text.clone();
         assert!(busy.contains("not read"), "{busy}");
         assert!(!busy.contains("not published yet"), "a held index is not an unbuilt one: {busy}",);
+
+        // A terminal initialization failure leaves the slot empty for the rest of the process.
+        // "Still building" there is not merely imprecise — it tells the reader to wait for
+        // something that will never happen.
+        let failed = search_status(
+            crate::McpProfile::Workspace,
+            &engine,
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Failed(
+                "workspace search engine initialization failed".to_owned(),
+            ))),
+            WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let failed = failed.content[0].raw.as_text().expect("text").text.clone();
+        assert!(failed.contains("initialization failed"), "{failed}");
+        assert!(
+            !failed.contains("not published yet"),
+            "a failed init is not a build in progress: {failed}",
+        );
     }
 
     #[test]

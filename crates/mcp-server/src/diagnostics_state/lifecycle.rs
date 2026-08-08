@@ -646,7 +646,7 @@ impl DiagnosticsState {
                 workspace_root: root.to_path_buf(),
                 // Built from the project read above, the same one `scan_roots` came from, so
                 // a resolved root can never name files this resident did not enumerate.
-                workspace_roots: crate::project::workspace_roots(&project),
+                workspace_roots: crate::project::workspace_roots(&project).0,
                 diff_base,
                 scope_identity,
                 ignored_authors,

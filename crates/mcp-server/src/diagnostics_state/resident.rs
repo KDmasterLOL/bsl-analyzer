@@ -237,19 +237,22 @@ pub(crate) struct DiagnosticsResident {
     pub(super) author_filter: Option<std::sync::Arc<vcs::AuthorFilter>>,
 }
 
-/// Why a `(root_id, path)` pair names no file. Both cases are answered, never guessed: a
-/// pair that cannot be resolved and a pair resolved against some other root are
-/// indistinguishable to the caller, and the second is a wrong answer wearing the shape of a
-/// right one.
+/// Why a `(root_id, path)` pair names no file. Every case is answered, never guessed: a pair
+/// that cannot be resolved and a pair resolved against some other root are indistinguishable
+/// to the caller, and the second is a wrong answer wearing the shape of a right one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RootedPathError {
     /// No root is registered under this id. It is the caller's spelling that is wrong, or
     /// the workspace declares a different set of extensions than the index the caller read.
-    UnknownRoot(String),
+    RootNotRegistered(String),
     /// An absolute path carries its own root, and a second one cannot be honoured: joining a
     /// root with an absolute path discards the root silently, so the pair would be answered
     /// from whichever file the path alone names.
-    AbsolutePathUnderRoot(String),
+    AbsolutePathWithRootId(String),
+    /// The path climbs out of the root it was given. `Path::join` keeps `..` and the lookup
+    /// canonicalises afterwards, so such a pair resolves to a real file under some OTHER root
+    /// — the same silent mis-answer, arriving through the path instead of the root.
+    PathClimbsOutOfRoot(String),
 }
 
 impl RootedPathError {
@@ -258,8 +261,9 @@ impl RootedPathError {
     /// both would send the reader looking for the wrong thing.
     pub(crate) fn code(&self) -> &'static str {
         match self {
-            Self::UnknownRoot(_) => "unknown_root",
-            Self::AbsolutePathUnderRoot(_) => "absolute_path_under_root",
+            Self::RootNotRegistered(_) => "unknown_root",
+            Self::AbsolutePathWithRootId(_) => "absolute_path_under_root",
+            Self::PathClimbsOutOfRoot(_) => "path_leaves_root",
         }
     }
 }
@@ -267,15 +271,20 @@ impl RootedPathError {
 impl std::fmt::Display for RootedPathError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnknownRoot(root_id) => write!(
+            Self::RootNotRegistered(root_id) => write!(
                 f,
                 "no source root is registered under '{root_id}'; \
                  `search` reports the roots this workspace knows"
             ),
-            Self::AbsolutePathUnderRoot(root_id) => write!(
+            Self::AbsolutePathWithRootId(root_id) => write!(
                 f,
                 "an absolute path already names its file, so it cannot also be read under \
                  root '{root_id}'; pass the path relative to that root, or drop `root_id`"
+            ),
+            Self::PathClimbsOutOfRoot(root_id) => write!(
+                f,
+                "the path climbs out of root '{root_id}' with `..`; a path read against a root \
+                 has to stay inside it, or the pair names a file of some other root"
             ),
         }
     }
@@ -308,13 +317,19 @@ impl DiagnosticsResident {
             return if root_id.is_empty() {
                 Ok(path.to_path_buf())
             } else {
-                Err(RootedPathError::AbsolutePathUnderRoot(root_id.to_owned()))
+                Err(RootedPathError::AbsolutePathWithRootId(root_id.to_owned()))
             };
+        }
+        // Checked BEFORE the join, on the components the caller actually sent: afterwards `..`
+        // is just another component, and the lookup canonicalises the result into a perfectly
+        // real file elsewhere.
+        if path.components().any(|component| component == std::path::Component::ParentDir) {
+            return Err(RootedPathError::PathClimbsOutOfRoot(root_id.to_owned()));
         }
         let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
         self.workspace_roots
             .resolve(&key)
-            .ok_or_else(|| RootedPathError::UnknownRoot(root_id.to_owned()))
+            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))
     }
 
     /// Resolve a request path to the resident FileId, canonicalising it the same way
@@ -1105,12 +1120,12 @@ mod tests {
 
         assert_eq!(
             absolute_under_root,
-            Err(RootedPathError::AbsolutePathUnderRoot(root_id.clone())),
+            Err(RootedPathError::AbsolutePathWithRootId(root_id.clone())),
             "an absolute path under a root is refused, not silently read as itself",
         );
         assert_eq!(
             unknown,
-            Err(RootedPathError::UnknownRoot("нет-такого".to_owned())),
+            Err(RootedPathError::RootNotRegistered("нет-такого".to_owned())),
             "an unregistered root is refused by its own name",
         );
         assert_eq!(
@@ -1128,6 +1143,44 @@ mod tests {
             Ok(extension.join(SHARED_MODULE_REL).as_path()),
             "and the pair resolves through the root's own declared spelling",
         );
+    }
+
+    /// A request path is read against a root, so it has to stay inside it. `Path::join` keeps
+    /// `..` and the lookup canonicalises afterwards, so without the check the pair
+    /// (extension root, `../ws/<модуль>`) resolves to the CONFIGURATION's module — the same
+    /// silent mis-answer this node exists to prevent, arriving through the other half of the
+    /// pair.
+    #[test]
+    fn a_path_that_climbs_out_of_its_root_is_refused() {
+        use super::super::test_support::{
+            extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
+        };
+        let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let escaping = format!("../ws/{SHARED_MODULE_REL}");
+        let outcome = state.read(|resident, _| {
+            (
+                resident.resolve_rooted_path(Some(&root_id), Path::new(&escaping)),
+                // The stand is only honest if that spelling really does reach a served file:
+                // refusing a path that resolves to nothing would prove nothing at all.
+                resident.file_id_for(&extension.join(&escaping)),
+                resident.file_id_for(&workspace.join(SHARED_MODULE_REL)),
+            )
+        });
+        let ResidentOutcome::Ready((refused, escaped_to, configuration), _) = outcome else {
+            panic!("expected Ready");
+        };
+
+        assert!(
+            escaped_to.is_some() && escaped_to == configuration,
+            "the stand is real: joined and canonicalised, that spelling names the \
+             configuration's module — a file the resident serves, under the other root",
+        );
+        assert_eq!(refused, Err(RootedPathError::PathClimbsOutOfRoot(root_id)));
     }
 
     /// The resident's metadata substrate resolves a common module's `Ext/Module.bsl`

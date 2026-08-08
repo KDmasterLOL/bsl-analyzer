@@ -116,7 +116,7 @@ pub(crate) fn workspace_with_an_outside_extension() -> (tempfile::TempDir, PathB
 /// would pin the test to a rule it is not testing.
 pub(crate) fn extension_root_id(workspace: &Path, extension: &Path) -> String {
     let project = crate::project::at(workspace).expect("the fixture is a valid project");
-    let roots = crate::project::workspace_roots(&project);
+    let (roots, _rejected) = crate::project::workspace_roots(&project);
     let file = extension.join(SHARED_MODULE_REL);
     let canonical = file.canonicalize().expect("the extension's module exists");
     roots.root_of(&file, &canonical).expect("the extension's file has an owning root").root_id

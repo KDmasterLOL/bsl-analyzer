@@ -49,18 +49,28 @@ pub fn at(root: &Path) -> Result<Project, ProjectError> {
 
 /// The root table for one project: the configuration root plus every declared extension,
 /// identified relative to the PROJECT directory — the identity [`bsl_search::WorkspaceRoots`]
-/// documents and the one stored rows carry across restarts. Rejected roots are named with
-/// their reason: a silently dropped root looks exactly like a tree nobody edited.
+/// documents and the one stored rows carry across restarts.
 ///
 /// It lives beside [`at`] for the same reason [`at`] does: more than one subsystem needs the
 /// table, and two of them — the search engine and the diagnostics resident — must agree on it
 /// exactly. Agreement that follows from calling one constructor cannot drift; agreement between
 /// two constructors is a claim someone has to keep true.
-pub fn workspace_roots(project: &Project) -> bsl_search::WorkspaceRoots {
+///
+/// Rejected roots come back rather than being logged here. Whether a dropped root is worth a
+/// line depends on how often the caller runs: the boot builds this once, while the resident
+/// rebuilds on every config drift, and a warning repeated per rebuild buries the one that is
+/// actually new. Callers that run once say it with [`warn_about_rejected_roots`].
+pub fn workspace_roots(
+    project: &Project,
+) -> (bsl_search::WorkspaceRoots, Vec<bsl_search::RejectedRoot>) {
     let extensions: Vec<std::path::PathBuf> =
         project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
-    let (roots, rejected) =
-        bsl_search::WorkspaceRoots::build(&project.root, project.source_path(), &extensions);
+    bsl_search::WorkspaceRoots::build(&project.root, project.source_path(), &extensions)
+}
+
+/// Name every root that did not make it into the table, with its reason: a silently dropped
+/// root looks exactly like a tree nobody edited.
+pub fn warn_about_rejected_roots(rejected: &[bsl_search::RejectedRoot]) {
     for rejection in rejected {
         tracing::warn!(
             path = ?rejection.path,
@@ -68,5 +78,4 @@ pub fn workspace_roots(project: &Project) -> bsl_search::WorkspaceRoots {
             "extension root is not registered in the search index",
         );
     }
-    roots
 }

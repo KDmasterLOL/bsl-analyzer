@@ -93,7 +93,21 @@ pub(crate) fn resolve_card(
             let column = column.unwrap_or(0);
             Some(SymbolPosition { file_id, line, column })
         }
-        None => None,
+        None => {
+            // `root_id` qualifies `path` and nothing else. Accepting it silently for a
+            // symbol-only request would make the same value a hard error in one shape and a
+            // no-op in the other — and an agent forwarding a hit's root alongside its symbol
+            // would get a card resolved by name, from whichever root owns that name.
+            if root_id.is_some() {
+                return Err(McpError::invalid_params(
+                    "'root_id' spells out which root 'path' is relative to, so it needs a \
+                     'path'; a 'symbol' is resolved by name and belongs to no root"
+                        .to_owned(),
+                    None,
+                ));
+            }
+            None
+        }
     };
 
     if symbol.is_none() && position.is_none() {

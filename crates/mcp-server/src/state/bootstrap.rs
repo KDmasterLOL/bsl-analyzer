@@ -656,6 +656,15 @@ impl SharedState {
         engine.set_workspace_baseline_hash_mode(hash_mode);
     }
 
+    /// The boot's root table, with every rejected root named. This runs once per engine
+    /// initialization, which is what makes the warning worth emitting here and not inside the
+    /// constructor: the resident builds the same table on every config drift.
+    fn roots_of(project: &project_model::Project) -> bsl_search::WorkspaceRoots {
+        let (roots, rejected) = crate::project::workspace_roots(project);
+        crate::project::warn_about_rejected_roots(&rejected);
+        roots
+    }
+
     fn semantic_runtime_status_for_mode(
         engine: &SearchEngine,
         mode: &WorkspaceSearchMode,
@@ -742,7 +751,7 @@ impl SharedState {
             let mut engine = Self::open_workspace_overlay_search_engine(&db_path)?;
             Self::configure_workspace_engine(
                 &mut engine,
-                crate::project::workspace_roots(&project),
+                Self::roots_of(&project),
                 BaselineHashMode::NormalizedChunks,
             );
             if let Err(error) = engine.set_serves_external_baseline(true) {
@@ -852,7 +861,7 @@ impl SharedState {
 
         Self::configure_workspace_engine(
             &mut engine,
-            crate::project::workspace_roots(&project),
+            Self::roots_of(&project),
             BaselineHashMode::RawFileBytes,
         );
         // Declaring the local mode also clears inherited fingerprint rows: they claim
