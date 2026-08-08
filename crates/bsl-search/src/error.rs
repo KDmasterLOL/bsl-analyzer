@@ -104,6 +104,7 @@ fn external_baseline_reason_code(message: &str) -> Option<&'static str> {
         "serving_lexical_unavailable",
         "serving_semantic_unavailable",
         "serving_semantic_rootless",
+        "root_id_not_portable",
     ];
 
     KNOWN_REASON_CODES
@@ -174,6 +175,7 @@ mod tests {
             "serving_lexical_unavailable",
             "serving_semantic_unavailable",
             "serving_semantic_rootless",
+            "root_id_not_portable",
             "postgres_connect_failed",
         ] {
             let error = SearchError::ExternalBaseline(format!("{name}: something went wrong"));

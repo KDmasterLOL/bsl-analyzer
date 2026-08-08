@@ -1328,6 +1328,15 @@ impl PostgresBaselineAdapter {
         let changed_files = plan.changed_paths.len();
         let final_sync_started = Instant::now();
         let mut tx = client.transaction()?;
+        // Asked again, here, because planning released its snapshot long ago: everything since
+        // — row preparation, embeddings — happened outside it, and a concurrent republish of
+        // this same id is legal. Placed first, so the refusal rolls back with the transaction
+        // and neither the rows nor the completeness mark are written.
+        //
+        // This closes the bypass of the refusal above; it does not make the whole operation
+        // serializable. Semantics computed from one version of a corpus and written after
+        // another was republished with different CONTENT is a staleness that predates roots.
+        refuse_semantic_publication_of_rooted_corpus(&mut tx, self, snapshot_id)?;
         clear_semantic_publication_complete(&mut tx, self, snapshot_id, model_id, dimension)?;
         delete_serving_semantic_rows(&mut tx, self, snapshot_id, model_id, dimension)?;
 
@@ -1861,6 +1870,10 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
             ));
         }
 
+        // Before the readiness check, which connects: an identity this baseline cannot share is
+        // refused without touching the database at all.
+        ensure_the_roots_mean_the_same_elsewhere(documents)?;
+
         self.check_storage_readiness()?;
 
         let mut phase_timings = SnapshotPublishPhaseTimings::default();
@@ -2377,6 +2390,37 @@ fn load_snapshot_file_rows(
             file_object_id: row.get("file_object_id"),
         })
         .collect())
+}
+
+/// Refuses a corpus whose root identifiers cannot mean the same thing on another machine.
+///
+/// A root inside the project directory is identified by its path relative to that directory, so
+/// two checkouts agree on it. A root OUTSIDE gets its absolute canonical path
+/// (`workspace_roots.rs:319-338`), which names a place on one machine and nothing anywhere else.
+///
+/// In a shared baseline that is not a cosmetic defect. The consumer keys files by
+/// `(root_id, path)`, so every file of such a root misses its manifest entry and is re-indexed
+/// whole as an overlay — the baseline silently stops being reusable, and the symptom reads as
+/// slowness rather than as a wrong identity. Refusing to store it is the honest answer, and the
+/// name of the extension cannot stand in: several entries are allowed to share one.
+fn ensure_the_roots_mean_the_same_elsewhere(
+    documents: &[IndexedDocument],
+) -> Result<(), SearchError> {
+    let unportable: BTreeSet<&str> = documents
+        .iter()
+        .map(|document| document.root_id.as_str())
+        .filter(|root_id| std::path::Path::new(root_id).is_absolute())
+        .collect();
+    if unportable.is_empty() {
+        return Ok(());
+    }
+    Err(SearchError::ExternalBaseline(format!(
+        "root_id_not_portable: these source roots lie outside the project directory, so they are \
+         identified by an absolute path that names nothing on any other machine: {}. A shared \
+         baseline keyed by such an id cannot be reused by anyone else. Move the extension inside \
+         the project directory, or publish the configuration alone.",
+        unportable.into_iter().collect::<Vec<_>>().join(", ")
+    )))
 }
 
 /// Refuses to publish semantics for a corpus that carries roots.
@@ -3546,6 +3590,51 @@ mod tests {
             "recomputing a stored row's embedding key must not read the root: the collector \
              that decides which vectors are live cannot see it, and would delete what it \
              cannot match"
+        );
+    }
+
+    /// A root identified by an absolute path is refused before the adapter reaches the database.
+    ///
+    /// Observed against an address nothing listens on: an implementation that stored first and
+    /// refused afterwards would have to connect, and there is no connection to be had. The
+    /// positive control is the same call with a workspace-relative root, which must get past the
+    /// refusal and fail on the network — without it the assertion holds under any error at all.
+    #[test]
+    fn a_root_named_by_an_absolute_path_is_refused_before_the_connection() {
+        let adapter = PostgresBaselineAdapter::new(ExternalBaselineConfig::postgres(
+            "postgres://127.0.0.1:1",
+        ))
+        .unwrap();
+        let snapshot = Snapshot::new("snap-1", CorpusId::WorkspaceCode);
+        let metadata = SnapshotPublishMetadata::default();
+        let portable = IndexedDocument {
+            root_id: "src/cfe/Расш".to_owned(),
+            ..indexed_document("code", "CommonModules/Общий/Ext/Module.bsl", "Общий", 1, "h", "t")
+        };
+        let outside =
+            IndexedDocument { root_id: "/srv/extensions/Расш".to_owned(), ..portable.clone() };
+
+        let refused = adapter
+            .publish_snapshot(&snapshot, &metadata, std::slice::from_ref(&outside))
+            .unwrap_err();
+        assert_eq!(
+            refused.reason_code(),
+            Some("root_id_not_portable"),
+            "the refusal must be named, and named before any connection: {refused}"
+        );
+        assert!(
+            !refused.to_string().contains("connection"),
+            "refusing after connecting means the identity already reached the wire: {refused}"
+        );
+
+        let reached_the_network = adapter
+            .publish_snapshot(&snapshot, &metadata, std::slice::from_ref(&portable))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            reached_the_network.contains("connection"),
+            "positive control: a root inside the project must get past the refusal: \
+             {reached_the_network}"
         );
     }
 
@@ -4839,6 +4928,71 @@ mod tests {
             !rootless_message.contains("serving_semantic_rootless"),
             "a corpus without roots must not meet this refusal: {rootless_message}"
         );
+    }
+
+    /// A corpus that becomes rooted WHILE its semantics are being published is refused, and
+    /// nothing is written.
+    ///
+    /// The planning snapshot is released long before the final write — row preparation and
+    /// embeddings happen outside it — so a republish of the same id, which is legal, can turn a
+    /// rootless corpus into a rooted one in between. Driven from the progress callback because
+    /// that is the one place inside the operation where a test can act.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_corpus_that_becomes_rooted_mid_publication_writes_nothing() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("midflight");
+        let config = ExternalBaselineConfig::postgres(url).with_schema(&schema);
+        let adapter = PostgresBaselineAdapter::new(config.clone()).unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let configuration = indexed_document("code", PATH, "Общий", 1, "hash-один", "текст");
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("mid".to_owned(), CorpusId::WorkspaceCode),
+                &SnapshotPublishMetadata::default(),
+                std::slice::from_ref(&configuration),
+            )
+            .unwrap();
+
+        let republisher = PostgresBaselineAdapter::new(config).unwrap();
+        let extension = IndexedDocument { root_id: "Расш".to_owned(), ..configuration.clone() };
+        let republish = |event: crate::external_baseline::SemanticPublishProgress| {
+            if matches!(event, crate::external_baseline::SemanticPublishProgress::Plan { .. }) {
+                republisher
+                    .publish_snapshot(
+                        &Snapshot::new("mid".to_owned(), CorpusId::WorkspaceCode),
+                        &SnapshotPublishMetadata::default(),
+                        &[configuration.clone(), extension.clone()],
+                    )
+                    .unwrap();
+            }
+        };
+
+        let error = adapter
+            .populate_serving_semantic_with_progress("mid", "model", 4, Some(&republish))
+            .expect_err("a corpus that turned rooted mid-flight must not get semantics");
+
+        assert_eq!(
+            error.reason_code(),
+            Some("serving_semantic_rootless"),
+            "the refusal must be the named one: {error}"
+        );
+        let rows: i64 = adapter
+            .connect()
+            .unwrap()
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM {schema}.serving_semantic WHERE snapshot_id = 'mid'"
+                ),
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(rows, 0, "the refusal must roll back with its transaction");
     }
 
     /// The refusal and the reads that follow it see ONE snapshot of the data.
