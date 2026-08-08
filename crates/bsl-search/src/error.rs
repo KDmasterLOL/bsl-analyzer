@@ -1,11 +1,13 @@
-/// Version 2 keys a file by `(collection, root_id, path)` in the shared PostgreSQL schema.
+/// Version 3 keys a file by `(collection, root_id, path)` in EVERY carrier, semantic included.
 ///
-/// The bump is deliberate and its cost is a hard stop for older builds: a column added to a
+/// Each bump is deliberate and its cost is a hard stop for older builds: a column added to a
 /// table is invisible to them, but the DATA is not. Once a build that knows roots publishes an
 /// extension, an older one on the same schema folds two files sharing a relative path into one
 /// key and silently serves one of them. The choice was never "hard stop versus rolling upgrade"
-/// — it was a hard stop versus losing a live file in silence.
-pub const SCHEMA_VERSION_CURRENT: i32 = 2;
+/// — it was a hard stop versus losing a live file in silence. Version 2 brought the three
+/// mandatory carriers, and 3 brings `serving_semantic`, where the same two files would otherwise
+/// collide on one primary key.
+pub const SCHEMA_VERSION_CURRENT: i32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SearchError {
@@ -132,8 +134,6 @@ pub(crate) mod reason {
         ReasonCode("serving_lexical_unavailable");
     pub(crate) const SERVING_SEMANTIC_UNAVAILABLE: ReasonCode =
         ReasonCode("serving_semantic_unavailable");
-    pub(crate) const SERVING_SEMANTIC_ROOTLESS: ReasonCode =
-        ReasonCode("serving_semantic_rootless");
     pub(crate) const ROOT_ID_NOT_PORTABLE: ReasonCode = ReasonCode("root_id_not_portable");
     pub(crate) const SCHEMA_NAME_TOO_LONG: ReasonCode = ReasonCode("schema_name_too_long");
 }
@@ -151,7 +151,6 @@ const KNOWN_REASON_CODES: &[ReasonCode] = &[
     reason::REFRESH_RETRY_EXHAUSTED,
     reason::SERVING_LEXICAL_UNAVAILABLE,
     reason::SERVING_SEMANTIC_UNAVAILABLE,
-    reason::SERVING_SEMANTIC_ROOTLESS,
     reason::ROOT_ID_NOT_PORTABLE,
     reason::SCHEMA_NAME_TOO_LONG,
 ];

@@ -160,31 +160,7 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
         SnapshotPublishMetadata { branch: branch.clone(), commit: commit.clone() };
 
     eprintln!("[3/5] Publishing snapshot ({} chunks)...", indexed_documents.len());
-    // Semantic serving does not key a file by its source root yet, so a corpus that carries
-    // roots is published lexically and its semantics are skipped. Decided HERE rather than by
-    // letting the adapter refuse at the end: the refusal would arrive after the snapshot is
-    // committed, the branch head moved and every embedding computed — a non-zero exit next to a
-    // baseline that really was published, and the most expensive phase burnt on every retry.
-    //
-    // Asked OF THE ADAPTER, not of the corpus alone. The refusal judges the published
-    // snapshot's ancestry, and a corpus that carries no roots itself can still be a delta over
-    // a rooted parent — the ordinary next publish after an extension is dropped from the tree.
-    // Judging locally would disagree with the adapter on exactly that input, which is the
-    // divergence this decision exists to remove.
-    let blocking_roots = adapter
-        .roots_blocking_semantic_publication(
-            snapshot.parent_id.as_ref().map(|parent| parent.0.as_str()),
-            &indexed_documents,
-        )
-        .map_err(|error| {
-            io::Error::other(format!("failed to check whether semantics can be published: {error}"))
-        })?;
-    let corpus_carries_roots = !blocking_roots.is_empty();
-    let embedder = if corpus_carries_roots {
-        None
-    } else {
-        postgres::embedder_config(&project).map(Embedder::new)
-    };
+    let embedder = postgres::embedder_config(&project).map(Embedder::new);
     let has_embedder = embedder.is_some();
     let embedding_progress = |event: EmbeddingProgress| match event {
         EmbeddingProgress::Plan { total_unique, cached, to_compute } => {
@@ -292,9 +268,6 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
             Some(&semantic_progress),
         )?;
         eprintln!("      {} rows", serving_count);
-    } else if corpus_carries_roots {
-        eprintln!("[4/5] Skipped (corpus covers extension source roots)");
-        eprintln!("[5/5] Skipped (semantic serving does not key a file by its source root)");
     } else {
         eprintln!("[4/5] Skipped (no embedding config)");
         eprintln!("[5/5] Skipped (no embeddings)");
@@ -592,16 +565,105 @@ mod tests {
         );
     }
 
-    /// Publishing a rooted corpus SUCCEEDS, skipping semantics before the expensive phase.
+    /// Puts an environment variable back the way it was, whichever way the test ends.
+    #[cfg(unix)]
+    struct RestoreEnv {
+        key: &'static str,
+        value: Option<String>,
+    }
+
+    #[cfg(unix)]
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match self.value.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// Answers every embedding request with one fixed vector.
     ///
-    /// Run end to end rather than against the decision alone: a correct policy nobody applies
-    /// publishes exactly what a missing policy would. The stand names an embedder nothing
-    /// listens on, so an implementation that computes embeddings first — and only then meets
-    /// the adapter's refusal — fails here, while the intended one never contacts it.
+    /// The published corpus holds ONE distinct content, so a fixed answer is not a simplification
+    /// here — the two files really do share a vector, and the point of the test is that they do
+    /// not therefore share a row.
+    #[cfg(unix)]
+    fn spawn_embedding_stub(vector: Vec<f32>) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let mut body_at = None;
+                let mut body_len = 0usize;
+                while let Ok(read) = stream.read(&mut chunk) {
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    if body_at.is_none() {
+                        if let Some(position) =
+                            request.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            body_at = Some(position + 4);
+                            let headers =
+                                String::from_utf8_lossy(&request[..position]).to_lowercase();
+                            for line in headers.lines() {
+                                if let Some(value) = line.strip_prefix("content-length:") {
+                                    body_len = value.trim().parse().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                    if body_at.is_some_and(|at| request.len() >= at + body_len) {
+                        break;
+                    }
+                }
+                let body = body_at.map(|at| &request[at..]).unwrap_or(&[]);
+                let inputs = serde_json::from_slice::<serde_json::Value>(body)
+                    .ok()
+                    .and_then(|value| {
+                        value.get("input").and_then(|input| input.as_array().map(Vec::len))
+                    })
+                    .unwrap_or(1);
+                let data: Vec<serde_json::Value> = (0..inputs)
+                    .map(|index| serde_json::json!({ "index": index, "embedding": vector }))
+                    .collect();
+                let payload = serde_json::json!({ "data": data }).to_string();
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A corpus with an extension publishes semantics too, and both roots come back from them.
+    ///
+    /// The end of the road this node walks: the same relative path under two roots is two files
+    /// in `serving_semantic` as it already was in the lexical carriers. Their CONTENT is
+    /// identical on purpose — that is the input where identity rebuilt from `file_object_id`
+    /// loses a file outright rather than merely mislabelling it, because one object legitimately
+    /// serves both.
+    ///
+    /// Asserted through `semantic_search_baseline` rather than by reading the table, because the
+    /// root has to survive the whole way out to a hit; a row keyed correctly and read as the
+    /// configuration's would satisfy any check made against the table alone.
     #[cfg(unix)]
     #[test]
     #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
-    fn a_rooted_corpus_publishes_lexically_and_skips_semantics() {
+    fn a_rooted_corpus_publishes_semantics_that_tell_its_roots_apart() {
         let url = std::env::var("BSL_TEST_PG_URL")
             .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
         let dir = tempfile::tempdir().unwrap();
@@ -611,6 +673,16 @@ mod tests {
             write(&owner_root.join("Configuration.xml"), "<MetaDataObject/>");
             write(&owner_root.join("CommonModules/Общий/Ext/Module.bsl"), &module("Общий"));
         }
+        let embedding = vec![1.0f32, 0.0, 0.0, 0.0];
+        let embedder_url = spawn_embedding_stub(embedding.clone());
+        // `embedder_config` prefers the ENVIRONMENT over the project file, so a developer with
+        // `EMBEDDING_URL` exported would send this run to a real service instead of the stub —
+        // the test would then hang on retries and, worse, would be measuring somebody else's
+        // endpoint. Pointed at the stub explicitly and restored afterwards.
+        let saved_embedding_url = std::env::var("EMBEDDING_URL").ok();
+        std::env::set_var("EMBEDDING_URL", &embedder_url);
+        let _restore_embedding_url =
+            RestoreEnv { key: "EMBEDDING_URL", value: saved_embedding_url };
         // A fixed schema, republished under a fixed snapshot id, because this crate has no
         // PostgreSQL client of its own and so cannot drop a per-run schema afterwards. The
         // publish upserts by id, so repeated runs leave one schema holding one snapshot rather
@@ -634,7 +706,7 @@ mod tests {
                  model = \"probe-model\"\n\
                  dimension = 4\n\
                  provider = \"nebius\"\n\
-                 url = \"http://127.0.0.1:1\"\n",
+                 url = \"{embedder_url}\"\n",
                 host = pg_part(&url, "host"),
                 port = pg_part(&url, "port"),
                 dbname = pg_part(&url, "dbname"),
@@ -653,13 +725,31 @@ mod tests {
             parent_snapshot_id: None,
             allow_non_policy_branch: true,
         })
-        .expect("a rooted corpus publishes lexically; semantics are skipped, not failed");
+        .expect("a rooted corpus publishes lexically AND semantically");
 
         let details = adapter
             .snapshot_details("cli:rooted")
             .unwrap()
             .expect("the snapshot must be published");
         assert_eq!(details.snapshot.files, 2, "both roots reach the baseline");
+
+        let hits = adapter
+            .semantic_search_baseline("cli:rooted", &embedding, "probe-model", 4, None, 10)
+            .expect("semantic serving must answer for a rooted corpus");
+        let mut roots: Vec<&str> = hits
+            .iter()
+            .map(|hit| hit.root_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        roots.sort();
+        // The extension's identifier is its workspace-relative path, not the directory's name:
+        // inside the workspace a root is named by where it lives.
+        assert_eq!(
+            roots,
+            vec!["", "src/cfe/Расш"],
+            "one path under two roots must serve two files, each naming its own root: {hits:#?}"
+        );
     }
 
     #[cfg(unix)]

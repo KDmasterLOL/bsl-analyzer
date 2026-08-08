@@ -260,23 +260,6 @@ impl ExternalBaselineAdapter {
         }
     }
 
-    /// The roots that will make semantic publication refuse this corpus once it is published.
-    ///
-    /// Exposed so the caller asks the storage the same question the storage will ask itself,
-    /// instead of guessing it from the documents alone and disagreeing on a delta over a rooted
-    /// parent.
-    pub fn roots_blocking_semantic_publication(
-        &self,
-        parent_snapshot_id: Option<&str>,
-        documents: &[IndexedDocument],
-    ) -> Result<Vec<String>, SearchError> {
-        match self {
-            Self::Postgres(adapter) => {
-                adapter.roots_blocking_semantic_publication(parent_snapshot_id, documents)
-            }
-        }
-    }
-
     pub fn migrate_storage(&self) -> Result<(), SearchError> {
         match self {
             Self::Postgres(adapter) => adapter.migrate_storage(),
