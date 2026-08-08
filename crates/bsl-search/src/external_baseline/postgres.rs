@@ -1270,13 +1270,6 @@ impl PostgresBaselineAdapter {
         #[cfg(test)]
         observe_planning_isolation(&mut tx)?;
 
-        // The version of the snapshot ROW the plan is about to be built from. Read here and
-        // compared again under the final lock: a republish that commits in between is invisible
-        // to that lock — it orders only republishes that have not committed yet — and everything
-        // after this transaction (row preparation, embeddings) describes a corpus that no longer
-        // exists. Writing those rows and marking them complete would serve one version of a file
-        // set under the name of another.
-        let planned_snapshot_version = snapshot_row_version(&mut tx, self, snapshot_id)?;
         let parent_snapshot_id = snapshot_parent_id(&mut tx, self, snapshot_id)?;
         let current_snapshot_files = load_snapshot_file_rows(&mut tx, self, snapshot_id)?;
         let deleted_paths = load_snapshot_deletion_keys(&mut tx, self, snapshot_id)?;
@@ -1296,6 +1289,23 @@ impl PostgresBaselineAdapter {
             &current_snapshot_files,
             &deleted_paths,
         );
+        // Which snapshots the plan is READ FROM, decided by the strategy: a full rebuild folds
+        // the whole ancestry into its visible set, an incremental copy reads exactly one parent,
+        // and a standalone publish reads nobody but itself. The final transaction locks this set
+        // and re-checks it, so lock and check answer for the same snapshots by construction.
+        let mut plan_dependencies = vec![snapshot_id.to_owned()];
+        match &plan.strategy {
+            SemanticPublishStrategy::FullRebuild => {
+                plan_dependencies = snapshot_ancestry_ids(&mut tx, self, snapshot_id)?;
+            }
+            SemanticPublishStrategy::IncrementalFromParent { parent_snapshot_id } => {
+                plan_dependencies.push(parent_snapshot_id.clone());
+            }
+            SemanticPublishStrategy::CurrentSnapshotOnly => {}
+        }
+        plan_dependencies.sort();
+        plan_dependencies.dedup();
+
         // Materialized here, inside the same snapshot, and only for the strategy that needs it:
         // reading it later — after row preparation — would put it in a different snapshot than
         // the plan it belongs to, which is the whole reason this transaction exists.
@@ -1307,6 +1317,17 @@ impl PostgresBaselineAdapter {
             _ => None,
         };
         let ancestry_materialization = materialization_started.elapsed();
+        // The version of every snapshot row the plan was read from, captured before the
+        // transaction that read them ends and compared again under the final lock. A republish
+        // that commits in between is invisible to that lock — it orders only republishes that
+        // have not committed yet — and everything computed after this point describes a corpus
+        // that no longer exists.
+        //
+        // A parent republished in that window is the WORSE case, not a lesser one: its own
+        // invalidation clears its rows and never touches ours, so the copy silently brings
+        // nothing and the gap is sealed under our completeness mark, with nothing left to
+        // correct it later.
+        let planned_versions = snapshot_row_versions(&mut tx, self, &plan_dependencies)?;
         tx.commit()?;
         let strategy = plan.strategy.clone();
         let phase_count = semantic_publish_phase_count(&strategy);
@@ -1447,26 +1468,25 @@ impl PostgresBaselineAdapter {
         // snapshot's parent has become since planning.
         //
         // Locked in id order so two publications sharing a parent queue instead of deadlocking.
-        let mut locked_snapshots = vec![snapshot_id.to_owned()];
-        if let Some(parent_snapshot_id) = strategy.parent_snapshot_id() {
-            locked_snapshots.push(parent_snapshot_id.to_owned());
-        }
         tx.execute(
             &format!(
                 "SELECT id FROM {} WHERE id = ANY($1) ORDER BY id FOR UPDATE",
                 self.table("snapshots")
             ),
-            &[&locked_snapshots],
+            &[&plan_dependencies],
         )?;
-        // Asked again now that the row is held: from here on nobody can republish this snapshot
-        // until we commit, so a version equal to the planned one means the plan still describes
-        // what is in the table.
-        let current_snapshot_version = snapshot_row_version(&mut tx, self, snapshot_id)?;
-        if current_snapshot_version != planned_snapshot_version {
+        // Asked again now that the rows are held: from here on nobody can republish any of them
+        // until we commit, so versions equal to the planned ones mean the plan still describes
+        // what is in the tables it was read from.
+        let current_versions = snapshot_row_versions(&mut tx, self, &plan_dependencies)?;
+        if let Some(republished) = plan_dependencies
+            .iter()
+            .find(|id| current_versions.get(*id) != planned_versions.get(*id))
+        {
             return Err(SearchError::named(
                 reason::SNAPSHOT_REPUBLISHED_WHILE_PUBLISHING,
                 format!(
-                    "snapshot '{snapshot_id}' was republished while its semantics were being                      computed; nothing was written, publish them again"
+                    "snapshot '{republished}' was republished while the semantics of \'{snapshot_id}\' were being computed; nothing was written, publish them again"
                 ),
             ));
         }
@@ -2540,25 +2560,29 @@ fn invalidate_semantic_publication_for_snapshot(
     Ok(())
 }
 
-/// How many times the snapshot's own row has been written, as PostgreSQL counts it.
+/// How many times each snapshot's own row has been written, as PostgreSQL counts it.
 ///
-/// `publish_snapshot` upserts this row as the first write of its own transaction, so the value
-/// changes on every republish of the id — whether the corpus changed its bytes, its roots or
-/// nothing at all. That is stricter than comparing file sets and deliberately so: the cost of a
-/// false alarm is one loud, repeatable refusal, while the cost of a missed one is a stale corpus
-/// wearing a completeness mark.
-fn snapshot_row_version(
+/// `publish_snapshot` upserts a snapshot's row as the first write of its own transaction, so the
+/// value changes on every republish of that id — whether the corpus changed its bytes, its roots
+/// or nothing at all. That is stricter than comparing file sets and deliberately so: the cost of
+/// a false alarm is one loud, repeatable refusal, while the cost of a missed one is a stale
+/// corpus wearing a completeness mark.
+///
+/// A snapshot that has DISAPPEARED is reported by its absence from the map rather than as an
+/// error: comparing the two maps then differs, which is the right answer — a plan read from a
+/// snapshot that no longer exists is exactly as stale as one read from a replaced one.
+fn snapshot_row_versions(
     client: &mut impl GenericClient,
     adapter: &PostgresBaselineAdapter,
-    snapshot_id: &str,
-) -> Result<String, SearchError> {
-    let query = format!("SELECT xmin::TEXT FROM {} WHERE id = $1", adapter.table("snapshots"));
-    let Some(row) = client.query_opt(&query, &[&snapshot_id])? else {
-        return Err(SearchError::ExternalBaseline(format!(
-            "snapshot '{snapshot_id}' was not found"
-        )));
-    };
-    Ok(row.get(0))
+    snapshot_ids: &[String],
+) -> Result<HashMap<String, String>, SearchError> {
+    let query =
+        format!("SELECT id, xmin::TEXT FROM {} WHERE id = ANY($1)", adapter.table("snapshots"));
+    Ok(client
+        .query(&query, &[&snapshot_ids])?
+        .into_iter()
+        .map(|row| (row.get("id"), row.get("xmin")))
+        .collect())
 }
 
 fn snapshot_parent_id(
@@ -4038,6 +4062,21 @@ mod tests {
             // does not exist yet, taking the whole migration down with them; presence alone is
             // green for a statement list in any order. `CREATE TABLE` is exempt because it
             // declares the column in the same breath.
+            // The backfill must belong to THIS carrier alone. Merge the carriers back into one
+            // script and every check above is satisfied by some other carrier's text — the exact
+            // blindness this gate was rewritten to remove, and nothing else would notice it.
+            for other in ROOTED_CARRIER_KEYS
+                .iter()
+                .map(|(other, _, _)| adapter.table(other))
+                .filter(|other| *other != qualified)
+            {
+                assert!(
+                    !mandatory[backfill].contains(&other),
+                    "{table}'s backfill also names {other}: one script for several carriers makes \
+                     every carrier's check pass on another's text"
+                );
+            }
+
             let keyed_by_root = mandatory.iter().enumerate().filter(|(position, statement)| {
                 *position != backfill
                     && statement.contains(&qualified)
@@ -4633,6 +4672,11 @@ mod tests {
             .unwrap()
             .get::<_, Option<Vec<String>>>(0)
             .unwrap_or_default()
+    }
+
+    fn relation_exists(adapter: &PostgresBaselineAdapter, relation: &str) -> bool {
+        let mut client = adapter.connect().unwrap();
+        client.query_one("SELECT to_regclass($1) IS NOT NULL", &[&relation]).unwrap().get(0)
     }
 
     fn relation_oid(adapter: &PostgresBaselineAdapter, relation: &str) -> u32 {
@@ -5396,6 +5440,102 @@ mod tests {
         assert!(
             !semantic_publication_complete(&mut *client, &adapter, "mid", "model", 4).unwrap(),
             "and it must leave no completeness mark behind"
+        );
+    }
+
+    /// A PARENT republished between planning and the write is refused just as the snapshot is.
+    ///
+    /// The worse half of the same class, and the one a check on our own row alone misses: the
+    /// parent's republish clears ITS rows and its completeness mark and never touches ours, so
+    /// the copy-forward silently brings nothing, our own rows go in, and the gap is sealed under
+    /// our completeness mark with nothing left to correct it later. Our own row's version does
+    /// not move at all, which is exactly why the check answers for every snapshot the plan was
+    /// read from rather than for the one being published.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_parent_republished_between_planning_and_the_write_is_refused() {
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("parstale");
+        let config = ExternalBaselineConfig::postgres(url).with_schema(&schema);
+        let adapter = PostgresBaselineAdapter::new(config.clone()).unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        let configuration = indexed_document("code", PATH, "Общий", 1, "hash-cfg", "текст");
+        let child_file = indexed_document("code", "src/B.bsl", "Б", 1, "hash-б", "текст-б");
+        let key_of = |document: &IndexedDocument| {
+            crate::document::semantic_key_from_parts(
+                &document.path,
+                &document.kind,
+                &document.symbol_name,
+                "",
+                &document.text,
+            )
+        };
+        adapter
+            .store_embeddings(
+                "model",
+                4,
+                &[
+                    (key_of(&configuration), vec![1.0, 0.0, 0.0, 0.0]),
+                    (key_of(&child_file), vec![0.0, 1.0, 0.0, 0.0]),
+                ],
+            )
+            .unwrap();
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("parent".to_owned(), CorpusId::WorkspaceCode),
+                &SnapshotPublishMetadata::default(),
+                std::slice::from_ref(&configuration),
+            )
+            .unwrap();
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("child".to_owned(), CorpusId::WorkspaceCode).with_parent("parent"),
+                &SnapshotPublishMetadata::default(),
+                std::slice::from_ref(&child_file),
+            )
+            .unwrap();
+        // Only a parent with a completeness mark makes the plan incremental, and only an
+        // incremental plan reads the parent at all.
+        adapter.populate_serving_semantic("parent", "model", 4).unwrap();
+
+        let republisher = PostgresBaselineAdapter::new(config).unwrap();
+        let republish_once = std::cell::Cell::new(true);
+        let extension = IndexedDocument { root_id: "Расш".to_owned(), ..configuration.clone() };
+        let republish_parent = |event: crate::external_baseline::SemanticPublishProgress| {
+            if matches!(event, crate::external_baseline::SemanticPublishProgress::Plan { .. })
+                && republish_once.replace(false)
+            {
+                republisher
+                    .publish_snapshot(
+                        &Snapshot::new("parent".to_owned(), CorpusId::WorkspaceCode),
+                        &SnapshotPublishMetadata::default(),
+                        &[configuration.clone(), extension.clone()],
+                    )
+                    .unwrap();
+            }
+        };
+
+        let error = adapter
+            .populate_serving_semantic_with_progress("child", "model", 4, Some(&republish_parent))
+            .expect_err("a plan that copies from a parent replaced since must not be served");
+        assert_eq!(
+            error.reason_code(),
+            Some("snapshot_republished_while_publishing"),
+            "the refusal must be the named one: {error}"
+        );
+        assert!(
+            error.to_string().contains("'parent'"),
+            "and it must name the snapshot that moved, not the one being published: {error}"
+        );
+
+        let mut client = adapter.connect().unwrap();
+        assert!(
+            !semantic_publication_complete(&mut *client, &adapter, "child", "model", 4).unwrap(),
+            "an incomplete corpus must not be left wearing a completeness mark"
         );
     }
 
@@ -6179,7 +6319,14 @@ mod tests {
         // Из константы, а не своим списком: носитель, добавленный туда, попадает под проверку
         // тем же действием, которым объявлен. `serving_semantic` здесь и самый дорогой —
         // повторная перестройка её ключа берёт ACCESS EXCLUSIVE на таблицу векторов.
-        let carriers: Vec<&str> = ROOTED_CARRIER_KEYS.iter().map(|(table, _, _)| *table).collect();
+        // Из константы, а не своим списком, но только по СУЩЕСТВУЮЩИМ таблицам: без pgvector
+        // необязательного носителя в схеме нет, и спрашивать его oid значило бы превратить
+        // состояние, которое миграция терпит намеренно, в панику каталога.
+        let carriers: Vec<&str> = ROOTED_CARRIER_KEYS
+            .iter()
+            .map(|(table, _, _)| *table)
+            .filter(|table| relation_exists(&adapter, &format!("{schema}.{table}")))
+            .collect();
         let indexes = ["snapshot_files", "snapshot_deletions"];
         let keys_before: Vec<u32> = carriers
             .iter()
