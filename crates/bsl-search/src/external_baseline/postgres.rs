@@ -5394,6 +5394,369 @@ mod tests {
         );
     }
 
+    /// A pre-root `serving_semantic`, as a schema published before this node has it.
+    fn raise_pre_root_serving_semantic(adapter: &PostgresBaselineAdapter, schema: &str) {
+        let mut client = adapter.connect().unwrap();
+        client
+            .batch_execute(&format!(
+                "CREATE EXTENSION IF NOT EXISTS vector;
+                 CREATE TABLE {schema}.serving_semantic (
+                     snapshot_id TEXT NOT NULL REFERENCES {schema}.snapshots(id) ON DELETE CASCADE,
+                     collection TEXT NOT NULL,
+                     path TEXT NOT NULL,
+                     ordinal INTEGER NOT NULL,
+                     symbol_name TEXT NOT NULL,
+                     kind TEXT NOT NULL,
+                     line_start INTEGER NOT NULL,
+                     line_end INTEGER NOT NULL,
+                     model_id TEXT NOT NULL,
+                     dimension INTEGER NOT NULL,
+                     embedding vector NOT NULL,
+                     PRIMARY KEY (snapshot_id, model_id, collection, path, ordinal)
+                 );"
+            ))
+            .unwrap();
+    }
+
+    /// Migrating an EXISTING semantic carrier rebuilds its key and leaves its rows alone.
+    ///
+    /// The key is asserted here and nowhere else. A fresh database gets the right key from
+    /// `CREATE TABLE`, and readiness only proves it can REFUSE a wrong key — neither says the
+    /// migration fixed an already published schema. Without this, every gate in this file is
+    /// green while an upgraded database carries version 3 over the old key and fails with a
+    /// duplicate key on the first pair of files that share a path.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn migrating_an_existing_semantic_carrier_keys_it_by_root_and_keeps_its_rows() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("semkey");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        raise_pre_root_schema(&adapter, &schema);
+        raise_pre_root_serving_semantic(&adapter, &schema);
+        {
+            let mut client = adapter.connect().unwrap();
+            client
+                .batch_execute(&format!(
+                    "INSERT INTO {schema}.snapshots (id, corpus) VALUES ('snap-1', 'code');
+                     INSERT INTO {schema}.serving_semantic VALUES
+                         ('snap-1', 'code', 'src/A.bsl', 0, 'A', 'procedure', 0, 1,
+                          'model', 4, '[1,0,0,0]');"
+                ))
+                .unwrap();
+        }
+        let row_version = |adapter: &PostgresBaselineAdapter| -> String {
+            let mut client = adapter.connect().unwrap();
+            client
+                .query_one(&format!("SELECT xmin::text FROM {schema}.serving_semantic"), &[])
+                .unwrap()
+                .get(0)
+        };
+        let before = row_version(&adapter);
+
+        adapter.migrate_storage().unwrap();
+
+        assert_eq!(
+            primary_key_columns(&adapter, &format!("{schema}.serving_semantic")),
+            vec!["snapshot_id", "model_id", "collection", "root_id", "path", "ordinal"],
+            "the migration must rebuild the key of a carrier that already existed"
+        );
+        let mut client = adapter.connect().unwrap();
+        let (path, root_id): (String, String) = {
+            let row = client
+                .query_one(&format!("SELECT path, root_id FROM {schema}.serving_semantic"), &[])
+                .unwrap();
+            (row.get(0), row.get(1))
+        };
+        assert_eq!(path, "src/A.bsl", "the row must survive the migration");
+        assert_eq!(root_id, CONFIGURATION_ROOT_ID, "a pre-root row belongs to the configuration");
+        assert_eq!(before, row_version(&adapter), "the backfill rewrote the row");
+        adapter.check_storage_readiness().expect("the migrated schema must be ready");
+    }
+
+    /// A schema WITHOUT the optional carrier migrates like any other.
+    ///
+    /// The backfill for `serving_semantic` runs inside the mandatory migration's transaction,
+    /// where a plain `ALTER TABLE` on a missing table would roll the whole thing back and leave
+    /// a database that never had the `vector` extension permanently unready. The table is dropped
+    /// here rather than the extension removed, because the state that matters is the same one and
+    /// this stand cannot be stripped of pgvector.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn migrating_a_schema_without_the_semantic_carrier_is_not_a_failure() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("nosem");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        adapter
+            .connect()
+            .unwrap()
+            .batch_execute(&format!("DROP TABLE {schema}.serving_semantic"))
+            .unwrap();
+
+        adapter
+            .migrate_storage()
+            .expect("a schema without the optional carrier must migrate, not roll back");
+
+        adapter
+            .check_storage_readiness()
+            .expect("and it must be ready afterwards, optional carrier or not");
+        assert_eq!(
+            adapter.get_schema_version().unwrap(),
+            Some(crate::error::SCHEMA_VERSION_CURRENT),
+            "the version must be stamped, since the carrier that is missing is optional"
+        );
+    }
+
+    /// Readiness answers about the optional carrier in THREE ways, not two.
+    ///
+    /// The third input is the one a two-way rule gets wrong: a table that exists with no primary
+    /// key at all yields exactly the same NULL composition as a table that is not there. Reading
+    /// that NULL as "absent" waves through a schema whose migration died between
+    /// `DROP CONSTRAINT` and `ADD PRIMARY KEY` — the state readiness exists for.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn readiness_answers_three_ways_for_the_optional_carrier() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("optready");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        let forget_readiness = |adapter: &PostgresBaselineAdapter| {
+            *adapter.storage_verified_at.lock().unwrap() = None;
+        };
+
+        adapter
+            .connect()
+            .unwrap()
+            .batch_execute(&format!("DROP TABLE {schema}.serving_semantic"))
+            .unwrap();
+        forget_readiness(&adapter);
+        adapter
+            .check_storage_readiness()
+            .expect("an absent optional carrier is not a fault: pgvector may simply be missing");
+
+        raise_pre_root_serving_semantic(&adapter, &schema);
+        forget_readiness(&adapter);
+        let error = adapter
+            .check_storage_readiness()
+            .expect_err("an optional carrier that EXISTS must carry the right key");
+        assert!(
+            error.to_string().contains("serving_semantic"),
+            "the refusal must name the carrier: {error}"
+        );
+
+        adapter
+            .connect()
+            .unwrap()
+            .batch_execute(&format!(
+                "ALTER TABLE {schema}.serving_semantic DROP CONSTRAINT serving_semantic_pkey"
+            ))
+            .unwrap();
+        forget_readiness(&adapter);
+        let error = adapter.check_storage_readiness().expect_err(
+            "a carrier left with no key at all reads as NULL just like an absent one, and must \
+             not be mistaken for it",
+        );
+        assert!(
+            error.to_string().contains("serving_semantic"),
+            "the refusal must name the carrier: {error}"
+        );
+    }
+
+    /// A delta inherits the other root's semantics and rewrites only its own.
+    ///
+    /// Shadowing blind to the root would take the child's rooted file as covering the
+    /// configuration's file of the same path, so the inherited row would never be copied.
+    ///
+    /// The parent's semantics are published first because only a parent with a completeness mark
+    /// makes the plan incremental — without it the strategy rebuilds everything and copies
+    /// nothing, and this test would pass without exercising the copy at all.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_delta_inherits_the_other_roots_semantics_and_rewrites_only_its_own() {
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("delta");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        let configuration =
+            indexed_document("code", PATH, "Общий", 1, "hash-cfg", "текст-конфигурации");
+        let mut extension =
+            indexed_document("code", PATH, "Общий", 1, "hash-ext", "текст-расширения");
+        extension.root_id = "Расш".to_owned();
+        let mut extension_v2 =
+            indexed_document("code", PATH, "Общий", 1, "hash-ext2", "текст-расширения-2");
+        extension_v2.root_id = "Расш".to_owned();
+
+        let key_of = |document: &IndexedDocument| {
+            crate::document::semantic_key_from_parts(
+                &document.path,
+                &document.kind,
+                &document.symbol_name,
+                "",
+                &document.text,
+            )
+        };
+        adapter
+            .store_embeddings(
+                "model",
+                4,
+                &[
+                    (key_of(&configuration), vec![1.0, 0.0, 0.0, 0.0]),
+                    (key_of(&extension), vec![0.0, 1.0, 0.0, 0.0]),
+                    (key_of(&extension_v2), vec![0.0, 0.0, 1.0, 0.0]),
+                ],
+            )
+            .unwrap();
+
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("parent".to_owned(), CorpusId::WorkspaceCode),
+                &SnapshotPublishMetadata::default(),
+                &[configuration.clone(), extension],
+            )
+            .unwrap();
+        adapter.populate_serving_semantic("parent", "model", 4).unwrap();
+
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("child".to_owned(), CorpusId::WorkspaceCode).with_parent("parent"),
+                &SnapshotPublishMetadata::default(),
+                &[configuration, extension_v2],
+            )
+            .unwrap();
+        adapter.populate_serving_semantic("child", "model", 4).unwrap();
+
+        let mut client = adapter.connect().unwrap();
+        let rows: Vec<(String, String)> = client
+            .query(
+                &format!(
+                    "SELECT root_id, embedding::text FROM {schema}.serving_semantic
+                      WHERE snapshot_id = 'child' ORDER BY root_id"
+                ),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![
+                (CONFIGURATION_ROOT_ID.to_owned(), "[1,0,0,0]".to_owned()),
+                ("Расш".to_owned(), "[0,0,1,0]".to_owned()),
+            ],
+            "the configuration's row is inherited unchanged and only the extension's is rebuilt"
+        );
+    }
+
+    /// Deleting a file under ONE root leaves the other root's semantics standing.
+    ///
+    /// The mirror of the inheritance case, and the one that loses data rather than merely missing
+    /// it: shadowing by `(collection, path)` lets a deletion under the extension shadow the
+    /// configuration's file of the same relative path, so the surviving file is served by nothing.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_deletion_under_one_root_leaves_the_other_roots_semantics_standing() {
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("delroot");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        let configuration =
+            indexed_document("code", PATH, "Общий", 1, "hash-cfg", "текст-конфигурации");
+        let mut extension =
+            indexed_document("code", PATH, "Общий", 1, "hash-ext", "текст-расширения");
+        extension.root_id = "Расш".to_owned();
+        let key_of = |document: &IndexedDocument| {
+            crate::document::semantic_key_from_parts(
+                &document.path,
+                &document.kind,
+                &document.symbol_name,
+                "",
+                &document.text,
+            )
+        };
+        adapter
+            .store_embeddings(
+                "model",
+                4,
+                &[
+                    (key_of(&configuration), vec![1.0, 0.0, 0.0, 0.0]),
+                    (key_of(&extension), vec![0.0, 1.0, 0.0, 0.0]),
+                ],
+            )
+            .unwrap();
+
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("parent".to_owned(), CorpusId::WorkspaceCode),
+                &SnapshotPublishMetadata::default(),
+                &[configuration.clone(), extension],
+            )
+            .unwrap();
+        adapter.populate_serving_semantic("parent", "model", 4).unwrap();
+
+        // The extension is gone from the tree, so publishing without it records a deletion for
+        // its root alone.
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("child".to_owned(), CorpusId::WorkspaceCode).with_parent("parent"),
+                &SnapshotPublishMetadata::default(),
+                std::slice::from_ref(&configuration),
+            )
+            .unwrap();
+        adapter.populate_serving_semantic("child", "model", 4).unwrap();
+
+        let mut client = adapter.connect().unwrap();
+        let rows: Vec<(String, String)> = client
+            .query(
+                &format!(
+                    "SELECT root_id, embedding::text FROM {schema}.serving_semantic
+                      WHERE snapshot_id = 'child' ORDER BY root_id"
+                ),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![(CONFIGURATION_ROOT_ID.to_owned(), "[1,0,0,0]".to_owned())],
+            "the deletion belongs to the extension's root and must not take the configuration \
+             file with it"
+        );
+    }
+
     /// Every read the plan is built from sees ONE snapshot of the data.
     ///
     /// Observed as the value in force inside production's own transaction, not as a property of
