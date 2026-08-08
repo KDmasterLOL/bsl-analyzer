@@ -249,10 +249,12 @@ pub(crate) enum RootedPathError {
     /// root with an absolute path discards the root silently, so the pair would be answered
     /// from whichever file the path alone names.
     AbsolutePathWithRootId(String),
-    /// The path climbs out of the root it was given. `Path::join` keeps `..` and the lookup
-    /// canonicalises afterwards, so such a pair resolves to a real file under some OTHER root
-    /// — the same silent mis-answer, arriving through the path instead of the root.
-    PathClimbsOutOfRoot(String),
+    /// The path is not a plain relative name under the root: it carries `..`, `.`, a leading
+    /// separator or a drive. Each of those is a way of naming something the root does not
+    /// contain — `Path::join` replaces its base outright for the last two — and `..` cannot be
+    /// resolved here at all, because the kernel collapses it only after dereferencing each
+    /// component, so any answer computed here would disagree with the file that opens.
+    PathIsNotPlainRelative(String),
 }
 
 impl RootedPathError {
@@ -263,7 +265,7 @@ impl RootedPathError {
         match self {
             Self::RootNotRegistered(_) => "unknown_root",
             Self::AbsolutePathWithRootId(_) => "absolute_path_under_root",
-            Self::PathClimbsOutOfRoot(_) => "path_leaves_root",
+            Self::PathIsNotPlainRelative(_) => "path_not_relative_to_root",
         }
     }
 }
@@ -281,10 +283,10 @@ impl std::fmt::Display for RootedPathError {
                 "an absolute path already names its file, so it cannot also be read under \
                  root '{root_id}'; pass the path relative to that root, or drop `root_id`"
             ),
-            Self::PathClimbsOutOfRoot(root_id) => write!(
+            Self::PathIsNotPlainRelative(root_id) => write!(
                 f,
-                "the path climbs out of root '{root_id}' with `..`; a path read against a root \
-                 has to stay inside it, or the pair names a file of some other root"
+                "a path read against root '{root_id}' has to be plain relative names — no `..`, \
+                 no `.`, no leading separator and no drive; spell the file as the hit does"
             ),
         }
     }
@@ -320,19 +322,32 @@ impl DiagnosticsResident {
                 Err(RootedPathError::AbsolutePathWithRootId(root_id.to_owned()))
             };
         }
-        // `..` is refused outright rather than resolved. Resolving it correctly is not this
-        // code's to do: the kernel collapses `..` AFTER dereferencing each component, so a
-        // `..` behind a directory link lands somewhere a textual fold never predicts, and a
-        // fold that disagrees with the filesystem is a second, wrong procedure for naming
-        // files. Two attempts to be cleverer both failed on exactly that — one comparing the
+        if !self.workspace_roots.contains_id(root_id) {
+            // Asked FIRST, so a caller with two wrong halves is told about the one that will
+            // still be wrong after fixing the other.
+            return Err(RootedPathError::RootNotRegistered(root_id.to_owned()));
+        }
+        // One rule, and it is about the SPELLING: every component must be a plain name.
+        //
+        // That covers more than `..`. On Windows neither a leading separator (`\Windows\M.bsl`)
+        // nor a drive-relative spelling (`C:M.bsl`) counts as absolute, yet `join` throws the
+        // base away for both — so a rule written against `..` alone lets exactly the escape
+        // this exists to stop back in through a platform difference. `.` is refused for a
+        // smaller reason: it survives into the graph id, and the graph was built from paths
+        // that never had one.
+        //
+        // `..` in particular is refused rather than resolved. The kernel collapses it only
+        // after dereferencing each component, so a `..` behind a directory link lands where no
+        // textual fold predicts; folding it here would be a second, wrong procedure for naming
+        // files. Two attempts to be cleverer failed on exactly that — one comparing the
         // canonical target against the root, one asking the table who owned it.
         //
-        // The refusal costs nothing real: a key comes from a walk INSIDE its root, so no
-        // producer of `(root_id, path)` ever emits `..`. A hand-written `a/../a/M.bsl` names a
-        // file that is perfectly reachable by its plain spelling, and that spelling is what
-        // this accepts.
-        if path.components().any(|component| component == std::path::Component::ParentDir) {
-            return Err(RootedPathError::PathClimbsOutOfRoot(root_id.to_owned()));
+        // The cost is nothing real: a key is built by a walk INSIDE its root, so no producer
+        // of `(root_id, path)` emits any of these, and the same file is always reachable by
+        // its plain spelling.
+        if path.components().any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(RootedPathError::PathIsNotPlainRelative(root_id.to_owned()));
         }
         // What follows from stopping here: a link sitting inside a root is a file OF that root,
         // and reading it yields its target, exactly as it would for anything else opening that
@@ -1191,7 +1206,7 @@ mod tests {
             "the stand is real: joined and canonicalised, that spelling names the \
              configuration's module — a file the resident serves, under the other root",
         );
-        assert_eq!(refused, Err(RootedPathError::PathClimbsOutOfRoot(root_id)));
+        assert_eq!(refused, Err(RootedPathError::PathIsNotPlainRelative(root_id)));
     }
 
     /// Two spellings that look like corner cases and are decided by one rule. `..` is refused
@@ -1232,7 +1247,7 @@ mod tests {
 
         assert_eq!(
             detour,
-            Err(RootedPathError::PathClimbsOutOfRoot(root_id.clone())),
+            Err(RootedPathError::PathIsNotPlainRelative(root_id.clone())),
             "`..` is refused by its name, not by where it would have landed: the same file is \
              reachable by its plain spelling, and that is the one to send",
         );
@@ -1289,7 +1304,60 @@ mod tests {
         };
 
         assert!(served, "the stand is real: that file is one the resident serves");
-        assert_eq!(refused, Err(RootedPathError::PathClimbsOutOfRoot(root_id)));
+        assert_eq!(refused, Err(RootedPathError::PathIsNotPlainRelative(root_id)));
+    }
+
+    /// The rule is about the SPELLING, and every way of spelling something the root does not
+    /// contain is refused by it — not just `..`. The Windows cases are the reason it is written
+    /// that way: neither a leading separator nor a drive-relative name counts as absolute
+    /// there, so the earlier `..`-only rule let both through, and `join` throws the base away
+    /// for each. Checked here on every platform, because it is the spelling that is rejected,
+    /// not the filesystem's reading of it.
+    #[test]
+    fn only_plain_relative_names_are_read_against_a_root() {
+        use super::super::test_support::{
+            extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
+        };
+        let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let refused = |resident: &DiagnosticsResident, spelling: &str| {
+            resident.resolve_rooted_path(Some(&root_id), Path::new(spelling))
+                == Err(RootedPathError::PathIsNotPlainRelative(root_id.clone()))
+        };
+        let outcome = state.read(|resident, _| {
+            (
+                refused(resident, "../ws/CommonModules/Общий/Ext/Module.bsl"),
+                refused(resident, "./CommonModules/Общий/Ext/Module.bsl"),
+                // Parsed as a root and a drive only on Windows; on Unix a backslash is an
+                // ordinary character, so these are plain file names that stay inside the root.
+                // The rule reads COMPONENTS for exactly that reason — the hazard is in how the
+                // platform splits a path, not in the characters.
+                cfg!(windows) == refused(resident, "\\Windows\\M.bsl"),
+                cfg!(windows) == refused(resident, "C:M.bsl"),
+                resident.resolve_rooted_path(Some(&root_id), Path::new(SHARED_MODULE_REL)),
+                // An unregistered root is named FIRST: fixing the path would not help.
+                resident.resolve_rooted_path(Some("нет-такого"), Path::new("../M.bsl")),
+            )
+        });
+        let ResidentOutcome::Ready((climbing, dotted, rooted, drive, plain, unknown), _) = outcome
+        else {
+            panic!("expected Ready");
+        };
+
+        assert!(climbing, "`..` cannot be resolved here, so it is not read at all");
+        assert!(dotted, "`.` survives into the graph id, which was built without one");
+        assert!(rooted, "a leading separator is refused wherever the platform reads it as one");
+        assert!(drive, "and so is a drive-relative spelling, absolute or not");
+        assert_eq!(
+            plain.as_deref(),
+            Ok(extension.join(SHARED_MODULE_REL).as_path()),
+            "while a plain name — the only shape a key is ever built in — resolves",
+        );
+        assert_eq!(unknown, Err(RootedPathError::RootNotRegistered("нет-такого".to_owned())));
     }
 
     /// The table keeps a file that lies outside every root under the root the walk reached it
