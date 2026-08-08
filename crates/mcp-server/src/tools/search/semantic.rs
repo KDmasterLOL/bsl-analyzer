@@ -14,7 +14,6 @@ use bsl_search::{
 };
 use rmcp::ErrorData as McpError;
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
@@ -128,11 +127,11 @@ pub(super) fn semantic_code_hits(
     // the same config), which preserves model and dimension. So the captured embedder/model_id/dim
     // stay consistent with the engine the second guard sees. (If a model-reconfiguration path is
     // ever added, re-validate identity under the second guard.)
-    let (embedder, workspace_root, model_id, dim) = {
+    let (embedder, roots, model_id, dim) = {
         let engine = guard.as_ref().expect("checked is_none above");
         (
             engine.embedder_clone(),
-            engine.configuration_root().map(Path::to_path_buf),
+            engine.workspace_roots().cloned(),
             engine.embedding_model().map(str::to_owned),
             engine.embedding_dimension(),
         )
@@ -228,7 +227,7 @@ pub(super) fn semantic_code_hits(
         );
         match direct {
             DirectResult::Found(hits) => {
-                return Ok(CodeHits::Ready { hits, workspace_root });
+                return Ok(CodeHits::Ready { hits, roots });
             }
             DirectResult::Terminal(error) => {
                 return Err(external_baseline_mcp_error(&error));
@@ -247,7 +246,7 @@ pub(super) fn semantic_code_hits(
     }
 
     match engine.search_with_embedding(&query_embedding, limit, Some("code")) {
-        Ok(hits) => Ok(CodeHits::Ready { hits, workspace_root }),
+        Ok(hits) => Ok(CodeHits::Ready { hits, roots }),
         Err(e) => Err(McpError::internal_error(format!("search error: {e}"), None)),
     }
 }

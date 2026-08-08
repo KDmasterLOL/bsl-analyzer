@@ -600,6 +600,7 @@ impl McpServer {
                 let baseline = self.state.baseline_view();
                 tokio::task::spawn_blocking(move || {
                     tools::search::search_status(
+                        McpProfile::Workspace,
                         &engine,
                         &progress,
                         &semantic_runtime,
@@ -1438,6 +1439,7 @@ impl McpServer {
                 let overlay_warmup = crate::state::OverlayWarmupState::Pending;
                 tokio::task::spawn_blocking(move || {
                     tools::search::search_status(
+                        McpProfile::Reference,
                         &engine,
                         &progress,
                         &semantic_runtime,

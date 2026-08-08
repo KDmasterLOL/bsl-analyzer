@@ -57,8 +57,8 @@ pub fn hybrid_code(
         query,
         fetch,
     )?;
-    let (lex_hits, workspace_root) = match lexical {
-        CodeHits::Ready { hits, workspace_root } => (hits, workspace_root),
+    let (lex_hits, roots) = match lexical {
+        CodeHits::Ready { hits, roots } => (hits, roots),
         // Lexical is the floor: if it cannot serve yet, the whole search cannot — return a
         // structured not-ready envelope (machine status + live counters + retry hint),
         // matching the graph tool, rather than a bare sentence a poller must parse.
@@ -112,7 +112,7 @@ pub fn hybrid_code(
     let mut out = String::from(MODALITY_LEGEND);
     let rendered = format_code_hits(
         &hits,
-        workspace_root.as_deref(),
+        roots.as_ref(),
         graph_root,
         hits_budget(max_output_tokens, note.as_deref()),
     );

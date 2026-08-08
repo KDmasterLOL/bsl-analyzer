@@ -93,6 +93,7 @@ pub(crate) fn baseline_warming_not_ready(progress: &IndexProgress) -> CallToolRe
 
 #[allow(clippy::too_many_arguments, reason = "distinct status inputs, mirrored by _with_cap")]
 pub fn search_status(
+    profile: crate::McpProfile,
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     progress: &Arc<IndexProgress>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
@@ -108,6 +109,7 @@ pub fn search_status(
     // holds the engine for longer than the cap, status reports no counts / overlay stats —
     // that is preferred over a poll that blocks for tens of seconds.
     search_status_with_cap(
+        profile,
         engine,
         progress,
         semantic_runtime,
@@ -127,6 +129,7 @@ pub fn search_status(
 // only rename the same fields, so the one-over-limit arity is accepted here.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn search_status_with_cap(
+    profile: crate::McpProfile,
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     progress: &Arc<IndexProgress>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
@@ -189,6 +192,39 @@ pub(super) fn search_status_with_cap(
         baseline_probe.as_ref(),
         engine_state,
     );
+
+    // Which roots are indexed at all. Without it an empty search over an extension reads
+    // exactly like an extension that was never registered — and the two call for opposite
+    // actions. The profile is passed in rather than inferred from the table: on a cold start
+    // neither profile has one, so "no table" cannot tell them apart, and a reference index
+    // (which has no source roots by construction) would report a permanent fault.
+    if matches!(profile, crate::McpProfile::Workspace) {
+        let _ = writeln!(out, "Source roots:");
+        match guard
+            .as_ref()
+            .and_then(|guard| guard.as_ref())
+            .and_then(SearchEngine::workspace_roots)
+        {
+            Some(roots) => {
+                for (id, declared) in roots.entries() {
+                    let name = if id.is_empty() { "(configuration)" } else { id };
+                    let _ = writeln!(out, "  {name}  {}", declared.display());
+                }
+            }
+            // Two different facts, and telling a reader "none" for either would be a lie about
+            // what this workspace indexes.
+            None if engine_busy => {
+                let _ = writeln!(
+                    out,
+                    "  not read (a long operation holds the index; the roots are unchanged)"
+                );
+            }
+            None => {
+                let _ = writeln!(out, "  not published yet (the index is still building)");
+            }
+        }
+        let _ = writeln!(out);
+    }
 
     // Pending is only reachable on the postgres path (a Connect plan exists for no other
     // backend), so the placeholder backend below is accurate by construction.
@@ -795,6 +831,7 @@ mod tests {
         assert!(poisoner.join().is_err());
 
         let result = search_status(
+            crate::McpProfile::Workspace,
             &Arc::new(Mutex::<Option<SearchEngine>>::new(None)),
             &Arc::new(IndexProgress::default()),
             &runtime,
@@ -825,6 +862,121 @@ mod tests {
         );
     }
 
+    /// An empty search over an extension and an extension that was never registered read
+    /// identically in the hits — so the composition of the index has to be askable somewhere.
+    /// The declared spelling comes along because "registered" is only actionable if the reader
+    /// can see WHICH directory was registered under that name.
+    #[test]
+    fn status_names_every_registered_root() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = dir.path().join("outside-ext");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, rejected) = bsl_search::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        assert!(rejected.is_empty(), "the extension is outside the configuration, so it registers");
+        engine.set_workspace_roots(roots);
+
+        let result = search_status(
+            crate::McpProfile::Workspace,
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("Source roots:"), "{text}");
+        assert!(text.contains("(configuration)"), "the configuration is named, not blank: {text}");
+        assert!(
+            text.contains(&extension.display().to_string()),
+            "and the extension is named by the directory it was declared as: {text}",
+        );
+    }
+
+    /// Three states, three answers. "There is no table" is not one fact but two — the index has
+    /// not published one yet, or something holds it and it could not be read — and neither is
+    /// "this workspace indexes nothing". The reference profile has no source roots at all by
+    /// construction, so for it the honest report is silence rather than a permanent fault.
+    #[test]
+    fn status_tells_an_unread_root_table_from_a_missing_one() {
+        let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let building = search_status(
+            crate::McpProfile::Workspace,
+            &engine,
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let building = building.content[0].raw.as_text().expect("text").text.clone();
+        assert!(building.contains("not published yet"), "{building}");
+
+        let reference = search_status(
+            crate::McpProfile::Reference,
+            &engine,
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let reference = reference.content[0].raw.as_text().expect("text").text.clone();
+        assert!(
+            !reference.contains("Source roots:"),
+            "a reference index has no source roots to report: {reference}",
+        );
+
+        // Hold the engine past the cap so the read genuinely times out, exactly as an overlay
+        // prime would. The roots are unchanged all the while — saying "none" here would be a
+        // statement about the workspace, when the only true statement is about the read.
+        let held: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let holder = {
+            let held = Arc::clone(&held);
+            std::thread::spawn(move || {
+                let guard = held.lock().unwrap();
+                std::thread::sleep(Duration::from_millis(200));
+                drop(guard);
+            })
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        let busy = search_status_with_cap(
+            crate::McpProfile::Workspace,
+            &held,
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            false,
+            Duration::from_millis(40),
+        )
+        .unwrap();
+        holder.join().unwrap();
+        let busy = busy.content[0].raw.as_text().expect("text").text.clone();
+        assert!(busy.contains("not read"), "{busy}");
+        assert!(!busy.contains("not published yet"), "a held index is not an unbuilt one: {busy}",);
+    }
+
     #[test]
     fn search_status_shows_workspace_overlay_section() {
         let dir = tempdir().unwrap();
@@ -838,6 +990,7 @@ mod tests {
         fs::write(&file, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
 
         let result = search_status(
+            crate::McpProfile::Workspace,
             &Arc::new(Mutex::new(Some(engine))),
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
@@ -877,6 +1030,7 @@ mod tests {
         );
 
         let result = search_status(
+            crate::McpProfile::Workspace,
             &Arc::new(Mutex::new(None)),
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
@@ -910,6 +1064,7 @@ mod tests {
         let source = unreachable_workspace_service();
         let started = Instant::now();
         let result = search_status(
+            crate::McpProfile::Workspace,
             &Arc::new(Mutex::new(None)),
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
@@ -935,6 +1090,7 @@ mod tests {
     #[test]
     fn search_status_reports_warming_while_baseline_connect_is_pending() {
         let result = search_status(
+            crate::McpProfile::Workspace,
             &Arc::new(Mutex::new(None)),
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
@@ -970,6 +1126,7 @@ mod tests {
             )
             .unwrap();
         let result = search_status(
+            crate::McpProfile::Workspace,
             &Arc::new(Mutex::new(Some(engine))),
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
@@ -1007,6 +1164,7 @@ mod tests {
         progress.total_batches.store(20, Ordering::Relaxed);
         progress.done_batches.store(5, Ordering::Relaxed);
         let result = search_status(
+            crate::McpProfile::Workspace,
             &Arc::new(Mutex::new(Some(engine))),
             &progress,
             &Arc::new(Mutex::new(SemanticRuntimeStatus::OverlaySyncing)),
@@ -1041,6 +1199,7 @@ mod tests {
         };
         let run = |warmup: OverlayWarmupState| {
             search_status(
+                crate::McpProfile::Workspace,
                 &Arc::new(Mutex::new(None)),
                 &Arc::new(IndexProgress::default()),
                 &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
@@ -1103,6 +1262,7 @@ mod tests {
         let engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         let progress = Arc::new(IndexProgress::default());
         let result = search_status(
+            crate::McpProfile::Workspace,
             &engine,
             &progress,
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
@@ -1138,6 +1298,7 @@ mod tests {
         gate.wait();
         let started = Instant::now();
         let status = search_status_with_cap(
+            crate::McpProfile::Workspace,
             &engine,
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::OverlaySyncing)),

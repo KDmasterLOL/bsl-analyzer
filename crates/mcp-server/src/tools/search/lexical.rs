@@ -14,7 +14,6 @@ use bsl_search::{
 };
 use rmcp::ErrorData as McpError;
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
@@ -55,7 +54,7 @@ pub(super) fn lexical_code_hits(
                         // with no reachable workspace root. Module-keyed methods still get a
                         // graph_id (root-independent); a path-fallback hit would be dropped,
                         // which is fine here — baseline paths are relative, not absolute.
-                        return Ok(CodeHits::Ready { hits, workspace_root: None });
+                        return Ok(CodeHits::Ready { hits, roots: None });
                     }
                     DirectResult::Terminal(error) => {
                         return Err(external_baseline_mcp_error(&error));
@@ -145,8 +144,8 @@ pub(super) fn lexical_code_hits(
             .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
     };
 
-    let workspace_root = guard.as_ref().and_then(|e| e.configuration_root()).map(Path::to_path_buf);
-    Ok(CodeHits::Ready { hits, workspace_root })
+    let roots = guard.as_ref().and_then(|engine| engine.workspace_roots().cloned());
+    Ok(CodeHits::Ready { hits, roots })
 }
 
 fn try_direct_lexical_code_no_overlay(
