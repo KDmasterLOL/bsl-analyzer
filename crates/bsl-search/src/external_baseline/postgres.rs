@@ -1461,11 +1461,11 @@ impl PostgresBaselineAdapter {
         // about to write, which would leave the corpus marked complete over semantics of a
         // version it no longer has.
         //
-        // Exactly the snapshots this transaction touches, no wider: our own, plus the parent the
-        // PLAN names when the strategy copies its rows. Nothing here reads further up the chain.
-        // Locking the ancestry as it stands NOW would be the wrong set as well as a larger one:
-        // the rows copied below belong to the parent the plan chose, not to whoever this
-        // snapshot's parent has become since planning.
+        // Exactly the snapshots the PLAN was read from — for a full rebuild the ancestry it
+        // folded, for an incremental copy the one parent it names, for a standalone publish only
+        // itself. Not the ancestry as it stands NOW, which would be a different set: what the
+        // rows below are copied from is the parent the plan chose, not whoever this snapshot's
+        // parent has become since planning.
         //
         // Locked in id order so two publications sharing a parent queue instead of deadlocking.
         tx.execute(
@@ -1479,10 +1479,15 @@ impl PostgresBaselineAdapter {
         // until we commit, so versions equal to the planned ones mean the plan still describes
         // what is in the tables it was read from.
         let current_versions = snapshot_row_versions(&mut tx, self, &plan_dependencies)?;
-        if let Some(republished) = plan_dependencies
-            .iter()
-            .find(|id| current_versions.get(*id) != planned_versions.get(*id))
-        {
+        if let Some(republished) = plan_dependencies.iter().find(|id| {
+            // Missing on EITHER side counts as moved. Absent from both would otherwise compare
+            // equal, and a plan read from a snapshot that was already gone would sail through on
+            // the strength of two identical absences.
+            match (planned_versions.get(*id), current_versions.get(*id)) {
+                (Some(planned), Some(current)) => planned != current,
+                _ => true,
+            }
+        }) {
             return Err(SearchError::named(
                 reason::SNAPSHOT_REPUBLISHED_WHILE_PUBLISHING,
                 format!(
@@ -2568,9 +2573,11 @@ fn invalidate_semantic_publication_for_snapshot(
 /// a false alarm is one loud, repeatable refusal, while the cost of a missed one is a stale
 /// corpus wearing a completeness mark.
 ///
-/// A snapshot that has DISAPPEARED is reported by its absence from the map rather than as an
-/// error: comparing the two maps then differs, which is the right answer — a plan read from a
-/// snapshot that no longer exists is exactly as stale as one read from a replaced one.
+/// A snapshot that is not there is reported by its ABSENCE from the map rather than as an error.
+/// The caller treats absence on either side as movement, which it has to: two identical absences
+/// would otherwise compare equal, and a plan read from a snapshot that was already gone — the
+/// completeness mark of a parent outlives the parent, since it lives in the metadata table — is
+/// exactly as stale as one read from a snapshot since replaced.
 fn snapshot_row_versions(
     client: &mut impl GenericClient,
     adapter: &PostgresBaselineAdapter,
@@ -5439,6 +5446,86 @@ mod tests {
         assert_eq!(rows, 0, "the refusal must roll back with its transaction");
         assert!(
             !semantic_publication_complete(&mut *client, &adapter, "mid", "model", 4).unwrap(),
+            "and it must leave no completeness mark behind"
+        );
+    }
+
+    /// A plan read from a snapshot that is already GONE is refused, not silently served.
+    ///
+    /// The parent's completeness mark lives in the metadata table, which no foreign key ties to
+    /// `snapshots`, so it outlives the parent row. Planning then picks the incremental strategy
+    /// on the strength of a mark whose snapshot is not there, the copy brings nothing, and the
+    /// child would be marked complete over a corpus it never read. Two identical absences compare
+    /// equal, which is why absence on either side counts as movement rather than as a match.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_plan_read_from_a_vanished_parent_is_refused() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("gone");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        let parent_file = indexed_document("code", "src/A.bsl", "А", 1, "hash-а", "текст-а");
+        let child_file = indexed_document("code", "src/B.bsl", "Б", 1, "hash-б", "текст-б");
+        let key_of = |document: &IndexedDocument| {
+            crate::document::semantic_key_from_parts(
+                &document.path,
+                &document.kind,
+                &document.symbol_name,
+                "",
+                &document.text,
+            )
+        };
+        adapter
+            .store_embeddings(
+                "model",
+                4,
+                &[
+                    (key_of(&parent_file), vec![1.0, 0.0, 0.0, 0.0]),
+                    (key_of(&child_file), vec![0.0, 1.0, 0.0, 0.0]),
+                ],
+            )
+            .unwrap();
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("parent".to_owned(), CorpusId::WorkspaceCode),
+                &SnapshotPublishMetadata::default(),
+                std::slice::from_ref(&parent_file),
+            )
+            .unwrap();
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("child".to_owned(), CorpusId::WorkspaceCode).with_parent("parent"),
+                &SnapshotPublishMetadata::default(),
+                std::slice::from_ref(&child_file),
+            )
+            .unwrap();
+        adapter.populate_serving_semantic("parent", "model", 4).unwrap();
+        // Raw SQL because nothing in the crate deletes a snapshot: the state is reachable only
+        // from outside, which is why this is a guard rather than a scenario.
+        adapter
+            .connect()
+            .unwrap()
+            .batch_execute(&format!("DELETE FROM {schema}.snapshots WHERE id = 'parent'"))
+            .unwrap();
+
+        let error = adapter
+            .populate_serving_semantic("child", "model", 4)
+            .expect_err("a plan whose parent is gone must not be served");
+        assert_eq!(
+            error.reason_code(),
+            Some("snapshot_republished_while_publishing"),
+            "the refusal must be the named one: {error}"
+        );
+
+        let mut client = adapter.connect().unwrap();
+        assert!(
+            !semantic_publication_complete(&mut *client, &adapter, "child", "model", 4).unwrap(),
             "and it must leave no completeness mark behind"
         );
     }
