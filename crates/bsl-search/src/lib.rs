@@ -46,6 +46,7 @@ pub use engine::{
 };
 pub use error::SearchError;
 pub use error::SCHEMA_VERSION_CURRENT;
+pub use external_baseline::ensure_the_roots_mean_the_same_elsewhere;
 pub use external_baseline::ExternalBaselineAdapter;
 pub use external_baseline::{
     BaselineCollectionRecord, BaselineEmbeddingCoverageRecord, BaselineEmbeddingModelRecord,

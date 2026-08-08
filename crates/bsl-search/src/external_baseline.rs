@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 mod postgres;
+pub use postgres::ensure_the_roots_mean_the_same_elsewhere;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineSnapshotRecord {
@@ -256,6 +257,23 @@ impl ExternalBaselineAdapter {
     pub fn garbage_collect(&self, execute: bool) -> Result<BaselineGcReport, SearchError> {
         match self {
             Self::Postgres(adapter) => adapter.garbage_collect(execute),
+        }
+    }
+
+    /// The roots that will make semantic publication refuse this corpus once it is published.
+    ///
+    /// Exposed so the caller asks the storage the same question the storage will ask itself,
+    /// instead of guessing it from the documents alone and disagreeing on a delta over a rooted
+    /// parent.
+    pub fn roots_blocking_semantic_publication(
+        &self,
+        parent_snapshot_id: Option<&str>,
+        documents: &[IndexedDocument],
+    ) -> Result<Vec<String>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => {
+                adapter.roots_blocking_semantic_publication(parent_snapshot_id, documents)
+            }
         }
     }
 

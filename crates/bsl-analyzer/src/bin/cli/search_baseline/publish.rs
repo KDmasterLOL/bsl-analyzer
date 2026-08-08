@@ -115,6 +115,13 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
         .into());
     }
 
+    // Before the adapter is built, and therefore before anything connects: a root identified by
+    // an absolute path means nothing on another machine, and the same refusal inside
+    // `publish_snapshot` arrives only after `resolve_parent` has already reached the database —
+    // so on the ordinary CLI path the operator would get a connection error instead of the
+    // reason.
+    bsl_search::ensure_the_roots_mean_the_same_elsewhere(&indexed_documents)?;
+
     let adapter = postgres::build_adapter(
         &resolved_pg.url,
         project.config.search.baseline.postgres.schema.as_deref(),
@@ -154,14 +161,25 @@ pub(super) fn run(args: SearchBaselinePublishArgs) -> Result<(), Box<dyn Error +
 
     eprintln!("[3/5] Publishing snapshot ({} chunks)...", indexed_documents.len());
     // Semantic serving does not key a file by its source root yet, so a corpus that carries
-    // roots is published lexically and its semantics are skipped. Decided HERE, from the corpus
-    // itself, and not by letting the adapter refuse at the end: the refusal would arrive after
-    // the snapshot is committed, the branch head moved and every embedding computed — leaving a
-    // non-zero exit next to a baseline that really was published, and burning the most
-    // expensive phase of the run on every retry.
-    let corpus_carries_roots = indexed_documents
-        .iter()
-        .any(|document| document.root_id != bsl_search::CONFIGURATION_ROOT_ID);
+    // roots is published lexically and its semantics are skipped. Decided HERE rather than by
+    // letting the adapter refuse at the end: the refusal would arrive after the snapshot is
+    // committed, the branch head moved and every embedding computed — a non-zero exit next to a
+    // baseline that really was published, and the most expensive phase burnt on every retry.
+    //
+    // Asked OF THE ADAPTER, not of the corpus alone. The refusal judges the published
+    // snapshot's ancestry, and a corpus that carries no roots itself can still be a delta over
+    // a rooted parent — the ordinary next publish after an extension is dropped from the tree.
+    // Judging locally would disagree with the adapter on exactly that input, which is the
+    // divergence this decision exists to remove.
+    let blocking_roots = adapter
+        .roots_blocking_semantic_publication(
+            snapshot.parent_id.as_ref().map(|parent| parent.0.as_str()),
+            &indexed_documents,
+        )
+        .map_err(|error| {
+            io::Error::other(format!("failed to check whether semantics can be published: {error}"))
+        })?;
+    let corpus_carries_roots = !blocking_roots.is_empty();
     let embedder = if corpus_carries_roots {
         None
     } else {

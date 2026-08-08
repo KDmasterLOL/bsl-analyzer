@@ -1359,6 +1359,16 @@ impl PostgresBaselineAdapter {
         let changed_files = plan.changed_paths.len();
         let final_sync_started = Instant::now();
         let mut tx = client.transaction()?;
+        // Serialized against a concurrent republish, not merely re-read. `publish_snapshot`
+        // upserts THIS row as the first write of its own transaction, so taking the row lock
+        // here orders the two: a republish that has not committed waits for us, and one that
+        // already committed is visible to the check below. Re-reading without the lock only
+        // narrows the window — a republish committing between the check and the insert still
+        // slips through, and the rows written would describe a corpus that no longer exists.
+        tx.execute(
+            &format!("SELECT id FROM {} WHERE id = $1 FOR UPDATE", self.table("snapshots")),
+            &[&snapshot_id],
+        )?;
         // Asked again, here, because planning released its snapshot long ago: everything since
         // — row preparation, embeddings — happened outside it, and a concurrent republish of
         // this same id is legal. Placed first, so the refusal rolls back with the transaction
@@ -1828,27 +1838,36 @@ impl WorkspaceBaselineManifestStore for PostgresBaselineAdapter {
 }
 
 impl PostgresBaselineAdapter {
+    /// The roots that will make semantic publication refuse the snapshot this corpus is about
+    /// to become — asked BEFORE publishing, so the caller can skip the expensive phase instead
+    /// of meeting the refusal after it.
+    ///
+    /// Answered from the same two ingredients the refusal itself uses, which is the point: the
+    /// refusal asks the ancestry of the published snapshot, and that ancestry is exactly this
+    /// corpus plus the parent's chain. A caller judging by its own documents alone would
+    /// disagree with the adapter on every delta over a rooted parent — a rootless corpus whose
+    /// ancestry carries roots — and disagreement here costs a full embedding run.
+    pub fn roots_blocking_semantic_publication(
+        &self,
+        parent_snapshot_id: Option<&str>,
+        documents: &[IndexedDocument],
+    ) -> Result<Vec<String>, SearchError> {
+        let mut roots: BTreeSet<String> = documents
+            .iter()
+            .map(|document| document.root_id.clone())
+            .filter(|root_id| root_id != CONFIGURATION_ROOT_ID)
+            .collect();
+        if let Some(parent_snapshot_id) = parent_snapshot_id {
+            let mut client = self.connect()?;
+            roots.extend(roots_in_snapshot_ancestry(&mut *client, self, parent_snapshot_id)?);
+        }
+        Ok(roots.into_iter().collect())
+    }
+
     pub fn migrate_storage(&self) -> Result<(), SearchError> {
         self.ensure_index_names_survive_the_identifier_limit()?;
 
         let mut client = self.connect()?;
-
-        // Forward-only has to be enforced, not remembered. An older build's migrator would
-        // otherwise stamp its own version over a newer schema AND rebuild the keys to its own
-        // shape, undoing the version barrier that keeps every other consumer off a schema it
-        // cannot read. Asked only where there is somewhere to ask: on an empty schema this
-        // migration is the thing that creates the metadata table.
-        if self.storage_table_exists(&mut *client, SCHEMA_METADATA_TABLE)? {
-            if let Some(version) = self.get_schema_version()? {
-                if version > crate::error::SCHEMA_VERSION_CURRENT {
-                    return Err(SearchError::SchemaVersionMismatch {
-                        expected: crate::error::SCHEMA_VERSION_CURRENT,
-                        actual: Some(version),
-                        schema: self.schema.clone(),
-                    });
-                }
-            }
-        }
 
         let statements = self.ensure_schema_statements();
         self.migrate_structure(&mut client, &statements)?;
@@ -1865,39 +1884,105 @@ impl PostgresBaselineAdapter {
         Ok(())
     }
 
-    /// Refuses a schema name that would make two generated index names collide.
+    /// Forward-only, enforced inside the migration's own transaction and under the row lock.
     ///
-    /// PostgreSQL truncates identifiers at 63 bytes, silently and on both sides — declaration
-    /// and lookup — which is why long names appear to work. They stop working when the
-    /// truncation eats the part that TELLS THE NAMES APART: the two secondary indexes here
-    /// differ only after a long common prefix, so past a certain schema name they become one
-    /// name. The migration would then drop one table's index, skip the other's, and still record
-    /// success — a schema quietly missing an index, every answer still correct, only the cost
-    /// changed.
+    /// An older build's migrator would otherwise stamp its own version over a newer schema AND
+    /// rebuild the keys to its own shape, undoing the barrier that keeps consumers off a schema
+    /// they cannot read.
     ///
-    /// Refused rather than shortened: a shorter generated name would orphan the indexes already
-    /// created under the long one, and an over-long schema name is a configuration the caller
-    /// can simply not choose.
-    fn ensure_index_names_survive_the_identifier_limit(&self) -> Result<(), SearchError> {
-        const IDENTIFIER_LIMIT: usize = 63;
-        let longest = ROOTED_SECONDARY_INDEXES
-            .iter()
-            .map(|(suffix, _)| format!("idx_{}_{suffix}", self.schema))
-            .max_by_key(String::len)
-            .expect("the index list is not empty");
-        if longest.len() <= IDENTIFIER_LIMIT {
+    /// Read here rather than before the transaction, and with `FOR UPDATE`: a check outside is
+    /// check-then-act — two migrators of different versions both read the old number, and the
+    /// older one commits last and wins. The lock makes the second reader wait for the first and
+    /// then see what it wrote.
+    ///
+    /// Asked only where there is somewhere to ask: on an empty schema this very migration is
+    /// what creates the metadata table.
+    fn refuse_to_move_a_newer_schema_backwards(
+        &self,
+        tx: &mut Transaction<'_>,
+    ) -> Result<(), SearchError> {
+        if !self.storage_table_exists(tx, SCHEMA_METADATA_TABLE)? {
             return Ok(());
         }
-        Err(SearchError::ExternalBaseline(format!(
-            "schema_name_too_long: index names generated for schema '{}' reach {} bytes, and \
-             PostgreSQL truncates identifiers at {IDENTIFIER_LIMIT}; two of them would collide \
-             and one index would silently go missing. Use a shorter schema name.",
-            self.schema,
-            longest.len()
-        )))
+        let row = tx.query_opt(
+            &format!(
+                "SELECT value::INTEGER FROM {} WHERE setting = 'schema_version' FOR UPDATE",
+                self.table(SCHEMA_METADATA_TABLE)
+            ),
+            &[],
+        )?;
+        let Some(version) = row.map(|row| row.get::<_, i32>(0)) else {
+            return Ok(());
+        };
+        if version <= crate::error::SCHEMA_VERSION_CURRENT {
+            return Ok(());
+        }
+        Err(SearchError::SchemaVersionMismatch {
+            expected: crate::error::SCHEMA_VERSION_CURRENT,
+            actual: Some(version),
+            schema: self.schema.clone(),
+        })
     }
 
-    /// Applies the mandatory half of the migration as one transaction, version included.
+    /// Refuses a schema name only when two generated index names actually COLLIDE after
+    /// truncation.
+    ///
+    /// Truncation by itself is harmless: PostgreSQL cuts identifiers at 63 bytes symmetrically,
+    /// in the declaration and in the lookup alike, which is why long names work. What breaks is
+    /// a collision — when the cut eats the part that tells two names apart, one index is dropped
+    /// in place of another and the migration still records success.
+    ///
+    /// Judged by comparing the truncated names, not by their length: the earlier version of this
+    /// guard refused as soon as the longest name stopped fitting, which is 15 bytes of schema
+    /// name before any collision is possible, and it told the operator that names "would
+    /// collide" when none did. That refusal stood first in `migrate_storage`, so a deployment
+    /// with a merely long schema name could neither migrate nor pass the version check.
+    fn ensure_index_names_survive_the_identifier_limit(&self) -> Result<(), SearchError> {
+        const IDENTIFIER_LIMIT: usize = 63;
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        for name in self.generated_index_names() {
+            let truncated = truncate_identifier(&name, IDENTIFIER_LIMIT);
+            if let Some(other) = seen.insert(truncated.clone(), name.clone()) {
+                if other != name {
+                    return Err(SearchError::ExternalBaseline(format!(
+                        "schema_name_too_long: index names '{other}' and '{name}' both truncate \
+                         to '{truncated}' at PostgreSQL's {IDENTIFIER_LIMIT}-byte identifier \
+                         limit, so one of the two indexes would silently replace the other. Use \
+                         a shorter schema name."
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Every index name this schema's DDL declares, gathered from the DDL itself.
+    ///
+    /// Read out of the generated statements rather than listed by hand, so an index added later
+    /// is covered without anyone remembering to add it here — the failure this guards against is
+    /// precisely one that nobody notices.
+    fn generated_index_names(&self) -> Vec<String> {
+        let prefix = format!("idx_{}_", self.schema);
+        let mut names = Vec::new();
+        for statement in
+            self.ensure_schema_statements().iter().chain(self.pgvector_schema_statements().iter())
+        {
+            let mut rest = statement.as_str();
+            while let Some(at) = rest.find(&prefix) {
+                let tail = &rest[at..];
+                let end =
+                    tail.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(tail.len());
+                let name = tail[..end].to_owned();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+                rest = &tail[end..];
+            }
+        }
+        names
+    }
+
+    /// Applies the mandatory half of the migration as one transaction, version included.    /// Applies the mandatory half of the migration as one transaction, version included.
     ///
     /// Changing a primary key is not idempotent in the middle: between `DROP CONSTRAINT` and
     /// `ADD PRIMARY KEY` the table has no key at all, and an interrupted run would leave a state
@@ -1914,6 +1999,7 @@ impl PostgresBaselineAdapter {
         statements: &[String],
     ) -> Result<(), SearchError> {
         let mut tx = client.transaction()?;
+        self.refuse_to_move_a_newer_schema_backwards(&mut tx)?;
         for statement in statements {
             tx.batch_execute(statement)?;
         }
@@ -2470,7 +2556,7 @@ fn load_snapshot_file_rows(
 /// whole as an overlay — the baseline silently stops being reusable, and the symptom reads as
 /// slowness rather than as a wrong identity. Refusing to store it is the honest answer, and the
 /// name of the extension cannot stand in: several entries are allowed to share one.
-fn ensure_the_roots_mean_the_same_elsewhere(
+pub fn ensure_the_roots_mean_the_same_elsewhere(
     documents: &[IndexedDocument],
 ) -> Result<(), SearchError> {
     let unportable: BTreeSet<&str> = documents
@@ -2506,11 +2592,11 @@ fn ensure_the_roots_mean_the_same_elsewhere(
 /// Conservative on purpose: a corpus whose rooted files have all since been deleted is refused
 /// too. That errs toward refusing, which is the safe direction here, and costs one indexed
 /// existence check instead of materializing the whole visible set on every semantic publish.
-fn refuse_semantic_publication_of_rooted_corpus(
+fn roots_in_snapshot_ancestry(
     client: &mut impl GenericClient,
     adapter: &PostgresBaselineAdapter,
     snapshot_id: &str,
-) -> Result<(), SearchError> {
+) -> Result<Vec<String>, SearchError> {
     let ancestry = snapshot_ancestry_ids(client, adapter, snapshot_id)?;
     let query = format!(
         "SELECT DISTINCT root_id FROM {}
@@ -2519,11 +2605,19 @@ fn refuse_semantic_publication_of_rooted_corpus(
           LIMIT 8",
         adapter.table("snapshot_files")
     );
-    let roots: Vec<String> = client
+    Ok(client
         .query(&query, &[&ancestry, &CONFIGURATION_ROOT_ID])?
         .iter()
         .map(|row| row.get::<_, String>(0))
-        .collect();
+        .collect())
+}
+
+fn refuse_semantic_publication_of_rooted_corpus(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<(), SearchError> {
+    let roots = roots_in_snapshot_ancestry(client, adapter, snapshot_id)?;
     if roots.is_empty() {
         return Ok(());
     }
@@ -2552,6 +2646,18 @@ fn observe_planning_isolation(client: &mut impl GenericClient) -> Result<(), Sea
     let level: String = client.query_one("SHOW transaction_isolation", &[])?.get(0);
     OBSERVED_PLANNING_ISOLATION.with(|cell| *cell.borrow_mut() = Some(level));
     Ok(())
+}
+
+/// An identifier as PostgreSQL will store it: cut to `limit` BYTES, never mid-character.
+fn truncate_identifier(name: &str, limit: usize) -> String {
+    if name.len() <= limit {
+        return name.to_owned();
+    }
+    let mut end = limit;
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_owned()
 }
 
 /// `['a', 'b']` as a PostgreSQL text array, for comparing against a catalog composition.
@@ -5065,6 +5171,164 @@ mod tests {
         assert_eq!(rows, 0, "the refusal must roll back with its transaction");
     }
 
+    /// A republish attempted DURING the final write is serialized behind it.
+    ///
+    /// The earlier version of this guard re-read the roots and wrote afterwards, which only
+    /// narrowed the window: at READ COMMITTED a republish committing between the check and the
+    /// insert is invisible to the check and present in the table.
+    ///
+    /// The rendezvous is a flag rather than a sleep: the republish waits until the write window
+    /// is actually open, so the input hits the window on every run instead of when the timing
+    /// happens to work out. Driven from another thread, because a synchronous republish would
+    /// block on the lock our own transaction holds and the test would hang — which is what the
+    /// first version of it did.
+    ///
+    /// The observable is the END STATE. With the lock the republish lands after our commit and
+    /// its own invalidation clears the rows; without it, the republish commits BEFORE our insert,
+    /// so its invalidation clears nothing and our rows survive for a corpus that is now rooted.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_republish_during_the_final_write_waits_for_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("race");
+        let config = ExternalBaselineConfig::postgres(url).with_schema(&schema);
+        let adapter = PostgresBaselineAdapter::new(config.clone()).unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+
+        const PATH: &str = "CommonModules/Общий/Ext/Module.bsl";
+        let configuration = indexed_document("code", PATH, "Общий", 1, "hash-один", "текст");
+        adapter
+            .publish_snapshot(
+                &Snapshot::new("race".to_owned(), CorpusId::WorkspaceCode),
+                &SnapshotPublishMetadata::default(),
+                std::slice::from_ref(&configuration),
+            )
+            .unwrap();
+
+        // Without a stored embedding the write phase produces no rows at all, and "no rows at
+        // the end" would then hold for any implementation — the assertion below would be green
+        // whether or not the republish slipped in.
+        adapter
+            .store_embeddings(
+                "model",
+                4,
+                &[(
+                    crate::document::semantic_key_from_parts(
+                        PATH,
+                        &configuration.kind,
+                        &configuration.symbol_name,
+                        "",
+                        &configuration.text,
+                    ),
+                    vec![0.1, 0.2, 0.3, 0.4],
+                )],
+            )
+            .unwrap();
+
+        let window_open = Arc::new(AtomicBool::new(false));
+        let republisher = PostgresBaselineAdapter::new(config).unwrap();
+        let extension = IndexedDocument { root_id: "Расш".to_owned(), ..configuration.clone() };
+        let handle = {
+            let window_open = Arc::clone(&window_open);
+            let configuration = configuration.clone();
+            std::thread::spawn(move || {
+                for _ in 0..500 {
+                    if window_open.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                republisher
+                    .publish_snapshot(
+                        &Snapshot::new("race".to_owned(), CorpusId::WorkspaceCode),
+                        &SnapshotPublishMetadata::default(),
+                        &[configuration, extension],
+                    )
+                    .unwrap();
+            })
+        };
+
+        let open_the_window = |event: crate::external_baseline::SemanticPublishProgress| {
+            if matches!(
+                event,
+                crate::external_baseline::SemanticPublishProgress::PhaseStarted {
+                    phase: crate::external_baseline::SemanticPublishPhase::WriteServingRows,
+                    ..
+                }
+            ) {
+                window_open.store(true, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        };
+        adapter
+            .populate_serving_semantic_with_progress("race", "model", 4, Some(&open_the_window))
+            .expect("the corpus was rootless when the write began");
+        handle.join().unwrap();
+
+        let rows: i64 = adapter
+            .connect()
+            .unwrap()
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM {schema}.serving_semantic WHERE snapshot_id = 'race'"
+                ),
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            rows, 0,
+            "the republish must be ordered after the write, so its invalidation clears what the \
+             write produced; rows surviving mean it slipped in between the check and the insert"
+        );
+    }
+
+    /// The prospective question and the refusal give the SAME answer on a rootless delta over a
+    /// rooted parent.
+    ///
+    /// That input is the whole point: a corpus judged by its own documents carries no roots,
+    /// while the snapshot it becomes has a rooted ancestry. Two criteria that disagree here cost
+    /// a full embedding run and leave the command red beside a published baseline.
+    #[test]
+    #[ignore = "requires a live Postgres; set BSL_TEST_PG_URL and run with --ignored"]
+    fn a_rootless_delta_over_a_rooted_parent_is_blocked_before_publishing_too() {
+        let url = std::env::var("BSL_TEST_PG_URL")
+            .expect("BSL_TEST_PG_URL must point to a live Postgres to run this test");
+        let schema = unique_schema("delta");
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres(url).with_schema(&schema),
+        )
+        .unwrap();
+        let _schema_guard = TestSchemaGuard { adapter: adapter.clone(), schema: schema.clone() };
+        adapter.migrate_storage().unwrap();
+        seed_two_rooted_files(&adapter, &schema);
+
+        let rootless = indexed_document("code", "src/B.bsl", "Б", 1, "hash-б", "текст");
+
+        let asked_before = adapter
+            .roots_blocking_semantic_publication(Some("parent"), std::slice::from_ref(&rootless))
+            .unwrap();
+        assert_eq!(
+            asked_before,
+            vec!["Расш".to_owned()],
+            "the parent's roots belong to the answer, or the caller and the adapter disagree"
+        );
+
+        // Positive control: without a rooted ancestry the same rootless corpus is clear.
+        assert!(
+            adapter
+                .roots_blocking_semantic_publication(None, std::slice::from_ref(&rootless))
+                .unwrap()
+                .is_empty(),
+            "a corpus with no roots and no parent must not be blocked"
+        );
+    }
+
     /// The refusal and the reads that follow it see ONE snapshot of the data.
     ///
     /// Observed as the value in force inside production's own transaction, not as a property of
@@ -5249,38 +5513,63 @@ mod tests {
         );
     }
 
-    /// A schema name long enough to make two index names collide is refused before migrating.
+    /// A schema name is refused exactly when two index names truly collide — and not before.
     ///
-    /// Observed offline: the check runs before the connection, so no stand is needed, and the
-    /// positive control is an ordinary name that must get past it and fail on the address.
+    /// Both directions are checked because the earlier guard was wrong in the tolerant one: it
+    /// refused as soon as the longest name stopped fitting, which is well before any collision,
+    /// and that refusal blocks migration outright for a deployment whose only sin is a longish
+    /// schema name.
     #[test]
-    fn a_schema_name_that_collides_index_names_is_refused_before_migrating() {
-        let long = "a".repeat(50);
-        let adapter = PostgresBaselineAdapter::new(
-            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1").with_schema(&long),
-        )
-        .unwrap();
+    fn a_schema_name_is_refused_only_when_index_names_actually_collide() {
+        let refusal_for = |schema: &str| {
+            PostgresBaselineAdapter::new(
+                ExternalBaselineConfig::postgres("postgres://127.0.0.1:1").with_schema(schema),
+            )
+            .unwrap()
+            .migrate_storage()
+            .unwrap_err()
+        };
 
-        let refused = adapter.migrate_storage().unwrap_err();
+        // Long enough that names are truncated, short enough that they stay distinct.
+        let tolerated = refusal_for(&"a".repeat(30));
+        assert_eq!(
+            tolerated.reason_code(),
+            Some("postgres_connect_failed"),
+            "truncation alone is harmless — PostgreSQL cuts declaration and lookup alike: \
+             {tolerated}"
+        );
 
+        // Long enough that two names become one after the cut.
+        let refused = refusal_for(&"a".repeat(50));
         assert_eq!(
             refused.reason_code(),
             Some("schema_name_too_long"),
-            "an index name past the identifier limit must be named, not silently truncated: \
-             {refused}"
-        );
-
-        let ordinary = PostgresBaselineAdapter::new(
-            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1").with_schema("bsl_search"),
-        )
-        .unwrap();
-        assert!(
-            ordinary.migrate_storage().unwrap_err().to_string().contains("connection"),
-            "positive control: an ordinary schema name must reach the database"
+            "a real collision must be named before the database is touched: {refused}"
         );
     }
 
-    /// Re-running the migration is a genuine no-op, proved by object identity.
+    /// The guard reads the index names out of the DDL, so one added later is covered without
+    /// anyone remembering this list.
+    #[test]
+    fn the_guard_sees_every_index_the_ddl_declares() {
+        let adapter = PostgresBaselineAdapter::new(
+            ExternalBaselineConfig::postgres("postgres://example").with_schema("bsl_search"),
+        )
+        .unwrap();
+
+        let names = adapter.generated_index_names();
+
+        assert!(
+            names.iter().any(|name| name.ends_with("_serving_semantic_snapshot_model")),
+            "the optional half of the schema declares indexes too: {names:?}"
+        );
+        assert!(
+            names.len() >= 10,
+            "the DDL declares more indexes than this; the scan is missing some: {names:?}"
+        );
+    }
+
+    /// Re-running the migration is a genuine no-op, proved by object identity.    /// Re-running the migration is a genuine no-op, proved by object identity.
     ///
     /// Composition alone cannot prove it: an implementation that unconditionally drops and
     /// recreates already-correct keys shows the same final composition — while taking the heavy

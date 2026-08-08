@@ -31,9 +31,18 @@ pub enum SearchError {
     StorageNotInitialized { schema: String },
 
     #[error(
-        "schema_version_mismatch: schema {schema} is at version {}, and this build needs {expected}; \
-         run `admin migrate` to bring it forward",
-        .actual.map_or_else(|| "none".to_owned(), |version| version.to_string())
+        "schema_version_mismatch: schema {schema} is at version {}, and this build needs \
+         {expected}; {}",
+        .actual.map_or_else(|| "none".to_owned(), |version| version.to_string()),
+        // The two directions need opposite advice, and only one of them is the common case.
+        // A schema NEWER than the build cannot be migrated forward — `admin migrate` is exactly
+        // the command that just refused it — so telling the operator to run it again sends them
+        // in a loop.
+        if .actual.is_some_and(|version| version > *.expected) {
+            "upgrade this build to one that knows that version"
+        } else {
+            "run `admin migrate` to bring it forward"
+        }
     )]
     SchemaVersionMismatch { expected: i32, actual: Option<i32>, schema: String },
 }
@@ -172,25 +181,75 @@ mod tests {
         }
     }
 
-    /// Every refusal this crate names must be recognised by the classifier, or the name reaches
-    /// nobody: consumers read `reason_code()`, and an unlisted prefix arrives as null there
-    /// while the message still reads as if the failure were identified.
+    /// Every named refusal in the storage adapter is recognised by the classifier.
     ///
-    /// Checked over the whole class rather than for one member, because the list and the
-    /// messages are edited in different files and drift silently apart.
+    /// Read out of the SOURCE rather than from a list written here. The previous version of this
+    /// gate was a third hand-written copy of the same names — it could not fail on the drift it
+    /// was written for, because adding a refusal without touching `KNOWN_REASON_CODES` also
+    /// leaves the test's own list untouched. A gate that restates the thing it guards is not a
+    /// gate.
     #[test]
-    fn every_named_refusal_of_this_crate_has_a_reason_code() {
-        for name in [
-            "serving_lexical_unavailable",
-            "serving_semantic_unavailable",
-            "serving_semantic_rootless",
-            "root_id_not_portable",
-            "schema_name_too_long",
-            "postgres_connect_failed",
-        ] {
+    fn every_named_refusal_in_the_adapter_has_a_reason_code() {
+        let source = include_str!("external_baseline/postgres.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap_or(source);
+
+        let mut checked = 0usize;
+        for occurrence in production.split("ExternalBaseline(").skip(1) {
+            // The refusal's name is the prefix before the first colon of its message, whether the
+            // message is a literal or a `format!`.
+            let Some(quote) = occurrence.find('"') else { continue };
+            let rest = &occurrence[quote + 1..];
+            let Some(colon) = rest.find(':') else { continue };
+            let name = &rest[..colon];
+            if name.is_empty()
+                || !name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                || name.contains('\n')
+            {
+                continue;
+            }
             let error = SearchError::ExternalBaseline(format!("{name}: something went wrong"));
-            assert_eq!(error.reason_code(), Some(name), "{name} is not classified");
+            assert_eq!(
+                error.reason_code(),
+                Some(name),
+                "the adapter names this refusal, but the classifier does not know it"
+            );
+            checked += 1;
         }
+
+        assert!(
+            checked >= 4,
+            "the scan found only {checked} named refusals; it stopped matching the source"
+        );
+    }
+
+    /// The advice matches the DIRECTION of the mismatch.    /// The advice matches the DIRECTION of the mismatch.
+    ///
+    /// One message served both directions, and for a schema newer than the build it named the
+    /// very command that had just refused it.
+    #[test]
+    fn the_version_mismatch_advises_by_direction() {
+        let behind = SearchError::SchemaVersionMismatch {
+            expected: 2,
+            actual: Some(1),
+            schema: "bsl_search".to_owned(),
+        }
+        .to_string();
+        assert!(behind.contains("admin migrate"), "a schema behind the build migrates: {behind}");
+
+        let ahead = SearchError::SchemaVersionMismatch {
+            expected: 2,
+            actual: Some(3),
+            schema: "bsl_search".to_owned(),
+        }
+        .to_string();
+        assert!(
+            ahead.contains("upgrade this build"),
+            "a schema ahead of the build cannot be migrated forward: {ahead}"
+        );
+        assert!(
+            !ahead.contains("admin migrate"),
+            "advising the command that just refused sends the operator in a loop: {ahead}"
+        );
     }
 
     #[test]
