@@ -61,6 +61,14 @@ impl SharedState {
         // generation of a pair that overlaps over them.
         let workspace_lease = crate::workspace_lease::WorkspaceLease::claim(&source_dir);
 
+        // Said once, here, because this is the only point EVERY boot passes. The engine's own
+        // initialization has early exits before it builds a table — an unreachable shared
+        // baseline, a store that will not open — and on those a dropped root would never be
+        // named at all, which is the silence the warning exists to break. The resident builds
+        // the same table on every config drift and deliberately says nothing: a line repeated
+        // per rebuild buries the one that is new.
+        crate::project::warn_about_rejected_roots(&crate::project::workspace_roots(&project).1);
+
         let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
@@ -656,13 +664,8 @@ impl SharedState {
         engine.set_workspace_baseline_hash_mode(hash_mode);
     }
 
-    /// The boot's root table, with every rejected root named. This runs once per engine
-    /// initialization, which is what makes the warning worth emitting here and not inside the
-    /// constructor: the resident builds the same table on every config drift.
     fn roots_of(project: &project_model::Project) -> bsl_search::WorkspaceRoots {
-        let (roots, rejected) = crate::project::workspace_roots(project);
-        crate::project::warn_about_rejected_roots(&rejected);
-        roots
+        crate::project::workspace_roots(project).0
     }
 
     fn semantic_runtime_status_for_mode(

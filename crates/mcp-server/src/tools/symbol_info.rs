@@ -94,11 +94,13 @@ pub(crate) fn resolve_card(
             Some(SymbolPosition { file_id, line, column })
         }
         None => {
-            // `root_id` qualifies `path` and nothing else. Accepting it silently for a
-            // symbol-only request would make the same value a hard error in one shape and a
-            // no-op in the other — and an agent forwarding a hit's root alongside its symbol
-            // would get a card resolved by name, from whichever root owns that name.
-            if root_id.is_some() {
+            // `root_id` qualifies `path` and nothing else, so a root NAMED beside a symbol is
+            // a request that cannot be honoured: the card is resolved by name, from whichever
+            // root owns that name, and answering it silently would make the same value a hard
+            // error in one shape and a no-op in the other. The empty id is not such a root —
+            // it is the configuration, it shifts no card anywhere, and every configuration hit
+            // carries it, so refusing it would break the commonest forwarding of all.
+            if root_id.is_some_and(|root_id| !root_id.is_empty()) {
                 return Err(McpError::invalid_params(
                     "'root_id' spells out which root 'path' is relative to, so it needs a \
                      'path'; a 'symbol' is resolved by name and belongs to no root"

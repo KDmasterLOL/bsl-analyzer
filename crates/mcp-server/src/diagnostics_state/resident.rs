@@ -237,34 +237,6 @@ pub(crate) struct DiagnosticsResident {
     pub(super) author_filter: Option<std::sync::Arc<vcs::AuthorFilter>>,
 }
 
-/// Whether `path` lands inside `root`, compared the same way the file lookup will read it:
-/// through the filesystem's own resolution, so a link is followed rather than trusted. When a
-/// path cannot be canonicalised — it names nothing on disk — the lexical reading stands in, so
-/// a missing file still reaches the ordinary "not in workspace" answer instead of being called
-/// an escape. Comparison is by whole components: a textual prefix would let `ext` swallow
-/// `ext-a`, and those are unrelated directories.
-fn lands_inside(path: &Path, root: &Path) -> bool {
-    let settled = |p: &Path| p.canonicalize().unwrap_or_else(|_| lexically_normalized(p));
-    settled(path).starts_with(settled(root))
-}
-
-/// `..` resolved textually, for a path that does not exist. Not a substitute for
-/// canonicalisation — through a directory link it gives the wrong answer, which is why it is
-/// only ever reached when the filesystem declines to answer at all.
-fn lexically_normalized(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 /// Why a `(root_id, path)` pair names no file. Every case is answered, never guessed: a pair
 /// that cannot be resolved and a pair resolved against some other root are indistinguishable
 /// to the caller, and the second is a wrong answer wearing the shape of a right one.
@@ -349,25 +321,29 @@ impl DiagnosticsResident {
             };
         }
         let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
-        let root = self
-            .workspace_roots
-            .entries()
-            .find(|(id, _)| *id == root_id)
-            .map(|(_, declared)| declared.to_path_buf())
-            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))?;
         let resolved = self
             .workspace_roots
             .resolve(&key)
             .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))?;
-        // Containment is asked of the RESOLVED path, not of the spelling. A ban on `..`
-        // would be both too wide and too narrow: `a/../a/M.bsl` names a file inside the root
-        // and would be refused, while `Alias.bsl` — a link pointing at another root's file —
-        // carries no `..` at all and would pass, only for the lookup to canonicalise it into
-        // that other root. What has to hold is where the path LANDS.
-        if !lands_inside(&resolved, &root) {
+        // Ownership is asked of the SAME procedure that assigned the key in the first place,
+        // not of a prefix comparison invented here. That matters beyond tidiness: the table
+        // deliberately keeps a file that lies outside every root under the root the walk
+        // reached it through, so a configuration hit can legitimately name a file whose
+        // canonical path is nowhere near the configuration — through a directory link out of
+        // the tree. A containment test would refuse exactly those keys, which the index itself
+        // produces, while `root_of` accepts them and still refuses the escapes: a link into
+        // another root canonicalises into it and is attributed there, not here.
+        let canonical = resolved.canonicalize();
+        let settled = canonical.as_deref().unwrap_or(&resolved);
+        let owner = self.workspace_roots.root_of(&resolved, settled);
+        if owner.map(|key| key.root_id) != Some(root_id.to_owned()) {
             return Err(RootedPathError::PathClimbsOutOfRoot(root_id.to_owned()));
         }
-        Ok(resolved)
+        // The CHECKED spelling is what goes back. Returning the one that still contains the
+        // link would leave every consumer to resolve it again, against a filesystem that may
+        // have moved in between — and the answer would come from whatever the link points at
+        // by then, which is the substitution this refuses.
+        Ok(canonical.unwrap_or(resolved))
     }
 
     /// Resolve a request path to the resident FileId, canonicalising it the same way
@@ -1257,9 +1233,10 @@ mod tests {
         };
 
         assert_eq!(
-            detour.as_deref(),
-            Ok(extension.join(detour_rel()).as_path()),
-            "a spelling that stays inside its root is a name for a file there, `..` or not",
+            detour,
+            extension.join(SHARED_MODULE_REL).canonicalize().map_err(|_| unreachable!()),
+            "a spelling that stays inside its root names a file there, `..` or not — and what \
+             comes back is the spelling that was CHECKED, not the one that was sent",
         );
         assert!(
             through_alias.is_some() && through_alias == configuration,
@@ -1268,8 +1245,45 @@ mod tests {
         assert_eq!(aliased, Err(RootedPathError::PathClimbsOutOfRoot(root_id)));
     }
 
-    fn detour_rel() -> &'static str {
-        "CommonModules/Общий/../Общий/Ext/Module.bsl"
+    /// The table keeps a file that lies outside every root under the root the walk reached it
+    /// through, and the index hands out exactly such keys: a directory link out of the tree is
+    /// walked (the enumerator follows links), so the hit reads `(configuration, Linked/M.bsl)`
+    /// while the file itself canonicalises far away. A test for containment would refuse the
+    /// index's own key — asking the table who OWNS the path accepts it and still refuses the
+    /// escapes.
+    #[cfg(unix)]
+    #[test]
+    fn a_key_of_a_file_reached_through_a_link_out_of_the_tree_still_resolves() {
+        use super::super::test_support::{sample_workspace, write};
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let outside = dir.path().join("outside-tree");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        sample_workspace(&workspace);
+        write(
+            &outside,
+            "CommonModules/Связанный/Ext/Module.bsl",
+            "&НаСервере\nФункция Связанная() Экспорт Возврат 1; КонецФункции\n",
+        );
+        std::os::unix::fs::symlink(&outside, workspace.join("Linked")).unwrap();
+
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let through_the_link = "Linked/CommonModules/Связанный/Ext/Module.bsl";
+        let outcome = state.read(|resident, _| {
+            let resolved = resident.resolve_rooted_path(Some(""), Path::new(through_the_link));
+            let served = resolved.as_ref().ok().and_then(|path| resident.file_id_for(path));
+            (resolved.is_ok(), served.is_some())
+        });
+        let ResidentOutcome::Ready((accepted, served), _) = outcome else {
+            panic!("expected Ready")
+        };
+
+        assert!(accepted, "the configuration's key for a linked file is not an escape");
+        assert!(served, "and it names a file this resident serves");
     }
 
     /// The resident's metadata substrate resolves a common module's `Ext/Module.bsl`
