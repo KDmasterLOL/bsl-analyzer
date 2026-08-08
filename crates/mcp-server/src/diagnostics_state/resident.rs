@@ -237,6 +237,34 @@ pub(crate) struct DiagnosticsResident {
     pub(super) author_filter: Option<std::sync::Arc<vcs::AuthorFilter>>,
 }
 
+/// Whether `path` lands inside `root`, compared the same way the file lookup will read it:
+/// through the filesystem's own resolution, so a link is followed rather than trusted. When a
+/// path cannot be canonicalised — it names nothing on disk — the lexical reading stands in, so
+/// a missing file still reaches the ordinary "not in workspace" answer instead of being called
+/// an escape. Comparison is by whole components: a textual prefix would let `ext` swallow
+/// `ext-a`, and those are unrelated directories.
+fn lands_inside(path: &Path, root: &Path) -> bool {
+    let settled = |p: &Path| p.canonicalize().unwrap_or_else(|_| lexically_normalized(p));
+    settled(path).starts_with(settled(root))
+}
+
+/// `..` resolved textually, for a path that does not exist. Not a substitute for
+/// canonicalisation — through a directory link it gives the wrong answer, which is why it is
+/// only ever reached when the filesystem declines to answer at all.
+fn lexically_normalized(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Why a `(root_id, path)` pair names no file. Every case is answered, never guessed: a pair
 /// that cannot be resolved and a pair resolved against some other root are indistinguishable
 /// to the caller, and the second is a wrong answer wearing the shape of a right one.
@@ -320,16 +348,26 @@ impl DiagnosticsResident {
                 Err(RootedPathError::AbsolutePathWithRootId(root_id.to_owned()))
             };
         }
-        // Checked BEFORE the join, on the components the caller actually sent: afterwards `..`
-        // is just another component, and the lookup canonicalises the result into a perfectly
-        // real file elsewhere.
-        if path.components().any(|component| component == std::path::Component::ParentDir) {
+        let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
+        let root = self
+            .workspace_roots
+            .entries()
+            .find(|(id, _)| *id == root_id)
+            .map(|(_, declared)| declared.to_path_buf())
+            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))?;
+        let resolved = self
+            .workspace_roots
+            .resolve(&key)
+            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))?;
+        // Containment is asked of the RESOLVED path, not of the spelling. A ban on `..`
+        // would be both too wide and too narrow: `a/../a/M.bsl` names a file inside the root
+        // and would be refused, while `Alias.bsl` — a link pointing at another root's file —
+        // carries no `..` at all and would pass, only for the lookup to canonicalise it into
+        // that other root. What has to hold is where the path LANDS.
+        if !lands_inside(&resolved, &root) {
             return Err(RootedPathError::PathClimbsOutOfRoot(root_id.to_owned()));
         }
-        let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
-        self.workspace_roots
-            .resolve(&key)
-            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))
+        Ok(resolved)
     }
 
     /// Resolve a request path to the resident FileId, canonicalising it the same way
@@ -1181,6 +1219,57 @@ mod tests {
              configuration's module — a file the resident serves, under the other root",
         );
         assert_eq!(refused, Err(RootedPathError::PathClimbsOutOfRoot(root_id)));
+    }
+
+    /// Containment is about where the path LANDS, so both halves of that have to hold: a
+    /// spelling that walks up and back down inside its own root is a legitimate name for a
+    /// file there, and a link that carries no `..` at all still leaves the root the moment the
+    /// lookup follows it.
+    #[cfg(unix)]
+    #[test]
+    fn containment_follows_the_path_rather_than_its_spelling() {
+        use super::super::test_support::{
+            extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
+        };
+        let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+        // A link inside the extension pointing at the configuration's module: no `..`, and the
+        // lookup canonicalises straight into the other root.
+        let alias = extension.join("Alias.bsl");
+        std::os::unix::fs::symlink(workspace.join(SHARED_MODULE_REL), &alias).unwrap();
+
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let detour = "CommonModules/Общий/../Общий/Ext/Module.bsl";
+        let outcome = state.read(|resident, _| {
+            (
+                resident.resolve_rooted_path(Some(&root_id), Path::new(detour)),
+                resident.resolve_rooted_path(Some(&root_id), Path::new("Alias.bsl")),
+                resident.file_id_for(&workspace.join(SHARED_MODULE_REL)),
+                resident.file_id_for(&alias),
+            )
+        });
+        let ResidentOutcome::Ready((detour, aliased, configuration, through_alias), _) = outcome
+        else {
+            panic!("expected Ready");
+        };
+
+        assert_eq!(
+            detour.as_deref(),
+            Ok(extension.join(detour_rel()).as_path()),
+            "a spelling that stays inside its root is a name for a file there, `..` or not",
+        );
+        assert!(
+            through_alias.is_some() && through_alias == configuration,
+            "the stand is real: followed, the link reaches the configuration's module",
+        );
+        assert_eq!(aliased, Err(RootedPathError::PathClimbsOutOfRoot(root_id)));
+    }
+
+    fn detour_rel() -> &'static str {
+        "CommonModules/Общий/../Общий/Ext/Module.bsl"
     }
 
     /// The resident's metadata substrate resolves a common module's `Ext/Module.bsl`

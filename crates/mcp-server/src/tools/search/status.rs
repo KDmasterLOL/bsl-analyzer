@@ -199,7 +199,12 @@ pub(super) fn search_status_with_cap(
     // neither profile has one, so "no table" cannot tell them apart, and a reference index
     // (which has no source roots by construction) would report a permanent fault.
     if matches!(profile, crate::McpProfile::Workspace) {
-        let _ = writeln!(out, "Source roots:");
+        // Named for the table it actually reads. The search index takes its root table once, at
+        // startup; the diagnostics resident rebuilds its own on every config drift. Between a
+        // config edit and a restart the two disagree, and a bare "Source roots" would present
+        // the older one as the workspace's answer — including to a reader who then feeds a
+        // listed id to `diagnostics file` and is told the root is unknown.
+        let _ = writeln!(out, "Source roots (as the search index was started with):");
         match guard
             .as_ref()
             .and_then(|guard| guard.as_ref())
@@ -907,7 +912,7 @@ mod tests {
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
-        assert!(text.contains("Source roots:"), "{text}");
+        assert!(text.contains("Source roots (as the search index was started with):"), "{text}");
         assert!(text.contains("(configuration)"), "the configuration is named, not blank: {text}");
         assert!(
             text.contains(&extension.display().to_string()),
@@ -951,7 +956,7 @@ mod tests {
         .unwrap();
         let reference = reference.content[0].raw.as_text().expect("text").text.clone();
         assert!(
-            !reference.contains("Source roots:"),
+            !reference.contains("Source roots"),
             "a reference index has no source roots to report: {reference}",
         );
 
@@ -959,15 +964,21 @@ mod tests {
         // prime would. The roots are unchanged all the while — saying "none" here would be a
         // statement about the workspace, when the only true statement is about the read.
         let held: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        // A barrier, not a sleep: the branch under test is the ONLY one that tells "the index
+        // is held" from "there is no index", so it must not depend on the holder winning a
+        // scheduling race against a fixed window.
+        let taken = Arc::new(std::sync::Barrier::new(2));
         let holder = {
             let held = Arc::clone(&held);
+            let taken = Arc::clone(&taken);
             std::thread::spawn(move || {
                 let guard = held.lock().unwrap();
+                taken.wait();
                 std::thread::sleep(Duration::from_millis(200));
                 drop(guard);
             })
         };
-        std::thread::sleep(Duration::from_millis(20));
+        taken.wait();
         let busy = search_status_with_cap(
             crate::McpProfile::Workspace,
             &held,

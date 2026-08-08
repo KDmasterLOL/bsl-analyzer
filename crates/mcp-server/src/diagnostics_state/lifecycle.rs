@@ -550,6 +550,11 @@ impl DiagnosticsState {
         let project = crate::project::at(root)
             .map_err(|e| anyhow::anyhow!("invalid project at {}: {e}", root.display()))?;
         let snapshot = ProjectSnapshot::from_project(&project);
+        // Taken BEFORE the walk, because `WorkspaceRoots::build` canonicalises against the disk
+        // rather than reading the already-loaded project: built afterwards, it could describe a
+        // retargeted symlink the walk never saw, and then the table and `by_path` would be two
+        // snapshots instead of one.
+        let (workspace_roots, _rejected) = crate::project::workspace_roots(&project);
         // ONE scan serves both the resident's file set and the drift baseline
         // below: two walks here could disagree (a file deleted between them would
         // sit in the resident forever, invisible to every later drift scan,
@@ -644,9 +649,7 @@ impl DiagnosticsState {
                 holes,
                 config,
                 workspace_root: root.to_path_buf(),
-                // Built from the project read above, the same one `scan_roots` came from, so
-                // a resolved root can never name files this resident did not enumerate.
-                workspace_roots: crate::project::workspace_roots(&project).0,
+                workspace_roots,
                 diff_base,
                 scope_identity,
                 ignored_authors,
