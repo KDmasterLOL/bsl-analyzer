@@ -46,9 +46,15 @@ pub(crate) fn locale_from(raw: Option<&str>) -> Result<Locale, McpError> {
 /// Resolve the semantic card on the resident host. Runs inside the resident read lock.
 /// `Ok(None)` means the resident could not resolve the request — the caller then offers graph
 /// candidates rather than a hard error. A malformed positional request is a param error.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per declared tool parameter; a grouping struct here would have to be \
+              built at the single call site and taken apart again in the first statement"
+)]
 pub(crate) fn resolve_card(
     resident: &DiagnosticsResident,
     symbol: Option<&str>,
+    root_id: Option<&str>,
     path: Option<&str>,
     line: Option<u32>,
     column: Option<u32>,
@@ -57,20 +63,27 @@ pub(crate) fn resolve_card(
 ) -> Result<Option<SymbolInfoCard>, McpError> {
     let position = match path {
         Some(path) => {
-            let file_id = resident.file_id_for(Path::new(path)).ok_or_else(|| {
+            // Resolved ONCE and bound to the same name, so the unreadable branch below reads
+            // the same file this resolves to rather than the same spelling the caller sent.
+            let path = resident
+                .resolve_rooted_path(root_id, Path::new(path))
+                .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+            let path = path.as_path();
+            let file_id = resident.file_id_for(path).ok_or_else(|| {
                 // Same split as `diagnostics file`: an existing but unreadable file
                 // gets its own answer rather than being called a non-workspace path.
-                if resident.is_unread(Path::new(path)) {
+                if resident.is_unread(path) {
                     McpError::invalid_params(
                         format!(
-                            "'{path}' is a workspace .bsl file whose bytes could not be read; \
-                             it is held out of service and re-read every drift window"
+                            "'{}' is a workspace .bsl file whose bytes could not be read; \
+                             it is held out of service and re-read every drift window",
+                            path.display()
                         ),
                         None,
                     )
                 } else {
                     McpError::invalid_params(
-                        format!("'{path}' is not a resident workspace .bsl file"),
+                        format!("'{}' is not a resident workspace .bsl file", path.display()),
                         None,
                     )
                 }
@@ -294,6 +307,55 @@ mod tests {
             graph_id: Some("method/common/МойМодуль/Сложить".to_string()),
             semantics_unavailable: false,
         }
+    }
+
+    /// The positional request is the one place `symbol_info` takes a path, and a path from a
+    /// `search` hit is spelled against the root that owns it. Answered without the root, this
+    /// lands on the configuration's module of the same name and describes a symbol the caller
+    /// never asked about — which is why the two modules declare differently named functions.
+    #[test]
+    fn a_rooted_position_describes_the_symbol_of_that_root() {
+        use crate::diagnostics_state::test_support::{
+            extension_root_id, wait_ready, workspace_with_an_outside_extension,
+            CONFIGURATION_SYMBOL, EXTENSION_SYMBOL, SHARED_MODULE_REL,
+        };
+        use crate::diagnostics_state::DiagnosticsState;
+
+        let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let card = match state.read(|resident, _| {
+            // Line 1, past `Функция `, is the function's own name in both modules.
+            resolve_card(
+                resident,
+                None,
+                Some(root_id.as_str()),
+                Some(SHARED_MODULE_REL),
+                Some(1),
+                Some(8),
+                sections_from(&[]),
+                Locale::default(),
+            )
+        }) {
+            crate::diagnostics_state::ResidentOutcome::Ready(card, _) => {
+                card.expect("the request resolves").expect("the position names a symbol")
+            }
+            _ => panic!("the resident is ready in this stand"),
+        };
+
+        assert!(
+            card.symbol.contains(EXTENSION_SYMBOL),
+            "the card describes the extension's function: {}",
+            card.symbol,
+        );
+        assert!(
+            !card.symbol.contains(CONFIGURATION_SYMBOL),
+            "and not its configuration namesake: {}",
+            card.symbol,
+        );
     }
 
     #[test]

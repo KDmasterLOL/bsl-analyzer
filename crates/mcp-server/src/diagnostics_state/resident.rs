@@ -213,6 +213,16 @@ pub(crate) struct DiagnosticsResident {
     /// uses (`source_dir`), so an absolute finding path strips to the graph encoder's rel
     /// and the `method/file/<rel>::<name>` graph bridge resolves.
     pub(super) workspace_root: PathBuf,
+    /// The registered source roots, built from the SAME project read that gave this
+    /// resident its file universe. A request path is relative to the root that owns it,
+    /// and only this table can say which directory that is.
+    ///
+    /// It is held here, rather than read from the search engine, because the two must not
+    /// be able to disagree: the engine's copy is published only after a full cold index
+    /// (and never at all if that fails), while `by_path` exists from the moment the
+    /// resident does. A table from the other subsystem could name a root whose files this
+    /// resident never enumerated — resolution would then point at a file it cannot serve.
+    pub(super) workspace_roots: bsl_search::WorkspaceRoots,
     /// `[analysis].diff_base` from the project config; drives the drift-time
     /// rescope so the vendor-diff filter tracks the moving working copy.
     pub(super) diff_base: Option<String>,
@@ -227,7 +237,86 @@ pub(crate) struct DiagnosticsResident {
     pub(super) author_filter: Option<std::sync::Arc<vcs::AuthorFilter>>,
 }
 
+/// Why a `(root_id, path)` pair names no file. Both cases are answered, never guessed: a
+/// pair that cannot be resolved and a pair resolved against some other root are
+/// indistinguishable to the caller, and the second is a wrong answer wearing the shape of a
+/// right one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RootedPathError {
+    /// No root is registered under this id. It is the caller's spelling that is wrong, or
+    /// the workspace declares a different set of extensions than the index the caller read.
+    UnknownRoot(String),
+    /// An absolute path carries its own root, and a second one cannot be honoured: joining a
+    /// root with an absolute path discards the root silently, so the pair would be answered
+    /// from whichever file the path alone names.
+    AbsolutePathUnderRoot(String),
+}
+
+impl RootedPathError {
+    /// The in-band error code. Two different facts never share one code: an unregistered root
+    /// and a pair that cannot be honoured call for different corrections, and one name for
+    /// both would send the reader looking for the wrong thing.
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::UnknownRoot(_) => "unknown_root",
+            Self::AbsolutePathUnderRoot(_) => "absolute_path_under_root",
+        }
+    }
+}
+
+impl std::fmt::Display for RootedPathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownRoot(root_id) => write!(
+                f,
+                "no source root is registered under '{root_id}'; \
+                 `search` reports the roots this workspace knows"
+            ),
+            Self::AbsolutePathUnderRoot(root_id) => write!(
+                f,
+                "an absolute path already names its file, so it cannot also be read under \
+                 root '{root_id}'; pass the path relative to that root, or drop `root_id`"
+            ),
+        }
+    }
+}
+
 impl DiagnosticsResident {
+    /// The file a request names, given the root its path is spelled against.
+    ///
+    /// A search hit's path is relative to ITS OWN root, so the pair is what identifies the
+    /// file; the path alone is ambiguous the moment an extension repeats the configuration's
+    /// layout. Resolution goes through the root table's own [`bsl_search::WorkspaceRoots::resolve`]
+    /// rather than by rebuilding the directory from `root_id`: the identifier is derived from
+    /// the CANONICAL spelling while the file is read back through the DECLARED one, and
+    /// reconstructing it here would be a second attribution procedure to keep in agreement
+    /// with the first.
+    ///
+    /// `None` for `root_id` means the caller said nothing about roots, and the path keeps
+    /// today's reading. An empty `root_id` is not that — it names the configuration, and
+    /// resolving it is what makes a hit's path work when the configuration sits in a
+    /// subdirectory of the workspace.
+    pub(crate) fn resolve_rooted_path(
+        &self,
+        root_id: Option<&str>,
+        path: &Path,
+    ) -> Result<PathBuf, RootedPathError> {
+        let Some(root_id) = root_id else {
+            return Ok(path.to_path_buf());
+        };
+        if path.is_absolute() {
+            return if root_id.is_empty() {
+                Ok(path.to_path_buf())
+            } else {
+                Err(RootedPathError::AbsolutePathUnderRoot(root_id.to_owned()))
+            };
+        }
+        let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
+        self.workspace_roots
+            .resolve(&key)
+            .ok_or_else(|| RootedPathError::UnknownRoot(root_id.to_owned()))
+    }
+
     /// Resolve a request path to the resident FileId, canonicalising it the same way
     /// the loader did. A relative path is resolved against the workspace root (not the
     /// process CWD), so `diagnostics file` works regardless of where the server was
@@ -979,6 +1068,66 @@ mod tests {
             }
             _ => panic!("expected Ready"),
         }
+    }
+
+    /// An absolute path already names one file, so a root cannot also be honoured: joining
+    /// them keeps the absolute path and drops the root SILENTLY, which is how a request
+    /// naming an extension gets answered from the configuration. The refusal is what keeps
+    /// that from happening, and it names which of the two facts was the problem — an
+    /// unregistered root calls for a different correction than a self-contradicting pair.
+    #[test]
+    fn a_rooted_pair_is_refused_rather_than_resolved_against_the_wrong_root() {
+        use super::super::test_support::{
+            extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
+        };
+        let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let outcome = state.read(|resident, _| {
+            let absolute = workspace.join(SHARED_MODULE_REL);
+            (
+                resident.resolve_rooted_path(Some(&root_id), &absolute),
+                resident.resolve_rooted_path(Some("нет-такого"), Path::new(SHARED_MODULE_REL)),
+                resident.resolve_rooted_path(Some(""), &absolute),
+                resident.resolve_rooted_path(None, Path::new(SHARED_MODULE_REL)),
+                resident.resolve_rooted_path(Some(&root_id), Path::new(SHARED_MODULE_REL)),
+            )
+        });
+        let ResidentOutcome::Ready((absolute_under_root, unknown, empty_root, no_root, rooted), _) =
+            outcome
+        else {
+            panic!("expected Ready");
+        };
+
+        assert_eq!(
+            absolute_under_root,
+            Err(RootedPathError::AbsolutePathUnderRoot(root_id.clone())),
+            "an absolute path under a root is refused, not silently read as itself",
+        );
+        assert_eq!(
+            unknown,
+            Err(RootedPathError::UnknownRoot("нет-такого".to_owned())),
+            "an unregistered root is refused by its own name",
+        );
+        assert_eq!(
+            empty_root.as_deref(),
+            Ok(workspace.join(SHARED_MODULE_REL).as_path()),
+            "the configuration's id over an absolute path is not a contradiction",
+        );
+        assert_eq!(
+            no_root.as_deref(),
+            Ok(Path::new(SHARED_MODULE_REL)),
+            "saying nothing about roots keeps the path exactly as it came",
+        );
+        assert_eq!(
+            rooted.as_deref(),
+            Ok(extension.join(SHARED_MODULE_REL).as_path()),
+            "and the pair resolves through the root's own declared spelling",
+        );
     }
 
     /// The resident's metadata substrate resolves a common module's `Ext/Module.bsl`

@@ -1374,7 +1374,7 @@ mod tests {
                 resident.file_id_for(&module),
                 resident.is_unread(&module),
                 resident.unread_count(),
-                crate::tools::diagnostics::file_findings(resident, &module, &filters, 0),
+                crate::tools::diagnostics::file_findings(resident, None, &module, &filters, 0),
             )
         });
         let ResidentOutcome::Ready((file_id, is_unread, unread, findings), fresh) = out else {

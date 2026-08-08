@@ -236,8 +236,13 @@ struct SymbolInfoParams {
     /// (`Документ.ЗаказКлиента.Провести`), or a platform member (`СтрНайти`, `Массив.Добавить`).
     /// Case-insensitive; the MdoType keyword accepts singular or plural, RU or EN.
     symbol: Option<String>,
+    /// `path`: the source root that path is spelled against, as carried by every `search`
+    /// code hit. Omit for a path already spelled against the workspace; `""` names the
+    /// configuration. An extension repeats the configuration's layout, so the same relative
+    /// path exists under several roots and the pair is what names one file.
+    root_id: Option<String>,
     /// Positional fallback for locals/parameters that have no qualified name: absolute or
-    /// workspace-relative `.bsl` path. Requires `line`.
+    /// workspace-relative `.bsl` path, or a path relative to `root_id`. Requires `line`.
     path: Option<String>,
     /// `path`: 0-based line of the symbol occurrence.
     line: Option<u32>,
@@ -258,8 +263,12 @@ struct SymbolInfoParams {
 struct DiagnosticsParams {
     /// catalog | schema | status | file | workspace.
     action: String,
-    /// `file`: absolute or workspace-relative `.bsl` path.
+    /// `file`: absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
     path: Option<String>,
+    /// `file`: the source root `path` is spelled against, as carried by every `search` code
+    /// hit. Omit for a path already spelled against the workspace; `""` names the
+    /// configuration.
+    root_id: Option<String>,
     /// `catalog`: narrow to these codes. `file`: keep only these codes.
     #[serde(default)]
     codes: Vec<String>,
@@ -1060,6 +1069,7 @@ impl McpServer {
         let max_output_tokens =
             p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
         let symbol = p.symbol.clone();
+        let root_id = p.root_id.clone();
         let path = p.path.clone();
         let line = p.line;
         let column = p.column;
@@ -1076,6 +1086,7 @@ impl McpServer {
                     tools::symbol_info::resolve_card(
                         resident,
                         symbol.as_deref(),
+                        root_id.as_deref(),
                         path.as_deref(),
                         line,
                         column,
@@ -1193,6 +1204,7 @@ impl McpServer {
         let diag = self.state.diagnostics().clone();
         let path = require(p.path, "path", "file")?;
         let path = std::path::PathBuf::from(path);
+        let root_id = p.root_id;
 
         diag.ensure_loading();
         match diag.status() {
@@ -1238,7 +1250,13 @@ impl McpServer {
             // the exact resident state queried), and the freshness verdict is computed
             // under that same lock and returned alongside — the envelope is atomic.
             let outcome = diag.read(|resident, generation| {
-                tools::diagnostics::file_findings(resident, &path, &filters, generation)
+                tools::diagnostics::file_findings(
+                    resident,
+                    root_id.as_deref(),
+                    &path,
+                    &filters,
+                    generation,
+                )
             });
             use crate::diagnostics_state::ResidentOutcome;
             match outcome {
@@ -1677,9 +1695,12 @@ mod tool_descriptions {
             (tighten `codes`/`min_severity`/range or raise the budget). When omitted, no token
             budget applies — only the action's own count caps (`max_findings`/`max_files`).
               - min_severity: `file`: inclusive severity floor error|warning|info|hint (default warning).
-              - path: `file`: absolute or workspace-relative `.bsl` path.
+              - path: `file`: absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
               - range_end: `file`: 0-based last line to include (optional).
               - range_start: `file`: 0-based first line to include (optional).
+              - root_id: `file`: the source root `path` is spelled against, as carried by every `search` code
+            hit. Omit for a path already spelled against the workspace; `""` names the
+            configuration.
 
             ## event_log
             Read the 1C infobase event log (журнал регистрации) through the deployed BSL_Analyzer
@@ -1838,7 +1859,11 @@ mod tool_descriptions {
               - max_output_tokens: Output budget in tokens (~4 chars each); an over-budget member list is trimmed and the
             response carries `truncated: true` with a `budget_hint` (default 6000).
               - path: Positional fallback for locals/parameters that have no qualified name: absolute or
-            workspace-relative `.bsl` path. Requires `line`.
+            workspace-relative `.bsl` path, or a path relative to `root_id`. Requires `line`.
+              - root_id: `path`: the source root that path is spelled against, as carried by every `search`
+            code hit. Omit for a path already spelled against the workspace; `""` names the
+            configuration. An extension repeats the configuration's layout, so the same relative
+            path exists under several roots and the pair is what names one file.
               - symbol: Qualified name of the symbol (primary input): a common-module method
             (`ОбщегоНазначения.ЗначениеРеквизитаОбъекта`), a metadata object (`Справочник.Товары`)
             or its attribute (`Справочник.Товары.Артикул`), an object/manager module method

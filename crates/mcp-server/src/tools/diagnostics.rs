@@ -160,10 +160,27 @@ pub(crate) fn parse_detail(s: Option<&str>) -> Result<bool, String> {
 /// `result_id`. Runs inside the resident read lock, on the calling thread.
 pub(crate) fn file_findings(
     resident: &DiagnosticsResident,
+    root_id: Option<&str>,
     path: &Path,
     filters: &FileFilters,
     generation: u64,
 ) -> Value {
+    // Resolved ONCE, here, and bound to the same name: the request path is read again by the
+    // unreadable branch, the blame filter, every finding's graph id, the result id and the
+    // scope verdict, and each of them reads it against the workspace on its own. Shadowing is
+    // what makes the root-relative spelling unreachable below rather than merely unwanted —
+    // the compiler cannot tell the two apart, they are both `&Path`.
+    let path = match resident.resolve_rooted_path(root_id, path) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return json!({
+                "error": error.code(),
+                "detail": error.to_string(),
+                "path": path.to_string_lossy(),
+            });
+        }
+    };
+    let path = path.as_path();
     let Some(file_id) = resident.file_id_for(path) else {
         // A workspace file whose bytes could not be read is NOT "not in workspace":
         // that answer would be a second lie about an existing file, replacing the
@@ -467,7 +484,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "10",
+        "schema_version": "11",
         "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
@@ -495,7 +512,8 @@ fn schema_json() -> Value {
             "locale": "ru | en (default ru) — title language"
         },
         "file_params": {
-            "path": "string — absolute or workspace-relative .bsl path (required)",
+            "path": "string — absolute or workspace-relative .bsl path, or a path relative to root_id (required)",
+            "root_id": "string — the source root `path` is spelled against, as carried by every `search` code hit; omit for a workspace-relative path, \"\" names the configuration (optional)",
             "min_severity": "error | warning | info | hint (default warning) — inclusive floor",
             "codes": "string[] — keep only these codes (optional)",
             "range_start": "usize — 0-based first line to include (optional)",
@@ -580,7 +598,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "10");
+        assert_eq!(body["schema_version"], "11");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
@@ -737,11 +755,22 @@ mod tests {
         }
 
         fn run(state: &DiagnosticsState, path: &Path, filters: &FileFilters) -> Value {
+            run_rooted(state, None, path, filters)
+        }
+
+        /// The rooted form: `root_id` is the source root `path` is spelled against, exactly as
+        /// a `search` code hit carries it.
+        fn run_rooted(
+            state: &DiagnosticsState,
+            root_id: Option<&str>,
+            path: &Path,
+            filters: &FileFilters,
+        ) -> Value {
             // `read` supplies the generation under the lock, so the closure must not
             // re-lock `&self`.
-            match state
-                .read(|resident, generation| file_findings(resident, path, filters, generation))
-            {
+            match state.read(|resident, generation| {
+                file_findings(resident, root_id, path, filters, generation)
+            }) {
                 ResidentOutcome::Ready(v, _) => v,
                 _ => panic!("expected Ready outcome"),
             }
@@ -790,6 +819,124 @@ mod tests {
 
             let body = run(&state, &PathBuf::from("/nope/Missing.bsl"), &default_filters());
             assert_eq!(body["error"], "not_in_workspace");
+        }
+
+        /// A hit's path is spelled against the root that owns it, so the pair is what names
+        /// the file. Answered without the root, this request lands on the configuration's
+        /// module of the same name — a wrong answer in the shape of a right one, which is
+        /// why the stand gives the two modules different text: identical bytes would make
+        /// the two answers indistinguishable however wrong the reading.
+        #[test]
+        fn a_rooted_path_is_answered_from_its_own_root() {
+            use crate::diagnostics_state::test_support::{
+                extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
+            };
+            let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+            let state = ready_state(&workspace);
+            let root_id = extension_root_id(&workspace, &extension);
+
+            let rooted = run_rooted(
+                &state,
+                Some(&root_id),
+                Path::new(SHARED_MODULE_REL),
+                &default_filters(),
+            );
+            let from_the_extension =
+                run(&state, &extension.join(SHARED_MODULE_REL), &default_filters());
+            let from_the_configuration =
+                run(&state, &workspace.join(SHARED_MODULE_REL), &default_filters());
+
+            assert_eq!(
+                rooted["result_id"], from_the_extension["result_id"],
+                "the pair names the extension's module: {rooted}",
+            );
+            assert_ne!(
+                rooted["result_id"], from_the_configuration["result_id"],
+                "and not the configuration's module of the same name: {rooted}",
+            );
+        }
+
+        /// The reading that makes an extension's path work is the same reading a nested
+        /// configuration needs: its hits are spelled against the configuration root, while a
+        /// bare relative path is read against the project root. The two differ exactly when
+        /// the configuration sits in a subdirectory, and no extension is involved.
+        #[test]
+        fn the_configuration_root_id_reads_a_path_against_the_configuration() {
+            use crate::diagnostics_state::test_support::{
+                workspace_with_a_nested_configuration, SHARED_MODULE_REL,
+            };
+            let (_dir, workspace) = workspace_with_a_nested_configuration();
+            let state = ready_state(&workspace);
+
+            let rooted =
+                run_rooted(&state, Some(""), Path::new(SHARED_MODULE_REL), &default_filters());
+            assert!(
+                rooted["error"].is_null(),
+                "the empty root id names the configuration, wherever it sits: {rooted}",
+            );
+            let direct = run(
+                &state,
+                &workspace.join("src").join("cf").join(SHARED_MODULE_REL),
+                &default_filters(),
+            );
+            assert_eq!(rooted["result_id"], direct["result_id"], "and names that file: {rooted}");
+        }
+
+        /// An unregistered root is the caller's error, and saying so is the whole point:
+        /// falling back to the old reading would answer from the configuration's namesake
+        /// and call it the extension's file.
+        #[test]
+        fn an_unregistered_root_is_refused_rather_than_read_as_the_configuration() {
+            use crate::diagnostics_state::test_support::{
+                workspace_with_an_outside_extension, SHARED_MODULE_REL,
+            };
+            let (_dir, workspace, _extension) = workspace_with_an_outside_extension();
+            let state = ready_state(&workspace);
+
+            let body = run_rooted(
+                &state,
+                Some("нет-такого-корня"),
+                Path::new(SHARED_MODULE_REL),
+                &default_filters(),
+            );
+            assert_eq!(body["error"], "unknown_root", "{body}");
+            assert!(
+                body["detail"].as_str().unwrap_or_default().contains("нет-такого-корня"),
+                "the refusal names the root it could not find: {body}",
+            );
+        }
+
+        /// Resolution has to reach every reader of the request path, not just the one that
+        /// picks the FileId. This asks the branch NEXT to it: a file held out of service
+        /// answers `unreadable`, and that answer comes from a separate lookup. Resolve only
+        /// under `file_id_for` and this request reports the CONFIGURATION's readable module
+        /// as "not in workspace" instead.
+        #[cfg(unix)]
+        #[test]
+        fn resolution_reaches_the_unreadable_branch_too() {
+            use crate::diagnostics_state::test_support::{
+                extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
+            };
+            use std::os::unix::fs::PermissionsExt;
+
+            let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+            let root_id = extension_root_id(&workspace, &extension);
+            let closed = extension.join(SHARED_MODULE_REL);
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read(&closed).is_ok() {
+                std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o644)).unwrap();
+                return; // running as root: the mode says nothing about readability
+            }
+            let state = ready_state(&workspace);
+            let body = run_rooted(
+                &state,
+                Some(&root_id),
+                Path::new(SHARED_MODULE_REL),
+                &default_filters(),
+            );
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            assert_eq!(body["error"], "unreadable", "{body}");
         }
 
         #[test]

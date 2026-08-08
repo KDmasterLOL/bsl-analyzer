@@ -236,7 +236,7 @@ mod tests {
     }
 
     /// The keys the CONSUMER derives from the same tree: the daemon's own root table
-    /// (`bootstrap::workspace_roots_of`), its own walk universe (every REGISTERED root, as
+    /// (`project::workspace_roots`), its own walk universe (every REGISTERED root, as
     /// `workspace_overlay::scan_workspace_files` declares it) and its own attribution
     /// (`WorkspaceRoots::root_of`).
     ///

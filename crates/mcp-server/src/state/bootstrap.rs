@@ -656,26 +656,6 @@ impl SharedState {
         engine.set_workspace_baseline_hash_mode(hash_mode);
     }
 
-    /// The engine's root table for one project: the configuration root plus every declared
-    /// extension, identified relative to the PROJECT directory — the identity
-    /// [`bsl_search::WorkspaceRoots`] documents and the one stored rows carry across restarts.
-    /// Rejected roots are named with their reason: a silently dropped root looks exactly like a
-    /// tree nobody edited.
-    fn workspace_roots_of(project: &project_model::Project) -> bsl_search::WorkspaceRoots {
-        let extensions: Vec<PathBuf> =
-            project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
-        let (roots, rejected) =
-            bsl_search::WorkspaceRoots::build(&project.root, project.source_path(), &extensions);
-        for rejection in rejected {
-            tracing::warn!(
-                path = ?rejection.path,
-                reason = ?rejection.reason,
-                "extension root is not registered in the search index",
-            );
-        }
-        roots
-    }
-
     fn semantic_runtime_status_for_mode(
         engine: &SearchEngine,
         mode: &WorkspaceSearchMode,
@@ -762,7 +742,7 @@ impl SharedState {
             let mut engine = Self::open_workspace_overlay_search_engine(&db_path)?;
             Self::configure_workspace_engine(
                 &mut engine,
-                Self::workspace_roots_of(&project),
+                crate::project::workspace_roots(&project),
                 BaselineHashMode::NormalizedChunks,
             );
             if let Err(error) = engine.set_serves_external_baseline(true) {
@@ -872,7 +852,7 @@ impl SharedState {
 
         Self::configure_workspace_engine(
             &mut engine,
-            Self::workspace_roots_of(&project),
+            crate::project::workspace_roots(&project),
             BaselineHashMode::RawFileBytes,
         );
         // Declaring the local mode also clears inherited fingerprint rows: they claim

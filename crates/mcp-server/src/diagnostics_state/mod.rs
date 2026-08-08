@@ -32,7 +32,7 @@ mod lifecycle;
 mod resident;
 mod snapshot;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod types;
 mod workspace_sweep;
 
