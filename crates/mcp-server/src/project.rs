@@ -96,6 +96,20 @@ mod tests {
         }
     }
 
+    /// Occurrences of `needle` that are whole identifiers — neither preceded nor
+    /// followed by a character that could continue one. `foo_extension_paths` is a
+    /// different name and must not be counted as this one.
+    fn whole_word_occurrences(text: &str, needle: &str) -> usize {
+        let continues = |c: char| c.is_alphanumeric() || c == '_';
+        text.match_indices(needle)
+            .filter(|(at, _)| {
+                let before = text[..*at].chars().next_back();
+                let after = text[at + needle.len()..].chars().next();
+                !before.is_some_and(continues) && !after.is_some_and(continues)
+            })
+            .count()
+    }
+
     /// Every root set in this crate comes from one derivation. The two accessors
     /// that hand back extension directories separately are what a second, hand-built
     /// set would have to reach for, so each gets exactly one place: the one that
@@ -109,7 +123,12 @@ mod tests {
     /// rebuild the set by hand also carried a comment claiming it armed "the SAME
     /// targets production arms" — a claim nothing held true.
     ///
-    /// The needles are assembled at runtime so this file does not match itself.
+    /// The names are matched as whole identifiers, NOT as a name plus its call
+    /// parentheses: a needle carrying the parentheses is a rule about one call
+    /// syntax, and the UFCS spelling `Project::…(p)` — the same accessor, the same
+    /// second root table — walks straight past it. The needles are assembled at
+    /// runtime so this file does not match itself; for the same reason neither
+    /// name is written out anywhere in this module, prose included.
     #[test]
     fn the_root_set_is_derived_in_exactly_one_place() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -117,13 +136,13 @@ mod tests {
         rust_sources(&src, &mut files);
         assert!(files.len() > 20, "the source scan found almost nothing: {}", files.len());
 
-        let needles = [["extension_", "paths()"].concat(), ["extension_", "topology()"].concat()];
+        let needles = [["extension_", "paths"].concat(), ["extension_", "topology"].concat()];
         let mut sites: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for file in &files {
             let text = std::fs::read_to_string(file).expect("read crate source");
             let rel = file.strip_prefix(&src).expect("source under src").display().to_string();
             for needle in &needles {
-                for _ in 0..text.matches(needle.as_str()).count() {
+                for _ in 0..whole_word_occurrences(&text, needle) {
                     sites.entry(needle.as_str()).or_default().push(rel.replace('\\', "/"));
                 }
             }
