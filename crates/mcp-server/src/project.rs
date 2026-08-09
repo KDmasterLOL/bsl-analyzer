@@ -110,6 +110,17 @@ mod tests {
             .count()
     }
 
+    /// Neutral names on purpose: the gate below counts the real ones, so writing
+    /// them here would make this test a finding of that one.
+    #[test]
+    fn a_whole_word_match_is_not_a_substring_match() {
+        assert_eq!(whole_word_occurrences("bar bar", "bar"), 2, "plain occurrences count");
+        assert_eq!(whole_word_occurrences("foo_bar", "bar"), 0, "a longer name is another name");
+        assert_eq!(whole_word_occurrences("bar_baz", "bar"), 0, "so is a longer name after it");
+        assert_eq!(whole_word_occurrences("Type::bar(x)", "bar"), 1, "UFCS is the same name");
+        assert_eq!(whole_word_occurrences("x.bar()", "bar"), 1, "so is a method call");
+    }
+
     /// Every root set in this crate comes from one derivation. The two accessors
     /// that hand back extension directories separately are what a second, hand-built
     /// set would have to reach for, so each gets exactly one place: the one that
@@ -127,8 +138,10 @@ mod tests {
     /// parentheses: a needle carrying the parentheses is a rule about one call
     /// syntax, and the UFCS spelling `Project::…(p)` — the same accessor, the same
     /// second root table — walks straight past it. The needles are assembled at
-    /// runtime so this file does not match itself; for the same reason neither
-    /// name is written out anywhere in this module, prose included.
+    /// runtime so this file does not match itself; for the same reason neither name
+    /// appears bare in this module, prose included. The one near-occurrence — the
+    /// longer name in the helper's doc — is excluded by the very boundary rule the
+    /// helper implements, so removing that rule fails this gate too.
     #[test]
     fn the_root_set_is_derived_in_exactly_one_place() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
