@@ -10,25 +10,53 @@ use crate::DefDatabase;
 
 use bsl_config::VisibleConfig;
 
-/// The body files of one common module, split by whether their bytes could be read.
+/// The body files of one common module, each carrying whether its bytes could be read.
 ///
-/// The split is the whole point: a resolver handed only the readable ones cannot tell
-/// "the module does not export this method" from "the method may live in the body
+/// The distinction is the whole point: a resolver handed only the readable ones cannot
+/// tell "the module does not export this method" from "the method may live in the body
 /// nobody could read", and answering the first when the second is true blames a file
 /// that did nothing wrong.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommonModuleBodies {
-    /// Bodies whose text stands for the module's API.
-    pub readable: Vec<FileId>,
-    /// Bodies that exist but could not be read. Never overlaps `readable`.
-    pub unread: Vec<FileId>,
+    /// Every body of the module IN PRIORITY ORDER, readable or not.
+    ///
+    /// One ordered list rather than two, because the order is semantic: the base
+    /// declaration wins over an extension's, so a method found in a later body is
+    /// only the answer if every earlier body was readable and did not have it. Two
+    /// separate lists lose exactly that relation, and the loss is invisible — the
+    /// wrong body simply answers.
+    pub bodies: Vec<CommonModuleBody>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommonModuleBody {
+    pub file: FileId,
+    /// The file exists but its bytes could not be read, so it says nothing about
+    /// what the module does or does not export.
+    pub unread: bool,
 }
 
 impl CommonModuleBodies {
-    /// No body of this module is known at all — neither readable nor unread. The
-    /// signal to degrade to the path-derived module index.
+    /// No body of this module is known at all. The signal to degrade to the
+    /// path-derived module index.
     pub fn is_empty(&self) -> bool {
-        self.readable.is_empty() && self.unread.is_empty()
+        self.bodies.is_empty()
+    }
+
+    /// The bodies whose text may be read as the module's API, in priority order.
+    pub fn readable(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.bodies.iter().filter(|b| !b.unread).map(|b| b.file)
+    }
+
+    /// The bodies that exist but could not be read, in priority order.
+    pub fn unread(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.bodies.iter().filter(|b| b.unread).map(|b| b.file)
+    }
+
+    pub fn push(&mut self, file: FileId, unread: bool) {
+        if !self.bodies.iter().any(|b| b.file == file) {
+            self.bodies.push(CommonModuleBody { file, unread });
+        }
     }
 }
 
@@ -114,10 +142,10 @@ pub trait ConfigsDatabase: DefDatabase {
     /// other extension's adoption is visible to this file.
     ///
     /// `None` means the provider has no visibility-scoped body lookup — the
-    /// caller falls back to the path-derived module index. A `Some` with both
-    /// lists empty means the configs know the module but no body file mapped
-    /// (metadata-URI drift); callers should degrade to the path index rather
-    /// than report the module missing.
+    /// caller falls back to the path-derived module index. An empty `Some` means
+    /// the configs know the module but no body file mapped (metadata-URI drift);
+    /// callers should degrade to the path index rather than report the module
+    /// missing.
     fn resolve_common_module_file_candidates(
         &self,
         file_id: FileId,

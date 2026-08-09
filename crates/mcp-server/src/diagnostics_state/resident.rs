@@ -847,8 +847,8 @@ pub(super) fn apply_resident_changes(
         resident.by_path.insert(path.clone(), file_id);
         // A path returning to service leaves the hole list, whichever branch brings it
         // back. `by_path` and `holes` must not intersect: the workspace denominator is
-        // their sum, and `unread_bodies()` would hand the substrate a path it is
-        // serving, blanking the back-link of a module that reads perfectly well.
+        // their sum, and the hole list drives the retry pass — a served path left in it
+        // would be re-read from disk every drift window for nothing.
         resident.holes.remove(path.as_str());
         moved = true;
     }

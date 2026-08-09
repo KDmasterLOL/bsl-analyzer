@@ -357,9 +357,8 @@ pub fn resolve_summary_via_index(
                     // Base body first, then the caller's own extension body —
                     // the first hit mirrors `resolve_qualified_method`.
                     Ok(candidates) => match candidates
-                        .readable
-                        .iter()
-                        .find_map(|&m| index.find_method(m, method_name).map(|hit| (m, hit)))
+                        .readable()
+                        .find_map(|m| index.find_method(m, method_name).map(|hit| (m, hit)))
                     {
                         Some((target_module, m)) if m.is_export => (
                             ResolvedTarget::Method(MethodId {
@@ -400,7 +399,7 @@ pub fn resolve_summary_via_index(
                     object_name: object_name.clone(),
                 };
                 match resolver.locate_manager_module(db, *manager_type, object_name) {
-                    Ok(target_module) => match index.find_method(target_module, method_name) {
+                    Ok(located) => match index.find_method(located.module, method_name) {
                         // A user manager-module method on a fully-literal
                         // `Коллекция.Объект.Метод()` path: the object name is a token and its
                         // manager module is uniquely determined, so locating the exported method
@@ -408,7 +407,7 @@ pub fn resolve_summary_via_index(
                         // call. The edge is about the method.
                         Some(m) if m.is_export => (
                             ResolvedTarget::Method(MethodId {
-                                module: target_module,
+                                module: located.module,
                                 local_id: m.local_id,
                             }),
                             EdgeProvenance::Resolved,
@@ -484,9 +483,8 @@ pub fn resolve_summary_via_index(
             .locate_common_module_candidates(db, module_name)
         {
             Ok(candidates) => match candidates
-                .readable
-                .iter()
-                .find_map(|&m| index.find_method(m, method_name).map(|hit| (m, hit)))
+                .readable()
+                .find_map(|m| index.find_method(m, method_name).map(|hit| (m, hit)))
             {
                 Some((target_module, m)) if m.is_export => {
                     crate::queries::QualifiedLookup::Resolved(MethodId {
@@ -743,12 +741,9 @@ pub fn extract_unresolved_refs(
                 if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
                     // No candidate resolves the call: track every body so adding
                     // the method to either (base or own extension) reprojects.
-                    if candidates
-                        .readable
-                        .iter()
-                        .all(|&m| unresolved(index.find_method(m, method_name)))
+                    if candidates.readable().all(|m| unresolved(index.find_method(m, method_name)))
                     {
-                        for target in candidates.readable {
+                        for target in candidates.readable() {
                             out.push((target, method_name.as_str().fold_lower()));
                         }
                     }
@@ -757,7 +752,7 @@ pub fn extract_unresolved_refs(
                     // just as well as declaring it can, and without this reference the
                     // caller is never reprojected and the incremental graph keeps an
                     // edge the full rebuild has.
-                    for target in candidates.unread {
+                    for target in candidates.unread() {
                         out.push((target, method_name.as_str().fold_lower()));
                     }
                 }
@@ -767,9 +762,15 @@ pub fn extract_unresolved_refs(
                 object_name,
                 method_name: Some(method_name),
             } => {
-                if let Ok(target) = resolver.locate_manager_module(db, *manager_type, object_name) {
-                    if unresolved(index.find_method(target, method_name)) {
-                        out.push((target, method_name.as_str().fold_lower()));
+                if let Ok(located) = resolver.locate_manager_module(db, *manager_type, object_name)
+                {
+                    // An unread manager module is tracked unconditionally, for the same
+                    // reason as an unread common-module body: its surface is unknown, so
+                    // becoming readable can add the method, and without the reference the
+                    // caller is never reprojected.
+                    if located.unread || unresolved(index.find_method(located.module, method_name))
+                    {
+                        out.push((located.module, method_name.as_str().fold_lower()));
                     }
                 }
             }
@@ -785,15 +786,14 @@ pub fn extract_unresolved_refs(
         if let crate::call_graph::NotifyTarget::Module(module_name) = &reg.target {
             if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
                 if candidates
-                    .readable
-                    .iter()
-                    .all(|&m| unresolved(index.find_method(m, &reg.callback_name)))
+                    .readable()
+                    .all(|m| unresolved(index.find_method(m, &reg.callback_name)))
                 {
-                    for target in candidates.readable {
+                    for target in candidates.readable() {
                         out.push((target, reg.callback_name.as_str().fold_lower()));
                     }
                 }
-                for target in candidates.unread {
+                for target in candidates.unread() {
                     out.push((target, reg.callback_name.as_str().fold_lower()));
                 }
             }

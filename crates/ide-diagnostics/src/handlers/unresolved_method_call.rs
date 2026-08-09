@@ -147,11 +147,51 @@ mod tests {
             "with every body readable the method really is missing: {control:?}"
         );
 
-        let unread =
-            check_with_cfe_unreadable(source, build(), &["Extensions/Расш/CommonModules/Сервер"]);
+        let unread = check_with_cfe_unreadable(
+            source,
+            build(),
+            &["Extensions/Расш/CommonModules/Сервер/Ext/Module.bsl"],
+        );
         assert!(
             !unread.iter().any(|d| d.code == DiagnosticCode::UnresolvedMethodCall),
             "the method may well live in the body nobody could read: {unread:?}"
+        );
+    }
+
+    /// Priority runs base-before-extension, so a hit in the extension body is the
+    /// answer only when the base body was readable and did not have the method. With
+    /// the base unread, the extension's non-exported `П` must not produce a verdict:
+    /// the base may well export one, and its declaration would have won.
+    #[test]
+    fn an_unread_base_body_bars_a_verdict_from_the_extension_body_behind_it() {
+        use crate::test_utils::{check_with_cfe, check_with_cfe_unreadable};
+
+        let source = r#"
+Процедура Тест() Экспорт
+    Сервер.П();
+КонецПроцедуры
+"#;
+        let build = || {
+            let mut builder = test_fixture::CfeFixtureBuilder::new("");
+            builder.add_base_module("Сервер", "Процедура П() Экспорт КонецПроцедуры");
+            builder.add_extension("Расш", "");
+            builder.add_extension_module("Расш", "Сервер", "Процедура П() КонецПроцедуры");
+            builder.build()
+        };
+
+        // Control: with the base readable its exported `П` wins and nothing is reported,
+        // so the assertion below is about the unread base and not about the fixture.
+        let control = check_with_cfe(source, build());
+        assert!(
+            !control.iter().any(|d| d.code == DiagnosticCode::UnresolvedMethodCall),
+            "the base body exports П and has priority: {control:?}"
+        );
+
+        let unread =
+            check_with_cfe_unreadable(source, build(), &["CommonModules/Сервер/Ext/Module.bsl"]);
+        assert!(
+            !unread.iter().any(|d| d.code == DiagnosticCode::UnresolvedMethodCall),
+            "an unread base body bars the extension from answering for it: {unread:?}"
         );
     }
 

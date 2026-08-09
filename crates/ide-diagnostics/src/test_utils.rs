@@ -994,9 +994,10 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
 }
 
 /// [`check_with_cfe`], with the named module bodies registered as existing but
-/// unreadable. Names are matched against the body's full path, so
-/// `"Extensions/Расш/CommonModules/Сервер"` picks the extension's body and leaves the
-/// base configuration's body of the same module readable.
+/// unreadable. Names are paths relative to the fixture root and are matched WHOLE, so
+/// `"CommonModules/Сервер/Ext/Module.bsl"` names the base body and
+/// `"Extensions/Расш/CommonModules/Сервер/Ext/Module.bsl"` its extension sibling —
+/// a substring match would silently take both.
 pub fn check_with_cfe_unreadable(
     source: &str,
     fixture: test_fixture::CfeFixture,
@@ -1027,10 +1028,16 @@ pub fn check_with_cfe_unreadable(
     file_set.insert(caller_file_id, VfsPath::new(caller_path.to_string_lossy().into_owned()));
 
     let mut module_files = Vec::new();
+    let relative_to_root = |path: &std::path::Path| {
+        path.strip_prefix(fixture.root())
+            .expect("every fixture body lives under the fixture root")
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
     for module in fixture.base_modules() {
         let fid = FileId((module_files.len() + 1) as u32);
         let path = fixture.root().join(format!("CommonModules/{}/Ext/Module.bsl", module.name()));
-        let spelling = path.to_string_lossy().replace('\\', "/");
+        let spelling = relative_to_root(&path);
         file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
         module_files.push((fid, module.source(), spelling));
     }
@@ -1039,7 +1046,7 @@ pub fn check_with_cfe_unreadable(
             let fid = FileId((module_files.len() + 1) as u32);
             let path =
                 extension.root().join(format!("CommonModules/{}/Ext/Module.bsl", module.name()));
-            let spelling = path.to_string_lossy().replace('\\', "/");
+            let spelling = relative_to_root(&path);
             file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
             module_files.push((fid, module.source(), spelling));
         }
@@ -1052,7 +1059,7 @@ pub fn check_with_cfe_unreadable(
     let mut marked = 0usize;
     for (fid, body, spelling) in module_files {
         db.set_file_source_root(fid, SourceRootId(0));
-        if unreadable.iter().any(|u| spelling.contains(u)) {
+        if unreadable.iter().any(|u| spelling == *u) {
             db.set_file_unreadable(fid);
             marked += 1;
         } else {

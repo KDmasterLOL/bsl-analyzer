@@ -1819,14 +1819,10 @@ impl RootDatabaseImpl {
             {
                 let index = metadata::common_module_index(self, listing);
                 if let Some(fid) = index.lookup_module_file(name) {
-                    if !out.readable.contains(&fid) {
-                        out.readable.push(fid);
-                    }
+                    out.push(fid, false);
                 }
                 if let Some(fid) = index.lookup_unread_module_file(name) {
-                    if !out.unread.contains(&fid) {
-                        out.unread.push(fid);
-                    }
+                    out.push(fid, true);
                 }
             }
             return out;
@@ -1854,10 +1850,7 @@ impl RootDatabaseImpl {
         // The scan resolves a URI to an id without ever reading it, so readability is
         // asked here — the same question the substrate branch answers from its index.
         let admit = |out: &mut hir::CommonModuleBodies, fid: FileId| {
-            let bucket = if self.file_is_unread(fid) { &mut out.unread } else { &mut out.readable };
-            if !bucket.contains(&fid) {
-                bucket.push(fid);
-            }
+            out.push(fid, self.file_is_unread(fid))
         };
 
         if paths.is_empty() {
@@ -2285,8 +2278,7 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         // The helper orders extension-first for merged-surface validation;
         // qualified resolution wants the base declaration to win, so reverse.
         let mut bodies = self.resolve_common_module_files_for_file(file_id, name);
-        bodies.readable.reverse();
-        bodies.unread.reverse();
+        bodies.bodies.reverse();
         Some(bodies)
     }
 
@@ -2632,7 +2624,9 @@ impl RootDatabase for RootDatabaseImpl {
     fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
         // Readable only: every consumer of this reads the body to decide what the
         // module offers, and an unread body offers nothing it can be trusted on.
-        RootDatabaseImpl::resolve_common_module_files_for_file(self, file_id, name).readable
+        RootDatabaseImpl::resolve_common_module_files_for_file(self, file_id, name)
+            .readable()
+            .collect()
     }
 
     fn all_sdbl_in_file(

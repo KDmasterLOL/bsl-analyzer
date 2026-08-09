@@ -327,7 +327,7 @@ impl Resolver {
             // in both keeps the base declaration, an extension-added export is
             // appended after it.
             let mut seen = rustc_hash::FxHashSet::default();
-            for module_id in candidates.readable {
+            for module_id in candidates.readable() {
                 let symbol_tree = db.symbol_tree_ref(module_id);
                 for method in symbol_tree.exported_methods() {
                     if seen.insert(intern::NormName::intern(method.name.as_str())) {
@@ -474,8 +474,11 @@ impl Resolver {
                     // have. Reporting the outcome here would also hide the unread ids
                     // from the graph index, which needs them to reproject on healing.
                     return Ok(CommonModuleCandidates {
-                        readable: bodies.readable.into_iter().map(crate::ModuleId::new).collect(),
-                        unread: bodies.unread.into_iter().map(crate::ModuleId::new).collect(),
+                        bodies: bodies
+                            .bodies
+                            .into_iter()
+                            .map(|b| (crate::ModuleId::new(b.file), b.unread))
+                            .collect(),
                     });
                 }
                 // Configs see the module but no body file mapped (metadata-URI
@@ -495,11 +498,8 @@ impl Resolver {
         // exactly like any other file — its entry cannot be dropped, because the first
         // query through a dropped id panics resolving its path. So the sorting happens
         // here, on the way out.
-        let target = crate::ModuleId::new(target_file_id);
-        Ok(if db.file_is_unread(target_file_id) {
-            CommonModuleCandidates { readable: Vec::new(), unread: vec![target] }
-        } else {
-            CommonModuleCandidates { readable: vec![target], unread: Vec::new() }
+        Ok(CommonModuleCandidates {
+            bodies: vec![(crate::ModuleId::new(target_file_id), db.file_is_unread(target_file_id))],
         })
     }
 
@@ -513,7 +513,14 @@ impl Resolver {
             tracing::info_span!("resolve_qualified_method", %module_name, %method_name).entered();
 
         let candidates = self.locate_common_module_candidates(db, module_name)?;
-        for target_module_id in candidates.readable {
+        for (target_module_id, unread) in candidates.bodies {
+            // Walking in priority order and stopping at the first unread body is what
+            // keeps a lower-priority body from answering for a higher-priority one
+            // whose surface is unknown: the unread base may well declare this method,
+            // and its declaration would have won.
+            if unread {
+                return Err(QualifiedMethodError::BodyUnread);
+            }
             let symbol_tree = db.symbol_tree_ref(target_module_id);
             if let Some(method_symbol) = symbol_tree.find_method(method_name) {
                 return Ok(QualifiedMethodResolution {
@@ -521,11 +528,6 @@ impl Resolver {
                     is_export: method_symbol.is_export,
                 });
             }
-        }
-        // Not finding the method among the bodies we could read is only evidence that
-        // it is missing if we could read them all.
-        if !candidates.unread.is_empty() {
-            return Err(QualifiedMethodError::BodyUnread);
         }
         Err(QualifiedMethodError::NotFound)
     }
@@ -581,7 +583,7 @@ impl Resolver {
         db: &dyn ConfigsDatabase,
         manager_type: crate::body::ManagerType,
         mdo_name: &Name,
-    ) -> Result<ModuleId, QualifiedMethodError> {
+    ) -> Result<ManagerModuleTarget, QualifiedMethodError> {
         let mdo_type = manager_type.to_mdo_type();
 
         let current_module_id = self.module_id().ok_or_else(|| {
@@ -603,13 +605,14 @@ impl Resolver {
             .resolve_manager(manager_type, mdo_name)
             .ok_or(QualifiedMethodError::NotFound)?;
 
-        // Same rule as the common-module route: a body the path index still names but
-        // nobody could read supports no verdict about the module's surface.
-        if db.file_is_unread(target_file_id) {
-            return Err(QualifiedMethodError::BodyUnread);
-        }
-
-        Ok(crate::ModuleId::new(target_file_id))
+        // Composition, not a verdict — same reason as the common-module route. Callers
+        // that know the method name turn "not found in an unread body" into
+        // `BodyUnread`; the graph index needs the id either way, or healing the body
+        // reprojects nobody.
+        Ok(ManagerModuleTarget {
+            module: crate::ModuleId::new(target_file_id),
+            unread: db.file_is_unread(target_file_id),
+        })
     }
 
     pub fn resolve_manager_method(
@@ -627,11 +630,14 @@ impl Resolver {
         )
         .entered();
 
-        let target_module_id = self.locate_manager_module(db, manager_type, mdo_name)?;
-        let symbol_tree = db.symbol_tree_ref(target_module_id);
+        let target = self.locate_manager_module(db, manager_type, mdo_name)?;
+        let symbol_tree = db.symbol_tree_ref(target.module);
 
-        let method_symbol =
-            symbol_tree.find_method(method_name).ok_or(QualifiedMethodError::NotFound)?;
+        let method_symbol = symbol_tree.find_method(method_name).ok_or(if target.unread {
+            QualifiedMethodError::BodyUnread
+        } else {
+            QualifiedMethodError::NotFound
+        })?;
 
         Ok(QualifiedMethodResolution {
             method_id: method_symbol.id,
@@ -703,12 +709,6 @@ impl Resolver {
                 QualifiedMethodError::NotFound
             })?;
 
-        // Same rule as the common-module route: a body the path index still names but
-        // nobody could read supports no verdict about the module's surface.
-        if db.file_is_unread(target_file_id) {
-            return Err(QualifiedMethodError::BodyUnread);
-        }
-
         let target_module_id = crate::ModuleId::new(target_file_id);
         let symbol_tree = db.symbol_tree_ref(target_module_id);
 
@@ -719,7 +719,12 @@ impl Resolver {
                 mdo_name,
                 method_name
             );
-            QualifiedMethodError::NotFound
+            // Not finding it in a body nobody could read is not a finding.
+            if db.file_is_unread(target_file_id) {
+                QualifiedMethodError::BodyUnread
+            } else {
+                QualifiedMethodError::NotFound
+            }
         })?;
 
         tracing::info!(
@@ -777,12 +782,6 @@ impl Resolver {
                 QualifiedMethodError::NotFound
             })?;
 
-        // Same rule as the common-module route: a body the path index still names but
-        // nobody could read supports no verdict about the module's surface.
-        if db.file_is_unread(target_file_id) {
-            return Err(QualifiedMethodError::BodyUnread);
-        }
-
         let target_module_id = crate::ModuleId::new(target_file_id);
         let symbol_tree = db.symbol_tree_ref(target_module_id);
 
@@ -793,7 +792,12 @@ impl Resolver {
                 mdo_name,
                 method_name
             );
-            QualifiedMethodError::NotFound
+            // Not finding it in a body nobody could read is not a finding.
+            if db.file_is_unread(target_file_id) {
+                QualifiedMethodError::BodyUnread
+            } else {
+                QualifiedMethodError::NotFound
+            }
         })?;
 
         tracing::info!(
@@ -871,16 +875,31 @@ pub enum QualifiedMethodError {
     BodyUnread,
 }
 
+/// A manager module the path index named, and whether its bytes could be read.
+/// Reported rather than judged for the same reason as [`CommonModuleCandidates`]:
+/// the verdict needs the method name, and the graph index needs the id regardless.
+pub(crate) struct ManagerModuleTarget {
+    pub(crate) module: ModuleId,
+    pub(crate) unread: bool,
+}
+
 /// The bodies of a common module that name resolution may look a method up in,
 /// plus whether looking there is the whole story.
 pub(crate) struct CommonModuleCandidates {
-    pub(crate) readable: Vec<ModuleId>,
-    /// Bodies that exist but could not be read. Two callers need them and need them
-    /// differently: a failed lookup over `readable` is inconclusive rather than
-    /// negative while this is non-empty, and the graph index must still record a
-    /// reverse reference to each, or a body that later becomes readable reprojects
-    /// nobody and the incremental graph silently loses the edge.
-    pub(crate) unread: Vec<ModuleId>,
+    /// Every body in PRIORITY ORDER with its readability. Order is semantic — the
+    /// base declaration wins over an extension's — so a hit in a later body is the
+    /// answer only when every earlier body was readable and did not have it.
+    pub(crate) bodies: Vec<(ModuleId, bool)>,
+}
+
+impl CommonModuleCandidates {
+    pub(crate) fn readable(&self) -> impl Iterator<Item = ModuleId> + '_ {
+        self.bodies.iter().filter(|(_, unread)| !unread).map(|(m, _)| *m)
+    }
+
+    pub(crate) fn unread(&self) -> impl Iterator<Item = ModuleId> + '_ {
+        self.bodies.iter().filter(|(_, unread)| *unread).map(|(m, _)| *m)
+    }
 }
 
 #[cfg(test)]
