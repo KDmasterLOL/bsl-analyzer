@@ -54,7 +54,12 @@ use crate::graph::input::{build_source_root, db_for_files};
 // the artefact was built. An older artefact has no such key, and reading its absence
 // as "nothing was unread" would certify a graph built partly blind, so the bump
 // routes it to a rebuild through the existing mismatch path.
-pub(crate) const SCHEMA_VERSION: u32 = 16;
+// 17: an unread body now bars callers from resolving into any body behind it, so a
+// version-16 artefact holds edges — and `unresolved_calls` rows — this binary would
+// never produce. Nothing about the workspace changed, so no fingerprint moves and
+// nothing else would ever force the rebuild; only the version says the projection
+// itself is of another generation.
+pub(crate) const SCHEMA_VERSION: u32 = 17;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a
@@ -1358,6 +1363,12 @@ pub fn caller_delta_plan(
 ) -> anyhow::Result<Option<Vec<PathBuf>>> {
     let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
+    // What the stored artefact recorded as unreadable, in the '/'-normalised spelling
+    // `nodes.file` (and therefore `sig_changed`) uses — `unread_paths` keeps raw
+    // `PathBuf`s, and on Windows the two differ.
+    let was_unread: std::collections::HashSet<String> =
+        read_unread_paths(&conn).into_iter().map(|p| p.replace('\\', "/")).collect();
+
     let mut index_callers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (file, profile) in sig_changed {
         if profile.has_collision {
@@ -1365,13 +1376,28 @@ pub fn caller_delta_plan(
         }
         // A body that has just become unreadable bars callers from resolving into any
         // body BEHIND it — a sibling body of the same common module, in another file
-        // entirely. Neither fan-out below can find them: this file has no method nodes
-        // to be called (an unread body declares nothing, and an empty readable one
-        // declared nothing either), and the stored edge points at the sibling's node,
-        // not at anything here. So there is nothing to widen the delta by, and the only
-        // correct answer is a full rebuild.
+        // entirely. Those callers hold a RESOLVED edge into the sibling's node and
+        // nothing at all pointing here, so neither fan-out below can reach them and the
+        // only correct answer is a full rebuild.
         if profile.unread {
             return Ok(None);
+        }
+        // The mirror image: this body has just become readable, and the calls its
+        // barrier used to bar now resolve — into that same sibling body. What they were
+        // barred from is this module's SCOPE, not any name this file declares, so the
+        // by-name lookup below cannot find them (the disputed method may well be
+        // declared only next door). Take every caller the artefact recorded as blocked
+        // on this scope, whatever the name.
+        if was_unread.contains(*file) {
+            let Some(scope) = ide::scope_for_path(file) else {
+                return Ok(None); // not name-keyed → its callers aren't indexable
+            };
+            let mut stmt =
+                conn.prepare("SELECT caller_file FROM unresolved_calls WHERE target_scope = ?1")?;
+            let rows = stmt.query_map(params![scope], |r| r.get::<_, String>(0))?;
+            for row in rows {
+                index_callers.insert(row?);
+            }
         }
         // OLD resolvable surface from the stored method nodes.
         let mut stmt =

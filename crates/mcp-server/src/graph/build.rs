@@ -4096,6 +4096,79 @@ mod tests {
         );
     }
 
+    /// Healing a body lifts the barrier, and the calls that were barred resolve into a
+    /// SIBLING body of the same common module — so the healed file's own declarations
+    /// say nothing about who has to be reprojected. Looking for callers by the names
+    /// this file newly exports finds none of them when the disputed method is declared
+    /// next door; they have to be found by the module SCOPE they were barred from.
+    #[test]
+    fn healing_a_body_reprojects_callers_barred_into_a_sibling_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(root, "Сервер", true, "");
+
+        let ext = root.join("cfe/Расш");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(
+            &ext,
+            "Сервер",
+            true,
+            "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+        );
+        write_common_module(
+            &ext,
+            "Вызов",
+            true,
+            "&НаСервере\nПроцедура Т() Экспорт\nСервер.П();\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: crate::graph_db::GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let base_body = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        fs::write(&base_body, [0xff, 0xfe]).unwrap();
+
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_whole_graph(root, &db_pre, 2, &meta()).expect("pre build");
+        let (_, pre_edges, _, _) = dump_data(&db_pre);
+        assert!(
+            !pre_edges.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "control: the barrier holds while the base body is unread: {pre_edges:?}"
+        );
+
+        // Healed, and it declares nothing at all — least of all the disputed П.
+        fs::write(&base_body, "").unwrap();
+        let db_full = root.join(".build/full.db");
+        build_whole_graph(root, &db_full, 2, &meta()).expect("full rebuild");
+        let (_, full_edges, _, _) = dump_data(&db_full);
+        assert!(
+            full_edges.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "control: a full rebuild resolves the call once the barrier lifts: {full_edges:?}"
+        );
+
+        let canonical = base_body.canonicalize().unwrap();
+        let key = canonical.to_string_lossy().into_owned();
+        let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&canonical)).unwrap();
+        let plan = crate::graph_db::caller_delta_plan(
+            &db_pre,
+            &[(key.as_str(), profiles.get(&key).unwrap())],
+        )
+        .unwrap();
+        match plan {
+            None => {}
+            Some(callers) => assert!(
+                callers.iter().any(|p| p.to_string_lossy().contains("Вызов")),
+                "the caller barred into the sibling body must be reprojected: {callers:?}"
+            ),
+        }
+    }
+
     /// A target whose body could not be read at build time still owes its callers a
     /// reverse reference. Name resolution refuses to conclude anything about an unread
     /// module — correctly — but if that refusal also erases the reference, then healing

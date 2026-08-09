@@ -205,6 +205,11 @@ pub trait AnalysisProvider {
     /// the file's visible configs and reports them all readable — it has no reader that
     /// could have failed; the salsa-backed provider overrides it with the substrate,
     /// scoped base + the file's own extension, where readability is known.
+    ///
+    /// Both produce the same MERGED, extension-first order the trait method promises:
+    /// `visible_configurations` runs base-first, so the default reverses it at the end.
+    /// Without that a provider written to this contract would measure a different
+    /// body's signature than the production one.
     fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies {
         use bsl_metadata::traits::Module;
 
@@ -225,6 +230,7 @@ pub trait AnalysisProvider {
                 out.push(fid, false);
             }
         }
+        out.reverse_priority();
         out
     }
 
