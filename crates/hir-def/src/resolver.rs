@@ -479,12 +479,9 @@ impl Resolver {
                     // not have — that decision belongs to `search` one level up.
                     // Reporting the outcome here would also hide the unread ids from
                     // the graph index, which needs them to reproject on healing.
-                    return Ok(CommonModuleCandidates {
-                        bodies: bodies
-                            .iter()
-                            .map(|b| (crate::ModuleId::new(b.file), b.unread))
-                            .collect(),
-                    });
+                    return Ok(CommonModuleCandidates::new(
+                        bodies.iter().map(|b| (crate::ModuleId::new(b.file), b.unread)).collect(),
+                    ));
                 }
                 // Configs see the module but no body file mapped (metadata-URI
                 // drift): degrade to the path index below instead of reporting
@@ -503,9 +500,10 @@ impl Resolver {
         // exactly like any other file — its entry cannot be dropped, because the first
         // query through a dropped id panics resolving its path. So the sorting happens
         // here, on the way out.
-        Ok(CommonModuleCandidates {
-            bodies: vec![(crate::ModuleId::new(target_file_id), db.file_is_unread(target_file_id))],
-        })
+        Ok(CommonModuleCandidates::new(vec![(
+            crate::ModuleId::new(target_file_id),
+            db.file_is_unread(target_file_id),
+        )]))
     }
 
     pub fn resolve_qualified_method(
@@ -901,10 +899,19 @@ pub(crate) struct CommonModuleCandidates {
     /// Every body in PRIORITY ORDER with its readability. Order is semantic — the
     /// base declaration wins over an extension's — so a hit in a later body is the
     /// answer only when every earlier body was readable and did not have it.
-    pub(crate) bodies: Vec<(ModuleId, bool)>,
+    ///
+    /// Private for the same reason as its file-level twin
+    /// [`crate::configs::CommonModuleBodies`]: a readable field is a walk past the
+    /// barrier that looks like an ordinary loop. All three walks live in this crate,
+    /// so leaving it open here would be leaving it open exactly where it matters.
+    bodies: Vec<(ModuleId, bool)>,
 }
 
 impl CommonModuleCandidates {
+    pub(crate) fn new(bodies: Vec<(ModuleId, bool)>) -> Self {
+        Self { bodies }
+    }
+
     /// The module-level twin of [`crate::configs::CommonModuleBodies::search`], with the
     /// same barrier and for the same reason.
     pub(crate) fn search<T>(

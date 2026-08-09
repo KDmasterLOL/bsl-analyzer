@@ -4175,13 +4175,14 @@ mod tests {
             &[(key.as_str(), profiles.get(&key).unwrap())],
         )
         .unwrap();
-        match plan {
-            None => {}
-            Some(callers) => assert!(
-                callers.iter().any(|p| p.to_string_lossy().contains("Вызов")),
-                "the caller barred into the sibling body must be reprojected: {callers:?}"
-            ),
-        }
+        // Insisting on `Some` is the point. A full rebuild (`None`) would also publish
+        // the right graph, so accepting it would let the scope lookup rot away unnoticed
+        // — the gate would pass on a build that simply gave up.
+        let callers = plan.expect("healing keeps the body-only fast path, it does not decline it");
+        assert!(
+            callers.iter().any(|p| p.to_string_lossy().contains("Вызов")),
+            "the caller barred into the sibling body must be reprojected: {callers:?}"
+        );
     }
 
     /// A target whose body could not be read at build time still owes its callers a
