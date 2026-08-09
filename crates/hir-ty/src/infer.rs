@@ -405,6 +405,12 @@ pub struct InferenceContext<'db> {
 
     diagnostics: Vec<InferenceDiagnostic>,
 
+    /// Calls whose callee module has a body that exists but could not be read.
+    /// Resolution carries on past it, so the receiver keeps whatever type its
+    /// platform surface gives; what is barred is any later verdict that the call
+    /// is unresolved, which would be filed against the calling file.
+    calls_with_unread_target: rustc_hash::FxHashSet<ExprId>,
+
     call_arg_bindings: Vec<CallArgBinding>,
 
     /// Execution environments this body runs in (module base ∩ compilation
@@ -642,6 +648,7 @@ impl<'db> InferenceContext<'db> {
             binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
+            calls_with_unread_target: rustc_hash::FxHashSet::default(),
             call_arg_bindings: Vec::new(),
             return_expr_ids: Vec::new(),
             body_env,
@@ -825,6 +832,16 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
         };
         if self.body.is_recovered(key) {
+            return;
+        }
+        // A call whose target body could not be read gets no "unresolved" verdict from
+        // ANY later attempt: resolution continues past the unread module (the platform
+        // surface of a manager or object does not live in the user module, and losing
+        // it would cost the receiver's type), but nothing it fails to find afterwards
+        // is evidence about the call.
+        if matches!(diag, InferenceDiagnostic::UnresolvedMethodCall { .. })
+            && self.calls_with_unread_target.contains(&key)
+        {
             return;
         }
         self.diagnostics.push(diag);
@@ -2297,10 +2314,9 @@ impl<'db> InferenceContext<'db> {
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
                     Err(UnresolvedMethodKind::BodyUnread) => {
-                        // Nothing is known about this module's surface, so no later
-                        // attempt may report the call as unresolved either.
-                        self.expr_types.insert(callee, self.db.unknown());
-                        return self.db.unknown();
+                        // Fall through exactly like a missing user method: the platform
+                        // surface is still worth resolving. Only the verdict is barred.
+                        self.calls_with_unread_target.insert(callee);
                     }
                     Err(
                         kind @ (UnresolvedMethodKind::MethodNotExport
@@ -2354,10 +2370,9 @@ impl<'db> InferenceContext<'db> {
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
                     Err(UnresolvedMethodKind::BodyUnread) => {
-                        // Nothing is known about this module's surface, so no later
-                        // attempt may report the call as unresolved either.
-                        self.expr_types.insert(callee, self.db.unknown());
-                        return self.db.unknown();
+                        // Fall through exactly like a missing user method: the platform
+                        // surface is still worth resolving. Only the verdict is barred.
+                        self.calls_with_unread_target.insert(callee);
                     }
                     Err(
                         kind @ (UnresolvedMethodKind::MethodNotExport
@@ -2422,10 +2437,9 @@ impl<'db> InferenceContext<'db> {
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
                     Err(UnresolvedMethodKind::BodyUnread) => {
-                        // Nothing is known about this module's surface, so no later
-                        // attempt may report the call as unresolved either.
-                        self.expr_types.insert(callee, self.db.unknown());
-                        return self.db.unknown();
+                        // Fall through exactly like a missing user method: the platform
+                        // surface is still worth resolving. Only the verdict is barred.
+                        self.calls_with_unread_target.insert(callee);
                     }
                     Err(
                         kind @ (UnresolvedMethodKind::MethodNotExport

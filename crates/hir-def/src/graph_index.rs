@@ -752,6 +752,14 @@ pub fn extract_unresolved_refs(
                             out.push((target, method_name.as_str().fold_lower()));
                         }
                     }
+                    // An unread body is tracked whatever the readable ones answered:
+                    // its surface is unknown, so becoming readable can add the method
+                    // just as well as declaring it can, and without this reference the
+                    // caller is never reprojected and the incremental graph keeps an
+                    // edge the full rebuild has.
+                    for target in candidates.unread {
+                        out.push((target, method_name.as_str().fold_lower()));
+                    }
                 }
             }
             CallTarget::ManagerAccess {
@@ -784,6 +792,9 @@ pub fn extract_unresolved_refs(
                     for target in candidates.readable {
                         out.push((target, reg.callback_name.as_str().fold_lower()));
                     }
+                }
+                for target in candidates.unread {
+                    out.push((target, reg.callback_name.as_str().fold_lower()));
                 }
             }
         }

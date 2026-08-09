@@ -468,16 +468,15 @@ impl Resolver {
             if let Some(bodies) =
                 db.resolve_common_module_file_candidates(file_id, module_name.as_str())
             {
-                if !bodies.readable.is_empty() {
+                if !bodies.is_empty() {
+                    // Composition, not a verdict: whether an empty `readable` is an
+                    // answer depends on the method name, which this function does not
+                    // have. Reporting the outcome here would also hide the unread ids
+                    // from the graph index, which needs them to reproject on healing.
                     return Ok(CommonModuleCandidates {
                         readable: bodies.readable.into_iter().map(crate::ModuleId::new).collect(),
-                        has_unread: !bodies.unread.is_empty(),
+                        unread: bodies.unread.into_iter().map(crate::ModuleId::new).collect(),
                     });
-                }
-                if !bodies.unread.is_empty() {
-                    // Every body this module has is unreadable, so there is nothing
-                    // to look a method up in and no honest answer about its surface.
-                    return Err(QualifiedMethodError::BodyUnread);
                 }
                 // Configs see the module but no body file mapped (metadata-URI
                 // drift): degrade to the path index below instead of reporting
@@ -494,15 +493,13 @@ impl Resolver {
 
         // The path index is built from source-root paths, which hold an unread body
         // exactly like any other file — its entry cannot be dropped, because the first
-        // query through a dropped id panics resolving its path. So the check belongs
+        // query through a dropped id panics resolving its path. So the sorting happens
         // here, on the way out.
-        if db.file_is_unread(target_file_id) {
-            return Err(QualifiedMethodError::BodyUnread);
-        }
-
-        Ok(CommonModuleCandidates {
-            readable: vec![crate::ModuleId::new(target_file_id)],
-            has_unread: false,
+        let target = crate::ModuleId::new(target_file_id);
+        Ok(if db.file_is_unread(target_file_id) {
+            CommonModuleCandidates { readable: Vec::new(), unread: vec![target] }
+        } else {
+            CommonModuleCandidates { readable: vec![target], unread: Vec::new() }
         })
     }
 
@@ -527,7 +524,7 @@ impl Resolver {
         }
         // Not finding the method among the bodies we could read is only evidence that
         // it is missing if we could read them all.
-        if candidates.has_unread {
+        if !candidates.unread.is_empty() {
             return Err(QualifiedMethodError::BodyUnread);
         }
         Err(QualifiedMethodError::NotFound)
@@ -878,9 +875,12 @@ pub enum QualifiedMethodError {
 /// plus whether looking there is the whole story.
 pub(crate) struct CommonModuleCandidates {
     pub(crate) readable: Vec<ModuleId>,
-    /// At least one body of this module exists but could not be read. A failed
-    /// lookup over `readable` is then inconclusive rather than negative.
-    pub(crate) has_unread: bool,
+    /// Bodies that exist but could not be read. Two callers need them and need them
+    /// differently: a failed lookup over `readable` is inconclusive rather than
+    /// negative while this is non-empty, and the graph index must still record a
+    /// reverse reference to each, or a body that later becomes readable reprojects
+    /// nobody and the incremental graph silently loses the edge.
+    pub(crate) unread: Vec<ModuleId>,
 }
 
 #[cfg(test)]

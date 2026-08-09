@@ -3947,6 +3947,71 @@ mod tests {
         );
     }
 
+    /// A target whose body could not be read at build time still owes its callers a
+    /// reverse reference. Name resolution refuses to conclude anything about an unread
+    /// module — correctly — but if that refusal also erases the reference, then healing
+    /// the body reprojects nobody: `caller_delta_plan` finds no callers, and the
+    /// incremental graph is published as current while missing an edge the full rebuild
+    /// has. The batch size is 2 so the target shares its database with the caller;
+    /// across batches an unregistered file answers "readable" and the case hides.
+    #[test]
+    fn caller_delta_update_heals_a_target_that_was_unread_at_build_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(root, "Ядро", true, "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры");
+        write_common_module(
+            root,
+            "Алиса",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\nЯдро.Новый();\nКонецПроцедуры",
+        );
+        // Two bytes `read_to_string` refuses under any UID — the stand does not depend
+        // on permissions, which root ignores.
+        fs::write(root.join("CommonModules/Ядро/Ext/Module.bsl"), [0xff, 0xfe]).unwrap();
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: crate::graph_db::GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_whole_graph(root, &db_pre, 2, &meta()).expect("pre build");
+
+        // Heal the body, exporting the method the caller was already asking for.
+        write(
+            root,
+            "CommonModules/Ядро/Ext/Module.bsl",
+            "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры\nПроцедура Новый() Экспорт КонецПроцедуры",
+        );
+        let core_path = root.join("CommonModules/Ядро/Ext/Module.bsl").canonicalize().unwrap();
+        let core_key = core_path.to_string_lossy().into_owned();
+        let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&core_path)).unwrap();
+        let profile = profiles.get(&core_key).unwrap();
+        let callers = crate::graph_db::caller_delta_plan(&db_pre, &[(core_key.as_str(), profile)])
+            .unwrap()
+            .expect("addition is eligible via the unresolved index");
+        assert_eq!(callers.len(), 1, "the caller of the healed body is discovered: {callers:?}");
+
+        let mut changed = vec![core_path];
+        changed.extend(callers);
+        let db_inc = root.join(".build/inc.db");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 2, &meta())
+            .expect("caller-delta update");
+
+        let db_full = root.join(".build/full.db");
+        build_whole_graph(root, &db_full, 2, &meta()).expect("full rebuild");
+        let (_, inc_edges, _, _) = dump_data(&db_inc);
+        let (_, full_edges, _, _) = dump_data(&db_full);
+        assert_eq!(inc_edges, full_edges, "edges match a full rebuild");
+        assert!(
+            inc_edges.iter().any(|e| e.contains("method/common/Ядро/Новый")),
+            "the edge into the healed body appears: {inc_edges:?}"
+        );
+    }
+
     /// A body-only edit that ADDS an unresolved call must refresh the reverse index
     /// (so a later addition of that method finds this caller), byte-identically to a
     /// full rebuild.
