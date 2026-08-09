@@ -18,13 +18,19 @@ use bsl_config::VisibleConfig;
 /// that did nothing wrong.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommonModuleBodies {
-    /// Every body of the module IN PRIORITY ORDER, readable or not.
+    /// Every body of the module, readable or not, in the order its producer chose.
     ///
-    /// One ordered list rather than two, because the order is semantic: the base
-    /// declaration wins over an extension's, so a method found in a later body is
-    /// only the answer if every earlier body was readable and did not have it. Two
-    /// separate lists lose exactly that relation, and the loss is invisible — the
-    /// wrong body simply answers.
+    /// One ordered list rather than two, because for the producer that orders by
+    /// PRIORITY the order is semantic: the base declaration wins over an extension's,
+    /// so a method found in a later body is only the answer if every earlier body was
+    /// readable and did not have it. Two separate lists lose exactly that relation, and
+    /// the loss is invisible — the wrong body simply answers.
+    ///
+    /// Not every producer orders by priority: the metadata substrate builds a MERGED
+    /// surface extension-first and qualified resolution reverses it. So the order is a
+    /// property of who built the list, and the walk must match it —
+    /// [`CommonModuleBodies::search`] for priority order,
+    /// [`CommonModuleBodies::search_merged_surface`] otherwise.
     pub bodies: Vec<CommonModuleBody>,
 }
 
