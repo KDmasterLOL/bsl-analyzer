@@ -77,6 +77,24 @@ fn assert_unread_failure(err: RunError, module: &Path) {
     );
 }
 
+/// The seam is an extension point, so a later hook may well want to install or
+/// drop a guard of its own. Holding the cell borrowed across the call would kill
+/// such a hook with a borrow panic — pinned here so the property stays a property
+/// of the seam rather than a rule its writers must remember.
+#[test]
+fn a_hook_may_touch_the_seam_while_it_runs() {
+    let ran_to_completion = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = std::rc::Rc::clone(&ran_to_completion);
+    let _hook = BetweenIndexPassesHook::install(move || {
+        let _nested = BetweenIndexPassesHook::install(|| {});
+        flag.set(true);
+    });
+
+    super::run_between_index_passes_hook();
+
+    assert!(ran_to_completion.get(), "the hook must reach its last statement");
+}
+
 #[test]
 fn a_readable_workspace_measures_its_only_call_pair() {
     let (_dir, mut env, resolved, _module) = stand();

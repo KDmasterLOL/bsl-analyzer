@@ -54,11 +54,20 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Takes the hook out of the cell for the duration of the call, so a hook that
+/// installs or drops a guard of its own sees a free cell instead of a borrow
+/// panic. The hook is put back only if nothing claimed the cell meanwhile —
+/// whoever installed last stays installed.
 #[cfg(test)]
 fn run_between_index_passes_hook() {
-    BETWEEN_INDEX_PASSES.with(|hook| {
-        if let Some(hook) = hook.borrow_mut().as_mut() {
-            hook();
+    let Some(mut hook) = BETWEEN_INDEX_PASSES.with(|slot| slot.borrow_mut().take()) else {
+        return;
+    };
+    hook();
+    BETWEEN_INDEX_PASSES.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(hook);
         }
     });
 }
