@@ -37,14 +37,15 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// The `Ext/Module.bsl` bodies of the common module `name` visible to this file —
-    /// base + its own extension, in priority order and each carrying whether it could
-    /// be read. For diagnostics that read the module body (handler method
-    /// existence/export, required parameters). Scoped extension-private through the
-    /// per-common-module substrate.
+    /// base + its own extension, each carrying whether it could be read. For
+    /// diagnostics that read the module body (handler method existence/export,
+    /// required parameters). Scoped extension-private through the per-common-module
+    /// substrate.
     ///
-    /// Look things up with [`hir::CommonModuleBodies::search`]: a diagnostic that
-    /// concludes "the module has no such method" must know whether every body was
-    /// actually readable, or it accuses the caller of an absence nobody established.
+    /// Look things up with [`hir::CommonModuleBodies::search_merged_surface`]: this is
+    /// the merged surface, not priority order, and a diagnostic that concludes "the
+    /// module has no such method" must know that every body was actually readable, or
+    /// it accuses the caller of an absence nobody established.
     pub fn common_module_bodies(&self, name: &str) -> hir::CommonModuleBodies {
         self.provider.resolve_common_module_files(self.file_id, name)
     }

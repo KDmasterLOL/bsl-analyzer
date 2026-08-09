@@ -45,6 +45,11 @@ struct ModuleMethods {
     by_name: FxHashMap<String, MethodRef>,
     /// Every method in declaration order (the index is the `local_id`).
     all: Vec<GraphMethodEntry>,
+    /// Whether this module's body could be read, as answered by the database that
+    /// actually read it. Recorded here because the index is what the batches share:
+    /// a batch database registers inputs only for its own files, so asking IT about
+    /// a module from another batch gets "readable" for everything.
+    unread: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -93,8 +98,8 @@ impl GraphIndex {
     /// so building the whole index batch-by-batch in fresh databases keeps peak RAM
     /// bounded.
     pub fn add_module(&mut self, db: &dyn ConfigsDatabase, module: ModuleId) {
-        let (all, module_dispatch) = Self::extract_module_data(db, module);
-        self.insert_module_data(module, all, module_dispatch);
+        let (all, module_dispatch, unread) = Self::extract_module_data(db, module);
+        self.insert_module_data(module, all, module_dispatch, unread);
     }
 
     /// Add a whole batch's modules, lowering each module's item tree + metadata in
@@ -111,8 +116,8 @@ impl GraphIndex {
         let extracted = parallel_per_module(pool, db, batch, |db, module| {
             (module, Self::extract_module_data(db, module))
         });
-        for (module, (all, module_dispatch)) in extracted {
-            self.insert_module_data(module, all, module_dispatch);
+        for (module, (all, module_dispatch, unread)) in extracted {
+            self.insert_module_data(module, all, module_dispatch, unread);
         }
     }
 
@@ -142,8 +147,9 @@ impl GraphIndex {
         &mut self,
         extraction: ModuleIndexExtraction,
     ) -> (ModuleId, crate::call_graph::ModuleCallSummary) {
-        let ModuleIndexExtraction { module, entries, module_dispatch, pair_intents } = extraction;
-        self.insert_module_data(module, entries, module_dispatch);
+        let ModuleIndexExtraction { module, entries, module_dispatch, unread, pair_intents } =
+            extraction;
+        self.insert_module_data(module, entries, module_dispatch, unread);
         (module, pair_intents)
     }
 
@@ -153,14 +159,14 @@ impl GraphIndex {
     fn extract_module_data(
         db: &dyn ConfigsDatabase,
         module: ModuleId,
-    ) -> (Vec<GraphMethodEntry>, Option<MethodDispatch>) {
+    ) -> (Vec<GraphMethodEntry>, Option<MethodDispatch>, bool) {
         let item_tree = db.item_tree(module.file_id);
         let all = crate::call_graph::extract_graph_methods(&item_tree);
         let module_dispatch = db
             .module_metadata(module)
             .execution_context
             .and_then(MethodDispatch::from_execution_context);
-        (all, module_dispatch)
+        (all, module_dispatch, db.file_is_unread(module.file_id))
     }
 
     /// The mutating half of [`Self::add_module`]: fold one module's extracted methods
@@ -170,6 +176,7 @@ impl GraphIndex {
         module: ModuleId,
         all: Vec<GraphMethodEntry>,
         module_dispatch: Option<MethodDispatch>,
+        unread: bool,
     ) {
         // First-wins lowercased map, matching `SymbolTree::find_method`.
         let mut by_name = FxHashMap::default();
@@ -183,7 +190,7 @@ impl GraphIndex {
                 module_dispatch.unwrap_or(entry.dispatch),
             );
         }
-        self.methods.insert(module, ModuleMethods { by_name, all });
+        self.methods.insert(module, ModuleMethods { by_name, all, unread });
     }
 
     /// The declaration facts (name, export, dispatch, ranges) for a method, for
@@ -296,6 +303,17 @@ impl GraphIndex {
         self.methods.get(&target)?.by_name.get(&name.as_str().fold_lower()).copied()
     }
 
+    /// Whether `target`'s body could be read, as recorded by the database that indexed
+    /// it — `None` for a module this index never covered.
+    ///
+    /// The batched build asks this instead of the database it happens to hold: that
+    /// database registered inputs only for its own batch, so it reports every module
+    /// from another batch as readable, and resolution would depend on how the build
+    /// was split rather than on the source root and configuration alone.
+    fn is_unread(&self, target: ModuleId) -> Option<bool> {
+        self.methods.get(&target).map(|m| m.unread)
+    }
+
     /// Resident per-node dispatch — the same value the fold's seeded graph returns
     /// (`None` for non-method nodes), so the client→server boundary flag matches.
     pub fn dispatch(&self, node: &GraphNode) -> Option<MethodDispatch> {
@@ -353,7 +371,10 @@ pub fn resolve_summary_via_index(
                 edge.kind,
             ),
             CallTarget::QualifiedModule { module_name, method_name } => {
-                match resolver.locate_common_module_candidates(db, module_name) {
+                match resolver
+                    .locate_common_module_candidates(db, module_name)
+                    .map(|c| c.reflagged(|m| index.is_unread(m)))
+                {
                     // Base body first, then the caller's own extension body, stopping
                     // where `resolve_qualified_method` stops — including at an unread
                     // body, or this route would resolve what the Salsa fold leaves
@@ -483,6 +504,7 @@ pub fn resolve_summary_via_index(
     let find_qualified =
         |module_name: &crate::name::Name, method_name: &crate::name::Name| match resolver
             .locate_common_module_candidates(db, module_name)
+            .map(|c| c.reflagged(|m| index.is_unread(m)))
         {
             Ok(candidates) => {
                 match candidates.search(|m| index.find_method(m, method_name).map(|hit| (m, hit))) {
@@ -551,6 +573,7 @@ pub struct ModuleIndexExtraction {
     pub module: ModuleId,
     entries: Vec<GraphMethodEntry>,
     module_dispatch: Option<MethodDispatch>,
+    unread: bool,
     pair_intents: crate::call_graph::ModuleCallSummary,
 }
 
@@ -564,9 +587,9 @@ pub fn extract_batch_index_and_pair_intents<DB: ConfigsDatabase + Clone + Send>(
     batch: &[ModuleId],
 ) -> Vec<ModuleIndexExtraction> {
     parallel_per_module(pool, db, batch, |db, module| {
-        let (entries, module_dispatch) = GraphIndex::extract_module_data(db, module);
+        let (entries, module_dispatch, unread) = GraphIndex::extract_module_data(db, module);
         let pair_intents = db.module_call_summary(module).method_pair_subset();
-        ModuleIndexExtraction { module, entries, module_dispatch, pair_intents }
+        ModuleIndexExtraction { module, entries, module_dispatch, unread, pair_intents }
     })
 }
 
@@ -741,7 +764,10 @@ pub fn extract_unresolved_refs(
     for edge in &summary.call_edges {
         match &edge.target {
             CallTarget::QualifiedModule { module_name, method_name } => {
-                if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
+                if let Ok(candidates) = resolver
+                    .locate_common_module_candidates(db, module_name)
+                    .map(|c| c.reflagged(|m| index.is_unread(m)))
+                {
                     for target in
                         reference_targets(&candidates, |m| index.find_method(m, method_name))
                     {
@@ -776,7 +802,10 @@ pub fn extract_unresolved_refs(
     // `module_call_summary` invalidation.
     for reg in &summary.notify_regs {
         if let crate::call_graph::NotifyTarget::Module(module_name) = &reg.target {
-            if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
+            if let Ok(candidates) = resolver
+                .locate_common_module_candidates(db, module_name)
+                .map(|c| c.reflagged(|m| index.is_unread(m)))
+            {
                 for target in
                     reference_targets(&candidates, |m| index.find_method(m, &reg.callback_name))
                 {
@@ -2470,7 +2499,7 @@ mod module_layout_hash_tests {
         let methods =
             crate::call_graph::extract_graph_methods(&crate::ItemTree::from_parse(&parse));
         let mut index = GraphIndex::new();
-        index.insert_module_data(module, methods, None);
+        index.insert_module_data(module, methods, None, false);
 
         (
             index.module_sig_hash(module).expect("indexed module has a signature hash"),

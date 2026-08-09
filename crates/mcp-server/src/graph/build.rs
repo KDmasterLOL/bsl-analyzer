@@ -3947,6 +3947,79 @@ mod tests {
         );
     }
 
+    /// The published graph must not depend on how the build was batched. A body whose
+    /// bytes could not be read is registered as unreadable only by the batch that read
+    /// it, so a caller in another batch asks a database that never heard of that file
+    /// and is told "readable" — after which a lower-priority body answers for the one
+    /// nobody could read. The barrier therefore has to travel with the index, which
+    /// every batch shares, not with the per-batch database.
+    ///
+    /// Batch size 1 puts every module in its own database, which is the whole point:
+    /// with the caller and the unread base together the case hides.
+    #[test]
+    fn a_cross_batch_unread_base_body_still_bars_the_extension_from_answering() {
+        fn build_and_dump(base_body_unreadable: bool) -> Vec<String> {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+            write_common_module(
+                root,
+                "Сервер",
+                true,
+                "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+            );
+
+            // The extension adopts Сервер (a second body of the same module) and calls
+            // it from a module of its own — common modules are extension-private, so
+            // the caller has to live inside the extension to see both bodies.
+            let ext = root.join("cfe/Расш");
+            std::fs::create_dir_all(&ext).unwrap();
+            std::fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+            write_common_module(
+                &ext,
+                "Сервер",
+                true,
+                "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+            );
+            write_common_module(
+                &ext,
+                "Вызов",
+                true,
+                "&НаСервере\nПроцедура Т() Экспорт\nСервер.П();\nКонецПроцедуры",
+            );
+
+            if base_body_unreadable {
+                fs::write(root.join("CommonModules/Сервер/Ext/Module.bsl"), [0xff, 0xfe]).unwrap();
+            }
+
+            let meta = crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files: 0,
+                built_at: "t".to_string(),
+            };
+            let db = root.join(".build/graph.db");
+            fs::create_dir_all(db.parent().unwrap()).unwrap();
+            build_whole_graph(root, &db, 1, &meta).expect("build");
+            let (_, edges, _, _) = dump_data(&db);
+            edges
+        }
+
+        // Control: with every body readable the call resolves, so the absence below is
+        // the barrier speaking and not a fixture that never resolved anything.
+        let control = build_and_dump(false);
+        assert!(
+            control.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "control: a readable base body must resolve the call: {control:?}"
+        );
+
+        let unread = build_and_dump(true);
+        assert!(
+            !unread.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "a body behind an unread one must not answer for it, whatever the batching: {unread:?}"
+        );
+    }
+
     /// A target whose body could not be read at build time still owes its callers a
     /// reverse reference. Name resolution refuses to conclude anything about an unread
     /// module — correctly — but if that refusal also erases the reference, then healing

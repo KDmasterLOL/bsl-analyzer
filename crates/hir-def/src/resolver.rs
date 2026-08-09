@@ -908,6 +908,18 @@ impl CommonModuleCandidates {
         crate::configs::BodySearch::Absent
     }
 
+    /// The same candidates with each body's readability replaced wherever `flag` knows
+    /// it. For a caller whose database cannot answer the question for every body — the
+    /// graph's per-batch databases — the authority is the shared index, not the db.
+    pub(crate) fn reflagged(mut self, flag: impl Fn(ModuleId) -> Option<bool>) -> Self {
+        for (module, unread) in &mut self.bodies {
+            if let Some(known) = flag(*module) {
+                *unread = known;
+            }
+        }
+        self
+    }
+
     /// Every body, readable or not — for recording a relation to the module, never for
     /// reading anything out of it. See
     /// [`crate::configs::CommonModuleBodies::all_for_reference`].

@@ -57,13 +57,17 @@ pub trait RootDatabase:
     ) -> Option<Arc<bsl_metadata::IntegrationService>>;
 
     /// The `Ext/Module.bsl` bodies of the common module `name` visible to `file_id`
-    /// (base + the file's own extension) IN PRIORITY ORDER, each carrying whether its
-    /// bytes could be read. For method/parameter validation that must read the module
-    /// body, scoped extension-private like the metadata.
+    /// (base + the file's own extension), each carrying whether its bytes could be
+    /// read. For method/parameter validation that must read the module body, scoped
+    /// extension-private like the metadata.
     ///
     /// The composition rather than a plain list of files, because a consumer that
     /// cannot see an unread body decides "the module has no such method" from bodies
     /// that were never entitled to answer.
+    ///
+    /// This is the MERGED surface, ordered extension-first — not priority order. Walk
+    /// it with [`hir::CommonModuleBodies::search_merged_surface`]; `search` would stop
+    /// at "the first" unread body, and in this order the unread one can be last.
     fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies;
 
     fn all_sdbl_in_file(
