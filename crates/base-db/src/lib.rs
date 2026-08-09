@@ -45,6 +45,14 @@ pub trait SourceDatabase: salsa::Database {
     /// [`Files::set_file_revision_from_disk`].
     fn set_file_revision_from_disk(&mut self, file_id: FileId, revision: u64);
 
+    /// Register a file that exists but whose bytes could not be read. See
+    /// [`Files::set_file_unreadable`].
+    fn set_file_unreadable(&mut self, file_id: FileId);
+
+    /// Whether the file's empty text stands for ignorance rather than content. See
+    /// [`Files::file_is_unread`] for what an unregistered file answers, and why.
+    fn file_is_unread(&self, file_id: FileId) -> bool;
+
     /// The file's source text, as a version-keyed tracked query: returns the
     /// in-memory overlay when present, otherwise reads disk and verifies the
     /// bytes against the file's content revision. LRU-evictable.
@@ -103,27 +111,7 @@ impl Files {
     }
 
     pub fn set_file_text(&self, db: &mut dyn SourceDatabase, file_id: FileId, text: &str) {
-        use salsa::Setter;
-
-        let existing = self.file_texts.get(&file_id).map(|e| *e.value());
-        match existing {
-            Some(input) => {
-                input.set_text(db).to(text.to_string());
-            }
-            None => {
-                let input = FileTextInput::new(db, text.to_string());
-                let previous = self.file_texts.insert(file_id, input);
-                debug_assert!(
-                    previous.is_none(),
-                    "concurrent set_file_text violates single-mutator invariant"
-                );
-            }
-        }
-        // Set the revision in the SAME exclusive `&mut db` op so a snapshot never
-        // observes overlay-and-revision out of step. The revision is the
-        // invalidation trigger for `file_text_query` and the token a later disk
-        // re-read (when this file is closed) must match.
-        self.set_file_revision(db, file_id, input::content_revision(text));
+        self.set_file_text_marked(db, file_id, text, salsa::Durability::LOW, false);
     }
 
     pub fn set_file_text_with_durability(
@@ -132,6 +120,19 @@ impl Files {
         file_id: FileId,
         text: &str,
         durability: salsa::Durability,
+    ) {
+        self.set_file_text_marked(db, file_id, text, durability, false);
+    }
+
+    /// Pin `text` as this file's resident overlay, recording whether the text stands
+    /// for the file's real content or for the fact that it could not be read.
+    fn set_file_text_marked(
+        &self,
+        db: &mut dyn SourceDatabase,
+        file_id: FileId,
+        text: &str,
+        durability: salsa::Durability,
+        unreadable: bool,
     ) {
         use salsa::Setter;
 
@@ -145,15 +146,20 @@ impl Files {
                 let previous = self.file_texts.insert(file_id, input);
                 debug_assert!(
                     previous.is_none(),
-                    "concurrent set_file_text_with_durability violates single-mutator invariant"
+                    "concurrent set_file_text violates single-mutator invariant"
                 );
             }
         }
+        // Set the revision in the SAME exclusive `&mut db` op so a snapshot never
+        // observes overlay-and-revision out of step. The revision is the
+        // invalidation trigger for `file_text_query` and the token a later disk
+        // re-read (when this file is closed) must match.
         self.set_file_revision_with_durability(
             db,
             file_id,
             input::content_revision(text),
             durability,
+            unreadable,
         );
     }
 
@@ -188,11 +194,7 @@ impl Files {
     ) {
         self.file_texts.remove(&file_id);
         let durability = self.durability_for_file(db, file_id).unwrap_or(salsa::Durability::LOW);
-        self.set_file_revision_with_durability(db, file_id, revision, durability);
-    }
-
-    fn set_file_revision(&self, db: &mut dyn SourceDatabase, file_id: FileId, revision: u64) {
-        self.set_file_revision_with_durability(db, file_id, revision, salsa::Durability::LOW);
+        self.set_file_revision_with_durability(db, file_id, revision, durability, false);
     }
 
     /// The durability of a file's inputs, decided by its source root (see
@@ -208,12 +210,19 @@ impl Files {
         Some(root_input.root(db).durability())
     }
 
+    /// The single sink every text/revision registration funnels through, and so the
+    /// only place `unreadable` is written. Taking it as a parameter here — rather
+    /// than listing the writers and setting it in each — means a new writer cannot
+    /// forget it: the compiler asks. The list is easy to get wrong, and was: the
+    /// only production `SourceDatabase` routes `set_file_text` through
+    /// `set_file_text_smart`, not through `Files::set_file_text`.
     fn set_file_revision_with_durability(
         &self,
         db: &mut dyn SourceDatabase,
         file_id: FileId,
         revision: u64,
         durability: salsa::Durability,
+        unreadable: bool,
     ) {
         use salsa::Setter;
 
@@ -221,9 +230,11 @@ impl Files {
         match existing {
             Some(input) => {
                 input.set_revision(db).with_durability(durability).to(revision);
+                input.set_unreadable(db).with_durability(durability).to(unreadable);
             }
             None => {
-                let input = FileRevisionInput::builder(revision).durability(durability).new(db);
+                let input =
+                    FileRevisionInput::builder(revision, unreadable).durability(durability).new(db);
                 let previous = self.file_revisions.insert(file_id, input);
                 debug_assert!(
                     previous.is_none(),
@@ -231,6 +242,25 @@ impl Files {
                 );
             }
         }
+    }
+
+    /// Register a file whose bytes could not be read: an empty text input (so a
+    /// later query yields `""` instead of panicking on a disk re-read) plus the
+    /// mark that says the emptiness is ignorance, not content.
+    pub fn set_file_unreadable(&self, db: &mut dyn SourceDatabase, file_id: FileId) {
+        let durability = self.durability_for_file(db, file_id).unwrap_or(salsa::Durability::LOW);
+        self.set_file_text_marked(db, file_id, "", durability, true);
+    }
+
+    /// Whether `file_id` is a file that exists but could not be read. A file with
+    /// no revision input at all answers `false`: the batch databases of the graph
+    /// build register inputs only for their own batch, yet resolve call targets
+    /// through a module index built over the whole source root, so an unregistered
+    /// candidate is routine there. Panicking would turn every cross-batch call into
+    /// a crash; `false` keeps the pre-existing behaviour for a file we know nothing
+    /// about.
+    pub fn file_is_unread(&self, db: &dyn SourceDatabase, file_id: FileId) -> bool {
+        self.file_revisions.get(&file_id).map(|e| e.value().unreadable(db)).unwrap_or(false)
     }
 
     pub fn set_file_text_smart(&self, db: &mut dyn SourceDatabase, file_id: FileId, text: &str) {
@@ -402,6 +432,15 @@ mod tests {
             files.set_file_revision_from_disk(self, file_id, revision);
         }
 
+        fn set_file_unreadable(&mut self, file_id: FileId) {
+            let files = self.files.clone();
+            files.set_file_unreadable(self, file_id);
+        }
+
+        fn file_is_unread(&self, file_id: FileId) -> bool {
+            self.files.file_is_unread(self, file_id)
+        }
+
         fn source_root_input(&self, source_root_id: SourceRootId) -> SourceRootInput {
             self.files.source_root(source_root_id)
         }
@@ -462,6 +501,134 @@ mod tests {
         file_id_input: FileIdInput<'db>,
     ) -> u32 {
         file_id_input.file_id(db).0
+    }
+
+    static UNREAD_PROBE_RUNS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    /// A memo whose only dependency is one file's unreadability, so re-execution
+    /// counts as the observable for invalidation.
+    #[salsa::tracked(returns(copy))]
+    fn unread_probe_query<'db>(
+        db: &'db dyn SourceDatabase,
+        file_id_input: FileIdInput<'db>,
+    ) -> bool {
+        UNREAD_PROBE_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        db.file_is_unread(file_id_input.file_id(db))
+    }
+
+    fn register_disk_backed(db: &mut TestDatabase, file_id: FileId, text: &str) {
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_revision_from_disk(file_id, input::content_revision(text));
+    }
+
+    #[test]
+    fn a_registered_file_is_readable_until_marked_and_readable_again_once_reread() {
+        let mut db = TestDatabase::default();
+        let overlaid = FileId(0);
+        let disk_backed = FileId(1);
+
+        let mut file_set = FileSet::new();
+        file_set.insert(overlaid, VfsPath::new("/Overlaid.bsl"));
+        file_set.insert(disk_backed, VfsPath::new("/DiskBacked.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+
+        db.set_file_source_root(overlaid, SourceRootId(0));
+        db.set_file_text(overlaid, "Процедура П() КонецПроцедуры");
+        register_disk_backed(&mut db, disk_backed, "Процедура П() КонецПроцедуры");
+
+        assert!(!db.file_is_unread(overlaid), "an overlay is content, not ignorance");
+        assert!(!db.file_is_unread(disk_backed), "a disk-backed revision is content too");
+
+        db.set_file_unreadable(overlaid);
+        db.set_file_unreadable(disk_backed);
+        assert!(db.file_is_unread(overlaid));
+        assert!(db.file_is_unread(disk_backed));
+
+        // Healing goes through the ordinary registration, so it must clear the mark
+        // without a second call — otherwise a file that came back stays mute forever.
+        db.set_file_text(overlaid, "Процедура П() КонецПроцедуры");
+        register_disk_backed(&mut db, disk_backed, "Процедура П() КонецПроцедуры");
+        assert!(!db.file_is_unread(overlaid), "re-registration clears the mark");
+        assert!(!db.file_is_unread(disk_backed), "re-registration clears the mark");
+    }
+
+    #[test]
+    fn an_empty_file_is_not_an_unread_one() {
+        let mut db = TestDatabase::default();
+        let file_id = FileId(0);
+
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/Empty.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        db.set_file_text(file_id, "");
+        assert_eq!(&*db.file_text(file_id), "");
+        assert!(!db.file_is_unread(file_id), "an honestly empty module is readable");
+
+        db.set_file_unreadable(file_id);
+        assert_eq!(&*db.file_text(file_id), "", "a hole still answers with empty text");
+        assert!(db.file_is_unread(file_id), "and only the mark tells the two apart");
+    }
+
+    #[test]
+    fn a_memo_reading_unreadability_is_recomputed_only_for_its_own_file() {
+        let mut db = TestDatabase::default();
+        let watched = FileId(0);
+        let other = FileId(1);
+
+        let mut file_set = FileSet::new();
+        file_set.insert(watched, VfsPath::new("/Watched.bsl"));
+        file_set.insert(other, VfsPath::new("/Other.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(watched, SourceRootId(0));
+        db.set_file_source_root(other, SourceRootId(0));
+        db.set_file_text(watched, "Процедура П() КонецПроцедуры");
+        db.set_file_text(other, "Процедура П() КонецПроцедуры");
+
+        let probe = |db: &TestDatabase| {
+            let input = FileIdInput::new(db, watched);
+            unread_probe_query(db, input)
+        };
+
+        UNREAD_PROBE_RUNS.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(!probe(&db));
+        assert!(!probe(&db));
+        assert_eq!(UNREAD_PROBE_RUNS.load(std::sync::atomic::Ordering::SeqCst), 1, "memoised");
+
+        db.set_file_unreadable(watched);
+        assert!(probe(&db), "the memo follows its own file");
+        assert_eq!(UNREAD_PROBE_RUNS.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // Positive control: without it the test would pass on an implementation that
+        // recomputes on every write anywhere, proving nothing about the dependency.
+        db.set_file_unreadable(other);
+        assert!(probe(&db));
+        assert_eq!(
+            UNREAD_PROBE_RUNS.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "another file's mark is not this memo's business"
+        );
+    }
+
+    #[test]
+    fn an_unregistered_file_answers_readable_where_asking_its_revision_panics() {
+        let db = TestDatabase::default();
+        let stranger = FileId(7);
+
+        assert!(!db.file_is_unread(stranger), "nothing known means nothing claimed");
+
+        // Positive control: the same id through the revision input DOES panic, so the
+        // assertion above is about the contract and not about an id that is somehow
+        // registered anyway.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            db.file_revision_input(stranger)
+        }));
+        std::panic::set_hook(previous);
+        assert!(asked.is_err(), "an unregistered file has no revision input at all");
     }
 
     #[test]

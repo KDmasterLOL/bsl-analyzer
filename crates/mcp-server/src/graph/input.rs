@@ -122,7 +122,7 @@ pub(crate) fn db_for_files(
                 // The empty overlay is load-bearing, not leniency: without a text
                 // input `file_text_query` re-reads from disk and panics. What changes
                 // is that the substitution stops being silent.
-                db.set_file_text(*file_id, "");
+                db.set_file_unreadable(*file_id);
                 unread.push(path.clone());
             }
         }

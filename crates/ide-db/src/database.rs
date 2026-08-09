@@ -1996,6 +1996,15 @@ impl SourceDatabase for RootDatabaseImpl {
         files.set_file_text_smart(self, file_id, text);
     }
 
+    fn set_file_unreadable(&mut self, file_id: FileId) {
+        let files = self.files.clone();
+        files.set_file_unreadable(self, file_id);
+    }
+
+    fn file_is_unread(&self, file_id: FileId) -> bool {
+        self.files.file_is_unread(self, file_id)
+    }
+
     fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId) {
         let files = self.files.clone();
         files.set_file_source_root(self, file_id, source_root_id);

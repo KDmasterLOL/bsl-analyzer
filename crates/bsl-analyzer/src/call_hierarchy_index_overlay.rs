@@ -114,6 +114,10 @@ impl CallHierarchyIndexFrozenSnapshot {
             } else if let Some(revision) = self.disk_revisions.get(&file_id) {
                 db.set_file_revision_from_disk(file_id, *revision);
             } else {
+                // Not a read failure: the overlay simply holds neither an open buffer
+                // nor a disk revision for this file, so its content is unknown rather
+                // than unreadable. Marking it unread would assert a cause nobody
+                // established.
                 db.set_file_text(file_id, "");
             }
             batch_files.push((file_id, path.clone()));

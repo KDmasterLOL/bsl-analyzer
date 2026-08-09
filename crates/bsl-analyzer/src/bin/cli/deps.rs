@@ -132,7 +132,7 @@ pub fn run_deps(
                 tracing::warn!(path = %path.display(), error = %err, "failed to read file");
                 unreadable.insert(*file_id);
                 read_errors.push((path.clone(), err));
-                db.set_file_text(*file_id, "");
+                db.set_file_unreadable(*file_id);
             }
         }
     }

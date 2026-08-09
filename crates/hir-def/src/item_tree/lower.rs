@@ -331,6 +331,15 @@ mod tests {
             files.set_file_revision_from_disk(self, file_id, revision);
         }
 
+        fn set_file_unreadable(&mut self, file_id: FileId) {
+            let files = self.files.clone();
+            files.set_file_unreadable(self, file_id);
+        }
+
+        fn file_is_unread(&self, file_id: FileId) -> bool {
+            self.files.file_is_unread(self, file_id)
+        }
+
         fn source_root_input(
             &self,
             source_root_id: base_db::SourceRootId,

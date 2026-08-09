@@ -50,7 +50,7 @@ fn retire_registration(
         None => None,
     };
     let Some(file_id) = file_id else { return false };
-    set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone);
+    set_file_text_source(&mut resident.db, file_id, FileTextSource::Deleted);
     resident.by_path.remove(key);
     if file_set.path_for_file(&file_id).is_some() {
         file_set.remove(file_id);
@@ -944,12 +944,12 @@ pub(super) fn apply_resident_changes(
                 set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text))
             }
             Err(_) => {
-                // Unreadable now. The tombstone is mandatory (a disk-backed re-read
+                // Unreadable now. The empty overlay is mandatory (a disk-backed re-read
                 // would panic), but it is no longer passed off as content: the file
                 // leaves service and joins the retry list, so consumers see "known
                 // but unreadable" instead of an empty module. `Admitted` — it was
                 // already serving under this configuration.
-                set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone);
+                set_file_text_source(&mut resident.db, file_id, FileTextSource::Unreadable);
                 resident.by_path.remove(path);
                 resident.holes.insert(path.clone(), HoleOrigin::Admitted);
                 became_holes.push(PathBuf::from(path));

@@ -246,16 +246,20 @@ impl GlobalState {
             if is_bsl_path && text.is_none() {
                 if file_set.path_for_file(&file.file_id).is_some() {
                     file_set.remove(file.file_id);
+                    // `Deleted` rather than `Unreadable`: the VFS reports both as
+                    // absent text, and the eviction below puts the file out of every
+                    // consumer's reach anyway, so marking it unread would assert a
+                    // cause nobody established and nobody could read back.
                     ide_host_core::set_file_text_source(
                         db,
                         file.file_id,
-                        ide_host_core::FileTextSource::Tombstone,
+                        ide_host_core::FileTextSource::Deleted,
                     );
                     file_set_modified = true;
                     bsl_source_changed = true;
                     tracing::warn!(
                         file_id = file.file_id.0,
-                        "BSL file evicted from FileSet (deleted or unreadable); FileTextInput tombstoned",
+                        "BSL file evicted from FileSet (deleted or unreadable); text input emptied",
                     );
                 }
                 continue;
