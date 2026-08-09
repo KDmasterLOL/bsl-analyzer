@@ -268,8 +268,12 @@ pub(crate) mod heap_estimate {
         stdx::heap::map_table_bytes::<intern::NormName, vfs::FileId>(v.by_name.len())
     }
 
+    /// The shared triple plus the fourth table this index alone carries. The
+    /// compiler does not ask for this summand when a field is added, so a new table
+    /// silently under-reports the index's weight unless it is added by hand.
     pub(crate) fn common_module_index_heap(v: &Arc<super::CommonModuleIndex>) -> usize {
         triple_name_index_heap(&v.by_name, &v.by_module_file, &v.module_file_by_name)
+            + string_key_map_heap(&v.unread_module_file_by_name)
     }
 
     pub(crate) fn event_subscription_index_heap(v: &Arc<super::EventSubscriptionIndex>) -> usize {
@@ -644,6 +648,13 @@ pub struct CommonModuleEntry {
     pub name: String,
     pub main: vfs::FileId,
     pub module_file: Option<vfs::FileId>,
+    /// The body's id when the body exists but could not be read. Kept beside
+    /// `module_file` rather than inside it because the two answer different
+    /// questions: `module_file` is "a body you can read", which every consumer of
+    /// the back-link wants, while this one is "a body whose absence from the list
+    /// above proves nothing" — the only thing that lets name resolution refuse to
+    /// conclude a module has no API.
+    pub unread_module_file: Option<vfs::FileId>,
 }
 
 /// One discovered event subscription in a config root's *structure* listing: its
@@ -1011,6 +1022,9 @@ pub struct CommonModuleIndex {
     /// body file scoped to this root (method/parameter validation needs the body,
     /// not the metadata XML). Absent for modules whose body was not enrolled.
     module_file_by_name: std::collections::HashMap<String, vfs::FileId>,
+    /// `lowercased-name -> Ext/Module.bsl id` for bodies that exist but could not
+    /// be read. Disjoint from `module_file_by_name`: a body is in one or neither.
+    unread_module_file_by_name: std::collections::HashMap<String, vfs::FileId>,
 }
 
 impl CommonModuleIndex {
@@ -1021,6 +1035,12 @@ impl CommonModuleIndex {
     /// The `Ext/Module.bsl` id of the common module `name` in this root, if known.
     pub fn lookup_module_file(&self, name: &str) -> Option<vfs::FileId> {
         self.module_file_by_name.get(&name.fold_lower()).copied()
+    }
+
+    /// The `Ext/Module.bsl` id of the common module `name` in this root when that
+    /// body exists but could not be read.
+    pub fn lookup_unread_module_file(&self, name: &str) -> Option<vfs::FileId> {
+        self.unread_module_file_by_name.get(&name.fold_lower()).copied()
     }
 
     /// The lowercased name of the common module whose `Ext/Module.bsl` is
@@ -1042,14 +1062,23 @@ pub fn common_module_index(
     let mut by_name = std::collections::HashMap::with_capacity(entries.len());
     let mut by_module_file = std::collections::HashMap::new();
     let mut module_file_by_name = std::collections::HashMap::new();
+    let mut unread_module_file_by_name = std::collections::HashMap::new();
     for entry in entries.iter() {
         by_name.insert(entry.name.fold_lower(), entry.main);
         if let Some(module_file) = entry.module_file {
             by_module_file.insert(module_file, entry.name.fold_lower());
             module_file_by_name.insert(entry.name.fold_lower(), module_file);
         }
+        if let Some(unread) = entry.unread_module_file {
+            unread_module_file_by_name.insert(entry.name.fold_lower(), unread);
+        }
     }
-    Arc::new(CommonModuleIndex { by_name, by_module_file, module_file_by_name })
+    Arc::new(CommonModuleIndex {
+        by_name,
+        by_module_file,
+        module_file_by_name,
+        unread_module_file_by_name,
+    })
 }
 
 /// Resolve a single common module's metadata by name within one config root, at

@@ -157,13 +157,7 @@ pub(super) fn retry_resident_holes(
         .filter(|p| project_model::is_substrate_listed_body_path(p))
         .collect();
     if !touched.is_empty() {
-        let unread_bodies = resident.unread_bodies();
-        ide_host_core::refresh_metadata_substrate(
-            &mut resident.db,
-            &resident.vfs,
-            &touched,
-            &unread_bodies,
-        );
+        ide_host_core::refresh_metadata_substrate(&mut resident.db, &resident.vfs, &touched);
     }
 
     (healed, vanished)
@@ -421,11 +415,6 @@ impl DiagnosticsResident {
             .file_set()
             .path_for_file(&file_id)
             .is_some()
-    }
-
-    /// The hole paths, in the shape the metadata substrate keys module bodies with.
-    pub(super) fn unread_bodies(&self) -> ide_host_core::UnreadBodies {
-        self.holes.keys().map(PathBuf::from).collect()
     }
 
     /// The workspace root the resident was built against (the graph's `source_dir`),
@@ -906,15 +895,9 @@ pub(super) fn apply_resident_changes(
         .filter(|p| config_roots.iter().any(|(_, root)| p.starts_with(root)))
         .collect();
     if !xml_paths.is_empty() || !structural_listing_bodies.is_empty() {
-        let unread_bodies = resident.unread_bodies();
         let mut refresh: Vec<PathBuf> = xml_paths.to_vec();
         refresh.extend(structural_listing_bodies);
-        ide_host_core::refresh_metadata_substrate(
-            &mut resident.db,
-            &resident.vfs,
-            &refresh,
-            &unread_bodies,
-        );
+        ide_host_core::refresh_metadata_substrate(&mut resident.db, &resident.vfs, &refresh);
         if !xml_paths.is_empty() {
             resident.db.bump_config_for_paths(xml_paths.iter().map(|p| p.as_path()));
         }
@@ -972,13 +955,7 @@ pub(super) fn apply_resident_changes(
         .filter(|p| config_roots.iter().any(|(_, root)| p.starts_with(root)))
         .collect();
     if !became_holes.is_empty() {
-        let unread_bodies = resident.unread_bodies();
-        ide_host_core::refresh_metadata_substrate(
-            &mut resident.db,
-            &resident.vfs,
-            &became_holes,
-            &unread_bodies,
-        );
+        ide_host_core::refresh_metadata_substrate(&mut resident.db, &resident.vfs, &became_holes);
     }
 
     (false, moved)

@@ -1427,7 +1427,7 @@ mod tests {
         let anchor_path = module_path(root, "Клиент");
         let out = state.read(|r, _| {
             let anchor = r.file_id_for(&anchor_path).expect("the healthy neighbour serves");
-            r.db().resolve_common_module_files_for_file(anchor, "Сервер").len()
+            r.db().resolve_common_module_files_for_file(anchor, "Сервер").readable.len()
         });
         let ResidentOutcome::Ready(before, _) = out else { panic!("expected Ready") };
         assert_eq!(before, 1, "control: a readable body HAS a back-link");
@@ -1439,7 +1439,7 @@ mod tests {
 
         let out = state.read(|r, _| {
             let anchor = r.file_id_for(&anchor_path).expect("the neighbour keeps serving");
-            r.db().resolve_common_module_files_for_file(anchor, "Сервер").len()
+            r.db().resolve_common_module_files_for_file(anchor, "Сервер").readable.len()
         });
         let ResidentOutcome::Ready(after, _) = out else { panic!("expected Ready") };
         assert_eq!(after, 0, "a body nobody could read gets no back-link");
@@ -1647,7 +1647,7 @@ mod tests {
             (
                 r.unread_count(),
                 r.is_unread(&victim),
-                r.db().resolve_common_module_files_for_file(anchor_id, "Сервер").len(),
+                r.db().resolve_common_module_files_for_file(anchor_id, "Сервер").readable.len(),
                 r.file_set_has_for_test(victim_id),
             )
         });

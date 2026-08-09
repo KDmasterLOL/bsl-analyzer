@@ -10,6 +10,28 @@ use crate::DefDatabase;
 
 use bsl_config::VisibleConfig;
 
+/// The body files of one common module, split by whether their bytes could be read.
+///
+/// The split is the whole point: a resolver handed only the readable ones cannot tell
+/// "the module does not export this method" from "the method may live in the body
+/// nobody could read", and answering the first when the second is true blames a file
+/// that did nothing wrong.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommonModuleBodies {
+    /// Bodies whose text stands for the module's API.
+    pub readable: Vec<FileId>,
+    /// Bodies that exist but could not be read. Never overlaps `readable`.
+    pub unread: Vec<FileId>,
+}
+
+impl CommonModuleBodies {
+    /// No body of this module is known at all — neither readable nor unread. The
+    /// signal to degrade to the path-derived module index.
+    pub fn is_empty(&self) -> bool {
+        self.readable.is_empty() && self.unread.is_empty()
+    }
+}
+
 #[salsa::db]
 pub trait ConfigsDatabase: DefDatabase {
     /// The configurations VISIBLE to `file_id` as separate entries (no merge):
@@ -92,15 +114,15 @@ pub trait ConfigsDatabase: DefDatabase {
     /// other extension's adoption is visible to this file.
     ///
     /// `None` means the provider has no visibility-scoped body lookup — the
-    /// caller falls back to the path-derived module index. An empty `Some`
-    /// means the configs know the module but no body file mapped (metadata-URI
-    /// drift); callers should degrade to the path index rather than report the
-    /// module missing.
+    /// caller falls back to the path-derived module index. A `Some` with both
+    /// lists empty means the configs know the module but no body file mapped
+    /// (metadata-URI drift); callers should degrade to the path index rather
+    /// than report the module missing.
     fn resolve_common_module_file_candidates(
         &self,
         file_id: FileId,
         name: &str,
-    ) -> Option<Vec<FileId>> {
+    ) -> Option<CommonModuleBodies> {
         let _ = (file_id, name);
         None
     }

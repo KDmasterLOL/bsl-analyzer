@@ -170,7 +170,7 @@ pub use hir_def::weaving::{
     interception_applicable, interceptor_target, signature_mismatch, Interception,
     InterceptionKind, SignatureMismatch, WeavingModuleId,
 };
-pub use hir_def::ConfigsDatabase;
+pub use hir_def::{CommonModuleBodies, ConfigsDatabase};
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
 pub use hir_ty::call_resolution::{
     BuiltinCallableId, CallCandidateSet, CallParam, CallParamMode, CallResolution, CallSelection,

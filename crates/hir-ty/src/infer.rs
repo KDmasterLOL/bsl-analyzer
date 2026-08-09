@@ -311,7 +311,10 @@ pub enum EnvCalleeKind {
 pub enum UnresolvedMethodKind {
     MethodNotFound,
     MethodNotExport,
-    CommonModuleNoSource,
+    /// A body of the callee module exists but could not be read. Travels as a
+    /// resolution outcome only: the call is left undiagnosed, because everything
+    /// that could be said about it would be said about the wrong file.
+    BodyUnread,
     ReceiverNotResolved,
 }
 
@@ -2293,9 +2296,14 @@ impl<'db> InferenceContext<'db> {
                         return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
+                    Err(UnresolvedMethodKind::BodyUnread) => {
+                        // Nothing is known about this module's surface, so no later
+                        // attempt may report the call as unresolved either.
+                        self.expr_types.insert(callee, self.db.unknown());
+                        return self.db.unknown();
+                    }
                     Err(
                         kind @ (UnresolvedMethodKind::MethodNotExport
-                        | UnresolvedMethodKind::CommonModuleNoSource
                         | UnresolvedMethodKind::ReceiverNotResolved),
                     ) => {
                         unreachable!(
@@ -2345,9 +2353,14 @@ impl<'db> InferenceContext<'db> {
                         return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
+                    Err(UnresolvedMethodKind::BodyUnread) => {
+                        // Nothing is known about this module's surface, so no later
+                        // attempt may report the call as unresolved either.
+                        self.expr_types.insert(callee, self.db.unknown());
+                        return self.db.unknown();
+                    }
                     Err(
                         kind @ (UnresolvedMethodKind::MethodNotExport
-                        | UnresolvedMethodKind::CommonModuleNoSource
                         | UnresolvedMethodKind::ReceiverNotResolved),
                     ) => {
                         unreachable!(
@@ -2408,9 +2421,14 @@ impl<'db> InferenceContext<'db> {
                         return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
+                    Err(UnresolvedMethodKind::BodyUnread) => {
+                        // Nothing is known about this module's surface, so no later
+                        // attempt may report the call as unresolved either.
+                        self.expr_types.insert(callee, self.db.unknown());
+                        return self.db.unknown();
+                    }
                     Err(
                         kind @ (UnresolvedMethodKind::MethodNotExport
-                        | UnresolvedMethodKind::CommonModuleNoSource
                         | UnresolvedMethodKind::ReceiverNotResolved),
                     ) => {
                         unreachable!(
@@ -2842,6 +2860,9 @@ impl<'db> InferenceContext<'db> {
                     }
                 }
 
+                // `BodyUnread` travels on: inference records the outcome it actually
+                // reached, and whether an outcome is worth telling the user about is
+                // the diagnostics layer's call, not this one's.
                 self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                     expr: call_expr,
                     receiver_name: module_name.clone(),

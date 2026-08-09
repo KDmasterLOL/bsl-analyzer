@@ -45,11 +45,7 @@ struct RootStructureListing {
 /// Free function over a raw database so a consumer that owns a bare
 /// [`RootDatabaseImpl`] (the MCP diagnostics resident) can share the exact policy
 /// [`AnalysisHost`] runs, without wrapping its db in an `AnalysisHost`.
-pub fn bootstrap_metadata_substrate(
-    db: &mut RootDatabaseImpl,
-    vfs: &impl VfsWrite,
-    unread: &UnreadBodies,
-) {
+pub fn bootstrap_metadata_substrate(db: &mut RootDatabaseImpl, vfs: &impl VfsWrite) {
     let start = Instant::now();
 
     let config_paths = db.all_config_paths();
@@ -198,9 +194,24 @@ pub fn bootstrap_metadata_substrate(
                 // it (bootstrap runs after the source root is interned) rather than
                 // enrolling a duplicate. `None` when the path is absent or unloaded;
                 // the reverse lookup then misses, which is correct.
-                let module_file =
-                    c.module_file.as_ref().and_then(|p| module_file_id(vfs, p, unread));
-                common_modules.push(CommonModuleEntry { name: c.name, main, module_file });
+                // Both outcomes are recorded: the readable id backs the ordinary
+                // back-link, the unread one lets name resolution refuse to read the
+                // shorter list as proof that a method is missing.
+                let body = c.module_file.as_ref().map(|p| module_file_id(db, vfs, p));
+                let module_file = match body {
+                    Some(BodyRef::Readable(id)) => Some(id),
+                    _ => None,
+                };
+                let unread_module_file = match body {
+                    Some(BodyRef::Unread(id)) => Some(id),
+                    _ => None,
+                };
+                common_modules.push(CommonModuleEntry {
+                    name: c.name,
+                    main,
+                    module_file,
+                    unread_module_file,
+                });
             }
             let mut event_subscriptions = Vec::new();
             for s in d.event_subscriptions {
@@ -261,8 +272,10 @@ pub fn bootstrap_metadata_substrate(
                 ) else {
                     continue;
                 };
-                let module_file =
-                    service.module_file.as_ref().and_then(|p| module_file_id(vfs, p, unread));
+                let module_file = service
+                    .module_file
+                    .as_ref()
+                    .and_then(|p| module_file_id(db, vfs, p).readable());
                 http_services.push(HTTPServiceEntry { name: service.name, main, module_file });
             }
             let mut web_services = Vec::new();
@@ -276,8 +289,10 @@ pub fn bootstrap_metadata_substrate(
                 ) else {
                     continue;
                 };
-                let module_file =
-                    service.module_file.as_ref().and_then(|p| module_file_id(vfs, p, unread));
+                let module_file = service
+                    .module_file
+                    .as_ref()
+                    .and_then(|p| module_file_id(db, vfs, p).readable());
                 web_services.push(WebServiceEntry { name: service.name, main, module_file });
             }
             let mut integration_services = Vec::new();
@@ -291,8 +306,10 @@ pub fn bootstrap_metadata_substrate(
                 ) else {
                     continue;
                 };
-                let module_file =
-                    service.module_file.as_ref().and_then(|p| module_file_id(vfs, p, unread));
+                let module_file = service
+                    .module_file
+                    .as_ref()
+                    .and_then(|p| module_file_id(db, vfs, p).readable());
                 integration_services.push(IntegrationServiceEntry {
                     name: service.name,
                     main,
@@ -373,7 +390,6 @@ pub fn refresh_metadata_substrate(
     db: &mut RootDatabaseImpl,
     vfs: &impl VfsWrite,
     changed_paths: &[PathBuf],
-    unread: &UnreadBodies,
 ) -> bool {
     if changed_paths.is_empty() {
         return false;
@@ -460,9 +476,24 @@ pub fn refresh_metadata_substrate(
                 // The module's `Ext/Module.bsl` is BSL source owned by root(0),
                 // not a metadata file — reuse the analyzer's existing FileId for
                 // it rather than enrolling a duplicate (see `bootstrap_metadata_substrate`).
-                let module_file =
-                    d.module_file.as_ref().and_then(|p| module_file_id(vfs, p, unread));
-                common_modules.push(CommonModuleEntry { name: d.name, main, module_file });
+                // Both outcomes are recorded: the readable id backs the ordinary
+                // back-link, the unread one lets name resolution refuse to read the
+                // shorter list as proof that a method is missing.
+                let body = d.module_file.as_ref().map(|p| module_file_id(db, vfs, p));
+                let module_file = match body {
+                    Some(BodyRef::Readable(id)) => Some(id),
+                    _ => None,
+                };
+                let unread_module_file = match body {
+                    Some(BodyRef::Unread(id)) => Some(id),
+                    _ => None,
+                };
+                common_modules.push(CommonModuleEntry {
+                    name: d.name,
+                    main,
+                    module_file,
+                    unread_module_file,
+                });
             }
             let mut event_subscriptions = Vec::new();
             for d in bsl_metadata::discover_event_subscription_structure(root) {
@@ -529,7 +560,7 @@ pub fn refresh_metadata_substrate(
                     continue;
                 };
                 let module_file =
-                    d.module_file.as_ref().and_then(|p| module_file_id(vfs, p, unread));
+                    d.module_file.as_ref().and_then(|p| module_file_id(db, vfs, p).readable());
                 http_services.push(HTTPServiceEntry { name: d.name, main, module_file });
             }
             let mut web_services = Vec::new();
@@ -545,7 +576,7 @@ pub fn refresh_metadata_substrate(
                     continue;
                 };
                 let module_file =
-                    d.module_file.as_ref().and_then(|p| module_file_id(vfs, p, unread));
+                    d.module_file.as_ref().and_then(|p| module_file_id(db, vfs, p).readable());
                 web_services.push(WebServiceEntry { name: d.name, main, module_file });
             }
             let mut integration_services = Vec::new();
@@ -561,7 +592,7 @@ pub fn refresh_metadata_substrate(
                     continue;
                 };
                 let module_file =
-                    d.module_file.as_ref().and_then(|p| module_file_id(vfs, p, unread));
+                    d.module_file.as_ref().and_then(|p| module_file_id(db, vfs, p).readable());
                 integration_services.push(IntegrationServiceEntry {
                     name: d.name,
                     main,
@@ -652,12 +683,8 @@ impl AnalysisHost {
     /// Build the metadata substrate for every config root the database knows about.
     /// Thin wrapper over the free [`bootstrap_metadata_substrate`]; the LSP and CLI
     /// drive the shared policy through this, supplying only their VFS.
-    ///
-    /// Passes an EMPTY unread set: the LSP and CLI keep no such list, so their
-    /// substrate behaves exactly as before. Only the MCP resident tracks holes, and it
-    /// calls the free function directly.
     pub fn bootstrap_metadata_substrate(&mut self, vfs: &impl VfsWrite) {
-        bootstrap_metadata_substrate(self.raw_database_mut(), vfs, &UnreadBodies::new());
+        bootstrap_metadata_substrate(self.raw_database_mut(), vfs);
     }
 
     /// Incrementally refresh the metadata substrate for the config roots owning any
@@ -668,27 +695,34 @@ impl AnalysisHost {
         vfs: &impl VfsWrite,
         changed_paths: &[PathBuf],
     ) -> bool {
-        refresh_metadata_substrate(
-            self.raw_database_mut(),
-            vfs,
-            changed_paths,
-            &UnreadBodies::new(),
-        )
+        refresh_metadata_substrate(self.raw_database_mut(), vfs, changed_paths)
     }
 }
 
-/// Module bodies that exist but could not be read, by the spelling the host keys
-/// them with. A body in here gets NO `module_file` back-link.
+/// What the substrate found behind a module's declared body path.
 ///
-/// The set has to be passed in because no derivable property distinguishes such a
-/// body: `Vfs` keeps a `FileId` forever, `build_source_root` puts every enumerated
-/// file into the source root before anything is read, and a tombstoned text input is
-/// an empty overlay — indistinguishable from a genuinely empty module. This crate is
-/// where unreadability is discovered in the first place ([`register_files_disk_backed`]
-/// reports it), so carrying the answer back here keeps it in one layer.
-///
-/// Empty for hosts that do not track it (LSP, CLI): they behave exactly as before.
-pub type UnreadBodies = std::collections::HashSet<PathBuf>;
+/// Three outcomes, not two: a body can be absent, present and readable, or present
+/// and unreadable. The last one used to be indistinguishable from the second and had
+/// to be supplied as a side-channel set of paths; it is now a property of the file in
+/// the database, asked by id.
+enum BodyRef {
+    Readable(FileId),
+    Unread(FileId),
+    Absent,
+}
+
+impl BodyRef {
+    /// The id a consumer of the back-link may use — that is, one whose text stands
+    /// for the module's API. An unread body deliberately answers `None`: handing its
+    /// id to a module-level consumer would let it read an empty text and conclude
+    /// the module has no API.
+    fn readable(self) -> Option<FileId> {
+        match self {
+            BodyRef::Readable(id) => Some(id),
+            BodyRef::Unread(_) | BodyRef::Absent => None,
+        }
+    }
+}
 
 /// Resolve a module's `Ext/Module.bsl` path to the FileId already interned for it,
 /// so the metadata reverse index points at the consumer's own source id.
@@ -700,37 +734,25 @@ pub type UnreadBodies = std::collections::HashSet<PathBuf>;
 /// though the file is interned under its real path — retry once with the path
 /// canonicalised. The syscall stays off the common case: it runs only on a miss, so
 /// an already-canonical VFS (the LSP) never pays for it and its behaviour is unchanged.
-fn module_file_id(vfs: &Vfs, path: &Path, unread: &UnreadBodies) -> Option<FileId> {
-    // The hole check rides on the lookup rather than preceding it, so it costs a hash
-    // probe and never a syscall of its own. Asking it first would have to canonicalise
-    // every module the set does not name — and once a workspace holds a single hole,
-    // "not named" is every module but one, so the guarded fallback would fire on the
-    // common case instead of the rare one. Riding along is also exact: whichever
-    // spelling the interner answered for IS the spelling the resident keyed its holes
-    // with, both having come from the same canonicalisation.
+///
+/// Readability is asked of the database by id, so the spelling the caller composed and
+/// the spelling the host interned no longer have to agree for the answer to be right.
+fn module_file_id(db: &RootDatabaseImpl, vfs: &Vfs, path: &Path) -> BodyRef {
     let interned = match vfs.file_id(&VfsPath::new(path.to_path_buf())) {
-        Some(id) => (id, None),
+        Some(id) => Some(id),
         None => {
-            let canonical = path.canonicalize().ok()?;
-            let id = vfs.file_id(&VfsPath::new(canonical.clone()))?;
-            (id, Some(canonical))
+            // A consumer may seed its VFS with canonicalised paths while the caller
+            // here composes `root.join(relative)`, which does not resolve a symlink
+            // inside the tree. Retry once resolved; the syscall runs only on a miss.
+            path.canonicalize().ok().and_then(|c| vfs.file_id(&VfsPath::new(c)))
         }
     };
-    // A body nobody could read gets no back-link: pointing at its FileId would hand a
-    // module-level consumer an empty text and let it conclude the module has no API.
-    //
-    // This covers the consumers that READ the back-link — subscription and scheduled-job
-    // handlers among them. It is not the whole guarantee: a resolver that finds no
-    // substrate candidate falls back to the module index, which is built from file-set
-    // paths and still holds the hole's FileId with its tombstoned text. The entry cannot
-    // simply be dropped — the first query through that id panics in `path_for_file` —
-    // so closing that route means teaching the fallback about holes, which lives a layer
-    // down in name resolution.
-    let spelling = interned.1.as_deref().unwrap_or(path);
-    if unread.contains(spelling) {
-        return None;
+    let Some(id) = interned else { return BodyRef::Absent };
+    if db.file_is_unread(id) {
+        BodyRef::Unread(id)
+    } else {
+        BodyRef::Readable(id)
     }
-    Some(interned.0)
 }
 
 /// Intern a metadata composing file (already read and hashed in the parallel pass)

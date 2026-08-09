@@ -618,11 +618,10 @@ impl DiagnosticsState {
                 );
             }
         }
-        // The holes go in so no MDO gets a `module_file` back-link to a body nobody
-        // could read — otherwise module-level diagnostics run against empty text and
-        // conclude the module has no API.
-        let unread_bodies: ide_host_core::UnreadBodies = unread.iter().cloned().collect();
-        ide_host_core::bootstrap_metadata_substrate(&mut db, &vfs, &unread_bodies);
+        // Runs AFTER every file is registered, so the unreadable ones already carry
+        // their mark: the substrate asks the database per body, and a body asked too
+        // early would get a back-link to text nobody could read.
+        ide_host_core::bootstrap_metadata_substrate(&mut db, &vfs);
 
         let mut by_path = HashMap::with_capacity(files.len());
         for (file_id, path) in files {

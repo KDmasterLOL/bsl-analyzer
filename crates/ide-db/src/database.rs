@@ -1801,24 +1801,31 @@ impl RootDatabaseImpl {
     /// sees the merged surface. The scoped counterpart of the former all-config
     /// `find_common_module_files_anywhere`: body ids come straight from the substrate
     /// when bootstrapped, otherwise from a scoped root-relative URI scan.
-    pub fn resolve_common_module_files_for_file(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+    pub fn resolve_common_module_files_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> hir::CommonModuleBodies {
+        let mut out = hir::CommonModuleBodies::default();
         let Some((main_listing, chain_listings, bootstrapped)) =
             self.metadata_listings_for_file(file_id)
         else {
-            return Vec::new();
+            return out;
         };
-
-        let mut out: Vec<FileId> = Vec::new();
 
         if bootstrapped {
             for listing in
                 chain_listings.iter().rev().cloned().chain(std::iter::once(main_listing)).flatten()
             {
-                if let Some(fid) =
-                    metadata::common_module_index(self, listing).lookup_module_file(name)
-                {
-                    if !out.contains(&fid) {
-                        out.push(fid);
+                let index = metadata::common_module_index(self, listing);
+                if let Some(fid) = index.lookup_module_file(name) {
+                    if !out.readable.contains(&fid) {
+                        out.readable.push(fid);
+                    }
+                }
+                if let Some(fid) = index.lookup_unread_module_file(name) {
+                    if !out.unread.contains(&fid) {
+                        out.unread.push(fid);
                     }
                 }
             }
@@ -1844,10 +1851,19 @@ impl RootDatabaseImpl {
             self.resolve_vfs_path(SourceRootId(0), &vfs_path)
         };
 
+        // The scan resolves a URI to an id without ever reading it, so readability is
+        // asked here — the same question the substrate branch answers from its index.
+        let admit = |out: &mut hir::CommonModuleBodies, fid: FileId| {
+            let bucket = if self.file_is_unread(fid) { &mut out.unread } else { &mut out.readable };
+            if !bucket.contains(&fid) {
+                bucket.push(fid);
+            }
+        };
+
         if paths.is_empty() {
             if let Some(root) = vfs_helpers::find_configuration_root(self, &file_path) {
                 if let Some(fid) = body_in(&root) {
-                    out.push(fid);
+                    admit(&mut out, fid);
                 }
             }
             return out;
@@ -1858,9 +1874,7 @@ impl RootDatabaseImpl {
         };
         for root in roots.chain.iter().rev().map(|(_, p)| p).chain(roots.main.as_ref()) {
             if let Some(fid) = body_in(root) {
-                if !out.contains(&fid) {
-                    out.push(fid);
-                }
+                admit(&mut out, fid);
             }
         }
         out
@@ -2267,12 +2281,13 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         &self,
         file_id: FileId,
         name: &str,
-    ) -> Option<Vec<FileId>> {
+    ) -> Option<hir::CommonModuleBodies> {
         // The helper orders extension-first for merged-surface validation;
         // qualified resolution wants the base declaration to win, so reverse.
-        let mut files = self.resolve_common_module_files_for_file(file_id, name);
-        files.reverse();
-        Some(files)
+        let mut bodies = self.resolve_common_module_files_for_file(file_id, name);
+        bodies.readable.reverse();
+        bodies.unread.reverse();
+        Some(bodies)
     }
 
     fn resolve_event_subscription(
@@ -2615,7 +2630,9 @@ impl RootDatabase for RootDatabaseImpl {
     }
 
     fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
-        RootDatabaseImpl::resolve_common_module_files_for_file(self, file_id, name)
+        // Readable only: every consumer of this reads the body to decide what the
+        // module offers, and an unread body offers nothing it can be trusted on.
+        RootDatabaseImpl::resolve_common_module_files_for_file(self, file_id, name).readable
     }
 
     fn all_sdbl_in_file(

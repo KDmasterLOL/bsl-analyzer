@@ -365,6 +365,20 @@ fn severity_sort_key(severity: Severity) -> u8 {
 }
 
 pub fn check_hir_diagnostic_with_fixtures(fixture_text: &str) -> Vec<Diagnostic> {
+    check_hir_diagnostic_with_unreadable(fixture_text, &[])
+}
+
+/// [`check_hir_diagnostic_with_fixtures`], with the named fixture files registered
+/// as bodies that exist but could not be read.
+///
+/// The state is set through the database rather than by making a real file
+/// unreadable on disk: this fixture never touches the disk at all, and the file
+/// permissions that would express it are ignored by root anyway, which would leave
+/// the stand green in a container no matter what the code did.
+pub fn check_hir_diagnostic_with_unreadable(
+    fixture_text: &str,
+    unreadable: &[&str],
+) -> Vec<Diagnostic> {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use test_fixture::Fixture;
@@ -373,10 +387,22 @@ pub fn check_hir_diagnostic_with_fixtures(fixture_text: &str) -> Vec<Diagnostic>
     let mut db = RootDatabaseImpl::new();
 
     let mut file_set = vfs::FileSet::default();
+    let mut marked = 0usize;
     for (file_id, file) in &fixture.files {
         file_set.insert(*file_id, file.path.clone());
-        db.set_file_text(*file_id, &file.content);
+        let path = file.path.as_path().to_string_lossy().replace('\\', "/");
+        if unreadable.iter().any(|u| path.ends_with(u)) {
+            db.set_file_unreadable(*file_id);
+            marked += 1;
+        } else {
+            db.set_file_text(*file_id, &file.content);
+        }
     }
+    assert_eq!(
+        marked,
+        unreadable.len(),
+        "every named body must exist in the fixture, or the stand proves nothing"
+    );
 
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);

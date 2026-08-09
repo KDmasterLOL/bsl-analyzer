@@ -32,9 +32,11 @@ pub fn from_hir(
         UnresolvedMethodKind::MethodNotExport => {
             format!("Метод '{}.{}' не экспортирован", receiver_name.as_str(), method_name.as_str())
         }
-        UnresolvedMethodKind::CommonModuleNoSource => {
-            format!("Для общего модуля '{}' не найден исходный файл", receiver_name.as_str())
-        }
+        // Nothing is said about this call. The module's surface is unknown, so any
+        // verdict would be a guess, and it would be filed against the calling file —
+        // which is not the one with the problem. The unreadable file is reported at
+        // its own address, once, by the host that failed to read it.
+        UnresolvedMethodKind::BodyUnread => return None,
         UnresolvedMethodKind::ReceiverNotResolved => {
             format!("Не удалось разрешить модуль '{}'", receiver_name.as_str())
         }
@@ -67,6 +69,72 @@ mod tests {
             unresolved[0].message.contains("НесуществующийМетод"),
             "message must name the missing method, got: {}",
             unresolved[0].message
+        );
+    }
+
+    /// The body of the callee module could not be read, so its empty text is
+    /// ignorance rather than an empty API — and the caller, which did not change,
+    /// must not be blamed for a method the unread body may well export.
+    ///
+    /// The readable half is the positive control: without it the test would pass on
+    /// an implementation that never reports an unresolved call at all.
+    #[test]
+    fn an_unread_callee_body_silences_the_call_where_an_empty_one_reports_it() {
+        use crate::test_utils::check_hir_diagnostic_with_unreadable;
+
+        let fixture = r#"
+//- /CommonModules/Сервер/Ext/Module.bsl
+
+//- /test.bsl
+Процедура Тест()
+    Сервер.П();
+КонецПроцедуры
+"#;
+
+        let readable = check_hir_diagnostic_with_unreadable(fixture, &[]);
+        let reported: Vec<_> =
+            readable.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert_eq!(
+            reported.len(),
+            1,
+            "an honestly empty module really does lack the method: {readable:?}"
+        );
+
+        let unread = check_hir_diagnostic_with_unreadable(
+            fixture,
+            &["/CommonModules/Сервер/Ext/Module.bsl"],
+        );
+        let silenced: Vec<_> =
+            unread.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert!(silenced.is_empty(), "the caller is not the file with the problem: {silenced:?}");
+    }
+
+    /// The route that produced the defect in the first place: with no configuration
+    /// root the resolver never asks the substrate at all and takes the candidate
+    /// straight from the path-derived module index, which holds the unread body's id
+    /// like any other file's.
+    #[test]
+    fn the_path_index_route_is_the_one_under_test_here() {
+        use crate::test_utils::check_hir_diagnostic_with_unreadable;
+
+        let fixture = r#"
+//- /CommonModules/Сервер/Ext/Module.bsl
+
+//- /test.bsl
+Процедура Тест()
+    Сервер.П();
+КонецПроцедуры
+"#;
+        // No `set_all_config_paths` runs in this fixture, so `has_config_root` is
+        // false and the substrate branch is unreachable — the assertion below can
+        // only be satisfied by the check on the path-index candidate.
+        let unread = check_hir_diagnostic_with_unreadable(
+            fixture,
+            &["/CommonModules/Сервер/Ext/Module.bsl"],
+        );
+        assert!(
+            !unread.iter().any(|d| d.code == DiagnosticCode::UnresolvedMethodCall),
+            "path-index candidates must be checked for readability too: {unread:?}"
         );
     }
 

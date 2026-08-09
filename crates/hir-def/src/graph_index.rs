@@ -357,6 +357,7 @@ pub fn resolve_summary_via_index(
                     // Base body first, then the caller's own extension body —
                     // the first hit mirrors `resolve_qualified_method`.
                     Ok(candidates) => match candidates
+                        .readable
                         .iter()
                         .find_map(|&m| index.find_method(m, method_name).map(|hit| (m, hit)))
                     {
@@ -483,6 +484,7 @@ pub fn resolve_summary_via_index(
             .locate_common_module_candidates(db, module_name)
         {
             Ok(candidates) => match candidates
+                .readable
                 .iter()
                 .find_map(|&m| index.find_method(m, method_name).map(|hit| (m, hit)))
             {
@@ -741,8 +743,12 @@ pub fn extract_unresolved_refs(
                 if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
                     // No candidate resolves the call: track every body so adding
                     // the method to either (base or own extension) reprojects.
-                    if candidates.iter().all(|&m| unresolved(index.find_method(m, method_name))) {
-                        for target in candidates {
+                    if candidates
+                        .readable
+                        .iter()
+                        .all(|&m| unresolved(index.find_method(m, method_name)))
+                    {
+                        for target in candidates.readable {
                             out.push((target, method_name.as_str().fold_lower()));
                         }
                     }
@@ -770,9 +776,12 @@ pub fn extract_unresolved_refs(
     for reg in &summary.notify_regs {
         if let crate::call_graph::NotifyTarget::Module(module_name) = &reg.target {
             if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
-                if candidates.iter().all(|&m| unresolved(index.find_method(m, &reg.callback_name)))
+                if candidates
+                    .readable
+                    .iter()
+                    .all(|&m| unresolved(index.find_method(m, &reg.callback_name)))
                 {
-                    for target in candidates {
+                    for target in candidates.readable {
                         out.push((target, reg.callback_name.as_str().fold_lower()));
                     }
                 }

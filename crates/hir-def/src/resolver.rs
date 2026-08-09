@@ -327,7 +327,7 @@ impl Resolver {
             // in both keeps the base declaration, an extension-added export is
             // appended after it.
             let mut seen = rustc_hash::FxHashSet::default();
-            for module_id in candidates {
+            for module_id in candidates.readable {
                 let symbol_tree = db.symbol_tree_ref(module_id);
                 for method in symbol_tree.exported_methods() {
                     if seen.insert(intern::NormName::intern(method.name.as_str())) {
@@ -445,7 +445,7 @@ impl Resolver {
         &self,
         db: &dyn ConfigsDatabase,
         module_name: &Name,
-    ) -> Result<Vec<ModuleId>, QualifiedMethodError> {
+    ) -> Result<CommonModuleCandidates, QualifiedMethodError> {
         if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
             tracing::warn!(
                 "locate_common_module_candidates called without workspace scope; refusing"
@@ -465,11 +465,19 @@ impl Resolver {
                 return Err(QualifiedMethodError::NotVisibleInConfigs);
             }
 
-            if let Some(files) =
+            if let Some(bodies) =
                 db.resolve_common_module_file_candidates(file_id, module_name.as_str())
             {
-                if !files.is_empty() {
-                    return Ok(files.into_iter().map(crate::ModuleId::new).collect());
+                if !bodies.readable.is_empty() {
+                    return Ok(CommonModuleCandidates {
+                        readable: bodies.readable.into_iter().map(crate::ModuleId::new).collect(),
+                        has_unread: !bodies.unread.is_empty(),
+                    });
+                }
+                if !bodies.unread.is_empty() {
+                    // Every body this module has is unreadable, so there is nothing
+                    // to look a method up in and no honest answer about its surface.
+                    return Err(QualifiedMethodError::BodyUnread);
                 }
                 // Configs see the module but no body file mapped (metadata-URI
                 // drift): degrade to the path index below instead of reporting
@@ -484,7 +492,18 @@ impl Resolver {
             .resolve_common_module(module_name)
             .ok_or(QualifiedMethodError::NotFound)?;
 
-        Ok(vec![crate::ModuleId::new(target_file_id)])
+        // The path index is built from source-root paths, which hold an unread body
+        // exactly like any other file — its entry cannot be dropped, because the first
+        // query through a dropped id panics resolving its path. So the check belongs
+        // here, on the way out.
+        if db.file_is_unread(target_file_id) {
+            return Err(QualifiedMethodError::BodyUnread);
+        }
+
+        Ok(CommonModuleCandidates {
+            readable: vec![crate::ModuleId::new(target_file_id)],
+            has_unread: false,
+        })
     }
 
     pub fn resolve_qualified_method(
@@ -497,7 +516,7 @@ impl Resolver {
             tracing::info_span!("resolve_qualified_method", %module_name, %method_name).entered();
 
         let candidates = self.locate_common_module_candidates(db, module_name)?;
-        for target_module_id in candidates {
+        for target_module_id in candidates.readable {
             let symbol_tree = db.symbol_tree_ref(target_module_id);
             if let Some(method_symbol) = symbol_tree.find_method(method_name) {
                 return Ok(QualifiedMethodResolution {
@@ -505,6 +524,11 @@ impl Resolver {
                     is_export: method_symbol.is_export,
                 });
             }
+        }
+        // Not finding the method among the bodies we could read is only evidence that
+        // it is missing if we could read them all.
+        if candidates.has_unread {
+            return Err(QualifiedMethodError::BodyUnread);
         }
         Err(QualifiedMethodError::NotFound)
     }
@@ -581,6 +605,12 @@ impl Resolver {
         let target_file_id = module_index
             .resolve_manager(manager_type, mdo_name)
             .ok_or(QualifiedMethodError::NotFound)?;
+
+        // Same rule as the common-module route: a body the path index still names but
+        // nobody could read supports no verdict about the module's surface.
+        if db.file_is_unread(target_file_id) {
+            return Err(QualifiedMethodError::BodyUnread);
+        }
 
         Ok(crate::ModuleId::new(target_file_id))
     }
@@ -676,6 +706,12 @@ impl Resolver {
                 QualifiedMethodError::NotFound
             })?;
 
+        // Same rule as the common-module route: a body the path index still names but
+        // nobody could read supports no verdict about the module's surface.
+        if db.file_is_unread(target_file_id) {
+            return Err(QualifiedMethodError::BodyUnread);
+        }
+
         let target_module_id = crate::ModuleId::new(target_file_id);
         let symbol_tree = db.symbol_tree_ref(target_module_id);
 
@@ -743,6 +779,12 @@ impl Resolver {
                 tracing::debug!("Record-set module not found: {:?} / {}", mdo_type, mdo_name);
                 QualifiedMethodError::NotFound
             })?;
+
+        // Same rule as the common-module route: a body the path index still names but
+        // nobody could read supports no verdict about the module's surface.
+        if db.file_is_unread(target_file_id) {
+            return Err(QualifiedMethodError::BodyUnread);
+        }
 
         let target_module_id = crate::ModuleId::new(target_file_id);
         let symbol_tree = db.symbol_tree_ref(target_module_id);
@@ -827,6 +869,18 @@ pub struct QualifiedMethodResolution {
 pub enum QualifiedMethodError {
     NotVisibleInConfigs,
     NotFound,
+    /// The module exists, but a body of it could not be read, so nothing can be
+    /// concluded about the call — least of all against the file making it.
+    BodyUnread,
+}
+
+/// The bodies of a common module that name resolution may look a method up in,
+/// plus whether looking there is the whole story.
+pub(crate) struct CommonModuleCandidates {
+    pub(crate) readable: Vec<ModuleId>,
+    /// At least one body of this module exists but could not be read. A failed
+    /// lookup over `readable` is then inconclusive rather than negative.
+    pub(crate) has_unread: bool,
 }
 
 #[cfg(test)]

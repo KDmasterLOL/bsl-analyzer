@@ -371,6 +371,7 @@ fn resolve_common_module_by_name_and_by_body_file() {
             name: "ОбщегоНазначения".to_string(),
             main: xml_file,
             module_file: Some(bsl_file),
+            unread_module_file: None,
         }]),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),

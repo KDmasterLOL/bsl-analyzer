@@ -42,6 +42,7 @@ pub fn resolve_qualified_call(
             QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
                 UnresolvedMethodKind::MethodNotFound
             }
+            QualifiedMethodError::BodyUnread => UnresolvedMethodKind::BodyUnread,
         })?;
 
     let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
@@ -159,6 +160,7 @@ pub fn resolve_record_set_module_call(
             QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
                 UnresolvedMethodKind::MethodNotFound
             }
+            QualifiedMethodError::BodyUnread => UnresolvedMethodKind::BodyUnread,
         })?;
 
     let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
@@ -186,6 +188,7 @@ pub fn resolve_object_module_call(
             QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
                 UnresolvedMethodKind::MethodNotFound
             }
+            QualifiedMethodError::BodyUnread => UnresolvedMethodKind::BodyUnread,
         })?;
 
     let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
@@ -211,6 +214,7 @@ pub fn resolve_aliased_manager_call(
         QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
             UnresolvedMethodKind::MethodNotFound
         }
+        QualifiedMethodError::BodyUnread => UnresolvedMethodKind::BodyUnread,
     })?;
 
     let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
