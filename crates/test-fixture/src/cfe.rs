@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct CfeFixtureBuilder {
     base_config_xml: String,
+    base_modules: Vec<CfeModuleSpec>,
     extensions: Vec<CfeExtensionSpec>,
 }
 
@@ -22,6 +23,7 @@ struct CfeModuleSpec {
 #[derive(Debug)]
 pub struct CfeFixture {
     root: PathBuf,
+    base_modules: Vec<CfeModule>,
     extensions: Vec<CfeExtension>,
 }
 
@@ -42,7 +44,24 @@ pub struct CfeModule {
 
 impl CfeFixtureBuilder {
     pub fn new(base_config_xml: &str) -> Self {
-        Self { base_config_xml: base_config_xml.to_string(), extensions: Vec::new() }
+        Self {
+            base_config_xml: base_config_xml.to_string(),
+            base_modules: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    /// A common module of the BASE configuration. Needed whenever a fixture must
+    /// exercise a module that has more than one body — the base declaration and an
+    /// extension's adoption of the same name.
+    pub fn add_base_module(&mut self, module_name: &str, bsl: &str) -> &mut Self {
+        if let Some(existing) = self.base_modules.iter_mut().find(|m| m.name == module_name) {
+            existing.source = bsl.to_string();
+        } else {
+            self.base_modules
+                .push(CfeModuleSpec { name: module_name.to_string(), source: bsl.to_string() });
+        }
+        self
     }
 
     pub fn add_extension(&mut self, name: &str, config_xml: &str) -> &mut Self {
@@ -99,6 +118,18 @@ impl CfeFixtureBuilder {
         std::fs::write(root.join("Configuration.xml"), base_config_xml)
             .expect("write base Configuration.xml");
 
+        let base_modules = self
+            .base_modules
+            .into_iter()
+            .map(|module| {
+                let module_dir = root.join("CommonModules").join(&module.name);
+                std::fs::create_dir_all(&module_dir).expect("create base CommonModule directory");
+                let path = module_dir.join("Module.bsl");
+                std::fs::write(&path, &module.source).expect("write base CommonModule body");
+                CfeModule { name: module.name, path, source: module.source }
+            })
+            .collect();
+
         let extensions_root = root.join("Extensions");
         std::fs::create_dir_all(&extensions_root).expect("create Extensions directory");
 
@@ -135,13 +166,17 @@ impl CfeFixtureBuilder {
             })
             .collect();
 
-        CfeFixture { root, extensions }
+        CfeFixture { root, base_modules, extensions }
     }
 }
 
 impl CfeFixture {
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn base_modules(&self) -> &[CfeModule] {
+        &self.base_modules
     }
 
     pub fn extensions(&self) -> &[CfeExtension] {

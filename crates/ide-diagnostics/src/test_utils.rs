@@ -990,6 +990,18 @@ pub fn check_snapshot_with_config_xml(
 }
 
 pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Diagnostic> {
+    check_with_cfe_unreadable(source, fixture, &[])
+}
+
+/// [`check_with_cfe`], with the named module bodies registered as existing but
+/// unreadable. Names are matched against the body's full path, so
+/// `"Extensions/Расш/CommonModules/Сервер"` picks the extension's body and leaves the
+/// base configuration's body of the same module readable.
+pub fn check_with_cfe_unreadable(
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    unreadable: &[&str],
+) -> Vec<Diagnostic> {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::metadata::intern_configuration_path;
     use ide_db::RootDatabaseImpl;
@@ -1015,13 +1027,21 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
     file_set.insert(caller_file_id, VfsPath::new(caller_path.to_string_lossy().into_owned()));
 
     let mut module_files = Vec::new();
+    for module in fixture.base_modules() {
+        let fid = FileId((module_files.len() + 1) as u32);
+        let path = fixture.root().join(format!("CommonModules/{}/Ext/Module.bsl", module.name()));
+        let spelling = path.to_string_lossy().replace('\\', "/");
+        file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
+        module_files.push((fid, module.source(), spelling));
+    }
     for extension in fixture.extensions() {
         for module in extension.modules() {
             let fid = FileId((module_files.len() + 1) as u32);
             let path =
                 extension.root().join(format!("CommonModules/{}/Ext/Module.bsl", module.name()));
+            let spelling = path.to_string_lossy().replace('\\', "/");
             file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
-            module_files.push((fid, module.source()));
+            module_files.push((fid, module.source(), spelling));
         }
     }
 
@@ -1029,10 +1049,21 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(caller_file_id, SourceRootId(0));
     db.set_file_text(caller_file_id, source);
-    for (fid, body) in module_files {
+    let mut marked = 0usize;
+    for (fid, body, spelling) in module_files {
         db.set_file_source_root(fid, SourceRootId(0));
-        db.set_file_text(fid, body);
+        if unreadable.iter().any(|u| spelling.contains(u)) {
+            db.set_file_unreadable(fid);
+            marked += 1;
+        } else {
+            db.set_file_text(fid, body);
+        }
     }
+    assert_eq!(
+        marked,
+        unreadable.len(),
+        "every named body must exist in the fixture, or the stand proves nothing"
+    );
 
     let config_path = fixture.root().to_string_lossy();
     let config_path_input = intern_configuration_path(
@@ -1196,6 +1227,19 @@ fn common_module_xml_with_privileged(name: &str, idx: usize, privileged: bool) -
 
 fn materialize_cfe_loader_compat(fixture: &test_fixture::CfeFixture) {
     let mut idx = 0usize;
+    for module in fixture.base_modules() {
+        let common_modules_dir = fixture.root().join("CommonModules");
+        let ext_dir = common_modules_dir.join(module.name()).join("Ext");
+        std::fs::create_dir_all(&ext_dir).expect("create base CommonModule Ext directory");
+        std::fs::write(ext_dir.join("Module.bsl"), module.source())
+            .expect("write base CommonModule Ext body");
+        std::fs::write(
+            common_modules_dir.join(format!("{}.xml", module.name())),
+            common_module_xml(module.name(), idx),
+        )
+        .expect("write base CommonModule XML");
+        idx += 1;
+    }
     for extension in fixture.extensions() {
         for module in extension.modules() {
             let common_modules_dir = extension.root().join("CommonModules");

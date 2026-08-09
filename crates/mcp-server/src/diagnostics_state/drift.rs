@@ -1703,6 +1703,50 @@ mod tests {
         assert!(healed, "the retry list must heal a hole no fingerprint change reveals");
     }
 
+    /// Losing the back-link when a body goes unreadable is only half the contract: the
+    /// substrate is rebuilt FROM the database, so a rebuild ordered before the mark is
+    /// cleared files the body as unread for good, and every call into the module stays
+    /// silently undiagnosed. That outcome is worse than the false finding this route
+    /// exists to prevent, and neither `served` nor the hole count shows it.
+    #[test]
+    fn a_healed_body_becomes_readable_again_in_the_substrate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let body = "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры";
+        write_common_module(root, "Сервер", true, body);
+        write_common_module(root, "Клиент", false, "Процедура К() КонецПроцедуры");
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let anchor_path = module_path(root, "Клиент");
+        let composition = |state: &DiagnosticsState| {
+            let out = state.read(|r, _| {
+                let anchor = r.file_id_for(&anchor_path).expect("the neighbour serves throughout");
+                let bodies = r.db().resolve_common_module_files_for_file(anchor, "Сервер");
+                (bodies.readable.len(), bodies.unread.len())
+            });
+            let ResidentOutcome::Ready(counts, _) = out else { panic!("expected Ready") };
+            counts
+        };
+
+        assert_eq!(composition(&state), (1, 0), "control: a readable body starts readable");
+
+        let gen0 = state.generation();
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(module_path(root, "Сервер"), UNREADABLE).unwrap();
+        assert!(wait_for_apply(&state, gen0), "the unreadable body applies as drift");
+        assert_eq!(composition(&state), (0, 1), "unreadable is recorded, not merely dropped");
+
+        let gen1 = state.generation();
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(module_path(root, "Сервер"), body).unwrap();
+        assert!(wait_for_apply(&state, gen1), "the restored body applies as drift");
+        assert_eq!(composition(&state), (1, 0), "and the mark is gone once it reads again");
+    }
+
     /// Editing a `.bsl` body drifts the workspace; the next read applies an
     /// incremental `set_file_text` and bumps the generation, with no full rebuild.
     #[test]
