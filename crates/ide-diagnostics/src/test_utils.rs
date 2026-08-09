@@ -1229,6 +1229,15 @@ fn common_module_xml(name: &str, idx: usize) -> String {
     common_module_xml_with_privileged(name, idx, false)
 }
 
+fn common_module_xml_with_global(name: &str, idx: usize, global: bool) -> String {
+    let xml = common_module_xml_with_privileged(name, idx, false);
+    if global {
+        xml.replace("<Global>false</Global>", "<Global>true</Global>")
+    } else {
+        xml
+    }
+}
+
 fn common_module_xml_with_privileged(name: &str, idx: usize, privileged: bool) -> String {
     let uuid = format!("00000000-0000-0000-0000-{:012}", idx + 1);
     format!(
@@ -1262,7 +1271,7 @@ fn materialize_cfe_loader_compat(fixture: &test_fixture::CfeFixture) {
             .expect("write base CommonModule Ext body");
         std::fs::write(
             common_modules_dir.join(format!("{}.xml", module.name())),
-            common_module_xml(module.name(), idx),
+            common_module_xml_with_global(module.name(), idx, module.is_global()),
         )
         .expect("write base CommonModule XML");
         idx += 1;

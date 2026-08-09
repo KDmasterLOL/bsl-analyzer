@@ -607,7 +607,7 @@ fn complete_global_module_exports<DB: RootDatabase>(
 
     let mut items = Vec::new();
     let mut blocked = Vec::new();
-    for (module_name, method_name, method_id) in resolver.global_common_module_exports(db) {
+    for (module_name, method_name, method_id) in resolver.global_common_module_exports(db).entries {
         if !matcher.admits(method_name.as_str()) {
             continue;
         }

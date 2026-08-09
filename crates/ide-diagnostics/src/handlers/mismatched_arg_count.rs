@@ -277,4 +277,39 @@ mod tests {
             mismatched[0].message
         );
     }
+
+    /// An export of a GLOBAL common module shadows the platform global of the same
+    /// name. So when such a module has a body nobody could read, the platform
+    /// signature is not the one this call is measured against — the unknown body may
+    /// declare its own `СтрДлина`, and measuring against the platform's is a guess
+    /// charged to the caller.
+    #[test]
+    fn an_unread_global_body_bars_the_platform_signature_from_answering() {
+        use crate::test_utils::check_with_cfe_unreadable;
+        use test_fixture::CfeFixtureBuilder;
+
+        let code = "Процедура Тест() Экспорт\nСтрДлина();\nКонецПроцедуры";
+        let fixture = || {
+            let mut builder = CfeFixtureBuilder::new("");
+            builder
+                .add_base_module_global("Глоб", "Процедура Иное() Экспорт КонецПроцедуры")
+                .add_extension("Расш", "");
+            builder.build()
+        };
+
+        // Control: with the global body readable the call really is measured against the
+        // platform signature and IS accused — so the silence below is the barrier.
+        let control = check_with_cfe_unreadable(code, fixture(), &[]);
+        assert!(
+            control.iter().any(|d| d.code == DiagnosticCode::MismatchedArgCount),
+            "control: the platform arity check must fire, got {control:?}"
+        );
+
+        let unread =
+            check_with_cfe_unreadable(code, fixture(), &["CommonModules/Глоб/Ext/Module.bsl"]);
+        assert!(
+            !unread.iter().any(|d| d.code == DiagnosticCode::MismatchedArgCount),
+            "an unread global body may declare this very name, got {unread:?}"
+        );
+    }
 }

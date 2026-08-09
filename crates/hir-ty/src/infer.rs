@@ -429,6 +429,10 @@ pub struct InferenceContext<'db> {
     /// miss and reused, so a global-util-heavy body does not re-enumerate global modules
     /// per call. `None` until first consulted. See [`Self::global_export_map`].
     global_exports: Option<Arc<FxHashMap<NormName, hir_def::MethodId>>>,
+    /// A visible global common module has a body nobody could read, so the cached
+    /// export map above is not the whole global surface. Meaningful only once that map
+    /// has been built.
+    global_surface_partly_unknown: bool,
 
     /// Per-body literal `Структура` shapes (keys built via `Новый Структура` / `.Вставить`), keyed
     /// by lowercased local name. Collected once at the start of [`Self::infer_all`] and used to
@@ -654,6 +658,7 @@ impl<'db> InferenceContext<'db> {
             body_env,
             checked_env: opts.checked_environments,
             global_exports: None,
+            global_surface_partly_unknown: false,
             structure_shapes: FxHashMap::default(),
             callee_module_env: FxHashMap::default(),
             local_callee_env: FxHashMap::default(),
@@ -756,7 +761,9 @@ impl<'db> InferenceContext<'db> {
         }
         let resolver = self.get_resolver();
         let mut map: FxHashMap<NormName, hir_def::MethodId> = FxHashMap::default();
-        for (_module, method_name, method_id) in resolver.global_common_module_exports(self.db) {
+        let surface = resolver.global_common_module_exports(self.db);
+        self.global_surface_partly_unknown = surface.surface_partly_unknown;
+        for (_module, method_name, method_id) in surface.entries {
             map.entry(NormName::intern(method_name.as_str())).or_insert(method_id);
         }
         let arc = Arc::new(map);
@@ -2581,6 +2588,18 @@ impl<'db> InferenceContext<'db> {
             {
                 if let Some(ret) = self.resolve_bare_global_export(name, args, callee) {
                     return ret;
+                }
+                // The name is not in the known global surface — but if a visible global
+                // common module has a body nobody could read, that surface is not the
+                // whole one. The unknown body may export this very name, and a global
+                // export shadows the platform global, so falling through to the platform
+                // signature would measure the call against a contract that never applied.
+                if self.global_surface_partly_unknown {
+                    for arg in args {
+                        self.infer_expr(*arg);
+                    }
+                    self.expr_types.insert(callee, self.db.unknown());
+                    return self.db.unknown();
                 }
             }
         }

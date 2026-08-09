@@ -678,12 +678,12 @@ impl GlobalState {
                 let exports = Resolver::with_workspace_scope(ModuleId::new(anchor))
                     .global_common_module_exports(db);
                 let modules: std::collections::HashSet<String> =
-                    exports.iter().map(|(module, _, _)| module.as_str().to_lowercase()).collect();
+                    exports.entries.iter().map(|(m, _, _)| m.as_str().to_lowercase()).collect();
 
                 let rss_after = crate::smoke::read_rss_bytes().unwrap_or(0);
                 tracing::info!(
                     global_modules = modules.len(),
-                    exported_methods = exports.len(),
+                    exported_methods = exports.entries.len(),
                     elapsed_ms = warm_start.elapsed().as_millis() as u64,
                     rss_delta_mb = rss_after.saturating_sub(rss_before) / 1_048_576,
                     "global common modules warmed",

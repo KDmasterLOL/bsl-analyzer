@@ -18,6 +18,7 @@ struct CfeExtensionSpec {
 struct CfeModuleSpec {
     name: String,
     source: String,
+    global: bool,
 }
 
 #[derive(Debug)]
@@ -40,6 +41,7 @@ pub struct CfeModule {
     name: String,
     path: PathBuf,
     source: String,
+    global: bool,
 }
 
 impl CfeFixtureBuilder {
@@ -55,11 +57,30 @@ impl CfeFixtureBuilder {
     /// exercise a module that has more than one body — the base declaration and an
     /// extension's adoption of the same name.
     pub fn add_base_module(&mut self, module_name: &str, bsl: &str) -> &mut Self {
+        self.add_base_module_with_global(module_name, bsl, false)
+    }
+
+    /// A base common module declared GLOBAL, so its exports enter the global context and
+    /// a bare `Имя()` call can resolve to them.
+    pub fn add_base_module_global(&mut self, module_name: &str, bsl: &str) -> &mut Self {
+        self.add_base_module_with_global(module_name, bsl, true)
+    }
+
+    fn add_base_module_with_global(
+        &mut self,
+        module_name: &str,
+        bsl: &str,
+        global: bool,
+    ) -> &mut Self {
         if let Some(existing) = self.base_modules.iter_mut().find(|m| m.name == module_name) {
             existing.source = bsl.to_string();
+            existing.global = global;
         } else {
-            self.base_modules
-                .push(CfeModuleSpec { name: module_name.to_string(), source: bsl.to_string() });
+            self.base_modules.push(CfeModuleSpec {
+                name: module_name.to_string(),
+                source: bsl.to_string(),
+                global,
+            });
         }
         self
     }
@@ -99,8 +120,11 @@ impl CfeFixtureBuilder {
         if let Some(existing) = ext.modules.iter_mut().find(|module| module.name == module_name) {
             existing.source = bsl.to_string();
         } else {
-            ext.modules
-                .push(CfeModuleSpec { name: module_name.to_string(), source: bsl.to_string() });
+            ext.modules.push(CfeModuleSpec {
+                name: module_name.to_string(),
+                source: bsl.to_string(),
+                global: false,
+            });
         }
         self
     }
@@ -126,7 +150,7 @@ impl CfeFixtureBuilder {
                 std::fs::create_dir_all(&module_dir).expect("create base CommonModule directory");
                 let path = module_dir.join("Module.bsl");
                 std::fs::write(&path, &module.source).expect("write base CommonModule body");
-                CfeModule { name: module.name, path, source: module.source }
+                CfeModule { name: module.name, path, source: module.source, global: module.global }
             })
             .collect();
 
@@ -158,7 +182,12 @@ impl CfeFixtureBuilder {
                         let path = module_dir.join("Module.bsl");
                         std::fs::write(&path, &module.source).expect("write CFE CommonModule body");
 
-                        CfeModule { name: module.name, path, source: module.source }
+                        CfeModule {
+                            name: module.name,
+                            path,
+                            source: module.source,
+                            global: module.global,
+                        }
                     })
                     .collect();
 
@@ -226,6 +255,11 @@ impl CfeModule {
 
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    /// Whether the module is declared global — its exports enter the global context.
+    pub fn is_global(&self) -> bool {
+        self.global
     }
 }
 

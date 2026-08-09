@@ -305,7 +305,7 @@ impl<'a> Forwarder<'a> {
         self.global_methods.get_or_init(|| {
             let mut map = FxHashMap::default();
             for (_module, method_name, method_id) in
-                self.resolver.global_common_module_exports(self.db)
+                self.resolver.global_common_module_exports(self.db).entries
             {
                 map.entry(method_name.as_str().fold_lower()).or_insert(method_id);
             }

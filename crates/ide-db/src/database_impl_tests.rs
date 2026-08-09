@@ -3555,6 +3555,7 @@ fn global_common_module_exports_stop_at_an_unread_body() {
 
         hir::Resolver::with_workspace_scope(ModuleId::new(caller))
             .global_common_module_exports(&db)
+            .entries
             .into_iter()
             .map(|(_, method, id)| (id.module, method.as_str().to_string()))
             .collect()

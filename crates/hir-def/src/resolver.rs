@@ -305,14 +305,12 @@ impl Resolver {
     /// symbol-tree order. Callers that need a single winner for a name keep the FIRST
     /// occurrence (a name exported by two global modules is a configuration-level ambiguity
     /// 1C itself forbids; we pick deterministically rather than guess).
-    pub fn global_common_module_exports(
-        &self,
-        db: &dyn ConfigsDatabase,
-    ) -> Vec<(Name, Name, MethodId)> {
+    pub fn global_common_module_exports(&self, db: &dyn ConfigsDatabase) -> GlobalExports {
         let Some(self_module) = self.module_id() else {
-            return Vec::new();
+            return GlobalExports::default();
         };
         let mut exports = Vec::new();
+        let mut surface_partly_unknown = false;
         for module_name in self.global_common_module_names(db) {
             let effective_is_global = db
                 .resolve_common_module(self_module.file_id, module_name.as_str())
@@ -330,7 +328,7 @@ impl Resolver {
             // first unread one, whose exports are unknown and whom a body behind it
             // must not extend the global context in place of.
             let mut seen = rustc_hash::FxHashSet::default();
-            let _: crate::configs::BodySearch<()> = candidates.search(|module_id| {
+            let walk: crate::configs::BodySearch<()> = candidates.search(|module_id| {
                 let symbol_tree = db.symbol_tree_ref(module_id);
                 for method in symbol_tree.exported_methods() {
                     if seen.insert(intern::NormName::intern(method.name.as_str())) {
@@ -339,8 +337,11 @@ impl Resolver {
                 }
                 None
             });
+            if matches!(walk, crate::configs::BodySearch::Unread) {
+                surface_partly_unknown = true;
+            }
         }
-        exports
+        GlobalExports { entries: exports, surface_partly_unknown }
     }
 
     pub fn resolve_assignment_target(
@@ -862,6 +863,19 @@ pub enum AssignmentResolution {
 pub struct QualifiedMethodResolution {
     pub method_id: MethodId,
     pub is_export: bool,
+}
+
+/// The exported surface of the visible GLOBAL common modules, plus whether it is the
+/// WHOLE surface.
+#[derive(Debug, Default)]
+pub struct GlobalExports {
+    /// `(module_name, method_name, method_id)` in resolution order.
+    pub entries: Vec<(Name, Name, MethodId)>,
+    /// A visible global common module has a body nobody could read, so a name absent
+    /// from `entries` is not proven absent from the global context — and a global
+    /// export shadows the platform global of the same name, so nothing may be
+    /// concluded about a bare call to such a name either.
+    pub surface_partly_unknown: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
