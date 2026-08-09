@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{boot, execute_once, resolve_target, BenchEnv, BetweenIndexPassesHook, ResolvedTarget};
+use super::{boot, execute_once, resolve_target, BenchEnv, ResolvedTarget};
 use crate::bench::manifest::FeatureSpec;
 use crate::bench::runner::RunError;
 
@@ -77,59 +77,19 @@ fn assert_unread_failure(err: RunError, module: &Path) {
     );
 }
 
-/// The seam is an extension point, so a later hook may well want to install or
-/// drop a guard of its own. Holding the cell borrowed across the call would kill
-/// such a hook with a borrow panic — pinned here so the property stays a property
-/// of the seam rather than a rule its writers must remember.
+/// The seam is one-shot, and that is the whole of its semantics: nothing stands
+/// registered, so nothing can leak into a later call. Pinned so it cannot quietly
+/// grow back into a standing registration.
 #[test]
-fn a_hook_may_touch_the_seam_while_it_runs() {
-    let ran_to_completion = std::rc::Rc::new(std::cell::Cell::new(false));
-    let flag = std::rc::Rc::clone(&ran_to_completion);
-    let _hook = BetweenIndexPassesHook::install(move || {
-        let _nested = BetweenIndexPassesHook::install(|| {});
-        flag.set(true);
-    });
-
-    super::run_between_index_passes_hook();
-
-    assert!(ran_to_completion.get(), "the hook must reach its last statement");
-}
-
-/// The call borrows nothing from the cell, so the registration outlives it — a
-/// seam that consumed its hook would serve the first call and silently no-op
-/// every one after.
-#[test]
-fn a_hook_stays_installed_across_calls() {
+fn an_armed_action_is_spent_by_the_first_call() {
     let calls = std::rc::Rc::new(std::cell::Cell::new(0));
     let counted = std::rc::Rc::clone(&calls);
-    let _hook = BetweenIndexPassesHook::install(move || counted.set(counted.get() + 1));
+    super::arm_between_index_passes(move || counted.set(counted.get() + 1));
 
     super::run_between_index_passes_hook();
     super::run_between_index_passes_hook();
 
-    assert_eq!(calls.get(), 2, "the hook must survive its own invocation");
-}
-
-/// A guard owns exactly the registration it made — no more, no less. Without the
-/// second half, a guard that clears the cell wholesale passes just as well, and an
-/// older guard outliving a newer hook would take that hook down with it.
-#[test]
-fn a_guard_removes_only_its_own_registration() {
-    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
-
-    let counted = std::rc::Rc::clone(&calls);
-    let sole = BetweenIndexPassesHook::install(move || counted.set(counted.get() + 1));
-    drop(sole);
-    super::run_between_index_passes_hook();
-    assert_eq!(calls.get(), 0, "a dropped guard leaves no hook behind");
-
-    let counted = std::rc::Rc::clone(&calls);
-    let older = BetweenIndexPassesHook::install(move || counted.set(counted.get() + 1));
-    let counted = std::rc::Rc::clone(&calls);
-    let _newer = BetweenIndexPassesHook::install(move || counted.set(counted.get() + 10));
-    drop(older);
-    super::run_between_index_passes_hook();
-    assert_eq!(calls.get(), 10, "the newer registration must outlive the older guard");
+    assert_eq!(calls.get(), 1, "the action must be spent by its call, not left standing");
 }
 
 #[test]
@@ -162,7 +122,7 @@ fn a_module_unreadable_between_the_two_passes_fails_the_measurement() {
     // The observation reopens every batch, so a file that survived the build pass
     // still has a second chance to become unreadable; its report must count too.
     let corrupted = module.clone();
-    let _hook = BetweenIndexPassesHook::install(move || make_unreadable(&corrupted));
+    super::arm_between_index_passes(move || make_unreadable(&corrupted));
 
     let err = expect_refusal(
         execute_once(&mut env, &resolved, &index_build_spec()),

@@ -41,64 +41,33 @@ pub const DEFAULT_BOOT_BUDGET_MS: u64 = 120_000;
 #[path = "unread_module_tests.rs"]
 mod unread_module_tests;
 
-// Lets a test make a module unreadable at the one instant it cannot reach from
-// outside: after the index is built, before the observation reopens the batches.
-// Every other instant is reachable by calling `boot`, `resolve_target` and
-// `execute_once` in sequence, so this is the only stage the seam offers.
+// Arms one action for the single instant a test cannot reach from outside: after
+// the index is built, before the observation reopens the batches. Every other
+// instant is reachable by calling `boot`, `resolve_target` and `execute_once` in
+// sequence, so this is the only stage the seam offers.
 //
-// Thread-local rather than global: libtest gives each test its own thread, so the
-// hook cannot leak into a neighbour running in parallel.
+// One-shot by construction: the call takes the action out and never puts it back.
+// There is no standing registration, so there is nothing to leak, replace, restore
+// or carry across a thread — a seam that kept one had to answer all four, and none
+// of those questions has a caller here.
 //
-// The hook is shared rather than owned by the cell, and each registration carries
-// the number of the guard that made it. Both are what make the seam behave
-// obviously under a hook that touches it: the call holds its own handle, so the
-// cell is free meanwhile, and a guard can only ever remove what it installed.
-#[cfg(test)]
-type SeamRegistration = (u64, std::rc::Rc<dyn Fn()>);
-
+// Thread-local, so an action a test arms but never spends cannot reach a neighbour:
+// libtest gives each test its own thread.
 #[cfg(test)]
 thread_local! {
-    static BETWEEN_INDEX_PASSES: std::cell::RefCell<Option<SeamRegistration>> =
-        const { std::cell::RefCell::new(None) };
-    static NEXT_HOOK_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static BETWEEN_INDEX_PASSES: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn arm_between_index_passes(action: impl FnOnce() + 'static) {
+    BETWEEN_INDEX_PASSES.with(|slot| slot.set(Some(Box::new(action))));
 }
 
 #[cfg(test)]
 fn run_between_index_passes_hook() {
-    let hook = BETWEEN_INDEX_PASSES
-        .with(|slot| slot.borrow().as_ref().map(|(_, hook)| std::rc::Rc::clone(hook)));
-    if let Some(hook) = hook {
-        hook();
-    }
-}
-
-/// Installs a [`BETWEEN_INDEX_PASSES`] hook and removes it on drop, so a panicking
-/// test cannot leave it behind for the next test on the same thread.
-#[cfg(test)]
-struct BetweenIndexPassesHook(u64);
-
-#[cfg(test)]
-impl BetweenIndexPassesHook {
-    fn install(hook: impl Fn() + 'static) -> Self {
-        let id = NEXT_HOOK_ID.with(|next| {
-            let id = next.get() + 1;
-            next.set(id);
-            id
-        });
-        BETWEEN_INDEX_PASSES.with(|slot| *slot.borrow_mut() = Some((id, std::rc::Rc::new(hook))));
-        BetweenIndexPassesHook(id)
-    }
-}
-
-#[cfg(test)]
-impl Drop for BetweenIndexPassesHook {
-    fn drop(&mut self) {
-        BETWEEN_INDEX_PASSES.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            if slot.as_ref().is_some_and(|(id, _)| *id == self.0) {
-                *slot = None;
-            }
-        });
+    if let Some(action) = BETWEEN_INDEX_PASSES.with(std::cell::Cell::take) {
+        action();
     }
 }
 
