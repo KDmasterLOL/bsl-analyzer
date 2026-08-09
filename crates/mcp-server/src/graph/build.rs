@@ -4154,6 +4154,21 @@ mod tests {
 
         let canonical = base_body.canonicalize().unwrap();
         let key = canonical.to_string_lossy().into_owned();
+
+        // The plan matches the recorded unread paths against these very keys, verbatim.
+        // Pin that they are one spelling: the comparison is only sound because both
+        // sides come from the same scanned canonical path, and this is the assertion
+        // that would notice either producer starting to normalise.
+        let recorded = {
+            let conn = rusqlite::Connection::open(&db_pre).unwrap();
+            crate::graph_db::read_unread_paths(&conn)
+        };
+        assert!(
+            recorded.contains(&key),
+            "the artefact records the unread body under the same spelling the plan is keyed by: \
+             {recorded:?} vs {key}"
+        );
+
         let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&canonical)).unwrap();
         let plan = crate::graph_db::caller_delta_plan(
             &db_pre,

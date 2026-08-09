@@ -839,8 +839,13 @@ fn reference_targets(
     candidates: &crate::resolver::CommonModuleCandidates,
     mut probe: impl FnMut(ModuleId) -> Option<MethodRef>,
 ) -> Vec<ModuleId> {
-    let answered =
-        matches!(candidates.search(|m| probe(m).filter(|hit| hit.is_export)), BodySearch::Found(_));
+    // The walk stops at the first body that DECLARES the name, exported or not — that
+    // is where resolution stops too, and a non-exported declaration is an answer of its
+    // own (`VisibilityBlocked`), not a reason to keep looking. Filtering by export
+    // inside the walk would step over it, find a lower body's export, and call the
+    // call answered — leaving no reverse reference for the day the winning declaration
+    // gains `Экспорт`.
+    let answered = matches!(candidates.search(&mut probe), BodySearch::Found(hit) if hit.is_export);
     if answered {
         Vec::new()
     } else {
@@ -2520,6 +2525,45 @@ mod module_layout_hash_tests {
             index.module_sig_hash(module).expect("indexed module has a signature hash"),
             index.module_layout_hash(module).expect("indexed module has a layout hash"),
         )
+    }
+
+    /// A call blocked by a non-exported declaration is not answered — it resolves to
+    /// nothing, and adding `Экспорт` to that very declaration makes an edge appear. The
+    /// reverse references are the only index able to find its callers then, so the walk
+    /// that decides whether to record them has to stop where resolution stops: at the
+    /// first DECLARATION, not at the first exported one.
+    #[test]
+    fn a_call_blocked_by_a_non_exported_declaration_keeps_its_reverse_references() {
+        fn targets(base_source: &str) -> Vec<ModuleId> {
+            let base = ModuleId::new(FileId(0));
+            let ext = ModuleId::new(FileId(1));
+            let mut index = GraphIndex::new();
+            for (module, source) in
+                [(base, base_source), (ext, "Процедура П() Экспорт КонецПроцедуры")]
+            {
+                let parse = parser::parse(source);
+                let methods =
+                    crate::call_graph::extract_graph_methods(&crate::ItemTree::from_parse(&parse));
+                index.insert_module_data(module, methods, None, false);
+            }
+            let candidates = crate::resolver::CommonModuleCandidates {
+                bodies: vec![(base, false), (ext, false)],
+            };
+            let name = Name::new("П");
+            super::reference_targets(&candidates, |m| index.find_method(m, &name))
+        }
+
+        // Control: a base body that exports the name really does answer the call, and
+        // an answered call owes nobody a reference.
+        assert_eq!(targets("Процедура П() Экспорт КонецПроцедуры"), Vec::<ModuleId>::new());
+
+        let base = ModuleId::new(FileId(0));
+        let ext = ModuleId::new(FileId(1));
+        assert_eq!(
+            targets("Процедура П() КонецПроцедуры"),
+            vec![base, ext],
+            "a non-exported declaration blocks the call, so both bodies stay tracked"
+        );
     }
 
     /// Both hashes are read as proof that other modules' calls still resolve the same

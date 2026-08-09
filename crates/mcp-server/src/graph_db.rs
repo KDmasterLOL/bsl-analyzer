@@ -1363,11 +1363,13 @@ pub fn caller_delta_plan(
 ) -> anyhow::Result<Option<Vec<PathBuf>>> {
     let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
-    // What the stored artefact recorded as unreadable, in the '/'-normalised spelling
-    // `nodes.file` (and therefore `sig_changed`) uses — `unread_paths` keeps raw
-    // `PathBuf`s, and on Windows the two differ.
+    // What the stored artefact recorded as unreadable. Compared verbatim: both this and
+    // the keys of `sig_changed` are the raw canonical spelling of the same scanned
+    // path — `unread_paths` from the batch loader's `PathBuf`s, the keys from
+    // `files.path`. Normalising either side would break the match on the one platform
+    // where the two spellings could differ at all.
     let was_unread: std::collections::HashSet<String> =
-        read_unread_paths(&conn).into_iter().map(|p| p.replace('\\', "/")).collect();
+        read_unread_paths(&conn).into_iter().collect();
 
     let mut index_callers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (file, profile) in sig_changed {
