@@ -100,7 +100,13 @@ mod tests {
     /// followed by a character that could continue one. `foo_extension_paths` is a
     /// different name and must not be counted as this one.
     fn whole_word_occurrences(text: &str, needle: &str) -> usize {
-        let continues = |c: char| c.is_alphanumeric() || c == '_';
+        // Rust continues an identifier by Unicode XID_Continue, which reaches beyond
+        // alphanumerics — a combining mark continues one too. Rather than depend on a
+        // Unicode table for a test helper, every non-ASCII char counts as continuing:
+        // a real call site is always ASCII-delimited (`.`, `::`, `(`), so this can
+        // only ever drop an exotic identifier that merely starts with the name, never
+        // a call the gate exists to see.
+        let continues = |c: char| c.is_alphanumeric() || c == '_' || !c.is_ascii();
         text.match_indices(needle)
             .filter(|(at, _)| {
                 let before = text[..*at].chars().next_back();
@@ -119,6 +125,11 @@ mod tests {
         assert_eq!(whole_word_occurrences("bar_baz", "bar"), 0, "so is a longer name after it");
         assert_eq!(whole_word_occurrences("Type::bar(x)", "bar"), 1, "UFCS is the same name");
         assert_eq!(whole_word_occurrences("x.bar()", "bar"), 1, "so is a method call");
+        assert_eq!(
+            whole_word_occurrences("bar\u{0301}", "bar"),
+            0,
+            "a combining mark continues a Rust identifier, so this is another name"
+        );
     }
 
     /// Every root set in this crate comes from one derivation. The two accessors
