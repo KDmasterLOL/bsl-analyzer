@@ -1275,6 +1275,10 @@ pub struct ModuleProfile {
     pub sig_hash: u64,
     pub exported_lower: std::collections::BTreeSet<String>,
     pub has_collision: bool,
+    /// The module's bytes could not be read. Not a property of its declarations —
+    /// which is exactly why the caller-delta cannot work with it, see
+    /// [`caller_delta_plan`].
+    pub unread: bool,
 }
 
 /// Recompute each module at `changed_paths`'s profile, for the incremental
@@ -1323,7 +1327,12 @@ pub fn recompute_module_profiles(
             methods.iter().filter(|(_, exp)| *exp).map(|(n, _)| n.to_lowercase()).collect();
         out.insert(
             path.to_string_lossy().into_owned(),
-            ModuleProfile { sig_hash, exported_lower, has_collision },
+            ModuleProfile {
+                sig_hash,
+                exported_lower,
+                has_collision,
+                unread: index.is_unread(*module).unwrap_or(false),
+            },
         );
     }
     Ok(out)
@@ -1353,6 +1362,16 @@ pub fn caller_delta_plan(
     for (file, profile) in sig_changed {
         if profile.has_collision {
             return Ok(None); // first-wins shadowing — exported set ≠ resolvable set
+        }
+        // A body that has just become unreadable bars callers from resolving into any
+        // body BEHIND it — a sibling body of the same common module, in another file
+        // entirely. Neither fan-out below can find them: this file has no method nodes
+        // to be called (an unread body declares nothing, and an empty readable one
+        // declared nothing either), and the stored edge points at the sibling's node,
+        // not at anything here. So there is nothing to widen the delta by, and the only
+        // correct answer is a full rebuild.
+        if profile.unread {
+            return Ok(None);
         }
         // OLD resolvable surface from the stored method nodes.
         let mut stmt =
@@ -1714,6 +1733,7 @@ mod tests {
             sig_hash: 999,
             exported_lower: std::collections::BTreeSet::new(),
             has_collision: false,
+            unread: false,
         };
         let plan =
             caller_delta_plan(&path, &[("CommonModules/X/Ext/Module.bsl", &profile)]).unwrap();

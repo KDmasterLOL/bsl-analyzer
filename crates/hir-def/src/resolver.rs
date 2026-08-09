@@ -473,14 +473,14 @@ impl Resolver {
                 db.resolve_common_module_file_candidates(file_id, module_name.as_str())
             {
                 if !bodies.is_empty() {
-                    // Composition, not a verdict: whether an empty `readable` is an
-                    // answer depends on the method name, which this function does not
-                    // have. Reporting the outcome here would also hide the unread ids
-                    // from the graph index, which needs them to reproject on healing.
+                    // Composition, not a verdict: whether a body without the method is
+                    // an answer depends on the method name, which this function does
+                    // not have — that decision belongs to `search` one level up.
+                    // Reporting the outcome here would also hide the unread ids from
+                    // the graph index, which needs them to reproject on healing.
                     return Ok(CommonModuleCandidates {
                         bodies: bodies
-                            .bodies
-                            .into_iter()
+                            .iter()
                             .map(|b| (crate::ModuleId::new(b.file), b.unread))
                             .collect(),
                     });
@@ -925,10 +925,6 @@ impl CommonModuleCandidates {
     /// [`crate::configs::CommonModuleBodies::all_for_reference`].
     pub(crate) fn all_for_reference(&self) -> impl Iterator<Item = ModuleId> + '_ {
         self.bodies.iter().map(|(m, _)| *m)
-    }
-
-    pub(crate) fn unread(&self) -> impl Iterator<Item = ModuleId> + '_ {
-        self.bodies.iter().filter(|(_, unread)| *unread).map(|(m, _)| *m)
     }
 }
 

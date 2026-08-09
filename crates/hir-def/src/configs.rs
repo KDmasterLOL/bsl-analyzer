@@ -31,7 +31,12 @@ pub struct CommonModuleBodies {
     /// property of who built the list, and the walk must match it —
     /// [`CommonModuleBodies::search`] for priority order,
     /// [`CommonModuleBodies::search_merged_surface`] otherwise.
-    pub bodies: Vec<CommonModuleBody>,
+    ///
+    /// Private, because a public field is a third walk past the barrier that looks
+    /// more innocent than the one this type removed: `bodies.iter().filter(|b|
+    /// !b.unread)` is just a loop over a field, and it loses exactly what `search`
+    /// exists to keep.
+    bodies: Vec<CommonModuleBody>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +124,20 @@ impl CommonModuleBodies {
         if !self.bodies.iter().any(|b| b.file == file) {
             self.bodies.push(CommonModuleBody { file, unread });
         }
+    }
+
+    /// Flip the list between the two orders a producer may build it in — merged
+    /// (extension-first) and priority (base-first). Named for what it does to meaning,
+    /// not to the vector, because that is the only reason to do it.
+    pub fn reverse_priority(&mut self) {
+        self.bodies.reverse();
+    }
+
+    /// Each body with its readability, in the producer's order. For building another
+    /// composition out of this one — never for deciding what the module declares,
+    /// which is what [`Self::search`] is for.
+    pub fn iter(&self) -> impl Iterator<Item = CommonModuleBody> + '_ {
+        self.bodies.iter().copied()
     }
 }
 

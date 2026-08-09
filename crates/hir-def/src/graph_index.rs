@@ -204,9 +204,12 @@ impl GraphIndex {
     /// declaration order. This is exactly the cross-module resolution + identity
     /// surface — `find_method` resolves on the name, callers' edges/boundary flags
     /// depend on `is_export` + effective dispatch, and the durable method id embeds
-    /// the original name spelling. So if this hash is unchanged across an edit, no
-    /// caller's resolved edge or stored node row can change and only this module's own
-    /// rows need reprojecting. Deliberately excludes source ranges (they shift on any
+    /// the original name spelling. Readability is hashed alongside them for the same
+    /// reason: an unread body bars callers from resolving into any body behind it, and
+    /// an empty readable body declares exactly the same nothing an unread one does — so
+    /// without it the transition between them looks like no change at all. So if this
+    /// hash is unchanged across an edit, no caller's resolved edge or stored node row
+    /// can change and only this module's own rows need reprojecting. Deliberately excludes source ranges (they shift on any
     /// text edit) and bodies (a body edit not touching a signature keeps it stable).
     /// `None` if the module is not indexed.
     ///
@@ -220,6 +223,7 @@ impl GraphIndex {
 
         let methods = self.methods.get(&module)?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        methods.unread.hash(&mut hasher);
         for entry in &methods.all {
             entry.name.as_str().hash(&mut hasher);
             entry.is_export.hash(&mut hasher);
@@ -241,15 +245,20 @@ impl GraphIndex {
 
     /// A body-free resident layout hash of one module's methods: the ordered
     /// (`local_id`, original-spelling name, `is_export`, effective dispatch) of every
-    /// method in declaration order. It deliberately includes the top-level position
-    /// encoded in `local_id`, unlike [`Self::module_sig_hash`], so resident identity
-    /// can detect declaration-layout shifts without widening the durable contract.
+    /// method in declaration order, plus readability. It deliberately includes the
+    /// top-level position encoded in `local_id`, unlike [`Self::module_sig_hash`], so
+    /// resident identity can detect declaration-layout shifts without widening the
+    /// durable contract. Readability is in it because the call-hierarchy catch-up
+    /// treats an unchanged hash as proof that the resident index still resolves other
+    /// modules' calls the same way, and crossing the unread barrier breaks exactly
+    /// that.
     /// Excludes source ranges and bodies. `None` if the module is not indexed.
     pub fn module_layout_hash(&self, module: ModuleId) -> Option<u64> {
         use std::hash::{Hash, Hasher};
 
         let methods = self.methods.get(&module)?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        methods.unread.hash(&mut hasher);
         for entry in &methods.all {
             entry.local_id.hash(&mut hasher);
             entry.name.as_str().hash(&mut hasher);
@@ -310,7 +319,7 @@ impl GraphIndex {
     /// database registered inputs only for its own batch, so it reports every module
     /// from another batch as readable, and resolution would depend on how the build
     /// was split rather than on the source root and configuration alone.
-    fn is_unread(&self, target: ModuleId) -> Option<bool> {
+    pub fn is_unread(&self, target: ModuleId) -> Option<bool> {
         self.methods.get(&target).map(|m| m.unread)
     }
 
@@ -820,10 +829,12 @@ pub fn extract_unresolved_refs(
 /// The bodies of `candidates` that must hold a reverse reference to a call for `probe`.
 ///
 /// A call nobody answers tracks EVERY body, so that declaring the method in any of them
-/// reprojects the caller. A call that is answered still tracks the unread bodies: their
-/// surface is unknown, so becoming readable can change the answer, and without the
-/// reference the caller is never reprojected and the incremental graph silently keeps an
-/// edge the full rebuild does not.
+/// — or making an unread one readable — reprojects the caller.
+///
+/// An ANSWERED call tracks nothing. Priority order already settled it: every body ahead
+/// of the answer was readable and did not have the method, and a body behind it loses to
+/// the answer whatever it later turns out to declare. Tracking those trailing bodies
+/// would fan a healed sibling out over every caller that was never going to change.
 fn reference_targets(
     candidates: &crate::resolver::CommonModuleCandidates,
     mut probe: impl FnMut(ModuleId) -> Option<MethodRef>,
@@ -831,7 +842,7 @@ fn reference_targets(
     let answered =
         matches!(candidates.search(|m| probe(m).filter(|hit| hit.is_export)), BodySearch::Found(_));
     if answered {
-        candidates.unread().collect()
+        Vec::new()
     } else {
         candidates.all_for_reference().collect()
     }
@@ -2494,17 +2505,37 @@ mod module_layout_hash_tests {
     use super::*;
 
     fn hashes(source: &str) -> (u64, u64) {
+        hashes_marked(source, false)
+    }
+
+    fn hashes_marked(source: &str, unread: bool) -> (u64, u64) {
         let module = ModuleId::new(FileId(0));
         let parse = parser::parse(source);
         let methods =
             crate::call_graph::extract_graph_methods(&crate::ItemTree::from_parse(&parse));
         let mut index = GraphIndex::new();
-        index.insert_module_data(module, methods, None, false);
+        index.insert_module_data(module, methods, None, unread);
 
         (
             index.module_sig_hash(module).expect("indexed module has a signature hash"),
             index.module_layout_hash(module).expect("indexed module has a layout hash"),
         )
+    }
+
+    /// Both hashes are read as proof that other modules' calls still resolve the same
+    /// way. An unread body bars callers from any body behind it, so crossing that
+    /// barrier has to move them — and it is invisible to everything else they hash,
+    /// because an unread body and an empty readable one declare the same nothing.
+    #[test]
+    fn both_hashes_move_when_a_body_crosses_the_unread_barrier() {
+        let readable = hashes_marked("", false);
+        let unread = hashes_marked("", true);
+        assert_ne!(readable.0, unread.0, "signature identity must see the barrier");
+        assert_ne!(readable.1, unread.1, "resident layout identity must see it too");
+
+        // Control: everything else about the two indexed modules is identical, so the
+        // inequality above is the flag speaking and not two unrelated modules.
+        assert_eq!(readable, hashes_marked("", false));
     }
 
     #[test]

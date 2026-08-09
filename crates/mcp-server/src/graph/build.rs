@@ -4020,6 +4020,82 @@ mod tests {
         );
     }
 
+    /// A body crossing the readable↔unread barrier changes how OTHER modules' calls
+    /// resolve — calls that resolve into a SIBLING body of the same common module, in
+    /// another file entirely. Nothing in the stored graph ties those callers to this
+    /// file, so the body-only fast path cannot widen its delta to reach them and must
+    /// decline outright. Its own signature hash has to move too, or the transition is
+    /// never even offered to the plan: an empty readable body and an unread one declare
+    /// exactly the same nothing.
+    #[test]
+    fn an_incremental_unread_transition_declines_the_body_only_fast_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        // Readable but empty: the call falls through to the extension body.
+        write_common_module(root, "Сервер", true, "");
+
+        let ext = root.join("cfe/Расш");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(
+            &ext,
+            "Сервер",
+            true,
+            "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+        );
+        write_common_module(
+            &ext,
+            "Вызов",
+            true,
+            "&НаСервере\nПроцедура Т() Экспорт\nСервер.П();\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: crate::graph_db::GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_whole_graph(root, &db_pre, 2, &meta()).expect("pre build");
+        let (_, pre_edges, _, _) = dump_data(&db_pre);
+        assert!(
+            pre_edges.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "control: while the base body is readable the call resolves: {pre_edges:?}"
+        );
+
+        // The base body stops being readable. Its declarations do not change — it had
+        // none — so only the barrier moves.
+        let base_body = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        fs::write(&base_body, [0xff, 0xfe]).unwrap();
+
+        let db_full = root.join(".build/full.db");
+        build_whole_graph(root, &db_full, 2, &meta()).expect("full rebuild");
+        let (_, full_edges, _, _) = dump_data(&db_full);
+        assert!(
+            !full_edges.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "control: a full rebuild bars the call once the base body is unread: {full_edges:?}"
+        );
+
+        // The caller that must change is `Вызов`, whose edge points at the EXTENSION
+        // body's node — nothing in the stored graph connects it to this file, so the
+        // body-only fast path has no way to widen its delta and must decline.
+        let canonical = base_body.canonicalize().unwrap();
+        let key = canonical.to_string_lossy().into_owned();
+        let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&canonical)).unwrap();
+        let plan = crate::graph_db::caller_delta_plan(
+            &db_pre,
+            &[(key.as_str(), profiles.get(&key).unwrap())],
+        )
+        .unwrap();
+        assert!(
+            plan.is_none(),
+            "a body crossing the unread barrier is not eligible for the body-only path: {plan:?}"
+        );
+    }
+
     /// A target whose body could not be read at build time still owes its callers a
     /// reverse reference. Name resolution refuses to conclude anything about an unread
     /// module — correctly — but if that refusal also erases the reference, then healing

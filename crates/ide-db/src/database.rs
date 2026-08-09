@@ -2278,7 +2278,7 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         // The helper orders extension-first for merged-surface validation;
         // qualified resolution wants the base declaration to win, so reverse.
         let mut bodies = self.resolve_common_module_files_for_file(file_id, name);
-        bodies.bodies.reverse();
+        bodies.reverse_priority();
         Some(bodies)
     }
 
