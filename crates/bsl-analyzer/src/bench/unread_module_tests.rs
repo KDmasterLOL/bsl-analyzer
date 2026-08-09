@@ -95,6 +95,43 @@ fn a_hook_may_touch_the_seam_while_it_runs() {
     assert!(ran_to_completion.get(), "the hook must reach its last statement");
 }
 
+/// The call borrows nothing from the cell, so the registration outlives it — a
+/// seam that consumed its hook would serve the first call and silently no-op
+/// every one after.
+#[test]
+fn a_hook_stays_installed_across_calls() {
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counted = std::rc::Rc::clone(&calls);
+    let _hook = BetweenIndexPassesHook::install(move || counted.set(counted.get() + 1));
+
+    super::run_between_index_passes_hook();
+    super::run_between_index_passes_hook();
+
+    assert_eq!(calls.get(), 2, "the hook must survive its own invocation");
+}
+
+/// A guard owns exactly the registration it made — no more, no less. Without the
+/// second half, a guard that clears the cell wholesale passes just as well, and an
+/// older guard outliving a newer hook would take that hook down with it.
+#[test]
+fn a_guard_removes_only_its_own_registration() {
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+
+    let counted = std::rc::Rc::clone(&calls);
+    let sole = BetweenIndexPassesHook::install(move || counted.set(counted.get() + 1));
+    drop(sole);
+    super::run_between_index_passes_hook();
+    assert_eq!(calls.get(), 0, "a dropped guard leaves no hook behind");
+
+    let counted = std::rc::Rc::clone(&calls);
+    let older = BetweenIndexPassesHook::install(move || counted.set(counted.get() + 1));
+    let counted = std::rc::Rc::clone(&calls);
+    let _newer = BetweenIndexPassesHook::install(move || counted.set(counted.get() + 10));
+    drop(older);
+    super::run_between_index_passes_hook();
+    assert_eq!(calls.get(), 10, "the newer registration must outlive the older guard");
+}
+
 #[test]
 fn a_readable_workspace_measures_its_only_call_pair() {
     let (_dir, mut env, resolved, _module) = stand();

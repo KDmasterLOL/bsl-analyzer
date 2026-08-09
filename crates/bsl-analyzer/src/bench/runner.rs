@@ -48,47 +48,57 @@ mod unread_module_tests;
 //
 // Thread-local rather than global: libtest gives each test its own thread, so the
 // hook cannot leak into a neighbour running in parallel.
+//
+// The hook is shared rather than owned by the cell, and each registration carries
+// the number of the guard that made it. Both are what make the seam behave
+// obviously under a hook that touches it: the call holds its own handle, so the
+// cell is free meanwhile, and a guard can only ever remove what it installed.
+#[cfg(test)]
+type SeamRegistration = (u64, std::rc::Rc<dyn Fn()>);
+
 #[cfg(test)]
 thread_local! {
-    static BETWEEN_INDEX_PASSES: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+    static BETWEEN_INDEX_PASSES: std::cell::RefCell<Option<SeamRegistration>> =
         const { std::cell::RefCell::new(None) };
+    static NEXT_HOOK_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// Takes the hook out of the cell for the duration of the call, so a hook that
-/// installs or drops a guard of its own sees a free cell instead of a borrow
-/// panic. The hook is put back only if nothing claimed the cell meanwhile —
-/// whoever installed last stays installed.
 #[cfg(test)]
 fn run_between_index_passes_hook() {
-    let Some(mut hook) = BETWEEN_INDEX_PASSES.with(|slot| slot.borrow_mut().take()) else {
-        return;
-    };
-    hook();
-    BETWEEN_INDEX_PASSES.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(hook);
-        }
-    });
+    let hook = BETWEEN_INDEX_PASSES
+        .with(|slot| slot.borrow().as_ref().map(|(_, hook)| std::rc::Rc::clone(hook)));
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 /// Installs a [`BETWEEN_INDEX_PASSES`] hook and removes it on drop, so a panicking
 /// test cannot leave it behind for the next test on the same thread.
 #[cfg(test)]
-struct BetweenIndexPassesHook;
+struct BetweenIndexPassesHook(u64);
 
 #[cfg(test)]
 impl BetweenIndexPassesHook {
-    fn install(hook: impl FnMut() + 'static) -> Self {
-        BETWEEN_INDEX_PASSES.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-        BetweenIndexPassesHook
+    fn install(hook: impl Fn() + 'static) -> Self {
+        let id = NEXT_HOOK_ID.with(|next| {
+            let id = next.get() + 1;
+            next.set(id);
+            id
+        });
+        BETWEEN_INDEX_PASSES.with(|slot| *slot.borrow_mut() = Some((id, std::rc::Rc::new(hook))));
+        BetweenIndexPassesHook(id)
     }
 }
 
 #[cfg(test)]
 impl Drop for BetweenIndexPassesHook {
     fn drop(&mut self) {
-        BETWEEN_INDEX_PASSES.with(|slot| *slot.borrow_mut() = None);
+        BETWEEN_INDEX_PASSES.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|(id, _)| *id == self.0) {
+                *slot = None;
+            }
+        });
     }
 }
 
