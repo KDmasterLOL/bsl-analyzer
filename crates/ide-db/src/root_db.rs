@@ -56,10 +56,15 @@ pub trait RootDatabase:
         module_file_id: FileId,
     ) -> Option<Arc<bsl_metadata::IntegrationService>>;
 
-    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
-    /// `file_id` (base + the file's own extension). For method/parameter validation
-    /// that must read the module body, scoped extension-private like the metadata.
-    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId>;
+    /// The `Ext/Module.bsl` bodies of the common module `name` visible to `file_id`
+    /// (base + the file's own extension) IN PRIORITY ORDER, each carrying whether its
+    /// bytes could be read. For method/parameter validation that must read the module
+    /// body, scoped extension-private like the metadata.
+    ///
+    /// The composition rather than a plain list of files, because a consumer that
+    /// cannot see an unread body decides "the module has no such method" from bodies
+    /// that were never entitled to answer.
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies;
 
     fn all_sdbl_in_file(
         &self,

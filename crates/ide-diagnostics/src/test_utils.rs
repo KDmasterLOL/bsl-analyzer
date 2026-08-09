@@ -1003,6 +1003,26 @@ pub fn check_with_cfe_unreadable(
     fixture: test_fixture::CfeFixture,
     unreadable: &[&str],
 ) -> Vec<Diagnostic> {
+    check_cfe_at_with_unreadable(
+        "CommonModules/Caller/Ext/Module.bsl",
+        source,
+        fixture,
+        unreadable,
+        crate::diagnostics,
+    )
+}
+
+/// [`check_with_cfe_unreadable`], with the analyzed file placed at `caller_relative`
+/// inside the fixture's first extension and its diagnostics produced by `run` rather
+/// than the whole registry. A diagnostic keyed to a module TYPE (the session module,
+/// say) is unreachable unless its file sits at the conventional path.
+pub fn check_cfe_at_with_unreadable(
+    caller_relative: &str,
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    unreadable: &[&str],
+    run: impl FnOnce(&crate::DiagnosticsContext<'_>) -> Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::metadata::intern_configuration_path;
     use ide_db::RootDatabaseImpl;
@@ -1024,7 +1044,7 @@ pub fn check_with_cfe_unreadable(
         .first()
         .map(|ext| ext.root().to_path_buf())
         .unwrap_or_else(|| fixture.root().to_path_buf());
-    let caller_path = caller_root.join("CommonModules/Caller/Ext/Module.bsl");
+    let caller_path = caller_root.join(caller_relative);
     file_set.insert(caller_file_id, VfsPath::new(caller_path.to_string_lossy().into_owned()));
 
     let mut module_files = Vec::new();
@@ -1082,7 +1102,7 @@ pub fn check_with_cfe_unreadable(
     let config = crate::DiagnosticsConfig::all_enabled();
     let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);
 
-    crate::diagnostics(&ctx)
+    run(&ctx)
 }
 
 pub fn check_snapshot_with_cfe(

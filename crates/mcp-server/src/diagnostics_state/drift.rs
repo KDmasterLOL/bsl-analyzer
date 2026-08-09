@@ -1336,6 +1336,14 @@ mod tests {
     /// depend on file permissions (which root ignores).
     const UNREADABLE: &[u8] = &[0xFF, 0xFE];
 
+    /// How many bodies of a module the substrate would let a resolver read. Counting
+    /// them is a statement about the substrate, which is what these tests measure; a
+    /// resolver instead walks them through `CommonModuleBodies::search`, which stops at
+    /// the first unread body rather than skipping it.
+    fn readable_body_count(bodies: &ide::CommonModuleBodies) -> usize {
+        bodies.all_for_reference().count() - bodies.unread().count()
+    }
+
     fn mtime_of(path: &Path) -> std::time::SystemTime {
         fs::metadata(path).unwrap().modified().unwrap()
     }
@@ -1427,7 +1435,7 @@ mod tests {
         let anchor_path = module_path(root, "Клиент");
         let out = state.read(|r, _| {
             let anchor = r.file_id_for(&anchor_path).expect("the healthy neighbour serves");
-            r.db().resolve_common_module_files_for_file(anchor, "Сервер").readable().count()
+            readable_body_count(&r.db().resolve_common_module_files_for_file(anchor, "Сервер"))
         });
         let ResidentOutcome::Ready(before, _) = out else { panic!("expected Ready") };
         assert_eq!(before, 1, "control: a readable body HAS a back-link");
@@ -1439,7 +1447,7 @@ mod tests {
 
         let out = state.read(|r, _| {
             let anchor = r.file_id_for(&anchor_path).expect("the neighbour keeps serving");
-            r.db().resolve_common_module_files_for_file(anchor, "Сервер").readable().count()
+            readable_body_count(&r.db().resolve_common_module_files_for_file(anchor, "Сервер"))
         });
         let ResidentOutcome::Ready(after, _) = out else { panic!("expected Ready") };
         assert_eq!(after, 0, "a body nobody could read gets no back-link");
@@ -1647,7 +1655,9 @@ mod tests {
             (
                 r.unread_count(),
                 r.is_unread(&victim),
-                r.db().resolve_common_module_files_for_file(anchor_id, "Сервер").readable().count(),
+                readable_body_count(
+                    &r.db().resolve_common_module_files_for_file(anchor_id, "Сервер"),
+                ),
                 r.file_set_has_for_test(victim_id),
             )
         });
@@ -1726,7 +1736,7 @@ mod tests {
             let out = state.read(|r, _| {
                 let anchor = r.file_id_for(&anchor_path).expect("the neighbour serves throughout");
                 let bodies = r.db().resolve_common_module_files_for_file(anchor, "Сервер");
-                (bodies.readable().count(), bodies.unread().count())
+                (readable_body_count(&bodies), bodies.unread().count())
             });
             let ResidentOutcome::Ready(counts, _) = out else { panic!("expected Ready") };
             counts

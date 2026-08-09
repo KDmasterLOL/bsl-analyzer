@@ -49,7 +49,10 @@ pub use hir::{call_hierarchy_method_digest, MethodCallDigest};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
 pub use ide_db::metadata::WorkspaceConfigsSnapshot;
-pub use ide_db::{GraphConfigCache, RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};
+pub use ide_db::{
+    BodySearch, CommonModuleBodies, GraphConfigCache, RootDatabase, RootDatabaseImpl, SymbolKind,
+    TextRange,
+};
 pub use ide_diagnostics::{
     all_diagnostic_codes, apply_extension_merge, diagnostics as compute_diagnostics, docs,
     file_diagnostics, file_diagnostics_query, get_metadata, CleanCodeAttribute, Diagnostic,

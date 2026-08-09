@@ -2621,12 +2621,8 @@ impl RootDatabase for RootDatabaseImpl {
         RootDatabaseImpl::integration_service_for_file_id(self, module_file_id)
     }
 
-    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
-        // Readable only: every consumer of this reads the body to decide what the
-        // module offers, and an unread body offers nothing it can be trusted on.
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies {
         RootDatabaseImpl::resolve_common_module_files_for_file(self, file_id, name)
-            .readable()
-            .collect()
     }
 
     fn all_sdbl_in_file(

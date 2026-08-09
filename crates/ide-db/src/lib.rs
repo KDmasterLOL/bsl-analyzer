@@ -17,6 +17,9 @@ pub mod types;
 pub(crate) mod vfs_helpers;
 
 pub use hir::SdblHirEntries;
+// Named by `RootDatabase::resolve_common_module_files` / `AnalysisProvider`, so every
+// consumer of those must be able to spell them without depending on `hir` itself.
+pub use hir::{BodySearch, CommonModuleBodies};
 pub use types::SymbolKind;
 
 pub use database::{GraphConfigCache, RootDatabaseImpl, VisibleRoots};

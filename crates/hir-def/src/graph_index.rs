@@ -29,7 +29,7 @@ use crate::{
         ResolvedModuleSummary, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
     },
     call_hierarchy_index::MethodCallPair,
-    configs::ConfigsDatabase,
+    configs::{BodySearch, ConfigsDatabase},
     module_index::{module_key_for_path, ModuleKey},
     name::Name,
     resolver::Resolver,
@@ -354,13 +354,14 @@ pub fn resolve_summary_via_index(
             ),
             CallTarget::QualifiedModule { module_name, method_name } => {
                 match resolver.locate_common_module_candidates(db, module_name) {
-                    // Base body first, then the caller's own extension body —
-                    // the first hit mirrors `resolve_qualified_method`.
+                    // Base body first, then the caller's own extension body, stopping
+                    // where `resolve_qualified_method` stops — including at an unread
+                    // body, or this route would resolve what the Salsa fold leaves
+                    // unresolved on the same input.
                     Ok(candidates) => match candidates
-                        .readable()
-                        .find_map(|m| index.find_method(m, method_name).map(|hit| (m, hit)))
+                        .search(|m| index.find_method(m, method_name).map(|hit| (m, hit)))
                     {
-                        Some((target_module, m)) if m.is_export => (
+                        BodySearch::Found((target_module, m)) if m.is_export => (
                             ResolvedTarget::Method(MethodId {
                                 module: target_module,
                                 local_id: m.local_id,
@@ -369,13 +370,14 @@ pub fn resolve_summary_via_index(
                             edge.kind,
                         ),
                         // Found but not exported → visible-but-unreachable.
-                        Some(_) => (
+                        BodySearch::Found(_) => (
                             ResolvedTarget::Unresolved(edge.target.clone()),
                             EdgeProvenance::VisibilityBlocked,
                             edge.kind,
                         ),
-                        // Module located but method absent.
-                        None => (
+                        // Method absent from every readable body, or a body ahead of
+                        // it could not be read at all.
+                        BodySearch::Absent | BodySearch::Unread => (
                             ResolvedTarget::Unresolved(edge.target.clone()),
                             EdgeProvenance::Unresolved,
                             edge.kind,
@@ -482,19 +484,20 @@ pub fn resolve_summary_via_index(
         |module_name: &crate::name::Name, method_name: &crate::name::Name| match resolver
             .locate_common_module_candidates(db, module_name)
         {
-            Ok(candidates) => match candidates
-                .readable()
-                .find_map(|m| index.find_method(m, method_name).map(|hit| (m, hit)))
-            {
-                Some((target_module, m)) if m.is_export => {
-                    crate::queries::QualifiedLookup::Resolved(MethodId {
-                        module: target_module,
-                        local_id: m.local_id,
-                    })
+            Ok(candidates) => {
+                match candidates.search(|m| index.find_method(m, method_name).map(|hit| (m, hit))) {
+                    BodySearch::Found((target_module, m)) if m.is_export => {
+                        crate::queries::QualifiedLookup::Resolved(MethodId {
+                            module: target_module,
+                            local_id: m.local_id,
+                        })
+                    }
+                    BodySearch::Found(_) => crate::queries::QualifiedLookup::VisibilityBlocked,
+                    BodySearch::Absent | BodySearch::Unread => {
+                        crate::queries::QualifiedLookup::Absent
+                    }
                 }
-                Some(_) => crate::queries::QualifiedLookup::VisibilityBlocked,
-                None => crate::queries::QualifiedLookup::Absent,
-            },
+            }
             Err(_) => crate::queries::QualifiedLookup::Absent,
         };
     let global_modules = resolver.global_common_module_names(db);
@@ -739,20 +742,9 @@ pub fn extract_unresolved_refs(
         match &edge.target {
             CallTarget::QualifiedModule { module_name, method_name } => {
                 if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
-                    // No candidate resolves the call: track every body so adding
-                    // the method to either (base or own extension) reprojects.
-                    if candidates.readable().all(|m| unresolved(index.find_method(m, method_name)))
+                    for target in
+                        reference_targets(&candidates, |m| index.find_method(m, method_name))
                     {
-                        for target in candidates.readable() {
-                            out.push((target, method_name.as_str().fold_lower()));
-                        }
-                    }
-                    // An unread body is tracked whatever the readable ones answered:
-                    // its surface is unknown, so becoming readable can add the method
-                    // just as well as declaring it can, and without this reference the
-                    // caller is never reprojected and the incremental graph keeps an
-                    // edge the full rebuild has.
-                    for target in candidates.unread() {
                         out.push((target, method_name.as_str().fold_lower()));
                     }
                 }
@@ -785,21 +777,35 @@ pub fn extract_unresolved_refs(
     for reg in &summary.notify_regs {
         if let crate::call_graph::NotifyTarget::Module(module_name) = &reg.target {
             if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
-                if candidates
-                    .readable()
-                    .all(|m| unresolved(index.find_method(m, &reg.callback_name)))
+                for target in
+                    reference_targets(&candidates, |m| index.find_method(m, &reg.callback_name))
                 {
-                    for target in candidates.readable() {
-                        out.push((target, reg.callback_name.as_str().fold_lower()));
-                    }
-                }
-                for target in candidates.unread() {
                     out.push((target, reg.callback_name.as_str().fold_lower()));
                 }
             }
         }
     }
     out
+}
+
+/// The bodies of `candidates` that must hold a reverse reference to a call for `probe`.
+///
+/// A call nobody answers tracks EVERY body, so that declaring the method in any of them
+/// reprojects the caller. A call that is answered still tracks the unread bodies: their
+/// surface is unknown, so becoming readable can change the answer, and without the
+/// reference the caller is never reprojected and the incremental graph silently keeps an
+/// edge the full rebuild does not.
+fn reference_targets(
+    candidates: &crate::resolver::CommonModuleCandidates,
+    mut probe: impl FnMut(ModuleId) -> Option<MethodRef>,
+) -> Vec<ModuleId> {
+    let answered =
+        matches!(candidates.search(|m| probe(m).filter(|hit| hit.is_export)), BodySearch::Found(_));
+    if answered {
+        candidates.unread().collect()
+    } else {
+        candidates.all_for_reference().collect()
+    }
 }
 
 /// A batch's call/manager edge projection plus the module-located-but-unresolved call

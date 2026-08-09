@@ -36,6 +36,22 @@ pub struct CommonModuleBody {
     pub unread: bool,
 }
 
+/// What a walk over a module's bodies found — the only shape in which an answer about
+/// a common module may be phrased, because it keeps "not there" apart from "could not
+/// look".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodySearch<T> {
+    /// The first body that answered. Every body ahead of it was readable and did not.
+    Found(T),
+    /// Every body was readable and none of them answered: the module really has no
+    /// such thing, and saying so is fair.
+    Absent,
+    /// The walk reached a body whose bytes could not be read. What that body declares
+    /// is unknown, and a lower-priority body must not answer in its place — so nothing
+    /// is derivable about this module, least of all against whoever asked.
+    Unread,
+}
+
 impl CommonModuleBodies {
     /// No body of this module is known at all. The signal to degrade to the
     /// path-derived module index.
@@ -43,9 +59,49 @@ impl CommonModuleBodies {
         self.bodies.is_empty()
     }
 
-    /// The bodies whose text may be read as the module's API, in priority order.
-    pub fn readable(&self) -> impl Iterator<Item = FileId> + '_ {
-        self.bodies.iter().filter(|b| !b.unread).map(|b| b.file)
+    /// Walk the bodies in priority order, stopping at the first one that answers — and
+    /// at the first one that cannot be read.
+    ///
+    /// Stopping at the unread body is the whole barrier: it is what keeps a
+    /// lower-priority body from answering for a higher-priority one whose surface is
+    /// unknown. There is deliberately no iterator over the readable bodies — every
+    /// consumer handed one walked straight past the barrier and lost it silently.
+    pub fn search<T>(&self, mut probe: impl FnMut(FileId) -> Option<T>) -> BodySearch<T> {
+        for body in &self.bodies {
+            if body.unread {
+                return BodySearch::Unread;
+            }
+            if let Some(found) = probe(body.file) {
+                return BodySearch::Found(found);
+            }
+        }
+        BodySearch::Absent
+    }
+
+    /// Look through the whole MERGED surface, answering only when all of it was
+    /// readable.
+    ///
+    /// The counterpart of [`Self::search`] for consumers handed the bodies in merged
+    /// order rather than priority order (see the reversal in the metadata substrate):
+    /// there is no "first" body to stop at, so position cannot say whose declaration
+    /// wins. What stays true regardless of order is that an unread body leaves the
+    /// surface partly unknown, and a verdict drawn from the rest is a guess — so any
+    /// unread body at all yields [`BodySearch::Unread`].
+    pub fn search_merged_surface<T>(
+        &self,
+        probe: impl FnMut(FileId) -> Option<T>,
+    ) -> BodySearch<T> {
+        if self.bodies.iter().any(|b| b.unread) {
+            return BodySearch::Unread;
+        }
+        self.search(probe)
+    }
+
+    /// Every body, readable or not, for callers that record a RELATION to the module
+    /// rather than read anything out of it — the call graph's reverse references, which
+    /// must survive a body becoming readable. Never a substitute for [`Self::search`].
+    pub fn all_for_reference(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.bodies.iter().map(|b| b.file)
     }
 
     /// The bodies that exist but could not be read, in priority order.

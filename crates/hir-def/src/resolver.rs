@@ -325,16 +325,20 @@ impl Resolver {
             };
             // Base first, then the caller's own extension body: a name declared
             // in both keeps the base declaration, an extension-added export is
-            // appended after it.
+            // appended after it. The probe never answers, so the walk collects from
+            // every readable body and stops where a qualified call would — at the
+            // first unread one, whose exports are unknown and whom a body behind it
+            // must not extend the global context in place of.
             let mut seen = rustc_hash::FxHashSet::default();
-            for module_id in candidates.readable() {
+            let _: crate::configs::BodySearch<()> = candidates.search(|module_id| {
                 let symbol_tree = db.symbol_tree_ref(module_id);
                 for method in symbol_tree.exported_methods() {
                     if seen.insert(intern::NormName::intern(method.name.as_str())) {
                         exports.push((module_name.clone(), method.name.clone(), method.id));
                     }
                 }
-            }
+                None
+            });
         }
         exports
     }
@@ -513,23 +517,17 @@ impl Resolver {
             tracing::info_span!("resolve_qualified_method", %module_name, %method_name).entered();
 
         let candidates = self.locate_common_module_candidates(db, module_name)?;
-        for (target_module_id, unread) in candidates.bodies {
-            // Walking in priority order and stopping at the first unread body is what
-            // keeps a lower-priority body from answering for a higher-priority one
-            // whose surface is unknown: the unread base may well declare this method,
-            // and its declaration would have won.
-            if unread {
-                return Err(QualifiedMethodError::BodyUnread);
-            }
+        let found = candidates.search(|target_module_id| {
             let symbol_tree = db.symbol_tree_ref(target_module_id);
-            if let Some(method_symbol) = symbol_tree.find_method(method_name) {
-                return Ok(QualifiedMethodResolution {
-                    method_id: method_symbol.id,
-                    is_export: method_symbol.is_export,
-                });
+            symbol_tree.find_method(method_name).map(|m| (m.id, m.is_export))
+        });
+        match found {
+            crate::configs::BodySearch::Found((method_id, is_export)) => {
+                Ok(QualifiedMethodResolution { method_id, is_export })
             }
+            crate::configs::BodySearch::Absent => Err(QualifiedMethodError::NotFound),
+            crate::configs::BodySearch::Unread => Err(QualifiedMethodError::BodyUnread),
         }
-        Err(QualifiedMethodError::NotFound)
     }
 
     fn resolve_cross_module(
@@ -893,8 +891,28 @@ pub(crate) struct CommonModuleCandidates {
 }
 
 impl CommonModuleCandidates {
-    pub(crate) fn readable(&self) -> impl Iterator<Item = ModuleId> + '_ {
-        self.bodies.iter().filter(|(_, unread)| !unread).map(|(m, _)| *m)
+    /// The module-level twin of [`crate::configs::CommonModuleBodies::search`], with the
+    /// same barrier and for the same reason.
+    pub(crate) fn search<T>(
+        &self,
+        mut probe: impl FnMut(ModuleId) -> Option<T>,
+    ) -> crate::configs::BodySearch<T> {
+        for &(module, unread) in &self.bodies {
+            if unread {
+                return crate::configs::BodySearch::Unread;
+            }
+            if let Some(found) = probe(module) {
+                return crate::configs::BodySearch::Found(found);
+            }
+        }
+        crate::configs::BodySearch::Absent
+    }
+
+    /// Every body, readable or not — for recording a relation to the module, never for
+    /// reading anything out of it. See
+    /// [`crate::configs::CommonModuleBodies::all_for_reference`].
+    pub(crate) fn all_for_reference(&self) -> impl Iterator<Item = ModuleId> + '_ {
+        self.bodies.iter().map(|(m, _)| *m)
     }
 
     pub(crate) fn unread(&self) -> impl Iterator<Item = ModuleId> + '_ {

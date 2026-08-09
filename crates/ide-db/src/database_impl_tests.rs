@@ -3387,6 +3387,198 @@ fn call_hierarchy_index_cfe_parity() {
     }));
 }
 
+fn cfe_common_module_xml(name: &str, global: bool) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000002">
+        <Properties><Name>{name}</Name><Server>true</Server><Global>{global}</Global></Properties>
+    </CommonModule>
+</MetaDataObject>"#
+    )
+}
+
+/// Write one common module of a configuration root in the layout the whole-config
+/// loader expects: a sibling XML next to a `<Имя>/Ext/Module.bsl` body.
+fn write_cfe_common_module(
+    root: &std::path::Path,
+    name: &str,
+    global: bool,
+    source: &str,
+) -> std::path::PathBuf {
+    let modules_dir = root.join("CommonModules");
+    let body_dir = modules_dir.join(name).join("Ext");
+    std::fs::create_dir_all(&body_dir).expect("create CommonModule body directory");
+    std::fs::write(modules_dir.join(format!("{name}.xml")), cfe_common_module_xml(name, global))
+        .expect("write CommonModule metadata");
+    let path = body_dir.join("Module.bsl");
+    std::fs::write(&path, source).expect("write CommonModule body");
+    path
+}
+
+/// A two-body common module `Сервер` (base + the caller's own extension), both bodies
+/// declaring `П`, with a caller in the extension calling it both qualified and through a
+/// string-dispatched callback. `base_unread` marks the base body's bytes unreadable.
+///
+/// Returns the database plus the module ids in `(base, extension body, caller)` order.
+fn cfe_db_with_two_server_bodies(
+    fixture: &test_fixture::CfeFixture,
+    base_unread: bool,
+) -> (RootDatabaseImpl, [ModuleId; 3]) {
+    let base_path = write_cfe_common_module(
+        fixture.root(),
+        "Сервер",
+        false,
+        "Процедура П() Экспорт КонецПроцедуры",
+    );
+    let ext_root = fixture.extensions()[0].root().to_path_buf();
+    let ext_server_path =
+        write_cfe_common_module(&ext_root, "Сервер", false, "Процедура П() Экспорт КонецПроцедуры");
+    let caller_source = "Процедура Т() Экспорт\n\
+                         Сервер.П();\n\
+                         Оп = Новый ОписаниеОповещения(\"П\", Сервер);\n\
+                         КонецПроцедуры";
+    let caller_path = write_cfe_common_module(&ext_root, "Вызов", false, caller_source);
+
+    let (base, ext_server, caller) = (FileId(0), FileId(1), FileId(2));
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    for (id, path) in [(base, &base_path), (ext_server, &ext_server_path), (caller, &caller_path)] {
+        file_set.insert(id, VfsPath::new(path.to_string_lossy().as_ref()));
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for id in [base, ext_server, caller] {
+        db.set_file_source_root(id, SourceRootId(0));
+    }
+    db.set_file_text(ext_server, "Процедура П() Экспорт КонецПроцедуры");
+    db.set_file_text(caller, caller_source);
+    if base_unread {
+        db.set_file_unreadable(base);
+    } else {
+        db.set_file_text(base, "Процедура П() Экспорт КонецПроцедуры");
+    }
+    db.set_all_config_paths(fixture.config_paths());
+
+    (db, [ModuleId::new(base), ModuleId::new(ext_server), ModuleId::new(caller)])
+}
+
+/// The compact index and the Salsa fold must answer the same thing about a call whose
+/// callee module has an unread body ahead of a readable one. The unread base may well
+/// declare the method, and its declaration would outrank the extension's — so neither
+/// route may let the extension body answer in its place.
+#[test]
+fn graph_index_matches_the_salsa_fold_when_a_base_body_is_unread() {
+    use hir::call_graph::{EdgeProvenance, ResolvedTarget};
+    use hir::graph_index::{resolve_module_summary_via_index, GraphIndex};
+    use hir::ConfigsDatabase;
+    use test_fixture::CfeFixtureBuilder;
+
+    // Positive control: with every body readable the same fixture resolves the call to
+    // the BASE declaration. Without it the equality below could hold vacuously — two
+    // routes agreeing that nothing resolves at all.
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Расш", "");
+    let readable_fixture = builder.build();
+    let (readable_db, [base, _, caller]) = cfe_db_with_two_server_bodies(&readable_fixture, false);
+    let control = readable_db.resolved_module_summary(caller);
+    assert!(
+        control.edges.iter().any(|e| e.provenance == EdgeProvenance::Resolved
+            && matches!(&e.target, ResolvedTarget::Method(m) if m.module == base)),
+        "control: a readable base body must win the call, else the fixture proves nothing"
+    );
+
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Расш", "");
+    let fixture = builder.build();
+    let (db, modules) = cfe_db_with_two_server_bodies(&fixture, true);
+    let [_, ext_server, caller] = modules;
+    let index = GraphIndex::build(&db, &modules);
+
+    let salsa = db.resolved_module_summary(caller);
+    assert!(
+        !salsa
+            .edges
+            .iter()
+            .any(|e| matches!(&e.target, ResolvedTarget::Method(m) if m.module == ext_server)),
+        "a body behind an unread one must not answer for it"
+    );
+    for &module in &modules {
+        assert_eq!(
+            resolve_module_summary_via_index(&db, module, &index),
+            *db.resolved_module_summary(module),
+            "index and Salsa must agree about {module:?} when a base body is unread"
+        );
+    }
+}
+
+/// The bare-call surface of a GLOBAL common module is walked in the same priority order
+/// as a qualified call, and stops at the same place: a body behind an unread one is not
+/// the module's answer, so its exports must not enter the global context either.
+#[test]
+fn global_common_module_exports_stop_at_an_unread_body() {
+    use test_fixture::CfeFixtureBuilder;
+
+    fn exports_of(
+        fixture: &test_fixture::CfeFixture,
+        base_unread: bool,
+    ) -> Vec<(ModuleId, String)> {
+        let base_path = write_cfe_common_module(
+            fixture.root(),
+            "Глоб",
+            true,
+            "Функция П() Экспорт КонецФункции",
+        );
+        let ext_root = fixture.extensions()[0].root().to_path_buf();
+        let ext_path =
+            write_cfe_common_module(&ext_root, "Глоб", true, "Функция П() Экспорт КонецФункции");
+        let caller_source = "Процедура Т() Экспорт КонецПроцедуры";
+        let caller_path = write_cfe_common_module(&ext_root, "Вызов", false, caller_source);
+
+        let (base, ext, caller) = (FileId(0), FileId(1), FileId(2));
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        for (id, path) in [(base, &base_path), (ext, &ext_path), (caller, &caller_path)] {
+            file_set.insert(id, VfsPath::new(path.to_string_lossy().as_ref()));
+        }
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        for id in [base, ext, caller] {
+            db.set_file_source_root(id, SourceRootId(0));
+        }
+        db.set_file_text(ext, "Функция П() Экспорт КонецФункции");
+        db.set_file_text(caller, caller_source);
+        if base_unread {
+            db.set_file_unreadable(base);
+        } else {
+            db.set_file_text(base, "Функция П() Экспорт КонецФункции");
+        }
+        db.set_all_config_paths(fixture.config_paths());
+
+        hir::Resolver::with_workspace_scope(ModuleId::new(caller))
+            .global_common_module_exports(&db)
+            .into_iter()
+            .map(|(_, method, id)| (id.module, method.as_str().to_string()))
+            .collect()
+    }
+
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Расш", "");
+    let readable_fixture = builder.build();
+    let control = exports_of(&readable_fixture, false);
+    assert!(
+        control.iter().any(|(module, name)| *module == ModuleId::new(FileId(0)) && name == "П"),
+        "control: a readable global base body must export П, else the fixture proves nothing"
+    );
+
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Расш", "");
+    let fixture = builder.build();
+    let exports = exports_of(&fixture, true);
+    assert!(
+        !exports.iter().any(|(_, name)| name == "П"),
+        "an unread base body bars its own name from the global context: {exports:?}"
+    );
+}
+
 /// A `Движения.<Регистр>` movement must resolve to the register's `Mdo` node — and the
 /// Salsa fold and the resident index must agree — given a configuration that supplies the
 /// register's metadata type. Uses the checked-in designer fixture (which defines the

@@ -116,24 +116,29 @@ fn check_method(
     code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let module_files = ctx.common_module_body_files(&handler.module_name);
-    if module_files.is_empty() {
+    let bodies = ctx.common_module_bodies(&handler.module_name);
+    if bodies.is_empty() {
         return;
     }
 
     let method_name_obj = Name::new(&handler.method_name);
     let mut saw_non_export = false;
 
-    for module_file_id in module_files {
-        let module_id = ModuleId::new(module_file_id);
-        let symbol_tree = ctx.symbol_tree_for(module_id);
-        let Some(method) = symbol_tree.find_method(&method_name_obj) else {
-            continue;
-        };
-        if method.is_export {
-            return;
+    match bodies.search_merged_surface(|module_file_id| {
+        let symbol_tree = ctx.symbol_tree_for(ModuleId::new(module_file_id));
+        let method = symbol_tree.find_method(&method_name_obj)?;
+        if !method.is_export {
+            saw_non_export = true;
+            return None;
         }
-        saw_non_export = true;
+        Some(())
+    }) {
+        // The handler is there and exported: nothing to report.
+        hir::BodySearch::Found(()) => return,
+        hir::BodySearch::Absent => {}
+        // "This module declares no such handler" is a claim about the whole module, and
+        // part of it could not be read: the handler may be declared exactly there.
+        hir::BodySearch::Unread => return,
     }
 
     let detail = format!("{}.{}", handler.module_name, handler.method_name);
@@ -327,5 +332,67 @@ mod tests {
         let diagnostics = check(&ctx);
 
         expect![[r#""#]].assert_eq(&format_diags("Процедура Тест()\nКонецПроцедуры", &diagnostics));
+    }
+
+    /// "The module does not declare this handler" is a claim about the whole module. A
+    /// body whose bytes could not be read makes that claim underivable: the handler may
+    /// well be declared there, and the readable extension body lacking it proves nothing
+    /// about the body ahead of it in priority.
+    #[test]
+    fn an_unread_base_body_bars_the_missing_handler_verdict() {
+        use crate::test_utils::check_cfe_at_with_unreadable;
+        use test_fixture::CfeFixtureBuilder;
+
+        let subscription_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <EventSubscription uuid="6daf85b1-5fbf-411c-9bdd-4eddd85bd65a">
+        <Properties>
+            <Name>ПриЗаписи</Name>
+            <Event>OnWrite</Event>
+            <Handler>CommonModule.Сервер.Обработчик</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#;
+
+        // Both bodies lack the handler, so the verdict is derivable — until one of them
+        // stops being readable. Only the unreadable flag differs between the two runs.
+        let fixture = || {
+            let mut builder = CfeFixtureBuilder::new("");
+            builder
+                .add_base_module("Сервер", "Процедура Иное() Экспорт КонецПроцедуры")
+                .add_extension("Расш", "")
+                .add_extension_module("Расш", "Сервер", "Процедура Иное() Экспорт КонецПроцедуры");
+            let fixture = builder.build();
+            let dir = fixture.root().join("EventSubscriptions");
+            std::fs::create_dir_all(&dir).expect("create EventSubscriptions directory");
+            std::fs::write(dir.join("ПриЗаписи.xml"), subscription_xml)
+                .expect("write EventSubscription");
+            fixture
+        };
+        let session_module = "Процедура Маркер()\nКонецПроцедуры\n";
+
+        let control = check_cfe_at_with_unreadable(
+            "Ext/SessionModule.bsl",
+            session_module,
+            fixture(),
+            &[],
+            check,
+        );
+        assert!(
+            control.iter().any(|d| d.code == DiagnosticCode::MissingEventSubscriptionHandler),
+            "control: a readable module without the handler must be reported, got {control:?}"
+        );
+
+        let unread = check_cfe_at_with_unreadable(
+            "Ext/SessionModule.bsl",
+            session_module,
+            fixture(),
+            &["CommonModules/Сервер/Ext/Module.bsl"],
+            check,
+        );
+        assert!(
+            unread.iter().all(|d| d.code != DiagnosticCode::MissingEventSubscriptionHandler),
+            "an unread body may declare the handler, so absence is not provable: {unread:?}"
+        );
     }
 }

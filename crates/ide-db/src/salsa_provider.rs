@@ -215,7 +215,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
             .collect()
     }
 
-    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies {
         self.db.resolve_common_module_files(file_id, name)
     }
 

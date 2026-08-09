@@ -199,16 +199,16 @@ pub trait AnalysisProvider {
             .unwrap_or_default()
     }
 
-    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
-    /// `file_id`, for diagnostics that validate the module body (handler method
-    /// existence/export, required parameters). The default resolves bodies by
-    /// root-relative URI across the file's visible configs; the salsa-backed
-    /// provider overrides it with the substrate, scoped base + the file's own
-    /// extension.
-    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+    /// The `Ext/Module.bsl` bodies of the common module `name` visible to `file_id`,
+    /// for diagnostics that validate the module body (handler method existence/export,
+    /// required parameters). The default resolves bodies by root-relative URI across
+    /// the file's visible configs and reports them all readable — it has no reader that
+    /// could have failed; the salsa-backed provider overrides it with the substrate,
+    /// scoped base + the file's own extension, where readability is known.
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies {
         use bsl_metadata::traits::Module;
 
-        let mut out = Vec::new();
+        let mut out = hir::CommonModuleBodies::default();
         for visible in self.visible_configurations(file_id) {
             let Some(uri) =
                 visible.config.configuration.find_common_module(name).and_then(|m| m.uri())
@@ -222,9 +222,7 @@ pub trait AnalysisProvider {
                 self.resolve_vfs_path(SourceRootId(0), &vfs_path)
             };
             if let Some(fid) = resolved {
-                if !out.contains(&fid) {
-                    out.push(fid);
-                }
+                out.push(fid, false);
             }
         }
         out
