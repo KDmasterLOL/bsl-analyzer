@@ -51,8 +51,10 @@ mod unread_module_tests;
 // or carry across a thread — a seam that kept one had to answer all four, and none
 // of those questions has a caller here.
 //
-// Thread-local, so an action a test arms but never spends cannot reach a neighbour:
-// libtest gives each test its own thread.
+// An armed action is spent by the very call it was armed for — arming sits
+// immediately before that call, so there is no window in which one can be left
+// over. Thread-local storage is the second line rather than the first: libtest
+// gives each test its own thread even under `--test-threads=1`.
 #[cfg(test)]
 thread_local! {
     static BETWEEN_INDEX_PASSES: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
