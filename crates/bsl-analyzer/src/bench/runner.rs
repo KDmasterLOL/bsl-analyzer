@@ -37,6 +37,52 @@ use crate::smoke::{bootstrap_smoke, Budgets, Scenario, SmokeArgs};
 pub const DEFAULT_WARM_ITERATIONS: usize = 20;
 pub const DEFAULT_BOOT_BUDGET_MS: u64 = 120_000;
 
+#[cfg(test)]
+#[path = "unread_module_tests.rs"]
+mod unread_module_tests;
+
+// Lets a test make a module unreadable at the one instant it cannot reach from
+// outside: after the index is built, before the observation reopens the batches.
+// Every other instant is reachable by calling `boot`, `resolve_target` and
+// `execute_once` in sequence, so this is the only stage the seam offers.
+//
+// Thread-local rather than global: libtest gives each test its own thread, so the
+// hook cannot leak into a neighbour running in parallel.
+#[cfg(test)]
+thread_local! {
+    static BETWEEN_INDEX_PASSES: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_between_index_passes_hook() {
+    BETWEEN_INDEX_PASSES.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+/// Installs a [`BETWEEN_INDEX_PASSES`] hook and removes it on drop, so a panicking
+/// test cannot leave it behind for the next test on the same thread.
+#[cfg(test)]
+struct BetweenIndexPassesHook;
+
+#[cfg(test)]
+impl BetweenIndexPassesHook {
+    fn install(hook: impl FnMut() + 'static) -> Self {
+        BETWEEN_INDEX_PASSES.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        BetweenIndexPassesHook
+    }
+}
+
+#[cfg(test)]
+impl Drop for BetweenIndexPassesHook {
+    fn drop(&mut self) {
+        BETWEEN_INDEX_PASSES.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
 #[derive(Debug)]
 pub enum RunError {
     /// Manifest unreadable / invalid / point id unknown → CLI exit 2.
@@ -1010,6 +1056,8 @@ pub(crate) fn execute_once(
             )
             .map_err(|err| RunError::Other(format!("call hierarchy index build failed: {err}")))?;
             let build_duration_ns = built.elapsed.as_nanos() as u64;
+            #[cfg(test)]
+            run_between_index_passes_hook();
             let observation = call_hierarchy_index_observation(&built, &context, *batch_size)?;
             // Checked AFTER both passes, so a file that became unreadable between them
             // fails the run exactly like one that was unreadable from the start.
