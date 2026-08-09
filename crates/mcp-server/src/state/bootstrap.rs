@@ -93,8 +93,7 @@ impl SharedState {
         // config source root plus every extension root — so diagnostics/graph drift in
         // extensions is event-delivered, not left to the reconciler. Search subscribes as a
         // sink and preserves its prior behavior (mark only source-root `.bsl` paths dirty).
-        let mut scan_roots = vec![config_path.to_path_buf()];
-        scan_roots.extend(project.extension_paths().iter().map(|(_, path)| path.clone()));
+        let scan_roots = project.source_roots();
         let change_hub = WorkspaceChangeHub::start_targets(crate::change_hub::watch_targets_for(
             &project.root,
             &scan_roots,

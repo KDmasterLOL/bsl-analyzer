@@ -3488,8 +3488,7 @@ mod tests {
         // upgraded by the resident's post-publish re-arm, and that one-time rescan
         // debt is exactly what this zero-scan assertion must not see.
         let project = project_model::Project::new(root).expect("valid test project");
-        let mut roots = vec![project.source_path().to_path_buf()];
-        roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
+        let roots = project.source_roots();
         assert!(roots.len() >= 2, "the extension root must be discovered: {roots:?}");
         let hub =
             WorkspaceChangeHub::start_targets(crate::change_hub::watch_targets_for(root, &roots));

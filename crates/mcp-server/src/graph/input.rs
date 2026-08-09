@@ -43,8 +43,7 @@ impl ProjectSnapshot {
     }
 
     pub(crate) fn from_project(project: &project_model::Project) -> Self {
-        let mut scan_roots = vec![project.source_path().to_path_buf()];
-        scan_roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
+        let scan_roots = project.source_roots();
         // The MCP file universe is enumerated canonically (`enumerate_bsl_files`
         // canonicalizes every `.bsl`), so the registered roots must be canonical
         // too — a raw symlinked root would miss both prefix matching and the
@@ -177,4 +176,69 @@ pub(super) fn load_workspace_db(
     let source_root = build_source_root(&files);
     let loaded = db_for_files(&source_root, &files, &project.configs, None);
     Ok((loaded.db, files.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProjectSnapshot;
+    use crate::graph::test_support::write_common_module;
+    use std::fs;
+    use std::path::Path;
+
+    /// Configuration under `src/cf`, extension under `src/cfe/Расш` — outside the
+    /// configuration directory on purpose. Inside it, the configuration's own
+    /// recursive walk would cover the extension anyway, and a scan-root set that
+    /// lost the extension would still enumerate its modules.
+    fn workspace_with_an_extension(root: &Path) {
+        let cf = root.join("src/cf");
+        fs::create_dir_all(&cf).unwrap();
+        fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(&cf, "Сервер", true, "&НаСервере\nФункция Ч() Экспорт КонецФункции");
+
+        let ext = root.join("src/cfe/Расш");
+        fs::create_dir_all(&ext).unwrap();
+        fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(
+            &ext,
+            "РасшМодуль",
+            true,
+            "&НаСервере\nФункция Р() Экспорт КонецФункции",
+        );
+    }
+
+    #[test]
+    fn the_scan_universe_is_every_root_the_project_declares() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        workspace_with_an_extension(root);
+        let project = project_model::Project::new(root).expect("valid test project");
+        assert_eq!(project.source_roots().len(), 2, "the stand must declare an extension root");
+
+        let snapshot = ProjectSnapshot::from_project(&project);
+
+        assert_eq!(
+            snapshot.scan_roots,
+            project.source_roots(),
+            "the graph universe must be the project's own root set, not a second derivation"
+        );
+    }
+
+    /// Separate from the root-set comparison above: that one compares directory
+    /// lists, this one asks what the walk actually returns. A root set that lost
+    /// the extension yields no module from it, which is the defect itself.
+    #[test]
+    fn a_module_in_an_extension_reaches_the_graph_universe() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        workspace_with_an_extension(root);
+        let project = project_model::Project::new(root).expect("valid test project");
+        let snapshot = ProjectSnapshot::from_project(&project);
+
+        let files = super::enumerate_bsl_files(&snapshot);
+
+        assert!(
+            files.iter().any(|(_, path)| path.ends_with("CommonModules/РасшМодуль/Ext/Module.bsl")),
+            "the extension module must be enumerated: {files:?}"
+        );
+    }
 }

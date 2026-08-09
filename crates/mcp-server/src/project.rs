@@ -79,3 +79,66 @@ pub fn warn_about_rejected_roots(rejected: &[bsl_search::RejectedRoot]) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    fn rust_sources(dir: &Path, into: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read crate sources") {
+            let path = entry.expect("read dir entry").path();
+            if path.is_dir() {
+                rust_sources(&path, into);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                into.push(path);
+            }
+        }
+    }
+
+    /// Every root set in this crate comes from one derivation. The two accessors
+    /// that hand back extension directories separately are what a second, hand-built
+    /// set would have to reach for, so each gets exactly one place: the one that
+    /// needs it for something other than a root set.
+    ///
+    /// COUNTED, not located. An allowlist by file says nothing about a second
+    /// occurrence inside the allowed file, and two hand-built root tables in one file
+    /// drift from each other exactly like two in two files.
+    ///
+    /// This gate covers unit tests too, and deliberately: the test that used to
+    /// rebuild the set by hand also carried a comment claiming it armed "the SAME
+    /// targets production arms" — a claim nothing held true.
+    ///
+    /// The needles are assembled at runtime so this file does not match itself.
+    #[test]
+    fn the_root_set_is_derived_in_exactly_one_place() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&src, &mut files);
+        assert!(files.len() > 20, "the source scan found almost nothing: {}", files.len());
+
+        let needles = [["extension_", "paths()"].concat(), ["extension_", "topology()"].concat()];
+        let mut sites: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).expect("read crate source");
+            let rel = file.strip_prefix(&src).expect("source under src").display().to_string();
+            for needle in &needles {
+                for _ in 0..text.matches(needle.as_str()).count() {
+                    sites.entry(needle.as_str()).or_default().push(rel.replace('\\', "/"));
+                }
+            }
+        }
+
+        let expected: BTreeMap<&str, Vec<String>> = [
+            (needles[0].as_str(), vec!["project.rs".to_string()]),
+            (needles[1].as_str(), vec!["broker/name.rs".to_string()]),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            sites, expected,
+            "a root set must come from Project::source_roots(); these accessors rebuild it by hand"
+        );
+    }
+}
