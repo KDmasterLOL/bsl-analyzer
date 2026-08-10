@@ -41,6 +41,14 @@ const DEFAULT_CAPACITY: usize = 8192;
 /// memory.
 const CHANNEL_BOUND: usize = 65536;
 
+/// Ceiling on a whole stop: enqueueing the message and waiting for the thread to act on
+/// it share it, so no caller of [`HubThread::stop`] — including a `Drop` — can be held
+/// longer than this whatever the thread is doing.
+const STOP_BUDGET: Duration = Duration::from_secs(5);
+
+/// How often a stop re-checks the two things it waits on (channel space, thread exit).
+const STOP_POLL: Duration = Duration::from_millis(10);
+
 /// What is known to have happened to a path within a drain window. The kind is
 /// re-derived from on-disk state at event time (stats are truth), so a
 /// create-then-delete or delete-then-create burst settles on the final reality
@@ -89,6 +97,10 @@ pub(crate) enum DegradeReason {
 /// Run on the hub thread immediately before the watch is armed. `None` in production.
 type BeforeArm = Arc<dyn Fn() + Send + Sync>;
 
+/// Consulted before every watch: paths it answers `true` for refuse to arm. `None` in
+/// production, where only the backend refuses.
+type WatchRefusal = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
+
 /// Holds a hub's thread short of arming until released.
 #[cfg(test)]
 pub(crate) struct HubHold {
@@ -112,6 +124,122 @@ impl HubHold {
     pub(crate) fn release(&self) {
         *self.held.lock().unwrap_or_else(PoisonError::into_inner) = false;
         self.released.notify_all();
+    }
+}
+
+/// The watch the hub holds, and the only way this module places one.
+///
+/// A root that cannot be watched is the condition half of this file exists to survive — an
+/// exhausted inotify limit, a denied permission, a path that is not a directory — and it
+/// cannot be built from a test out of the file system alone. Permission bits are the
+/// tempting way and the wrong one: they mean nothing to a process with CAP_DAC_READ_SEARCH,
+/// so the same `chmod` that blinds a hub on a developer's machine leaves it fully sighted
+/// in a root container, and every assertion about blindness there passes over a hub that
+/// is not blind. So the refusal is DECLARED instead, and declared refusal and backend
+/// refusal take the same branch at every call site because there is only one call site
+/// each: [`Self::arm`].
+struct Watch {
+    backend: RecommendedWatcher,
+    refuses: Option<WatchRefusal>,
+}
+
+impl Watch {
+    fn arm(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+        if self.refuses.as_ref().is_some_and(|refuses| refuses(path)) {
+            return Err(notify::Error::generic("the watch of this path is refused"));
+        }
+        self.backend.watch(path, mode)
+    }
+
+    /// Drop a registration. Not gated: a refusal makes a watch fail, and un-watching what
+    /// was never armed is the backend's own no-op to report.
+    fn disarm(&mut self, path: &Path) -> notify::Result<()> {
+        self.backend.unwatch(path)
+    }
+}
+
+/// The paths a test has declared unwatchable, and the switch that clears them.
+///
+/// Compared by canonical path with a fallback to the raw one: the hub arms whichever
+/// spelling it was declared with, and a refusal keyed by a different spelling of the same
+/// directory would silently never fire — a seam that cannot refuse is worse than none,
+/// because the tests built on it go green over the behaviour they meant to pin.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RefusedWatches {
+    paths: Mutex<Vec<PathBuf>>,
+}
+
+#[cfg(test)]
+impl RefusedWatches {
+    /// Declared before the hub starts, for a root that must never arm in the first place.
+    pub(crate) fn refusing(paths: Vec<PathBuf>) -> Arc<Self> {
+        Arc::new(Self { paths: Mutex::new(paths.iter().map(|p| Self::key(p)).collect()) })
+    }
+
+    pub(crate) fn none() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub(crate) fn refuse(&self, path: &Path) {
+        let key = Self::key(path);
+        let mut paths = self.paths.lock().unwrap_or_else(PoisonError::into_inner);
+        if !paths.contains(&key) {
+            paths.push(key);
+        }
+    }
+
+    pub(crate) fn allow(&self, path: &Path) {
+        let key = Self::key(path);
+        self.paths.lock().unwrap_or_else(PoisonError::into_inner).retain(|p| *p != key);
+    }
+
+    fn refuses(&self, path: &Path) -> bool {
+        let key = Self::key(path);
+        self.paths.lock().unwrap_or_else(PoisonError::into_inner).contains(&key)
+    }
+
+    /// Canonical where the path can be resolved, raw where it cannot — a refused root may
+    /// be one nothing can describe, and dropping it from the set on that account would
+    /// hand the test the arming it declared away.
+    fn key(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// The form the hub thread consults. Holds a clone, so a test can flip a refusal after
+    /// the hub is running and the next arming pass sees it.
+    fn as_refusal(self: &Arc<Self>) -> WatchRefusal {
+        let refusals = Arc::clone(self);
+        Arc::new(move |path: &Path| refusals.refuses(path))
+    }
+}
+
+/// The caller's end of a [`HubHold`]: releases the hold when it goes, so a hub still
+/// parked when its handles are dropped goes on to arm and can then read the stop message.
+///
+/// The hold cannot do this itself. The parked thread's own closure owns a clone of it, so
+/// a `Drop` on the shared hold would only run once that thread ended — which is precisely
+/// what the hold is preventing. Separating the caller's end from the shared one is what
+/// makes the release reachable at all.
+#[cfg(test)]
+pub(crate) struct HubHoldGuard(Arc<HubHold>);
+
+#[cfg(test)]
+impl HubHoldGuard {
+    pub(crate) fn release(&self) {
+        self.0.release();
+    }
+
+    /// A releaser another thread can own, for a test that releases on a schedule.
+    pub(crate) fn shared(&self) -> Arc<HubHold> {
+        Arc::clone(&self.0)
+    }
+}
+
+#[cfg(test)]
+impl Drop for HubHoldGuard {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 
@@ -997,18 +1125,86 @@ enum HubMsg {
 #[derive(Clone)]
 pub(crate) struct WorkspaceChangeHub {
     inner: Arc<HubInner>,
-    /// Producer side of the hub thread's channel, for control messages. The
-    /// watcher callback holds its own clone for events.
+    /// The hub thread: reached for control messages through [`Self::control`], and stopped
+    /// when the last handle to it goes.
+    thread: Arc<HubThread>,
+}
+
+/// The hub thread's lifetime, tied to the handles that can still reach it: the last
+/// clone out stops it. Without that, every hub whose handles are dropped leaves a live
+/// thread and its watcher behind for the life of the process — a per-hub inotify
+/// instance against a per-uid quota that is measured in dozens.
+struct HubThread {
+    /// Producer side of the thread's channel, for control messages — the stop among them.
+    /// The watcher callback holds its own clone for events.
     control: std::sync::mpsc::SyncSender<HubMsg>,
-    /// The hub thread's handle, joined once by [`Self::shutdown`].
-    #[allow(
-        dead_code,
-        reason = "read only by the test-facing shutdown seam; production daemons exit the process"
-    )]
-    thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl HubThread {
+    /// Ask the thread to exit, then join it. Idempotent, and bounded END TO END —
+    /// enqueue AND exit share one deadline.
+    ///
+    /// The exit is waited for rather than joined into: the stop message is read in the
+    /// thread's message loop, and a thread held short of arming by a seam has not reached
+    /// that loop, so it never reads the message at all. An unconditional `join` would then
+    /// hold the dropping thread for ever, which in a test binary is not a failure but a
+    /// hang — the one outcome a run cannot report. Past the deadline the thread is left
+    /// detached instead: a leaked thread is visible in the warning, a wedged process is
+    /// visible as nothing.
+    fn stop(&self) {
+        let deadline = Instant::now() + STOP_BUDGET;
+        let mut msg = HubMsg::Shutdown;
+        let sent = loop {
+            match self.control.try_send(msg) {
+                Ok(()) => break true,
+                Err(std::sync::mpsc::TrySendError::Full(back)) => {
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    msg = back;
+                    std::thread::sleep(STOP_POLL);
+                }
+                // Already gone: waiting below is safe and immediate.
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break true,
+            }
+        };
+        if !sent {
+            tracing::warn!("change hub shutdown could not be enqueued; leaving the thread running");
+            return;
+        }
+        // Taken out either way: a thread this call does not manage to join is one nobody
+        // else can join later, and leaving the handle behind would only invite a second
+        // caller to wait out the same budget again.
+        let Some(handle) = self.handle.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            return;
+        };
+        while !handle.is_finished() {
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    "workspace change hub thread did not exit within the stop budget; leaving it detached"
+                );
+                return;
+            }
+            std::thread::sleep(STOP_POLL);
+        }
+        let _ = handle.join();
+    }
+}
+
+impl Drop for HubThread {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 impl WorkspaceChangeHub {
+    /// The control channel. One sender for the whole hub, owned by the thread's own record:
+    /// a second copy on the handle would be a second thing to keep in step with it.
+    fn control(&self) -> &std::sync::mpsc::SyncSender<HubMsg> {
+        &self.thread.control
+    }
+
     /// Spawn the hub over one or more roots (the drift-scan universe: the config source
     /// root plus each extension root). Returns immediately — each root is watched
     /// recursively on the hub thread (walking large trees must not block daemon startup).
@@ -1030,15 +1226,15 @@ impl WorkspaceChangeHub {
     /// A hub whose thread the operating system refused to start.
     #[cfg(test)]
     pub(crate) fn start_with_unstartable_thread(targets: Vec<WatchTarget>) -> Self {
-        Self::start_seamed(targets, DEFAULT_CAPACITY, COVERAGE_TICK_PERIOD, true, None)
+        Self::start_seamed(targets, DEFAULT_CAPACITY, COVERAGE_TICK_PERIOD, true, None, None)
     }
 
-    /// A hub held just short of arming until the returned handle is released, so a
-    /// consumer can be observed waiting on a hub that is alive and not yet ready. Once
+    /// A hub held just short of arming until the returned guard is released or dropped, so
+    /// a consumer can be observed waiting on a hub that is alive and not yet ready. Once
     /// released it arms for real, which is what makes it a control and not a stub: the
     /// consumer's work after the wait has to actually happen.
     #[cfg(test)]
-    pub(crate) fn start_targets_held(targets: Vec<WatchTarget>) -> (Self, Arc<HubHold>) {
+    pub(crate) fn start_targets_held(targets: Vec<WatchTarget>) -> (Self, HubHoldGuard) {
         let hold = Arc::new(HubHold::new());
         let gate = Arc::clone(&hold);
         let hub = Self::start_seamed(
@@ -1047,8 +1243,9 @@ impl WorkspaceChangeHub {
             COVERAGE_TICK_PERIOD,
             false,
             Some(Arc::new(move || gate.wait())),
+            None,
         );
-        (hub, hold)
+        (hub, HubHoldGuard(hold))
     }
 
     /// [`Self::start_targets`] with a tick interval a test can actually wait for.
@@ -1057,24 +1254,47 @@ impl WorkspaceChangeHub {
         Self::start_with_capacity(targets, DEFAULT_CAPACITY, period)
     }
 
-    fn start_with_capacity(targets: Vec<WatchTarget>, cap: usize, tick_period: Duration) -> Self {
-        Self::start_seamed(targets, cap, tick_period, false, None)
+    /// A hub that refuses to arm the declared paths, for a test that needs a root nothing
+    /// watches. The refusal is declared BEFORE the thread starts: an ordinary hub arms
+    /// within milliseconds, so a refusal installed afterwards would race the arming it is
+    /// meant to prevent.
+    #[cfg(test)]
+    pub(crate) fn start_targets_refusing(
+        targets: Vec<WatchTarget>,
+        period: Duration,
+        refusals: &Arc<RefusedWatches>,
+    ) -> Self {
+        Self::start_seamed(
+            targets,
+            DEFAULT_CAPACITY,
+            period,
+            false,
+            None,
+            Some(refusals.as_refusal()),
+        )
     }
 
-    /// The hub with its two startup seams exposed. Production passes `false` and `None`.
+    fn start_with_capacity(targets: Vec<WatchTarget>, cap: usize, tick_period: Duration) -> Self {
+        Self::start_seamed(targets, cap, tick_period, false, None, None)
+    }
+
+    /// The hub with its startup seams exposed. Production passes `false` and two `None`s.
     ///
-    /// Both exist because the states they produce cannot be provoked on demand and are
-    /// the states no other door leads to. `refuse_spawn`: an operating system refusing a
+    /// Each exists because the state it produces cannot be provoked on demand and is a
+    /// state no other door leads to. `refuse_spawn`: an operating system refusing a
     /// thread — every other permanent failure is reported through a different path, so
     /// the wiring that turns THIS one into a report is otherwise unreachable.
     /// `before_arm`: a hub alive, not yet armed and not failed — what a huge initial walk
     /// looks like, and the only readiness answer that means "ask again later".
+    /// `watch_refusal`: a root the watch will not take, which no file system produces for
+    /// every uid alike (see [`Watch`]).
     fn start_seamed(
         targets: Vec<WatchTarget>,
         cap: usize,
         tick_period: Duration,
         refuse_spawn: bool,
         before_arm: Option<BeforeArm>,
+        watch_refusal: Option<WatchRefusal>,
     ) -> Self {
         let placed = ResolvedTargets::here(targets.clone());
         let inner = Arc::new(HubInner {
@@ -1102,9 +1322,11 @@ impl WorkspaceChangeHub {
         let spawned = if refuse_spawn {
             Err(std::io::Error::other("hub thread spawn refused by test seam"))
         } else {
-            std::thread::Builder::new()
-                .name("bsl-workspace-change-hub".to_owned())
-                .spawn(move || run_hub_thread(thread_inner, targets, event_tx, rx, before_arm))
+            std::thread::Builder::new().name("bsl-workspace-change-hub".to_owned()).spawn(
+                move || {
+                    run_hub_thread(thread_inner, targets, event_tx, rx, before_arm, watch_refusal)
+                },
+            )
         };
         // A hub whose thread never started arms nothing, ever. Dropping the error would
         // leave `watching` false and `setup_failed` unset — the one state that reads as
@@ -1119,7 +1341,7 @@ impl WorkspaceChangeHub {
             }
         };
 
-        Self { inner, control: tx, thread: Arc::new(Mutex::new(thread)) }
+        Self { inner, thread: Arc::new(HubThread { control: tx, handle: Mutex::new(thread) }) }
     }
 
     /// Ask the hub thread to re-point the watch set at `targets`, blocking until it
@@ -1135,7 +1357,7 @@ impl WorkspaceChangeHub {
         let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
         let mut msg = HubMsg::Rearm { targets, ack: ack_tx };
         loop {
-            match self.control.try_send(msg) {
+            match self.control().try_send(msg) {
                 Ok(()) => break,
                 Err(std::sync::mpsc::TrySendError::Full(back)) => {
                     if Instant::now() >= deadline {
@@ -1214,7 +1436,7 @@ impl WorkspaceChangeHub {
         // Late, not lost — the record stays on the previous set, so the next rebuild's
         // `ensure_roots` publishes this one again instead of skipping it as a repeat.
         // Until then the periodic check polices the previous declaration.
-        if self.control.try_send(HubMsg::Declare(targets.to_vec())).is_ok() {
+        if self.control().try_send(HubMsg::Declare(targets.to_vec())).is_ok() {
             *published = targets.to_vec();
         }
     }
@@ -1229,37 +1451,11 @@ impl WorkspaceChangeHub {
     }
 
     /// Terminate the hub thread and join it. Cursors keep draining whatever was
-    /// accumulated; no further events arrive. Idempotent, and bounded: if the
-    /// control channel stays full past the enqueue deadline the hub is left
-    /// running (never a hang). A test seam today: production daemons exit the
-    /// process, but tests must be able to prove the thread terminates instead of
-    /// leaking a watcher per case.
-    #[allow(dead_code, reason = "exercised by tests; no production teardown path needs it yet")]
+    /// accumulated; no further events arrive. Idempotent, and reached from two
+    /// directions: explicitly here, and from the last handle's [`Drop`].
+    #[cfg(test)]
     pub(crate) fn shutdown(&self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut msg = HubMsg::Shutdown;
-        let sent = loop {
-            match self.control.try_send(msg) {
-                Ok(()) => break true,
-                Err(std::sync::mpsc::TrySendError::Full(back)) => {
-                    if Instant::now() >= deadline {
-                        break false;
-                    }
-                    msg = back;
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                // Already gone: joining below is safe and immediate.
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break true,
-            }
-        };
-        if !sent {
-            tracing::warn!("change hub shutdown could not be enqueued; leaving the thread running");
-            return;
-        }
-        let handle = self.thread.lock().unwrap_or_else(PoisonError::into_inner).take();
-        if let Some(handle) = handle {
-            let _ = handle.join();
-        }
+        self.thread.stop();
     }
 
     /// Register a cursor positioned at "everything up to now already seen": a fresh
@@ -1456,7 +1652,7 @@ impl WorkspaceChangeHub {
     #[cfg(test)]
     pub(crate) fn tick_now(&self, timeout: Duration) -> bool {
         let before = self.tick_count();
-        if self.control.send(HubMsg::Tick).is_err() {
+        if self.control().send(HubMsg::Tick).is_err() {
             return false;
         }
         let deadline = Instant::now() + timeout;
@@ -1784,6 +1980,7 @@ fn run_hub_thread(
     event_tx: std::sync::mpsc::SyncSender<HubMsg>,
     rx: std::sync::mpsc::Receiver<HubMsg>,
     before_arm: Option<BeforeArm>,
+    watch_refusal: Option<WatchRefusal>,
 ) {
     let callback_inner = Arc::clone(&inner);
     let watcher = RecommendedWatcher::new(
@@ -1798,7 +1995,7 @@ fn run_hub_thread(
     );
 
     let mut watcher = match watcher {
-        Ok(watcher) => watcher,
+        Ok(backend) => Watch { backend, refuses: watch_refusal },
         Err(error) => {
             tracing::warn!("workspace change hub failed to create watcher: {error}");
             inner.mark_setup_failed();
@@ -1834,7 +2031,7 @@ fn run_hub_thread(
         before_arm();
     }
     for (target, canonical) in dedup_targets(targets.into_inner()) {
-        match watcher.watch(&target.path, target.mode()) {
+        match watcher.arm(&target.path, target.mode()) {
             Ok(()) => {
                 tracing::info!(root = ?target.path, recursive = target.recursive, "workspace change hub watching root");
                 armed.push((target, canonical));
@@ -1877,7 +2074,7 @@ fn run_hub_thread(
         match msg {
             HubMsg::Event(res) => {
                 for dir in inner.ingest_event(res) {
-                    if let Err(error) = watcher.watch(&dir, RecursiveMode::Recursive) {
+                    if let Err(error) = watcher.arm(&dir, RecursiveMode::Recursive) {
                         inner.note_rewatch_failed(&dir, &error);
                     }
                 }
@@ -1928,7 +2125,7 @@ fn run_hub_thread(
 /// re-watching everything it keeps.
 fn coverage_tick(
     inner: &Arc<HubInner>,
-    watcher: &mut RecommendedWatcher,
+    watcher: &mut Watch,
     armed: &mut Vec<(WatchTarget, PathBuf)>,
     declared: &[WatchTarget],
     snapshot: &mut Snapshot,
@@ -1976,14 +2173,14 @@ fn coverage_tick(
 /// repeat of a report consumers already have.
 fn retry_blind_targets(
     inner: &HubInner,
-    watcher: &mut RecommendedWatcher,
+    watcher: &mut Watch,
     armed: &mut Vec<(WatchTarget, PathBuf)>,
     declared: &[WatchTarget],
     snapshot: &Snapshot,
 ) {
     let mut armed_any = false;
     for (target, _) in blind_targets(declared, snapshot, armed) {
-        match watcher.watch(&target.path, target.mode()) {
+        match watcher.arm(&target.path, target.mode()) {
             Ok(()) => {
                 tracing::info!(root = ?target.path, recursive = target.recursive, "workspace change hub watching root (retry)");
                 // Canonicalized HERE, at the moment the watch went in, like every other
@@ -2016,7 +2213,7 @@ fn retry_blind_targets(
 /// starting state, and the decision to arm uses the same rule the tick uses.
 fn apply_declaration(
     inner: &Arc<HubInner>,
-    watcher: &mut RecommendedWatcher,
+    watcher: &mut Watch,
     armed: &mut Vec<(WatchTarget, PathBuf)>,
     declared: &mut Vec<WatchTarget>,
     snapshot: &mut Snapshot,
@@ -2065,7 +2262,7 @@ fn apply_declaration(
 /// never delivered. Returns whether EVERY desired target is armed afterwards.
 fn apply_rearm(
     inner: &HubInner,
-    watcher: &mut RecommendedWatcher,
+    watcher: &mut Watch,
     armed: &mut Vec<(WatchTarget, PathBuf)>,
     new_targets: ResolvedTargets,
 ) -> bool {
@@ -2093,7 +2290,7 @@ fn apply_rearm(
             next_armed.push((target.clone(), canonical.clone()));
             continue;
         }
-        match watcher.watch(&target.path, target.mode()) {
+        match watcher.arm(&target.path, target.mode()) {
             Ok(()) => {
                 tracing::info!(root = ?target.path, recursive = target.recursive, "workspace change hub watching root (re-arm)");
                 next_armed.push((target.clone(), canonical.clone()));
@@ -2106,7 +2303,7 @@ fn apply_rearm(
     }
     for (target, canonical) in armed.iter() {
         if !is_armed(&next_armed, target, canonical) {
-            if let Err(error) = watcher.unwatch(&target.path) {
+            if let Err(error) = watcher.disarm(&target.path) {
                 tracing::debug!(root = ?target.path, "workspace change hub unwatch on re-arm: {error}");
             }
         }
@@ -2122,7 +2319,7 @@ fn apply_rearm(
     // still stand costs one retry; keeping one that does not costs the events.
     let mut kept: Vec<(WatchTarget, PathBuf)> = Vec::with_capacity(next_armed.len());
     for (target, canonical) in next_armed {
-        match watcher.watch(&target.path, target.mode()) {
+        match watcher.arm(&target.path, target.mode()) {
             Ok(()) => kept.push((target, canonical)),
             Err(error) => {
                 tracing::warn!(root = ?target.path, "workspace change hub lost a kept root on re-arm: {error}");
@@ -2145,29 +2342,10 @@ fn apply_rearm(
 /// standing-degraded, and that stand can only be built here, next to what it exercises.
 #[cfg(test)]
 pub(crate) mod test_support {
-    #[cfg(unix)]
-    use super::{WatchTarget, WorkspaceChangeHub};
-    #[cfg(unix)]
-    use std::path::{Path, PathBuf};
+    use super::{RefusedWatches, WatchTarget, WorkspaceChangeHub};
+    use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
-
-    /// Make a directory unwatchable for real: `inotify_add_watch` needs read permission,
-    /// and refuses both a first watch and a re-watch of an already-watched path without
-    /// it. Nothing weaker works — an unreadable directory still stats and canonicalizes,
-    /// so it moves no fingerprint.
-    #[cfg(unix)]
-    pub(crate) fn unreadable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
-    }
-
-    /// Restore access. Called before the temporary directory is dropped: its recursive
-    /// removal cannot descend into a directory it may not read.
-    #[cfg(unix)]
-    pub(crate) fn readable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
 
     pub(crate) fn eventually(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + timeout;
@@ -2180,23 +2358,29 @@ pub(crate) mod test_support {
         f()
     }
 
-    /// One live root and one the watcher genuinely cannot take, so the hub is standing
-    /// degraded for a reason no drain clears. The period is an hour, so every tick is one
-    /// the test asked for and nothing happens between two assertions on its own.
-    #[cfg(unix)]
-    pub(crate) fn partly_blind_hub() -> (tempfile::TempDir, PathBuf, PathBuf, WorkspaceChangeHub) {
+    /// One live root and one the watch refuses to take, so the hub is standing degraded for
+    /// a reason no drain clears. The period is an hour, so every tick is one the test asked
+    /// for and nothing happens between two assertions on its own.
+    ///
+    /// `b` stays an ordinary readable directory: it is present, it stats, it canonicalizes,
+    /// and the only thing wrong with it is that nothing watches it — which is the branch
+    /// these tests are about. The root that cannot even be described is a different branch
+    /// with a test of its own.
+    pub(crate) fn partly_blind_hub(
+    ) -> (tempfile::TempDir, PathBuf, PathBuf, WorkspaceChangeHub, Arc<RefusedWatches>) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let (a, b) = (root.join("a"), root.join("b"));
         std::fs::create_dir(&a).unwrap();
         std::fs::create_dir(&b).unwrap();
-        unreadable(&b);
-        let hub = WorkspaceChangeHub::start_targets_with_period(
+        let refusals = RefusedWatches::refusing(vec![b.clone()]);
+        let hub = WorkspaceChangeHub::start_targets_refusing(
             vec![WatchTarget::recursive(a.clone()), WatchTarget::recursive(b.clone())],
             Duration::from_secs(3600),
+            &refusals,
         );
         assert!(hub.wait_until_watching(Duration::from_secs(5)), "the live root still arms");
-        (dir, a, b, hub)
+        (dir, a, b, hub, refusals)
     }
 }
 
@@ -2481,16 +2665,18 @@ mod tests {
         for path in [&a, &b, &c] {
             std::fs::create_dir(path).unwrap();
         }
-        let hub = WorkspaceChangeHub::start_targets(vec![
-            WatchTarget::recursive(a.clone()),
-            WatchTarget::recursive(b.clone()),
-        ]);
+        let refusals = RefusedWatches::none();
+        let hub = WorkspaceChangeHub::start_targets_refusing(
+            vec![WatchTarget::recursive(a.clone()), WatchTarget::recursive(b.clone())],
+            COVERAGE_TICK_PERIOD,
+            &refusals,
+        );
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
 
-        // `chmod` alone moves no fingerprint, so the re-arm has to come from elsewhere:
+        // Refusing `b` moves no fingerprint, so the re-arm has to come from elsewhere:
         // adding `c` is the ordinary reason a rebuild re-arms, and it carries `b` into the
         // defensive pass, where the watch now fails.
-        unreadable(&b);
+        refusals.refuse(&b);
         let targets = vec![
             WatchTarget::recursive(a.clone()),
             WatchTarget::recursive(b.clone()),
@@ -2505,7 +2691,6 @@ mod tests {
             "the same set must still be denied: `b` is not watched, however long it stays in the live set"
         );
 
-        readable(&b);
         hub.shutdown();
     }
 
@@ -2516,11 +2701,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_root_the_watch_could_not_take_at_start_is_armed_by_a_later_tick() {
-        let (_dir, _a, b, hub) = partly_blind_hub();
+        let (_dir, _a, b, hub, refusals) = partly_blind_hub();
         let cursor = hub.subscribe();
         let _ = hub.drain(cursor);
 
-        readable(&b);
+        refusals.allow(&b);
         assert!(hub.tick_now(Duration::from_secs(5)));
 
         std::fs::write(b.join("Module.bsl"), "x").unwrap();
@@ -2539,7 +2724,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_first_root_the_watch_could_not_take_is_reported_at_once() {
-        let (_dir, _a, b, hub) = partly_blind_hub();
+        let (_dir, _a, _b, hub, _refusals) = partly_blind_hub();
         assert_eq!(
             hub.health(),
             Health::Degraded(DegradeReason::RewatchFailed),
@@ -2550,7 +2735,6 @@ mod tests {
             hub.drain(cursor).rescan_required,
             "the blind window between startup and this subscription is nobody else's to read"
         );
-        readable(&b);
     }
 
     /// Ill health lasts as long as the obstacle, not as long as the reconcile window.
@@ -2561,7 +2745,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_root_that_stays_unwatchable_keeps_the_hub_unhealthy() {
-        let (_dir, _a, b, hub) = partly_blind_hub();
+        let (_dir, _a, _b, hub, _refusals) = partly_blind_hub();
         let cursor = hub.subscribe();
         assert!(hub.drain(cursor).rescan_required);
         assert!(!hub.drain(cursor).rescan_required, "the window is closed");
@@ -2576,7 +2760,6 @@ mod tests {
             hub.drain(late).rescan_required,
             "a consumer arriving after the window still has the blind subtree to reconcile"
         );
-        readable(&b);
     }
 
     /// Arming a root that was blind is new coverage, and everything under it changed
@@ -2587,7 +2770,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn arming_a_root_after_its_blind_window_asks_for_one_reconcile() {
-        let (_dir, _a, b, hub) = partly_blind_hub();
+        let (_dir, _a, b, hub, refusals) = partly_blind_hub();
         let cursor = hub.subscribe();
         assert!(hub.drain(cursor).rescan_required);
         let batch = hub.drain(cursor);
@@ -2596,7 +2779,7 @@ mod tests {
             "drained clean, so what follows is the retry's doing and nothing else"
         );
 
-        readable(&b);
+        refusals.allow(&b);
         std::fs::write(b.join("Module.bsl"), "x").unwrap();
         assert!(hub.tick_now(Duration::from_secs(5)));
         assert!(
@@ -2611,11 +2794,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_hub_is_healthy_again_once_the_root_arms() {
-        let (_dir, _a, b, hub) = partly_blind_hub();
+        let (_dir, _a, b, hub, refusals) = partly_blind_hub();
         let cursor = hub.subscribe();
         let _ = hub.drain(cursor);
 
-        readable(&b);
+        refusals.allow(&b);
         assert!(hub.tick_now(Duration::from_secs(5)));
         let _ = hub.drain(cursor);
         assert_eq!(hub.health(), Health::Healthy, "everything declared is watched again");
@@ -2628,14 +2811,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_blind_root_dropped_from_the_declaration_stops_costing_health() {
-        let (_dir, a, b, hub) = partly_blind_hub();
+        let (_dir, a, _b, hub, _refusals) = partly_blind_hub();
         let cursor = hub.subscribe();
         let _ = hub.drain(cursor);
 
         assert!(hub.rearm(vec![WatchTarget::recursive(a.clone())], Duration::from_secs(10)));
         let _ = hub.drain(cursor);
         assert_eq!(hub.health(), Health::Healthy, "everything still declared is watched");
-        readable(&b);
     }
 
     /// The same exit, on the branch that never re-arms: a declaration whose cover equals
@@ -2723,15 +2905,17 @@ mod tests {
         for path in [&a, &b, &c] {
             std::fs::create_dir(path).unwrap();
         }
-        let hub = WorkspaceChangeHub::start_targets(vec![
-            WatchTarget::recursive(a.clone()),
-            WatchTarget::recursive(b.clone()),
-        ]);
+        let refusals = RefusedWatches::none();
+        let hub = WorkspaceChangeHub::start_targets_refusing(
+            vec![WatchTarget::recursive(a.clone()), WatchTarget::recursive(b.clone())],
+            COVERAGE_TICK_PERIOD,
+            &refusals,
+        );
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         let cursor = hub.subscribe();
         let _ = hub.drain(cursor);
 
-        unreadable(&b);
+        refusals.refuse(&b);
         assert!(!hub.ensure_roots(&[
             WatchTarget::recursive(a.clone()),
             WatchTarget::recursive(b.clone()),
@@ -2743,7 +2927,6 @@ mod tests {
             Health::Degraded(DegradeReason::RewatchFailed),
             "the root the defensive pass lost is unwatched like any other"
         );
-        readable(&b);
         hub.shutdown();
     }
 
@@ -2763,22 +2946,24 @@ mod tests {
         for path in [&a, &b, &c] {
             std::fs::create_dir(path).unwrap();
         }
-        let hub = WorkspaceChangeHub::start_targets_with_period(
+        let refusals = RefusedWatches::none();
+        let hub = WorkspaceChangeHub::start_targets_refusing(
             vec![WatchTarget::recursive(a.clone()), WatchTarget::recursive(b.clone())],
             Duration::from_secs(3600),
+            &refusals,
         );
         assert!(hub.wait_until_watching(Duration::from_secs(5)));
         let cursor = hub.subscribe();
         let _ = hub.drain(cursor);
 
-        unreadable(&b);
+        refusals.refuse(&b);
         assert!(!hub.ensure_roots(&[
             WatchTarget::recursive(a.clone()),
             WatchTarget::recursive(b.clone()),
             WatchTarget::recursive(c.clone()),
         ]));
 
-        readable(&b);
+        refusals.allow(&b);
         assert!(hub.tick_now(Duration::from_secs(5)));
         let _ = hub.drain(cursor);
         assert_eq!(
@@ -2794,12 +2979,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_retry_that_failed_does_not_stop_the_next_one() {
-        let (_dir, _a, b, hub) = partly_blind_hub();
+        let (_dir, _a, b, hub, refusals) = partly_blind_hub();
         let cursor = hub.subscribe();
         let _ = hub.drain(cursor);
 
         assert!(hub.tick_now(Duration::from_secs(5)), "this retry must fail");
-        readable(&b);
+        refusals.allow(&b);
         assert!(hub.tick_now(Duration::from_secs(5)), "and this one must be attempted at all");
 
         std::fs::write(b.join("Module.bsl"), "x").unwrap();
@@ -2818,7 +3003,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_retry_that_keeps_failing_asks_for_no_reconcile() {
-        let (_dir, _a, b, hub) = partly_blind_hub();
+        let (_dir, _a, _b, hub, _refusals) = partly_blind_hub();
         let cursor = hub.subscribe();
         assert!(hub.drain(cursor).rescan_required, "the first failure is reported");
         let rescans = hub.rescan_request_count();
@@ -2831,28 +3016,28 @@ mod tests {
             rescans,
             "a repeat of a failure already reported buys the consumers nothing"
         );
-        readable(&b);
     }
 
-    /// A declared root can exist and still be unstattable: an unreadable PARENT denies
-    /// every `stat` below it, and so does a symlink cycle. The fingerprint is then neither
-    /// present nor absent, and a blindness derived from the cover alone would never see
-    /// such a root — no report, no standing ill health, and no retry, which is the whole
-    /// of what this node is for.
+    /// A declared root can be unstattable rather than merely unwatched: a symlink cycle
+    /// answers every `stat` with a loop, so the fingerprint is neither present nor absent,
+    /// and a blindness derived from the cover alone would never see such a root — no
+    /// report, no standing ill health, and no retry, which is the whole of what this node
+    /// is for.
+    ///
+    /// The obstacle is the file system's own and needs no seam: `ELOOP` is answered to
+    /// every caller, root included, which is exactly what a permission cannot claim.
     #[cfg(unix)]
     #[test]
     fn a_root_that_cannot_even_be_stat_ed_is_blind_like_any_other() {
         let dir = tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let a = root.join("a");
-        let parent = root.join("parent");
-        let child = parent.join("child");
+        let loopy = root.join("loopy");
         std::fs::create_dir(&a).unwrap();
-        std::fs::create_dir_all(&child).unwrap();
-        unreadable(&parent);
+        std::os::unix::fs::symlink(&loopy, &loopy).unwrap();
 
         let hub = WorkspaceChangeHub::start_targets_with_period(
-            vec![WatchTarget::recursive(a), WatchTarget::recursive(child.clone())],
+            vec![WatchTarget::recursive(a), WatchTarget::recursive(loopy.clone())],
             Duration::from_secs(3600),
         );
         assert!(hub.wait_until_watching(Duration::from_secs(5)), "the live root still arms");
@@ -2862,7 +3047,11 @@ mod tests {
             "a declared root nothing watches is not health, however it came to be unwatchable"
         );
 
-        readable(&parent);
+        // The cycle is replaced by an ordinary directory at the same path: the obstacle
+        // clears without the declaration moving, which is the only way the retry — and not
+        // a re-arm — can be what covers it.
+        std::fs::remove_file(&loopy).unwrap();
+        std::fs::create_dir(&loopy).unwrap();
         assert!(hub.tick_now(Duration::from_secs(5)));
         let cursor = hub.subscribe();
         let _ = hub.drain(cursor);
@@ -3810,7 +3999,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_blind_hub_is_unhealthy_for_a_cursor_that_owes_nothing() {
-        let (_dir, _a, b, hub) = partly_blind_hub();
+        let (_dir, _a, _b, hub, _refusals) = partly_blind_hub();
         let cursor = hub.subscribe();
         assert!(hub.drain(cursor).rescan_required, "the blindness was announced");
         assert!(!hub.drain(cursor).rescan_required, "and acknowledged");
@@ -3820,7 +4009,6 @@ mod tests {
             Health::Degraded(DegradeReason::RewatchFailed),
             "a root nothing watches is the hub's condition, not this cursor's debt"
         );
-        readable(&b);
     }
 
     /// A genuine loss of the stream is everyone's, and is told to each cursor exactly
@@ -4294,6 +4482,98 @@ mod tests {
         let batch = hub.drain(cursor);
         assert!(batch.entries.is_empty(), "the frozen stream still drains cleanly");
         hub.shutdown();
+    }
+
+    /// The thread belongs to the handles collectively: it stops when the LAST one goes, not
+    /// the first. A sink is handed a clone and the starter's handle is dropped — the stream
+    /// has to survive that, or a daemon that hands its hub to a sink and keeps no copy of
+    /// its own would silently lose every event.
+    #[test]
+    fn a_hub_lives_while_any_handle_still_holds_it() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let hub = WorkspaceChangeHub::start(vec![root.clone()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let survivor = hub.clone();
+        let cursor = survivor.subscribe();
+        drop(hub);
+
+        std::fs::write(root.join("Module.bsl"), "x").unwrap();
+        assert!(
+            eventually(Duration::from_secs(10), || {
+                entry_names(&survivor.drain(cursor)).iter().any(|n| n.ends_with("Module.bsl"))
+            }),
+            "the surviving clone still holds the hub, so its stream is still live"
+        );
+    }
+
+    /// Dropping a hub whose thread will never read the stop message has to RETURN. The
+    /// message is read in the message loop, and a thread parked short of arming has not
+    /// reached it, so a stop that waited for the thread unconditionally would wedge whoever
+    /// dropped the hub — in a test binary not a failure but a hang, the one outcome no run
+    /// can report. The hold is deliberately kept for the whole drop, so nothing releases
+    /// the thread and only the stop's own bound can end the wait; and the drop happens on
+    /// another thread so that a regression here is reported instead of hanging the binary.
+    #[test]
+    fn dropping_a_hub_whose_thread_cannot_answer_returns() {
+        let dir = tempdir().unwrap();
+        let (hub, hold) = WorkspaceChangeHub::start_targets_held(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+        assert_eq!(
+            hub.watch_readiness(Duration::from_millis(50)),
+            WatchReadiness::NotYet,
+            "the hub is alive and short of arming, which is the state this is about"
+        );
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(hub);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(STOP_BUDGET * 3).is_ok(),
+            "the drop of a hub nobody can join must end on its own budget"
+        );
+        // Only now: the thread is free to run out, and the temporary directory to go.
+        drop(hold);
+    }
+
+    /// The guard on the hold is what keeps the case above from costing the whole budget:
+    /// released as it goes, the parked thread arms, reaches its loop and reads the stop,
+    /// so the drop joins a finished thread instead of waiting one out. Mutation: take the
+    /// release out of the guard's `Drop` and this spends the budget it is asserting against.
+    #[test]
+    fn a_released_hold_lets_a_parked_hub_stop_at_once() {
+        let dir = tempdir().unwrap();
+        let (hub, hold) = WorkspaceChangeHub::start_targets_held(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+        assert_eq!(hub.watch_readiness(Duration::from_millis(50)), WatchReadiness::NotYet);
+
+        let started = Instant::now();
+        drop(hold);
+        drop(hub);
+        let waited = started.elapsed();
+        assert!(waited < STOP_BUDGET, "a released hub stops without its budget: {waited:?}");
+    }
+
+    /// An explicit `shutdown` and the last handle's `Drop` reach the same stop, so the two
+    /// in sequence must be as harmless as either alone. What this pins is that the second
+    /// stop finds the thread already taken and treats that as nothing left to do — an
+    /// implementation that assumed a handle would still be there would panic here.
+    #[test]
+    fn an_explicit_shutdown_before_the_last_drop_is_harmless() {
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+
+        hub.shutdown();
+        hub.shutdown();
+        let started = Instant::now();
+        drop(hub);
+        let waited = started.elapsed();
+        assert!(waited < STOP_BUDGET, "a stop with nothing left to stop is immediate: {waited:?}");
     }
 
     /// Nested targets collapse under a recursive ancestor so a subtree is never
