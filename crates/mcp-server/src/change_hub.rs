@@ -1219,6 +1219,15 @@ impl WorkspaceChangeHub {
         }
     }
 
+    /// The targets this hub currently stands declared on — what it was ASKED to
+    /// watch, not what the watcher managed to take. The distinction is the point:
+    /// an unwatchable root leaves the declaration alone, so a reader of this set
+    /// sees its caller's intent even on a machine whose inotify limit is spent.
+    #[cfg(test)]
+    pub(crate) fn declared_targets(&self) -> Vec<WatchTarget> {
+        self.inner.declared_published.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
     /// Terminate the hub thread and join it. Cursors keep draining whatever was
     /// accumulated; no further events arrive. Idempotent, and bounded: if the
     /// control channel stays full past the enqueue deadline the hub is left

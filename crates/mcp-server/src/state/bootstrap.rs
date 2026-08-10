@@ -94,18 +94,13 @@ impl SharedState {
         // extensions is event-delivered, not left to the reconciler. Search subscribes as a
         // sink and preserves its prior behavior (mark only source-root `.bsl` paths dirty).
         //
-        // This set has no test of its own, and how long a narrower one would survive
-        // depends on the path the graph takes. The fused publish and the full build re-arm
-        // the hub onto their snapshot's roots; the warm-cache publish does not, and the
-        // resident builds lazily on first use. So on a cold boot a narrower set here is
-        // repaired before much can observe it, while on a second boot over a matching
-        // cache it survives — until the first FULL graph rebuild, which the search sink
-        // starts by itself on `.xml` or analyzer-config drift, no graph tool called.
-        // A witness would therefore have to look right after the warm publish and touch
-        // nothing that nudges a rebuild; one that edits an `.xml` first reads an
-        // already-repaired set and proves nothing. Until such a test exists, the
-        // derivation is the whole of the protection — which is why this is a call and not
-        // a list assembled here by hand.
+        // Witnessed by `a_second_boot_over_a_matching_cache_declares_every_source_root_to_the_hub`,
+        // and only a second boot can witness it: every graph path that BUILDS re-declares the
+        // hub onto its own snapshot's roots, so a narrower set here would be repaired on a cold
+        // boot before a reader could reach it. The publish that reuses a matching cache is the
+        // one path that declares nothing. The window belongs to that test rather than to a
+        // session: a serving daemon calls `warm_start` right after this constructor, and the
+        // resident's publish re-declares the roots too.
         let scan_roots = project.source_roots();
         let change_hub = WorkspaceChangeHub::start_targets(crate::change_hub::watch_targets_for(
             &project.root,
@@ -2340,6 +2335,104 @@ mod tests {
             init.engine.configuration_root(),
             Some(workspace.join("src").join("cf").as_path()),
             "the configuration root stays the base of stored relative paths",
+        );
+    }
+
+    /// Drive a graph to `Ready`, or say which state it got stuck in.
+    fn wait_until_graph_ready(graph: &GraphState) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match graph.status() {
+                crate::graph::GraphStatus::Ready { .. } => return,
+                crate::graph::GraphStatus::Failed(msg) => panic!("graph load failed: {msg}"),
+                other => assert!(
+                    std::time::Instant::now() < deadline,
+                    "the graph never became ready; it stayed {other:?}",
+                ),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn canonical(path: &std::path::Path) -> PathBuf {
+        path.canonicalize()
+            .unwrap_or_else(|e| panic!("{path:?} must exist to be canonicalized: {e}"))
+    }
+
+    /// The boot declares to the change hub EVERY root the project has — the configuration
+    /// and each extension — plus the workspace directory itself, non-recursively, so a
+    /// config-file edit is delivered even in a nested layout.
+    ///
+    /// The set is observable on a SECOND boot and only there. Every graph path that builds
+    /// re-declares the hub onto its own snapshot's roots, so on a first boot a narrower set
+    /// here is repaired while the test is still waiting for the graph; the publish that
+    /// reuses a matching cache is the one path that declares nothing, which is why this test
+    /// pays for two boots. The same holds for the diagnostics resident, whose publish also
+    /// re-declares — hence the assertion that it never started.
+    ///
+    /// What the hub was ASKED to watch is the subject, not what the watcher took: an
+    /// exhausted inotify limit leaves the declaration intact, so this gate cannot turn red
+    /// on a machine's resource state.
+    #[test]
+    fn a_second_boot_over_a_matching_cache_declares_every_source_root_to_the_hub() {
+        use crate::diagnostics_state::DiagnosticsStatus;
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let (_dir, workspace) = workspace_with_two_extensions();
+        let graph_db = crate::cache::graph_db_path(&workspace);
+
+        let first = SharedState::workspace(workspace.clone()).expect("valid workspace project");
+        wait_until_graph_ready(first.graph());
+        first.shutdown();
+        let built_at_before = crate::graph::test_support::meta_string(&graph_db, "built_at");
+
+        let second = SharedState::workspace(workspace.clone()).expect("valid workspace project");
+        wait_until_graph_ready(second.graph());
+
+        let built_at_now = crate::graph::test_support::meta_string(&graph_db, "built_at");
+        let snapshot = second.graph().snapshot().expect("a ready graph snapshots");
+        let freshness = second.graph().freshness(&snapshot);
+        let resident = second.diagnostics().status();
+        let declared =
+            second.change_hub().expect("a workspace boot owns a change hub").declared_targets();
+        second.shutdown();
+
+        // Warmth, in three parts because the two non-warm branches announce themselves
+        // differently. A finished full build writes its meta before publishing `Ready`, so
+        // the timestamp catches it. The stale-cache publish writes no meta at all — it goes
+        // `Ready` and pre-claims the reload in one lock hold, and its catch-up build repairs
+        // the declaration afterwards — so only the published state catches that one.
+        assert_eq!(
+            built_at_now, built_at_before,
+            "the second boot must republish the cached build, not rebuild it",
+        );
+        assert!(!freshness.stale, "a republished cache is not stale: {:?}", freshness.reload);
+        assert_eq!(freshness.reload, "none", "no catch-up reload may be in flight");
+        // The resident's publish re-declares the hub too, and moves neither the graph's meta
+        // nor its published state — the assertions above cannot see it. `SharedState::workspace`
+        // leaves the resident idle on purpose (serve paths call `warm_start` themselves); this
+        // says so out loud, so moving that call inside the constructor fails here instead of
+        // silently disarming the check below.
+        assert!(
+            matches!(resident, DiagnosticsStatus::Idle),
+            "the resident must not have started; it was {resident:?}",
+        );
+
+        let mut declared: Vec<(PathBuf, bool)> =
+            declared.iter().map(|t| (canonical(&t.path), t.recursive)).collect();
+        declared.sort();
+        // Spelled out rather than recomputed from `project.source_roots()`: the derivation is
+        // what is on trial, and checking a call against itself would pass whatever it returned.
+        let mut expected = vec![
+            (canonical(&workspace.join("src").join("cf")), true),
+            (canonical(&workspace.join("ext-a")), true),
+            (canonical(&workspace.join("ext-b")), true),
+            (canonical(&workspace), false),
+        ];
+        expected.sort();
+        assert_eq!(
+            declared, expected,
+            "the boot declares the configuration, every extension, and the workspace root",
         );
     }
 

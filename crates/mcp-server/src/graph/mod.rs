@@ -17,7 +17,7 @@ pub(crate) mod scan;
 mod snapshot;
 mod state;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod types;
 pub(crate) mod universe;
 

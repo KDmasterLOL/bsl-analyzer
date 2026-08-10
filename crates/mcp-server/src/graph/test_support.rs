@@ -110,7 +110,7 @@ pub(super) fn seed_cache(root: &Path, fingerprint: crate::graph_db::GraphFp) {
     .expect("seed cache builds");
 }
 
-pub(super) fn meta_string(path: &Path, key: &str) -> String {
+pub(crate) fn meta_string(path: &Path, key: &str) -> String {
     rusqlite::Connection::open(path)
         .unwrap()
         .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| row.get(0))

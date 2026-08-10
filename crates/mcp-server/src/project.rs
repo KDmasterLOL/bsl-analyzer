@@ -68,8 +68,9 @@ pub fn at(root: &Path) -> Result<Project, ProjectError> {
 /// function value, a comment standing between the name and its parenthesis, a parenthetical
 /// aside in prose: each falls on a different side of whatever line the scan draws, and
 /// moving the line to admit one form expels another. What guards each root set instead is
-/// behavioural, and how well differs per set — this table has its own boot test, the graph's
-/// scan universe has its own, and the hub's targets have none (see `state::bootstrap`).
+/// behavioural, and each set has its own: this table has a boot test, so has the graph's scan
+/// universe, and the hub's declared targets are read back on a second boot over a matching
+/// graph cache — the one boot path that leaves them alone (see `state::bootstrap`).
 pub fn workspace_roots(
     project: &Project,
 ) -> (bsl_search::WorkspaceRoots, Vec<bsl_search::RejectedRoot>) {
