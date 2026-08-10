@@ -1112,11 +1112,8 @@ enum HubMsg {
     /// cannot hide behind a working commanded one.
     #[cfg(test)]
     Tick,
-    /// Exit the hub thread. Cursors keep draining the frozen stream.
-    #[allow(
-        dead_code,
-        reason = "constructed only by the test-facing shutdown seam; production daemons exit the process"
-    )]
+    /// Exit the hub thread. Cursors keep draining the frozen stream. Sent by
+    /// [`HubThread::stop`], which the last handle's `Drop` reaches like any other caller.
     Shutdown,
 }
 
