@@ -99,8 +99,11 @@ impl SharedState {
         // the hub onto their snapshot's roots; the warm-cache publish does not, and the
         // resident builds lazily on first use. So on a cold boot a narrower set here is
         // repaired before much can observe it, while on a second boot over a matching
-        // cache, in a session that touches only search, it stands for the whole session.
-        // That second boot is where a witness would have to look. Until one exists, the
+        // cache it survives — until the first FULL graph rebuild, which the search sink
+        // starts by itself on `.xml` or analyzer-config drift, no graph tool called.
+        // A witness would therefore have to look right after the warm publish and touch
+        // nothing that nudges a rebuild; one that edits an `.xml` first reads an
+        // already-repaired set and proves nothing. Until such a test exists, the
         // derivation is the whole of the protection — which is why this is a call and not
         // a list assembled here by hand.
         let scan_roots = project.source_roots();
