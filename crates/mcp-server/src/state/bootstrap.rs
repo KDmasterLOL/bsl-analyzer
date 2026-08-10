@@ -2400,8 +2400,11 @@ mod tests {
         // Warmth, in three parts because the two non-warm branches announce themselves
         // differently. A finished full build writes its meta before publishing `Ready`, so
         // the timestamp catches it. The stale-cache publish writes no meta at all — it goes
-        // `Ready` and pre-claims the reload in one lock hold, and its catch-up build repairs
-        // the declaration afterwards — so only the published state catches that one.
+        // `Ready` and pre-claims the reload in one lock hold — so at the instant it is
+        // observed only the published state tells it apart from a warm republish. Where its
+        // catch-up lands then decides whether the declaration is repaired at all: a full
+        // rebuild re-declares the roots, a body-only incremental one never does. Neither
+        // outcome is safe to observe over, which is why this refuses both.
         assert_eq!(
             built_at_now, built_at_before,
             "the second boot must republish the cached build, not rebuild it",
