@@ -96,40 +96,42 @@ mod tests {
         }
     }
 
-    /// Occurrences of `needle` that are whole identifiers — neither preceded nor
-    /// followed by a character that could continue one. `foo_extension_paths` is a
-    /// different name and must not be counted as this one.
-    fn whole_word_occurrences(text: &str, needle: &str) -> usize {
-        // Rust continues an identifier by Unicode XID_Continue, which reaches beyond
-        // alphanumerics — a combining mark continues one too. Rather than depend on a
-        // Unicode table for a test helper, every non-ASCII char counts as continuing:
-        // a real call site is always ASCII-delimited (`.`, `::`, `(`), so this can
-        // only ever drop an exotic identifier that merely starts with the name, never
-        // a call the gate exists to see.
-        let continues = |c: char| c.is_alphanumeric() || c == '_' || !c.is_ascii();
-        text.match_indices(needle)
+    /// CALL sites of `name`: the name with a `(` next, whatever stands between them
+    /// being whitespace. Both call syntaxes reach the same accessor and so must
+    /// count the same — `x.name()` and `Type::name(x)` alike.
+    ///
+    /// Only the left side needs a boundary, and an ASCII one suffices: a longer
+    /// identifier ending in this name continues leftwards through `_` or a letter.
+    /// The right side needs none at all — the `(` is the boundary — which is what
+    /// keeps this out of Rust's identifier grammar entirely. Approximating that
+    /// grammar by hand is what three review rounds kept finding new holes in: first
+    /// a needle that carried its own empty parentheses, then a boundary blind to
+    /// combining marks, then one that swallowed typographic punctuation.
+    fn call_occurrences(text: &str, name: &str) -> usize {
+        let continues_leftwards = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        text.match_indices(name)
             .filter(|(at, _)| {
                 let before = text[..*at].chars().next_back();
-                let after = text[at + needle.len()..].chars().next();
-                !before.is_some_and(continues) && !after.is_some_and(continues)
+                let after = text[at + name.len()..].trim_start();
+                !before.is_some_and(continues_leftwards) && after.starts_with('(')
             })
             .count()
     }
 
-    /// Neutral names on purpose: the gate below counts the real ones, so writing
-    /// them here would make this test a finding of that one.
+    /// Neutral names on purpose: the gate below counts the real ones.
     #[test]
-    fn a_whole_word_match_is_not_a_substring_match() {
-        assert_eq!(whole_word_occurrences("bar bar", "bar"), 2, "plain occurrences count");
-        assert_eq!(whole_word_occurrences("foo_bar", "bar"), 0, "a longer name is another name");
-        assert_eq!(whole_word_occurrences("bar_baz", "bar"), 0, "so is a longer name after it");
-        assert_eq!(whole_word_occurrences("Type::bar(x)", "bar"), 1, "UFCS is the same name");
-        assert_eq!(whole_word_occurrences("x.bar()", "bar"), 1, "so is a method call");
+    fn a_call_site_is_counted_and_a_mention_is_not() {
+        assert_eq!(call_occurrences("x.bar()", "bar"), 1, "a method call");
+        assert_eq!(call_occurrences("Type::bar(x)", "bar"), 1, "UFCS reaches the same accessor");
+        assert_eq!(call_occurrences("bar (x)", "bar"), 1, "whitespace before the parenthesis");
         assert_eq!(
-            whole_word_occurrences("bar\u{0301}", "bar"),
-            0,
-            "a combining mark continues a Rust identifier, so this is another name"
+            call_occurrences("bar\u{0085}()", "bar"),
+            1,
+            "NEXT LINE is whitespace to Rust, so this is still a call"
         );
+        assert_eq!(call_occurrences("«bar» в прозе", "bar"), 0, "a mention is not a call");
+        assert_eq!(call_occurrences("foo_bar()", "bar"), 0, "a longer name is another name");
+        assert_eq!(call_occurrences("bar_baz()", "bar"), 0, "so is a longer name after it");
     }
 
     /// Every root set in this crate comes from one derivation. The two accessors
@@ -145,14 +147,9 @@ mod tests {
     /// rebuild the set by hand also carried a comment claiming it armed "the SAME
     /// targets production arms" — a claim nothing held true.
     ///
-    /// The names are matched as whole identifiers, NOT as a name plus its call
-    /// parentheses: a needle carrying the parentheses is a rule about one call
-    /// syntax, and the UFCS spelling `Project::…(p)` — the same accessor, the same
-    /// second root table — walks straight past it. The needles are assembled at
-    /// runtime so this file does not match itself; for the same reason neither name
-    /// appears bare in this module, prose included. The one near-occurrence — the
-    /// longer name in the helper's doc — is excluded by the very boundary rule the
-    /// helper implements, so removing that rule fails this gate too.
+    /// What is counted is CALLS, not mentions: naming an accessor in prose builds
+    /// no root table, and a rule that forbade the name outright would be a rule
+    /// about writing rather than about code.
     #[test]
     fn the_root_set_is_derived_in_exactly_one_place() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -160,21 +157,21 @@ mod tests {
         rust_sources(&src, &mut files);
         assert!(files.len() > 20, "the source scan found almost nothing: {}", files.len());
 
-        let needles = [["extension_", "paths"].concat(), ["extension_", "topology"].concat()];
+        let names = ["extension_paths", "extension_topology"];
         let mut sites: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for file in &files {
             let text = std::fs::read_to_string(file).expect("read crate source");
             let rel = file.strip_prefix(&src).expect("source under src").display().to_string();
-            for needle in &needles {
-                for _ in 0..whole_word_occurrences(&text, needle) {
-                    sites.entry(needle.as_str()).or_default().push(rel.replace('\\', "/"));
+            for name in names {
+                for _ in 0..call_occurrences(&text, name) {
+                    sites.entry(name).or_default().push(rel.replace('\\', "/"));
                 }
             }
         }
 
         let expected: BTreeMap<&str, Vec<String>> = [
-            (needles[0].as_str(), vec!["project.rs".to_string()]),
-            (needles[1].as_str(), vec!["broker/name.rs".to_string()]),
+            (names[0], vec!["project.rs".to_string()]),
+            (names[1], vec!["broker/name.rs".to_string()]),
         ]
         .into_iter()
         .collect();
