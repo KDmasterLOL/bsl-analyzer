@@ -94,11 +94,15 @@ impl SharedState {
         // extensions is event-delivered, not left to the reconciler. Search subscribes as a
         // sink and preserves its prior behavior (mark only source-root `.bsl` paths dirty).
         //
-        // This particular set has no test of its own, and cannot have one: the graph and
-        // the resident re-arm the hub onto their snapshot's roots as soon as they publish,
-        // so a narrower set here is repaired before anything can observe it. The derivation
-        // is therefore the whole of the protection — which is why it is a call and not a
-        // list assembled by hand.
+        // This set has no test of its own, and how long a narrower one would survive
+        // depends on the path the graph takes. The fused publish and the full build re-arm
+        // the hub onto their snapshot's roots; the warm-cache publish does not, and the
+        // resident builds lazily on first use. So on a cold boot a narrower set here is
+        // repaired before much can observe it, while on a second boot over a matching
+        // cache, in a session that touches only search, it stands for the whole session.
+        // That second boot is where a witness would have to look. Until one exists, the
+        // derivation is the whole of the protection — which is why this is a call and not
+        // a list assembled here by hand.
         let scan_roots = project.source_roots();
         let change_hub = WorkspaceChangeHub::start_targets(crate::change_hub::watch_targets_for(
             &project.root,
