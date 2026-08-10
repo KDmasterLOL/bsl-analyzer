@@ -61,17 +61,15 @@ pub fn at(root: &Path) -> Result<Project, ProjectError> {
 /// rebuilds on every config drift, and a warning repeated per rebuild buries the one that is
 /// actually new. Callers that run once say it with [`warn_about_rejected_roots`].
 ///
-/// **No structural test forbids a second hand-built root set, and that is a decision.**
-/// Such a test can only scan source text, and telling a call from a mention — or from a
-/// longer identifier ending in the same name — is Rust's lexical grammar, which a text
-/// scan approximates and never matches. The accessor used as a function value, a comment
-/// standing between the name and its parenthesis, a parenthetical aside in prose: each
-/// falls on a different side of whatever line the scan draws, and moving the line to admit
-/// one form expels another. What guards this instead is behavioural and sits where the
-/// root set is observable at all — `graph::input`'s tests hold the scan universe against
-/// the project's own roots. The boot's set has no such witness: the graph and the resident
-/// re-arm the change hub onto the snapshot's roots, so a narrower boot set is repaired
-/// before anything can see it.
+/// **No structural test forbids a second hand-built root set anywhere in this crate, and
+/// that is a decision.** Such a test can only scan source text, and telling a call from a
+/// mention — or from a longer identifier ending in the same name — is Rust's lexical
+/// grammar, which a text scan approximates and never matches. The accessor used as a
+/// function value, a comment standing between the name and its parenthesis, a parenthetical
+/// aside in prose: each falls on a different side of whatever line the scan draws, and
+/// moving the line to admit one form expels another. What guards each root set instead is
+/// behavioural, and how well differs per set — this table has its own boot test, the graph's
+/// scan universe has its own, and the hub's targets have none (see `state::bootstrap`).
 pub fn workspace_roots(
     project: &Project,
 ) -> (bsl_search::WorkspaceRoots, Vec<bsl_search::RejectedRoot>) {
