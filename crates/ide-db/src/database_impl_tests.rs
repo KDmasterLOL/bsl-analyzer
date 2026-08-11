@@ -3695,6 +3695,38 @@ fn application_module_exports_are_typed_and_preserve_unread_gaps() {
 }
 
 #[test]
+fn common_module_body_lookup_marks_declared_but_unmapped_body() {
+    use test_fixture::CfeFixtureBuilder;
+
+    let fixture = CfeFixtureBuilder::new("").build();
+    let caller_source = "Процедура Тест() Экспорт\nКонецПроцедуры";
+    let caller_path = write_cfe_common_module(fixture.root(), "Caller", false, caller_source);
+    let missing_path = write_cfe_common_module(
+        fixture.root(),
+        "DeclaredWithoutBody",
+        false,
+        "Процедура Метод() Экспорт\nКонецПроцедуры",
+    );
+    std::fs::remove_file(missing_path).expect("remove enrolled body from fixture");
+
+    let caller = FileId(0);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_text(caller, caller_source);
+    db.set_all_config_paths(fixture.config_paths());
+
+    let bodies = db.resolve_common_module_files_for_file(caller, "DeclaredWithoutBody");
+    assert!(bodies.is_empty());
+    assert!(
+        bodies.has_missing_expected_body(),
+        "a metadata declaration without a mapped body must preserve the completeness gap"
+    );
+}
+
+#[test]
 fn module_cfgs_reuses_the_module_level_cfg_allocation() {
     let file = FileId(0);
     let mut db = RootDatabaseImpl::new();
