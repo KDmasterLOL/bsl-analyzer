@@ -43,6 +43,7 @@ pub use domain::{
 pub use embedder::{Embedder, EmbedderConfig};
 pub use engine::{
     FtsIngest, IndexProgress, OverlayRetrySignals, SearchConfig, SearchEngine, SearchHit,
+    WorkspaceRootsTransitionOutcome, WorkspaceRootsTransitionPlan, WorkspaceRootsTransitionSeed,
 };
 pub use error::SearchError;
 pub use error::SCHEMA_VERSION_CURRENT;

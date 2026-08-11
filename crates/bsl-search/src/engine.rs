@@ -6,11 +6,11 @@ use crate::local_baseline::LocalStoreBaselineAdapter;
 use crate::ports::{ModuleSnapshot, ModuleSnapshotSource, SnapshotCatalog, SnapshotContentStore};
 use crate::publish::EmbeddingExecutionPolicy;
 use crate::resolver::{InMemoryResolvedViewResolver, ResolvedView};
-use crate::store::Store;
+use crate::store::{Store, WorkspaceStoreTransition, WorkspaceTransitionFile};
 use crate::workspace_overlay::{
     lexical_hits, normalized_file_hash_for_indexed_documents, semantic_hits, BaselineHashMode,
     PublicationBaseline, PublishOutcome, RefreshMode, RefreshPlan, WorkspaceOverlayCache,
-    WorkspaceOverlayIndex, WorkspaceOverlayStats,
+    WorkspaceOverlayIndex, WorkspaceOverlayStats, WorkspaceTransitionOverlayFile,
 };
 use crate::workspace_roots::{FileKey, WorkspaceRoots, CONFIGURATION_ROOT_ID};
 use crate::{
@@ -150,6 +150,131 @@ thread_local! {
     static FORCE_VECTOR_REMOVE_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Cheap state captured under the live engine lock before a root-transition plan scans disk.
+pub struct WorkspaceRootsTransitionSeed {
+    epoch: u64,
+    overlay_epoch: u64,
+    old_roots: WorkspaceRoots,
+    next_roots: WorkspaceRoots,
+    serves_external_baseline: bool,
+    manifest: HashMap<FileKey, String>,
+    graph_context_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
+}
+
+struct PlannedWorkspaceFile {
+    key: FileKey,
+    abs_path: PathBuf,
+    canonical: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    content_hash: Vec<u8>,
+    chunks: Vec<crate::Chunk>,
+    graph_contexts: Vec<Option<String>>,
+    documents: Vec<crate::IndexedDocument>,
+    embedding_inputs: Vec<String>,
+    manifest_fingerprint: String,
+}
+
+/// Off-lock result of scanning and preparing the complete next root universe.
+pub struct WorkspaceRootsTransitionPlan {
+    epoch: u64,
+    overlay_epoch: u64,
+    old_roots: WorkspaceRoots,
+    next_roots: WorkspaceRoots,
+    serves_external_baseline: bool,
+    manifest: HashMap<FileKey, String>,
+    files: Vec<PlannedWorkspaceFile>,
+}
+
+/// Observable result of applying a prepared root transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceRootsTransitionOutcome {
+    Unchanged,
+    Applied {
+        removed: usize,
+        rebuilt: usize,
+        added: usize,
+        pending_collection_embeddings: bool,
+        pending_overlay_embeddings: bool,
+    },
+    /// The live roots or filesystem moved past the plan. Nothing was changed.
+    Superseded,
+}
+
+impl WorkspaceRootsTransitionSeed {
+    /// Scan and prepare all lexical documents without borrowing the live engine.
+    pub fn plan(self) -> Result<WorkspaceRootsTransitionPlan, SearchError> {
+        let declared: Vec<PathBuf> =
+            self.next_roots.entries().map(|(_, path)| path.to_path_buf()).collect();
+        let set = project_model::SourceSet::scan(&declared);
+        if !set.clean() {
+            return Err(SearchError::Index(format!(
+                "workspace root transition scan is incomplete: unreadable={}, canonical_fallbacks={}",
+                set.unreadable, set.canonical_fallbacks
+            )));
+        }
+
+        let mut seen = HashSet::new();
+        let mut files = Vec::new();
+        for file in &set.files {
+            if file.role != project_model::FileRole::Source {
+                continue;
+            }
+            let Some(key) = self.next_roots.root_of(&file.walked, &file.canonical) else {
+                continue;
+            };
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let content = std::fs::read_to_string(&file.walked).map_err(|error| {
+                SearchError::Index(format!(
+                    "failed to read {} for workspace root transition: {error}",
+                    file.walked.display()
+                ))
+            })?;
+            let chunks = Chunker::chunk(&content);
+            let documents: Vec<crate::IndexedDocument> = chunks
+                .iter()
+                .map(|chunk| {
+                    crate::document::indexed_document_for_chunk(
+                        &key,
+                        chunk,
+                        self.graph_context_provider.as_deref(),
+                    )
+                })
+                .collect();
+            let graph_contexts = documents.iter().map(|doc| doc.graph_context.clone()).collect();
+            let embedding_inputs =
+                documents.iter().map(crate::document::semantic_text_for_indexed_document).collect();
+            files.push(PlannedWorkspaceFile {
+                key: key.clone(),
+                abs_path: file.walked.clone(),
+                canonical: file.canonical.clone(),
+                len: file.metadata.len(),
+                modified: file.metadata.modified().ok(),
+                content_hash: blake3::hash(content.as_bytes()).as_bytes().to_vec(),
+                chunks,
+                graph_contexts,
+                documents,
+                embedding_inputs,
+                manifest_fingerprint: crate::workspace_overlay::fingerprint_content(
+                    &content, &key.path,
+                ),
+            });
+        }
+
+        Ok(WorkspaceRootsTransitionPlan {
+            epoch: self.epoch,
+            overlay_epoch: self.overlay_epoch,
+            old_roots: self.old_roots,
+            next_roots: self.next_roots,
+            serves_external_baseline: self.serves_external_baseline,
+            manifest: self.manifest,
+            files,
+        })
+    }
+}
+
 pub struct SearchEngine {
     store: Store,
     embedder: Option<Embedder>,
@@ -158,6 +283,7 @@ pub struct SearchEngine {
     batch_size: usize,
     concurrency: usize,
     workspace_roots: Option<WorkspaceRoots>,
+    workspace_roots_epoch: u64,
     workspace_overlay_cache: Mutex<WorkspaceOverlayCache>,
     workspace_baseline_hash_mode: BaselineHashMode,
     /// Whether this engine serves an EXTERNAL (remote) baseline through the persisted
@@ -236,6 +362,7 @@ impl SearchEngine {
             batch_size: execution.batch_size(),
             concurrency: execution.concurrency(),
             workspace_roots: None,
+            workspace_roots_epoch: 0,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
             serves_external_baseline: false,
@@ -328,6 +455,7 @@ impl SearchEngine {
             batch_size: EmbeddingExecutionPolicy::default().batch_size(),
             concurrency: EmbeddingExecutionPolicy::default().concurrency(),
             workspace_roots: None,
+            workspace_roots_epoch: 0,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
             serves_external_baseline: false,
@@ -356,6 +484,7 @@ impl SearchEngine {
             batch_size: execution.batch_size(),
             concurrency: execution.concurrency(),
             workspace_roots: None,
+            workspace_roots_epoch: 0,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
             serves_external_baseline: false,
@@ -1296,11 +1425,257 @@ impl SearchEngine {
         self.set_workspace_roots(roots);
     }
 
-    pub fn set_workspace_roots(&mut self, roots: WorkspaceRoots) {
-        self.workspace_roots = Some(roots);
-        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
-            cache.clear();
+    /// Install the complete root table during boot. Live callers must use the transition API;
+    /// silently assigning another table would leave every root-keyed carrier behind.
+    pub fn initialize_workspace_roots(&mut self, roots: WorkspaceRoots) -> Result<(), SearchError> {
+        if self.workspace_roots.is_some() {
+            return Err(SearchError::Index(
+                "workspace roots are already initialized; use a live transition".to_owned(),
+            ));
         }
+        self.workspace_roots = Some(roots);
+        self.workspace_roots_epoch = 1;
+        Ok(())
+    }
+
+    /// Compatibility entry point for boot and test callers being migrated to the explicit
+    /// two-phase API. A live replacement is best-effort: any incomplete scan, superseded plan or
+    /// apply failure leaves the old observable state serving and is logged rather than panicking
+    /// the daemon. Production live orchestration uses [`Self::workspace_roots_transition_seed`]
+    /// directly so it can retain and retry the obligation and act on embedding signals.
+    pub fn set_workspace_roots(&mut self, roots: WorkspaceRoots) {
+        if self.workspace_roots.is_none() {
+            if let Err(error) = self.initialize_workspace_roots(roots) {
+                warn!("failed to initialize compatibility workspace roots: {error}");
+            }
+            return;
+        }
+        let plan = match self
+            .workspace_roots_transition_seed(roots)
+            .and_then(WorkspaceRootsTransitionSeed::plan)
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                warn!("compatibility workspace root transition was not planned: {error}");
+                return;
+            }
+        };
+        match self.apply_workspace_roots_transition(plan) {
+            Ok(WorkspaceRootsTransitionOutcome::Applied {
+                pending_collection_embeddings,
+                pending_overlay_embeddings,
+                ..
+            }) => {
+                if pending_collection_embeddings || pending_overlay_embeddings {
+                    warn!(
+                        pending_collection_embeddings,
+                        pending_overlay_embeddings,
+                        "compatibility workspace root transition requires an embedding pass; \
+                         live orchestration must consume the explicit transition outcome"
+                    );
+                }
+            }
+            Ok(WorkspaceRootsTransitionOutcome::Unchanged) => {}
+            Ok(WorkspaceRootsTransitionOutcome::Superseded) => {
+                warn!("compatibility workspace root transition was superseded; old roots retained");
+            }
+            Err(error) => {
+                warn!(
+                    "compatibility workspace root transition failed; old roots retained: {error}"
+                );
+            }
+        }
+    }
+
+    /// Capture the cheap inputs of a two-phase live root transition.
+    pub fn workspace_roots_transition_seed(
+        &self,
+        next_roots: WorkspaceRoots,
+    ) -> Result<WorkspaceRootsTransitionSeed, SearchError> {
+        let old_roots = self.workspace_roots.clone().ok_or_else(|| {
+            SearchError::Index("workspace roots must be initialized before transition".to_owned())
+        })?;
+        let manifest = if self.serves_external_baseline {
+            self.dispatched_manifest_fingerprints()?.unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+        let overlay_epoch = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|error| {
+                SearchError::Index(format!("workspace overlay cache lock error: {error}"))
+            })?
+            .transition_epoch();
+        Ok(WorkspaceRootsTransitionSeed {
+            epoch: self.workspace_roots_epoch,
+            overlay_epoch,
+            old_roots,
+            next_roots,
+            serves_external_baseline: self.serves_external_baseline,
+            manifest,
+            graph_context_provider: self.graph_context_provider.clone(),
+        })
+    }
+
+    /// Validate and atomically publish a prepared root transition. The caller holds the outer
+    /// engine mutex, so watcher attribution and searches observe either complete old or complete
+    /// new state.
+    pub fn apply_workspace_roots_transition(
+        &mut self,
+        plan: WorkspaceRootsTransitionPlan,
+    ) -> Result<WorkspaceRootsTransitionOutcome, SearchError> {
+        if self.workspace_roots_epoch != plan.epoch
+            || self.workspace_roots.as_ref() != Some(&plan.old_roots)
+            || self.serves_external_baseline != plan.serves_external_baseline
+        {
+            return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+        }
+        if plan.old_roots == plan.next_roots {
+            return Ok(WorkspaceRootsTransitionOutcome::Unchanged);
+        }
+        if plan.serves_external_baseline {
+            let live_manifest = self.dispatched_manifest_fingerprints()?.unwrap_or_default();
+            if live_manifest != plan.manifest {
+                return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+            }
+        }
+        if !Self::transition_plan_still_matches_disk(&plan) {
+            return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+        }
+
+        let carriers = self.carrier_keys()?;
+        let mut cache = self.workspace_overlay_cache.lock().map_err(|error| {
+            SearchError::Index(format!("workspace overlay cache lock error: {error}"))
+        })?;
+        if cache.transition_epoch() != plan.overlay_epoch {
+            return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+        }
+
+        let mut known = carriers.all_keys();
+        known.extend(cache.root_keyed_keys());
+        let changed_ids = plan.old_roots.changed_root_ids(&plan.next_roots);
+        let new_keys: HashSet<FileKey> = plan.files.iter().map(|file| file.key.clone()).collect();
+
+        let mut cleanup: HashSet<FileKey> = known
+            .iter()
+            .filter(|key| changed_ids.contains(&key.root_id) || !new_keys.contains(*key))
+            .cloned()
+            .collect();
+        let mut affected_files = Vec::new();
+        let mut rebuilt = 0;
+        let mut added = 0;
+        for file in &plan.files {
+            let old_owner = plan.old_roots.root_of(&file.abs_path, &file.canonical);
+            if changed_ids.contains(&file.key.root_id)
+                || old_owner.as_ref() != Some(&file.key)
+                || !known.contains(&file.key)
+            {
+                cleanup.insert(file.key.clone());
+                affected_files.push(file);
+                if plan.old_roots.contains_id(&file.key.root_id) && known.contains(&file.key) {
+                    rebuilt += 1;
+                } else {
+                    added += 1;
+                }
+            }
+        }
+
+        let obsolete: HashSet<FileKey> =
+            cleanup.iter().filter(|key| !new_keys.contains(*key)).cloned().collect();
+        let obsolete_baseline: HashSet<FileKey> =
+            obsolete.iter().filter(|key| plan.manifest.contains_key(*key)).cloned().collect();
+
+        let upserts: Vec<WorkspaceTransitionFile> = if plan.serves_external_baseline {
+            Vec::new()
+        } else {
+            affected_files
+                .iter()
+                .map(|file| WorkspaceTransitionFile {
+                    key: file.key.clone(),
+                    hash: file.content_hash.clone(),
+                    chunks: file.chunks.clone(),
+                    graph_contexts: file.graph_contexts.clone(),
+                })
+                .collect()
+        };
+        let overlay_files: Vec<WorkspaceTransitionOverlayFile> = if plan.serves_external_baseline {
+            affected_files
+                .iter()
+                .map(|file| {
+                    let baseline = plan.manifest.get(&file.key);
+                    WorkspaceTransitionOverlayFile {
+                        key: file.key.clone(),
+                        len: file.len,
+                        modified: file.modified,
+                        canonical: file.canonical.clone(),
+                        file_hash: normalized_file_hash_for_indexed_documents(&file.documents),
+                        lexical_documents: file.documents.clone(),
+                        embedding_inputs: file.embedding_inputs.clone(),
+                        has_baseline: baseline.is_some(),
+                        baseline_equal: baseline
+                            .is_some_and(|fingerprint| fingerprint == &file.manifest_fingerprint),
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let next_index = self.store.apply_workspace_roots_transition(WorkspaceStoreTransition {
+            changed_root_ids: &changed_ids,
+            cleanup: &cleanup,
+            tombstones: &obsolete_baseline,
+            upserts: &upserts,
+            dimension: self.dim,
+        })?;
+        cache.transition_roots(&changed_ids, &cleanup, &obsolete_baseline, overlay_files);
+        self.index = next_index;
+        self.workspace_roots = Some(plan.next_roots);
+        self.workspace_roots_epoch += 1;
+
+        let pending_collection_embeddings = !plan.serves_external_baseline
+            && self.embedder.is_some()
+            && upserts.iter().any(|file| !file.chunks.is_empty());
+        let pending_overlay_embeddings =
+            plan.serves_external_baseline && self.embedder.is_some() && !affected_files.is_empty();
+        Ok(WorkspaceRootsTransitionOutcome::Applied {
+            removed: obsolete.len(),
+            rebuilt,
+            added,
+            pending_collection_embeddings,
+            pending_overlay_embeddings,
+        })
+    }
+
+    fn transition_plan_still_matches_disk(plan: &WorkspaceRootsTransitionPlan) -> bool {
+        let declared: Vec<PathBuf> =
+            plan.next_roots.entries().map(|(_, path)| path.to_path_buf()).collect();
+        let set = project_model::SourceSet::scan(&declared);
+        if !set.clean() {
+            return false;
+        }
+        let mut validation = HashMap::new();
+        for file in &set.files {
+            if file.role != project_model::FileRole::Source {
+                continue;
+            }
+            let Some(key) = plan.next_roots.root_of(&file.walked, &file.canonical) else {
+                continue;
+            };
+            validation.entry(key).or_insert_with(|| (file.walked.clone(), file.canonical.clone()));
+        }
+        if validation.len() != plan.files.len() {
+            return false;
+        }
+        plan.files.iter().all(|file| {
+            validation.get(&file.key).is_some_and(|(walked, canonical)| {
+                canonical == &file.canonical
+                    && std::fs::read(walked).is_ok_and(|content| {
+                        blake3::hash(&content).as_bytes() == file.content_hash.as_slice()
+                    })
+            })
+        })
     }
 
     pub fn enable_workspace_watcher_mode(&mut self) {
@@ -2772,6 +3147,7 @@ mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::fs;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     #[derive(Default)]
@@ -5146,5 +5522,513 @@ mod tests {
             .mark_workspace_path_context_dirty("CommonModules/Б/Ext/Module.bsl")
             .expect("marking a workspace path is not an error");
         assert!(marked, "a configuration-relative path resolves to its stored key");
+    }
+
+    fn write_transition_module(root: &std::path::Path, procedure: &str) {
+        let path = root.join("CommonModules/Один/Ext/Module.bsl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("Процедура {procedure}() Экспорт\nКонецПроцедуры")).unwrap();
+    }
+
+    #[test]
+    fn live_root_transition_adds_and_removes_an_extension_with_a_namesake_path() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let configuration_only = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(configuration_only.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(both).unwrap().plan().unwrap();
+        let outcome = engine.apply_workspace_roots_transition(plan).unwrap();
+        assert!(matches!(
+            outcome,
+            super::WorkspaceRootsTransitionOutcome::Applied { added: 1, .. }
+        ));
+        let extension_hits = engine.text_search("Расширение", 10, Some("code")).unwrap();
+        assert_eq!(extension_hits.len(), 1);
+        assert_eq!(extension_hits[0].root_id, "cfe/one");
+        assert_eq!(
+            engine.text_search("Конфигурация", 10, Some("code")).unwrap().len(),
+            1,
+            "the same relative path in the stable configuration survives"
+        );
+
+        let plan =
+            engine.workspace_roots_transition_seed(configuration_only).unwrap().plan().unwrap();
+        let outcome = engine.apply_workspace_roots_transition(plan).unwrap();
+        assert!(matches!(
+            outcome,
+            super::WorkspaceRootsTransitionOutcome::Applied { removed: 1, .. }
+        ));
+        assert!(engine.text_search("Расширение", 10, Some("code")).unwrap().is_empty());
+        assert_eq!(engine.file_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn changing_the_configuration_directory_rebuilds_the_stable_empty_root_id() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let old_configuration = workspace.join("old-cf");
+        let new_configuration = workspace.join("new-cf");
+        write_transition_module(&old_configuration, "Старая");
+        write_transition_module(&new_configuration, "Новая");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let old = crate::WorkspaceRoots::build(&workspace, &old_configuration, &[]).0;
+        engine.initialize_workspace_roots(old).unwrap();
+        engine.index_directory_fts(&old_configuration).unwrap();
+        let next = crate::WorkspaceRoots::build(&workspace, &new_configuration, &[]).0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        engine.apply_workspace_roots_transition(plan).unwrap();
+
+        assert!(engine.text_search("Старая", 10, Some("code")).unwrap().is_empty());
+        let hits = engine.text_search("Новая", 10, Some("code")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].root_id, CONFIGURATION_ROOT_ID);
+        assert_eq!(engine.configuration_root(), Some(new_configuration.as_path()));
+    }
+
+    #[test]
+    fn an_incomplete_transition_scan_keeps_the_last_known_good_roots() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let missing_extension = workspace.join("missing-extension");
+        write_transition_module(&configuration, "Конфигурация");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&missing_extension),
+        )
+        .0;
+
+        assert!(engine.workspace_roots_transition_seed(next).unwrap().plan().is_err());
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+    }
+
+    #[test]
+    fn a_file_change_between_plan_and_apply_supersedes_the_transition() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "До");
+        let extension_file = extension.join("CommonModules/Один/Ext/Module.bsl");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        fs::write(&extension_file, "Процедура После()\nКонецПроцедуры").unwrap();
+
+        assert_eq!(
+            engine.apply_workspace_roots_transition(plan).unwrap(),
+            super::WorkspaceRootsTransitionOutcome::Superseded
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert!(engine.text_search("После", 10, Some("code")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remote_overlay_transition_is_lexical_without_embedding_and_hides_removed_baseline() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "ЛокальнаяПравка");
+        let relative = "CommonModules/Один/Ext/Module.bsl";
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap-1".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![
+                    crate::BaselineManifestFile {
+                        root_id: CONFIGURATION_ROOT_ID.to_owned(),
+                        collection: "code".to_owned(),
+                        path: relative.to_owned(),
+                        file_fingerprint: crate::workspace_overlay::fingerprint_content(
+                            &fs::read_to_string(configuration.join(relative)).unwrap(),
+                            relative,
+                        ),
+                        document_count: 1,
+                        file_object_id: "obj-cf".to_owned(),
+                    },
+                    crate::BaselineManifestFile {
+                        root_id: "cfe/one".to_owned(),
+                        collection: "code".to_owned(),
+                        path: relative.to_owned(),
+                        file_fingerprint: "remote-version".to_owned(),
+                        document_count: 1,
+                        file_object_id: "obj-1".to_owned(),
+                    },
+                ],
+            })
+            .unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(both).unwrap().plan().unwrap();
+        let outcome = engine.apply_workspace_roots_transition(plan).unwrap();
+        assert!(matches!(
+            outcome,
+            super::WorkspaceRootsTransitionOutcome::Applied {
+                pending_overlay_embeddings: false,
+                ..
+            }
+        ));
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(stats.overlay_files, 1);
+        assert_eq!(stats.hidden_paths, 1, "the local replacement hides its baseline twin");
+
+        let plan = engine.workspace_roots_transition_seed(initial).unwrap().plan().unwrap();
+        engine.apply_workspace_roots_transition(plan).unwrap();
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(stats.overlay_files, 0);
+        assert_eq!(stats.deleted_files, 1, "the removed baseline key remains hidden");
+        assert!(engine
+            .store()
+            .overlay_tombstone_paths("code")
+            .unwrap()
+            .contains(&FileKey::new("cfe/one", relative)));
+    }
+
+    #[test]
+    fn a_store_failure_keeps_the_old_root_table_and_rows() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        let saboteur = rusqlite::Connection::open(engine.db_path()).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_transition BEFORE INSERT ON files
+                 WHEN NEW.root_id <> '' BEGIN SELECT RAISE(ABORT, 'denied'); END;",
+            )
+            .unwrap();
+
+        assert!(engine.apply_workspace_roots_transition(plan).is_err());
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert_eq!(engine.file_count().unwrap(), 1);
+        assert_eq!(engine.text_search("Конфигурация", 10, Some("code")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_file_created_between_plan_and_apply_supersedes_the_transition() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        fs::write(extension.join("Created.bsl"), "Процедура Создана()\nКонецПроцедуры").unwrap();
+
+        assert_eq!(
+            engine.apply_workspace_roots_transition(plan).unwrap(),
+            super::WorkspaceRootsTransitionOutcome::Superseded
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+    }
+
+    #[test]
+    fn a_file_deleted_between_plan_and_apply_supersedes_the_transition() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+        let extension_file = extension.join("CommonModules/Один/Ext/Module.bsl");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        fs::remove_file(extension_file).unwrap();
+
+        assert_eq!(
+            engine.apply_workspace_roots_transition(plan).unwrap(),
+            super::WorkspaceRootsTransitionOutcome::Superseded
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+    }
+
+    #[test]
+    fn a_removed_root_drops_a_dirty_only_key() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+        let extension_file = extension.join("CommonModules/Один/Ext/Module.bsl");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        engine.initialize_workspace_roots(both).unwrap();
+        engine.mark_workspace_path_dirty(&extension_file).unwrap();
+        let obsolete = FileKey::new("cfe/one", "CommonModules/Один/Ext/Module.bsl");
+        assert!(engine.workspace_overlay_dirty_paths().unwrap().contains(&obsolete));
+
+        let configuration_only = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        let plan =
+            engine.workspace_roots_transition_seed(configuration_only).unwrap().plan().unwrap();
+        engine.apply_workspace_roots_transition(plan).unwrap();
+
+        assert!(!engine.workspace_overlay_dirty_paths().unwrap().contains(&obsolete));
+    }
+
+    #[test]
+    fn a_vector_candidate_failure_rolls_back_sql_and_keeps_the_live_index() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let vectors_before = engine.vector_count();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+
+        crate::store::FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR.with(|flag| flag.set(true));
+        let result = engine.apply_workspace_roots_transition(plan);
+        crate::store::FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR.with(|flag| flag.set(false));
+
+        assert!(result.is_err());
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert_eq!(engine.vector_count(), vectors_before);
+        assert_eq!(engine.file_count().unwrap(), 1, "the inserted extension row was rolled back");
+        assert!(engine.text_search("Расширение", 10, Some("code")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn compatibility_root_replacement_keeps_serving_when_the_scan_is_incomplete() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        write_transition_module(&configuration, "Конфигурация");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let missing = workspace.join("missing-extension");
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&missing),
+        )
+        .0;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.set_workspace_roots(next);
+        }));
+
+        assert!(result.is_ok(), "the compatibility path must not panic on a live failure");
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert_eq!(engine.text_search("Конфигурация", 10, Some("code")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_baseline_mode_change_supersedes_a_prepared_root_plan() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        engine.set_serves_external_baseline(false).unwrap();
+
+        assert_eq!(
+            engine.apply_workspace_roots_transition(plan).unwrap(),
+            super::WorkspaceRootsTransitionOutcome::Superseded
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert!(engine.text_search("Расширение", 10, Some("code")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_manifest_change_supersedes_a_prepared_root_plan() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+        let relative = "CommonModules/Один/Ext/Module.bsl";
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap-before".to_owned(),
+                snapshot_fingerprint: Some("before".to_owned()),
+                files: Vec::new(),
+            })
+            .unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap-after".to_owned(),
+                snapshot_fingerprint: Some("after".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    root_id: "cfe/one".to_owned(),
+                    collection: "code".to_owned(),
+                    path: relative.to_owned(),
+                    file_fingerprint: "remote-version".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-extension".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(
+            engine.apply_workspace_roots_transition(plan).unwrap(),
+            super::WorkspaceRootsTransitionOutcome::Superseded
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert_eq!(engine.workspace_overlay_stats().unwrap().unwrap().overlay_files, 0);
+    }
+
+    #[test]
+    fn a_semantic_source_change_supersedes_a_prepared_root_plan() {
+        struct Provider;
+        impl crate::ports::GraphContextProvider for Provider {
+            fn graph_context(
+                &self,
+                _rel_path: &str,
+                _symbol_name: &str,
+                _kind: &str,
+            ) -> Option<String> {
+                Some("new graph".to_owned())
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        engine.set_graph_context_provider(Arc::new(Provider));
+
+        assert_eq!(
+            engine.apply_workspace_roots_transition(plan).unwrap(),
+            super::WorkspaceRootsTransitionOutcome::Superseded
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
     }
 }

@@ -36,6 +36,33 @@ pub type ChunkContextRow = (i64, String, String, Option<String>);
 /// `embedding_generation` they were read at, as one consistent snapshot.
 pub type EmbeddingsSnapshot = (i64, Vec<(i64, Vec<f32>)>);
 
+/// One file prepared off-lock for an atomic workspace-root transition.
+pub(crate) struct WorkspaceTransitionFile {
+    pub(crate) key: FileKey,
+    pub(crate) hash: Vec<u8>,
+    pub(crate) chunks: Vec<Chunk>,
+    pub(crate) graph_contexts: Vec<Option<String>>,
+}
+
+/// Persistent mutation set for one workspace-root transition.
+pub(crate) struct WorkspaceStoreTransition<'a> {
+    /// Entire keyspaces whose binding changed. Cleaning by id also reaches negative state and
+    /// persisted overlay rows that are deliberately absent from the positive carrier snapshot.
+    pub(crate) changed_root_ids: &'a HashSet<String>,
+    pub(crate) cleanup: &'a HashSet<FileKey>,
+    pub(crate) tombstones: &'a HashSet<FileKey>,
+    pub(crate) upserts: &'a [WorkspaceTransitionFile],
+    pub(crate) dimension: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Fail after the transition has mutated its transaction but before the vector candidate is
+    /// built, proving that dropping the transaction restores every persistent carrier.
+    pub(crate) static FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// Bumped whenever the embedding text composed by
 /// `document::semantic_text_for_indexed_document` changes shape. Stored in the SQLite
 /// `user_version` pragma; on mismatch the store clears file hashes so the next index
@@ -1054,6 +1081,163 @@ impl Store {
         embeddings: Option<&[Vec<f32>]>,
     ) -> Result<i64, SearchError> {
         self.reindex_file_in_collection(root_id, path, hash, "code", chunks, embeddings, None)
+    }
+
+    /// Apply every persistent part of a workspace-root transition in one SQLite transaction.
+    ///
+    /// The external baseline manifest and value-keyed embedding cache are deliberately not
+    /// touched: neither belongs to the mutable workspace keyspace. The live vector candidate is
+    /// built from the transaction's uncommitted rows, so a vector-build failure rolls SQL back.
+    pub(crate) fn apply_workspace_roots_transition(
+        &mut self,
+        change: WorkspaceStoreTransition<'_>,
+    ) -> Result<crate::index::VectorIndex, SearchError> {
+        let tx = self.conn.transaction()?;
+
+        for root_id in change.changed_root_ids {
+            tx.execute(
+                "DELETE FROM chunks_fts WHERE rowid IN (
+                     SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id
+                     WHERE f.collection = 'code' AND f.root_id = ?1
+                 )",
+                params![root_id],
+            )?;
+            tx.execute(
+                "DELETE FROM files WHERE collection = 'code' AND root_id = ?1",
+                params![root_id],
+            )?;
+            tx.execute(
+                "DELETE FROM overlay_chunks_fts WHERE rowid IN (
+                     SELECT c.id FROM overlay_chunks c
+                     JOIN overlay_files f ON f.id = c.file_id
+                     WHERE f.collection = 'code' AND f.root_id = ?1
+                 )",
+                params![root_id],
+            )?;
+            tx.execute(
+                "DELETE FROM overlay_files WHERE collection = 'code' AND root_id = ?1",
+                params![root_id],
+            )?;
+            for table in ["overlay_fingerprint_cache", "context_dirty", "overlay_tombstones"] {
+                let sql = format!("DELETE FROM {table} WHERE root_id = ?1");
+                tx.execute(&sql, params![root_id])?;
+            }
+        }
+
+        for key in change.cleanup {
+            tx.execute(
+                "DELETE FROM chunks_fts WHERE rowid IN (
+                     SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id
+                     WHERE f.collection = 'code' AND f.root_id = ?1 AND f.path = ?2
+                 )",
+                params![key.root_id, key.path],
+            )?;
+            tx.execute(
+                "DELETE FROM files WHERE collection = 'code' AND root_id = ?1 AND path = ?2",
+                params![key.root_id, key.path],
+            )?;
+            tx.execute(
+                "DELETE FROM overlay_chunks_fts WHERE rowid IN (
+                     SELECT c.id FROM overlay_chunks c
+                     JOIN overlay_files f ON f.id = c.file_id
+                     WHERE f.collection = 'code' AND f.root_id = ?1 AND f.path = ?2
+                 )",
+                params![key.root_id, key.path],
+            )?;
+            tx.execute(
+                "DELETE FROM overlay_files WHERE collection = 'code' AND root_id = ?1 AND path = ?2",
+                params![key.root_id, key.path],
+            )?;
+            for table in ["overlay_fingerprint_cache", "context_dirty", "overlay_tombstones"] {
+                let sql = format!("DELETE FROM {table} WHERE root_id = ?1 AND path = ?2");
+                tx.execute(&sql, params![key.root_id, key.path])?;
+            }
+        }
+
+        let deleted_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+        for key in change.tombstones {
+            tx.execute(
+                "INSERT INTO overlay_tombstones (root_id, path, collection, deleted_at)
+                 VALUES (?1, ?2, 'code', ?3)
+                 ON CONFLICT(root_id, path) DO UPDATE SET collection = 'code', deleted_at = ?3",
+                params![key.root_id, key.path, deleted_at],
+            )?;
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        for file in change.upserts {
+            if file.chunks.is_empty() {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+                 VALUES (?1, ?2, ?3, ?4, 'code')
+                 ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4,
+                                                        collection = 'code'",
+                params![file.key.root_id, file.key.path, file.hash, now],
+            )?;
+            let file_id: i64 = tx.query_row(
+                "SELECT id FROM files WHERE root_id = ?1 AND path = ?2",
+                params![file.key.root_id, file.key.path],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
+                params![file_id],
+            )?;
+            tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
+
+            let mut chunk_stmt = tx.prepare(
+                "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
+                                     line_start, line_end, text, embedding, graph_context)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9)",
+            )?;
+            let mut fts_stmt =
+                tx.prepare("INSERT INTO chunks_fts(rowid, symbol_name, text) VALUES (?1, ?2, ?3)")?;
+            for (index, chunk) in file.chunks.iter().enumerate() {
+                let kind = match chunk.kind {
+                    code_chunk::ChunkKind::ModuleHeader => "header",
+                    code_chunk::ChunkKind::Procedure => "procedure",
+                    code_chunk::ChunkKind::Function => "function",
+                };
+                let annotations =
+                    (!chunk.annotations.is_empty()).then(|| chunk.annotations.join(","));
+                let graph_context =
+                    file.graph_contexts.get(index).and_then(|context| context.as_deref());
+                chunk_stmt.execute(params![
+                    file_id,
+                    kind,
+                    chunk.name,
+                    chunk.is_export as i32,
+                    annotations,
+                    chunk.line_start,
+                    chunk.line_end,
+                    chunk.text,
+                    graph_context,
+                ])?;
+                let chunk_id = tx.last_insert_rowid();
+                fts_stmt.execute(params![chunk_id, chunk.name, chunk.text])?;
+            }
+        }
+
+        #[cfg(test)]
+        if FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR.with(std::cell::Cell::get) {
+            return Err(SearchError::Index(
+                "forced workspace transition vector preparation failure".to_owned(),
+            ));
+        }
+
+        let embeddings = Self::read_all_embeddings(&tx, change.dimension)?;
+        let index = crate::index::VectorIndex::build(change.dimension, &embeddings)?;
+        tx.commit()?;
+        Ok(index)
     }
 
     /// As [`Self::reindex_file`], but persists each chunk's graph context (parallel to
@@ -4100,6 +4284,57 @@ mod tests {
         assert_eq!(store.file_count().unwrap(), 0);
         assert_eq!(store.chunk_count().unwrap(), 0);
         assert_eq!(Store::stored_schema_version(&store.conn).unwrap(), Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn a_root_transition_retracts_every_persistent_key_carrier() {
+        let mut store = Store::in_memory().unwrap();
+        let key = FileKey::new("removed-root", "Module.bsl");
+        store.upsert_file(&key.root_id, &key.path, b"hash", "code").unwrap();
+        store
+            .upsert_overlay_file_with_chunks(
+                &key.root_id,
+                &key.path,
+                b"overlay",
+                "code",
+                &[sample_chunk("Overlay")],
+                None,
+            )
+            .unwrap();
+        store.insert_overlay_tombstone(&key.root_id, &key.path, "code").unwrap();
+        store.mark_context_dirty("code", &key.root_id, &key.path).unwrap();
+        store
+            .save_overlay_fingerprint_cache(
+                "snapshot",
+                &HashMap::from([(
+                    key.clone(),
+                    PersistedFingerprint {
+                        file_size: 1,
+                        file_mtime_secs: 2,
+                        file_mtime_nanos: 3,
+                        content_fingerprint: "fingerprint".to_owned(),
+                        canonical: "/removed/Module.bsl".to_owned(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        let changed_root_ids = HashSet::from([key.root_id.clone()]);
+        store
+            .apply_workspace_roots_transition(WorkspaceStoreTransition {
+                changed_root_ids: &changed_root_ids,
+                cleanup: &HashSet::new(),
+                tombstones: &HashSet::new(),
+                upserts: &[],
+                dimension: 4,
+            })
+            .unwrap();
+
+        assert!(store.file_hash(&key.root_id, &key.path).unwrap().is_none());
+        assert_eq!(store.overlay_file_count("code").unwrap(), 0);
+        assert!(!store.overlay_tombstone_paths("code").unwrap().contains(&key));
+        assert!(!store.context_dirty_paths("code").unwrap().contains(&key));
+        assert!(!store.overlay_fingerprint_keys().unwrap().contains(&key));
     }
 
     #[test]

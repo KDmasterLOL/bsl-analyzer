@@ -80,7 +80,7 @@ impl FileKey {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Root {
     id: String,
     /// The spelling the project declared, which is what exists on disk for a
@@ -91,7 +91,7 @@ struct Root {
 }
 
 /// The registered source roots of one workspace.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceRoots {
     /// The workspace itself. Not a source root — root ids are relative to it,
     /// and callers that speak of "the project directory" (the graph, the
@@ -271,6 +271,33 @@ impl WorkspaceRoots {
 
     pub fn is_empty(&self) -> bool {
         self.roots.is_empty()
+    }
+
+    /// Root identifiers whose physical binding was added, removed or changed.
+    ///
+    /// The identifier alone is not a binding: the configuration keeps the empty identifier when
+    /// its directory moves, and an extension can keep a workspace-relative identifier while an
+    /// alias is retargeted. Comparing the complete declared and canonical spellings makes a live
+    /// transition rebuild those key spaces instead of serving rows from the old directory through
+    /// the new one. Added identifiers are included so stale persistent state from an earlier use of
+    /// the same keyspace is retracted before their current files are installed.
+    pub(crate) fn changed_root_ids(&self, next: &Self) -> std::collections::HashSet<String> {
+        self.roots
+            .iter()
+            .filter(|root| {
+                next.roots
+                    .iter()
+                    .find(|candidate| candidate.id == root.id)
+                    .is_none_or(|candidate| candidate != *root)
+            })
+            .map(|root| root.id.clone())
+            .chain(
+                next.roots
+                    .iter()
+                    .filter(|root| !self.roots.iter().any(|candidate| candidate.id == root.id))
+                    .map(|root| root.id.clone()),
+            )
+            .collect()
     }
 
     /// The root with the longest matching prefix, under the given spelling.
@@ -795,6 +822,32 @@ mod tests {
             let key = owner(&roots, &made[1].join(MODULE)).unwrap();
             assert_eq!(roots.resolve(&key).as_deref(), Some(made[1].join(MODULE).as_path()));
         }
+    }
+
+    #[test]
+    fn binding_diff_detects_removed_added_and_rebound_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let old_made = dirs(&workspace, &["old-cf", "ext/kept", "ext/removed"]);
+        let new_made = dirs(&workspace, &["new-cf", "ext/kept", "ext/added"]);
+        let old = WorkspaceRoots::build(
+            &workspace,
+            &old_made[0],
+            &[old_made[1].clone(), old_made[2].clone()],
+        )
+        .0;
+        let next = WorkspaceRoots::build(
+            &workspace,
+            &new_made[0],
+            &[new_made[1].clone(), new_made[2].clone()],
+        )
+        .0;
+
+        let changed = old.changed_root_ids(&next);
+        assert!(changed.contains(CONFIGURATION_ROOT_ID), "the stable empty id was rebound");
+        assert!(changed.contains("ext/removed"));
+        assert!(changed.contains("ext/added"));
+        assert!(!changed.contains("ext/kept"));
     }
 
     mod containment {

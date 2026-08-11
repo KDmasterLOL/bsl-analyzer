@@ -148,6 +148,19 @@ struct PlannedEntry {
     embedding_inputs: Vec<String>,
 }
 
+/// One file prepared for the in-memory part of a workspace-root transition.
+pub(crate) struct WorkspaceTransitionOverlayFile {
+    pub(crate) key: FileKey,
+    pub(crate) len: u64,
+    pub(crate) modified: Option<SystemTime>,
+    pub(crate) canonical: PathBuf,
+    pub(crate) file_hash: Vec<u8>,
+    pub(crate) lexical_documents: Vec<IndexedDocument>,
+    pub(crate) embedding_inputs: Vec<String>,
+    pub(crate) has_baseline: bool,
+    pub(crate) baseline_equal: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceOverlayStats {
     pub overlay_files: usize,
@@ -393,6 +406,103 @@ impl WorkspaceOverlayCache {
 
     pub fn enable_watcher_mode(&mut self) {
         self.watcher_mode = true;
+    }
+
+    /// Selectively move the cache to a new root keyspace while preserving stable edits and warm
+    /// embeddings. The wholesale fence invalidates every lock-free plan made against the old
+    /// topology, but settlements for unaffected keys remain valid. This is not a full overlay
+    /// publication: stable roots are not rebuilt, so `initialized` and `full_rescan_pending` keep
+    /// their prior truth rather than claiming the transition proved the whole overlay complete.
+    pub(crate) fn transition_roots(
+        &mut self,
+        changed_root_ids: &HashSet<String>,
+        cleanup: &HashSet<FileKey>,
+        obsolete_baseline: &HashSet<FileKey>,
+        files: Vec<WorkspaceTransitionOverlayFile>,
+    ) {
+        self.dirty_seq += 1;
+        self.wholesale_seq = self.dirty_seq;
+
+        let binding_changed = |key: &FileKey| changed_root_ids.contains(&key.root_id);
+        self.entries.retain(|key, _| !binding_changed(key));
+        self.hidden_paths.retain(|key| !binding_changed(key));
+        self.dirty_paths.retain(|key, _| !binding_changed(key));
+        self.dirty_failures.retain(|key, _| !binding_changed(key));
+        self.unread_keys.retain(|key| !binding_changed(key));
+        self.settled_seq.retain(|key, _| !binding_changed(key) && !cleanup.contains(key));
+
+        for key in cleanup {
+            self.entries.remove(key);
+            self.dirty_paths.remove(key);
+            self.dirty_failures.remove(key);
+            self.unread_keys.remove(key);
+            if obsolete_baseline.contains(key) {
+                self.hidden_paths.insert(key.clone());
+            } else {
+                self.hidden_paths.remove(key);
+            }
+        }
+
+        for file in files {
+            if file.baseline_equal {
+                self.entries.remove(&file.key);
+                self.hidden_paths.remove(&file.key);
+                continue;
+            }
+            let vector_documents = file
+                .lexical_documents
+                .iter()
+                .zip(&file.embedding_inputs)
+                .filter_map(|(document, input)| {
+                    self.embedding_cache.get(&overlay_embedding_key(input)).map(|embedding| {
+                        OverlayVectorDocument {
+                            document: document.clone(),
+                            embedding: embedding.clone(),
+                        }
+                    })
+                })
+                .collect();
+            let key = file.key;
+            self.entries.insert(
+                key.clone(),
+                OverlayFileEntry {
+                    fingerprint: FileFingerprint {
+                        len: file.len,
+                        modified: file.modified,
+                        canonical: file.canonical,
+                    },
+                    file_hash: file.file_hash,
+                    lexical_documents: file.lexical_documents,
+                    vector_documents,
+                    embedding_inputs: file.embedding_inputs,
+                },
+            );
+            if file.has_baseline {
+                self.hidden_paths.insert(key);
+            } else {
+                self.hidden_paths.remove(&key);
+            }
+        }
+    }
+
+    /// Every root-keyed in-memory witness, including negative/freshness-only state that is not a
+    /// positive [`crate::key_carriers::KeyCarrier`]. A root transition uses this snapshot while
+    /// holding the cache lock so dirty-only and hidden-only obsolete keys cannot survive it.
+    pub(crate) fn root_keyed_keys(&self) -> HashSet<FileKey> {
+        let mut keys = HashSet::new();
+        keys.extend(self.entries.keys().cloned());
+        keys.extend(self.hidden_paths.iter().cloned());
+        keys.extend(self.dirty_paths.keys().cloned());
+        keys.extend(self.dirty_failures.keys().cloned());
+        keys.extend(self.unread_keys.iter().cloned());
+        keys.extend(self.settled_seq.keys().cloned());
+        keys
+    }
+
+    /// Fence captured with a root plan. Provider/hash-mode/full-publication invalidations move it,
+    /// preventing documents prepared under an old semantic source from being installed later.
+    pub(crate) fn transition_epoch(&self) -> u64 {
+        self.wholesale_seq
     }
 
     /// Drop a key's overlay entry for a deletion PROVEN by the caller (its store rows are
@@ -2649,13 +2759,13 @@ fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
 mod tests {
     use super::{
         build_overlay_documents, fingerprint_content, lexical_hits, BaselineHashMode,
-        WorkspaceOverlayCache, WorkspaceOverlayStats, MAX_DIRTY_REFRESH_FAILURES,
+        PublishOutcome, WorkspaceOverlayCache, WorkspaceOverlayStats, MAX_DIRTY_REFRESH_FAILURES,
     };
     use crate::store::Store;
     use crate::workspace_roots::{FileKey, WorkspaceRoots, CONFIGURATION_ROOT_ID};
     use std::collections::{HashMap, HashSet};
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     /// A workspace whose only source root is the workspace directory itself —
@@ -7780,5 +7890,79 @@ mod tests {
             1,
             "one unverified file must not be reported as two"
         );
+    }
+
+    #[test]
+    fn a_root_transition_supersedes_an_old_lock_free_plan() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("Module.bsl"), "Процедура Старая()\nКонецПроцедуры").unwrap();
+        let store = Store::open(&workspace.join("search.db")).unwrap();
+        let roots = single_root(workspace);
+        let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+            &HashMap::new(),
+            &roots,
+            &store,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+        )
+        .unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        let baseline = cache.publication_baseline();
+
+        cache.transition_roots(&HashSet::new(), &HashSet::new(), &HashSet::new(), Vec::new());
+        let outcome = cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
+        assert_eq!(outcome, PublishOutcome::Superseded);
+    }
+
+    #[test]
+    fn a_root_transition_preserves_stable_cache_state() {
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.initialized = true;
+        cache.full_rescan_pending = true;
+        let stable = key("Stable.bsl");
+        cache.mark_dirty_path(stable.clone());
+        cache.entries.insert(
+            stable.clone(),
+            super::OverlayFileEntry {
+                fingerprint: super::FileFingerprint {
+                    len: 1,
+                    modified: None,
+                    canonical: PathBuf::from("Stable.bsl"),
+                },
+                file_hash: vec![1],
+                lexical_documents: Vec::new(),
+                vector_documents: Vec::new(),
+                embedding_inputs: Vec::new(),
+            },
+        );
+        cache.embedding_cache.insert("warm".to_owned(), vec![1.0, 2.0]);
+        let obsolete = FileKey::new("removed-root", "Obsolete.bsl");
+        cache.mark_dirty_path(obsolete.clone());
+
+        let changed_ids = HashSet::from(["removed-root".to_owned()]);
+        let cleanup = HashSet::from([obsolete.clone()]);
+        cache.transition_roots(&changed_ids, &cleanup, &HashSet::new(), Vec::new());
+
+        assert!(cache.watcher_mode);
+        assert!(cache.initialized);
+        assert!(
+            cache.full_rescan_pending,
+            "an affected-root transition is not a full publication of stable roots"
+        );
+        assert!(cache.dirty_paths.contains_key(&stable));
+        assert!(cache.entries.contains_key(&stable));
+        assert!(!cache.dirty_paths.contains_key(&obsolete));
+        assert_eq!(cache.embedding_cache.get("warm"), Some(&vec![1.0, 2.0]));
+
+        let mut cold = WorkspaceOverlayCache::default();
+        cold.transition_roots(&HashSet::new(), &HashSet::new(), &HashSet::new(), Vec::new());
+        assert!(
+            !cold.initialized,
+            "a transition of affected roots cannot initialize untouched stable roots"
+        );
+        assert!(!cold.full_rescan_pending, "an absent obligation stays absent");
     }
 }
