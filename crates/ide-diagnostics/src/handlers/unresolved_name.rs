@@ -129,6 +129,48 @@ mod tests {
     }
 
     #[test]
+    fn same_named_module_method_is_not_a_value_of_platform_function() {
+        use crate::test_utils::check_with_cfe;
+
+        let source = r#"
+Процедура Формат()
+КонецПроцедуры
+Процедура Тест()
+    Результат = Формат;
+КонецПроцедуры
+"#;
+        let diagnostics = check_with_cfe(source, test_fixture::CfeFixtureBuilder::new("").build());
+        assert!(
+            diagnostics.iter().any(|diag| {
+                diag.code == DiagnosticCode::UnresolvedName && diag.message.contains("Формат")
+            }),
+            "a procedure remains non-first-class even when named like a platform function: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn indexed_assignment_declares_its_base_implicit_local() {
+        use crate::test_utils::check_with_cfe;
+
+        let source = "Таблица[0] = 1;\nРезультат = Таблица;";
+        let diagnostics = check_with_cfe(source, test_fixture::CfeFixtureBuilder::new("").build());
+        let unresolved = diagnostics
+            .iter()
+            .filter(|diag| diag.code == DiagnosticCode::UnresolvedName)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unresolved.len(),
+            1,
+            "the indexed target keeps its pre-existing target-base diagnostic, but the later read must resolve: {diagnostics:?}"
+        );
+        assert_eq!(
+            unresolved[0].range.start(),
+            0.into(),
+            "only the indexed assignment target may remain diagnosed"
+        );
+    }
+
+    #[test]
     fn catalog_property_without_hbk_type_is_still_a_known_value() {
         use crate::test_utils::check_with_cfe;
 

@@ -726,12 +726,18 @@ impl<'db> InferenceContext<'db> {
         with_body_env: bool,
     ) -> Self {
         let opts = db.env_options();
+        fn implicit_assignment_name(body: &Body, target: ExprId) -> Option<NormName> {
+            match body.expr(target) {
+                Expr::Path(name) => Some(NormName::intern(name.as_str())),
+                Expr::Index { base, .. } => implicit_assignment_name(body, ExprId::from_idx(*base)),
+                _ => None,
+            }
+        }
         let assignment_target_names = body
             .stmts_iter()
             .filter_map(|(_, stmt)| {
                 let Stmt::Assign { target, .. } = stmt else { return None };
-                let Expr::Path(name) = body.expr(ExprId::from_idx(*target)) else { return None };
-                Some(NormName::intern(name.as_str()))
+                implicit_assignment_name(body, ExprId::from_idx(*target))
             })
             .collect();
         let body_env = if !with_body_env {
@@ -2283,7 +2289,6 @@ impl<'db> InferenceContext<'db> {
 
         let user_shadows =
             matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)))
-                || resolver.resolve_module_method(self.db, name).is_some()
                 || resolver.resolve_module_variable(self.db, name).is_some();
         let body_binding_shadows = self.body_declares_binding(name);
 
