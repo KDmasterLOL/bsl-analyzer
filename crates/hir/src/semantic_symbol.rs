@@ -120,7 +120,7 @@ pub struct FileSymbolCtx<'db, DB: HirDatabase + base_db::RootQueryDb> {
     local_defs: RefCell<FxHashMap<(u32, String), Option<Definition>>>,
     module_methods: RefCell<FxHashMap<String, Option<MethodId>>>,
     module_vars: RefCell<FxHashMap<String, Option<VariableId>>>,
-    global_exports: OnceCell<FxHashMap<String, MethodId>>,
+    global_exports: OnceCell<FxHashMap<String, Definition>>,
     /// Narrowing dataflow per owner. `narrow_or_base` re-runs the whole
     /// dataflow solve on every call (`db.narrow` is not a tracked query), so
     /// resolving it per path token is quadratic in the body size; the paired
@@ -359,26 +359,32 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
             return None;
         }
 
-        self.global_exports()
-            .get(&fold_lower_per_char(token.text()))
-            .map(|method_id| Definition::Method(*method_id))
+        self.global_exports().get(&fold_lower_per_char(token.text())).cloned()
     }
 
-    fn global_exports(&self) -> &FxHashMap<String, MethodId> {
+    fn global_exports(&self) -> &FxHashMap<String, Definition> {
         self.global_exports.get_or_init(|| {
             let mut map = FxHashMap::default();
-            let exports = hir_def::resolver::Resolver::with_workspace_scope(self.module_id)
-                .global_common_module_exports(self.db());
-            // First occurrence wins, matching the linear `find` this replaces
-            // (and the deterministic-winner contract of the export list).
-            for entry in exports.entries {
-                if let hir_def::resolver::GlobalExportDefinition::Method(method_id) =
-                    entry.definition
-                {
-                    if entry.capabilities.callable == Some(true) {
-                        map.entry(fold_lower_per_char(entry.name.as_str())).or_insert(method_id);
+            let resolver = hir_def::resolver::Resolver::with_workspace_scope(self.module_id);
+            let common = resolver.global_common_module_exports(self.db());
+            let application = resolver.application_module_exports(self.db());
+            // First occurrence wins, matching inference precedence: global common
+            // modules first, then application-context hosts.
+            for entry in common.entries.into_iter().chain(application.entries) {
+                let definition = match entry.definition {
+                    hir_def::resolver::GlobalExportDefinition::Method(method_id)
+                        if entry.capabilities.callable == Some(true) =>
+                    {
+                        Definition::Method(method_id)
                     }
-                }
+                    hir_def::resolver::GlobalExportDefinition::Variable(variable_id)
+                        if entry.capabilities.readable_as_value == Some(true) =>
+                    {
+                        Definition::Variable(variable_id)
+                    }
+                    _ => continue,
+                };
+                map.entry(fold_lower_per_char(entry.name.as_str())).or_insert(definition);
             }
             map
         })

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use stdx::case::CaseExt;
 
 use bsl_metadata::MdoType;
-use bsl_platform::{GlobalFunction, PlatformDataInner};
+use bsl_platform::{GlobalFunction, PlatformDataInner, PlatformGlobalCatalog, PlatformGlobalKind};
 use either::Either;
 use hir::{DefWithBodyId, ExprScopes, ScopeDef};
 use ide_db::base_db::Locale;
@@ -607,27 +607,56 @@ fn complete_global_module_exports<DB: RootDatabase>(
 
     let mut items = Vec::new();
     let mut blocked = Vec::new();
-    for entry in resolver.global_common_module_exports(db).entries {
-        let hir::GlobalExportDefinition::Method(method_id) = entry.definition else {
-            continue;
-        };
-        if entry.capabilities.callable != Some(true) || !matcher.admits(entry.name.as_str()) {
+    let common = resolver.global_common_module_exports(db);
+    let application = resolver.application_module_exports(db);
+    for entry in common.entries.into_iter().chain(application.entries) {
+        if !matcher.admits(entry.name.as_str()) {
             continue;
         }
-        if !env.admits_common_module(db, file_id, entry.module.as_str()) {
+        let admitted = match entry.host {
+            hir::GlobalExportHost::CommonModule => {
+                env.admits_common_module(db, file_id, entry.module.as_str())
+            }
+            hir::GlobalExportHost::ApplicationModule(kind) => {
+                let metadata = hir::ModuleMetadata::unknown(kind.module_type());
+                env.admits(hir::execution_env::module_base_env(&metadata, &db.env_options()))
+            }
+        };
+        if !admitted {
             blocked.push(entry.name.as_str().to_string());
             continue;
         }
-        let symbol_tree = db.symbol_tree(method_id.module);
-        let Some(method) = symbol_tree.find_method_by_id(method_id) else {
-            continue;
-        };
-        items.push(super::platform_completion::render_common_module_method(
-            db,
-            file_id,
-            &entry.module,
-            method,
-        ));
+        match entry.definition {
+            hir::GlobalExportDefinition::Method(method_id)
+                if entry.capabilities.callable == Some(true) =>
+            {
+                let symbol_tree = db.symbol_tree(method_id.module);
+                let Some(method) = symbol_tree.find_method_by_id(method_id) else {
+                    continue;
+                };
+                items.push(super::platform_completion::render_common_module_method(
+                    db,
+                    file_id,
+                    &entry.module,
+                    method,
+                ));
+            }
+            hir::GlobalExportDefinition::Variable(_)
+                if entry.capabilities.readable_as_value == Some(true) =>
+            {
+                items.push(CompletionItem {
+                    label: entry.name.as_str().to_string(),
+                    detail: Some("Глобальная переменная приложения".to_string()),
+                    kind: CompletionItemKind::Field,
+                    insert_text: entry.name.as_str().to_string(),
+                    documentation: None,
+                    sort_text: None,
+                    filter_text: None,
+                    source: None,
+                });
+            }
+            _ => {}
+        }
     }
     (items, blocked)
 }
@@ -807,20 +836,58 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
 fn complete_global_functions(matcher: &PrefixMatcher, env: &EnvFilter) -> Vec<CompletionItem> {
     let data = PlatformDataInner::instance();
     let all_functions = data.all_global_functions();
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
 
-    let matching: Vec<_> = all_functions
+    for function in all_functions
         .iter()
         .filter(|f| matcher.admits_contiguous_bilingual(&f.name, &f.english_name))
         .filter(|f| env.admits_context(f.context.as_ref()))
-        .collect();
+    {
+        seen.insert(function.name.fold_lower());
+        seen.insert(function.english_name.fold_lower());
+        items.push(render_global_function(function));
+    }
+
+    // The exact EDT catalog can contain callable globals absent from the HBK help
+    // corpus. They have no rich signature to render, but they are still valid names.
+    for symbol in PlatformGlobalCatalog::instance()
+        .symbols()
+        .iter()
+        .filter(|symbol| symbol.kind == PlatformGlobalKind::Function)
+    {
+        if !matcher.admits_contiguous_bilingual(&symbol.canonical_ru, &symbol.canonical_en)
+            || !env.admits_context(symbol.context.as_ref())
+            || seen.contains(&symbol.canonical_ru.as_str().fold_lower())
+            || seen.contains(&symbol.canonical_en.as_str().fold_lower())
+        {
+            continue;
+        }
+        let label = if symbol.canonical_ru.is_empty() {
+            symbol.canonical_en.as_str()
+        } else {
+            symbol.canonical_ru.as_str()
+        };
+        seen.insert(symbol.canonical_ru.as_str().fold_lower());
+        seen.insert(symbol.canonical_en.as_str().fold_lower());
+        items.push(CompletionItem {
+            label: label.to_string(),
+            detail: Some("Глобальная функция платформы".to_string()),
+            kind: CompletionItemKind::Function,
+            insert_text: format!("{label}()$0"),
+            documentation: None,
+            sort_text: None,
+            filter_text: None,
+            source: None,
+        });
+    }
 
     tracing::debug!(
         total_functions = all_functions.len(),
-        matching_count = matching.len(),
+        matching_count = items.len(),
         "Filtered global functions"
     );
-
-    matching.iter().map(|f| render_global_function(f)).collect()
+    items
 }
 
 fn render_global_function(function: &GlobalFunction) -> CompletionItem {
@@ -919,6 +986,68 @@ mod tests {
         for item in &items {
             assert_eq!(item.kind, CompletionItemKind::Function);
         }
+    }
+
+    #[test]
+    fn edt_only_global_function_is_completed_without_hbk_signature() {
+        let data = PlatformDataInner::instance();
+        let symbol = PlatformGlobalCatalog::instance()
+            .symbols()
+            .iter()
+            .find(|symbol| {
+                symbol.kind == PlatformGlobalKind::Function
+                    && data.get_global_function(symbol.canonical_ru.as_str()).is_none()
+                    && data.get_global_function(symbol.canonical_en.as_str()).is_none()
+            })
+            .expect("the exact EDT catalog must contain a callable absent from HBK");
+        let prefix = symbol.canonical_ru.as_str();
+        let items =
+            complete_global_functions(&PrefixMatcher::new(prefix), &EnvFilter::permissive());
+        assert!(
+            items.iter().any(|item| {
+                item.label == symbol.canonical_ru.as_str()
+                    || item.label == symbol.canonical_en.as_str()
+            }),
+            "EDT-only callable must remain discoverable: {prefix}"
+        );
+    }
+
+    #[test]
+    fn application_module_exports_are_completed_as_globals() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let fixture = test_fixture::CfeFixtureBuilder::new("").build();
+        let caller_path = fixture.root().join("CommonModules/Caller/Ext/Module.bsl");
+        std::fs::create_dir_all(caller_path.parent().unwrap()).unwrap();
+        std::fs::write(&caller_path, "Процедура Тест()\nКонецПроцедуры").unwrap();
+        let app_path = fixture.root().join("Ext/ManagedApplicationModule.bsl");
+        std::fs::create_dir_all(app_path.parent().unwrap()).unwrap();
+        let app_source = "Перем ПриложениеПеременная Экспорт;\nПроцедура ПриложениеМетод() Экспорт КонецПроцедуры";
+        std::fs::write(&app_path, app_source).unwrap();
+
+        let caller = FileId(0);
+        let app = FileId(1);
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+        file_set.insert(app, VfsPath::new(app_path.to_string_lossy().as_ref()));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(caller, SourceRootId(0));
+        db.set_file_source_root(app, SourceRootId(0));
+        db.set_file_text(caller, "Процедура Тест()\nКонецПроцедуры");
+        db.set_file_text(app, app_source);
+        db.set_all_config_paths(fixture.config_paths());
+
+        let (items, _) = complete_global_module_exports(
+            &db,
+            caller,
+            &PrefixMatcher::new("Приложение"),
+            &EnvFilter::permissive(),
+        );
+        assert!(items.iter().any(|item| item.label == "ПриложениеМетод"));
+        assert!(items.iter().any(|item| item.label == "ПриложениеПеременная"));
     }
 
     #[test]
