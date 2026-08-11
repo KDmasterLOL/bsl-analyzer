@@ -486,6 +486,10 @@ pub struct InferenceContext<'db> {
 
     assigned_var_names: rustc_hash::FxHashSet<NormName>,
 
+    /// Every bare assignment target anywhere in the body, collected once so a
+    /// global read can skip CFG/reaching-definitions unless shadowing is possible.
+    assignment_target_names: rustc_hash::FxHashSet<NormName>,
+
     /// Memoised `bare_global_name_claim` verdicts. That lookup reaches past the
     /// body into the module and the workspace while the body itself does not
     /// change during a run, and the same collection root recurs throughout a
@@ -722,6 +726,14 @@ impl<'db> InferenceContext<'db> {
         with_body_env: bool,
     ) -> Self {
         let opts = db.env_options();
+        let assignment_target_names = body
+            .stmts_iter()
+            .filter_map(|(_, stmt)| {
+                let Stmt::Assign { target, .. } = stmt else { return None };
+                let Expr::Path(name) = body.expr(ExprId::from_idx(*target)) else { return None };
+                Some(NormName::intern(name.as_str()))
+            })
+            .collect();
         let body_env = if !with_body_env {
             hir_def::execution_env::EnvFlags::EMPTY
         } else {
@@ -750,6 +762,7 @@ impl<'db> InferenceContext<'db> {
             var_types: FxHashMap::default(),
             implicit_locals: FxHashMap::default(),
             assigned_var_names: rustc_hash::FxHashSet::default(),
+            assignment_target_names,
             shadowed_root_names: FxHashMap::default(),
             binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
@@ -2327,7 +2340,9 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
-        if self.implicit_local_reaches(expr_id, name) {
+        if self.assignment_target_names.contains(&NormName::intern(name.as_str()))
+            && self.implicit_local_reaches(expr_id, name)
+        {
             return found(self.db.unknown(), BareNameOrigin::FlowLocal, all_env);
         }
 

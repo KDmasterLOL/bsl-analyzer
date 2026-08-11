@@ -3746,6 +3746,26 @@ fn module_cfgs_reuses_the_module_level_cfg_allocation() {
 }
 
 #[test]
+fn platform_global_read_does_not_force_reaching_definitions() {
+    use hir::HirDatabase;
+
+    let file = FileId(0);
+    let mut db = RootDatabaseImpl::new_with_salsa_events();
+    let mut file_set = FileSet::new();
+    file_set.insert(file, VfsPath::new("/test.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file, SourceRootId(0));
+    db.set_file_text(file, "Процедура Тест()\nРезультат = Метаданные;\nКонецПроцедуры");
+
+    let _ = db.infer(file);
+    let rows = db.salsa_event_report().expect("event counters enabled");
+    assert!(
+        rows.iter().all(|row| !row.name.contains("module_reaching_definitions")),
+        "a read with no same-named assignment has no reason to build module dataflow"
+    );
+}
+
+#[test]
 fn application_module_path_scan_is_memoized_across_method_bodies() {
     use hir::HirDatabase;
     use test_fixture::CfeFixtureBuilder;
