@@ -677,13 +677,23 @@ impl GlobalState {
                 // calling it is the warm-up; the returned list only feeds the metrics below.
                 let exports = Resolver::with_workspace_scope(ModuleId::new(anchor))
                     .global_common_module_exports(db);
-                let modules: std::collections::HashSet<String> =
-                    exports.entries.iter().map(|(m, _, _)| m.as_str().to_lowercase()).collect();
+                let modules: std::collections::HashSet<String> = exports
+                    .entries
+                    .iter()
+                    .map(|entry| entry.module.as_str().to_lowercase())
+                    .collect();
 
+                let exported_methods = exports
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        matches!(entry.definition, hir::GlobalExportDefinition::Method(_))
+                    })
+                    .count();
                 let rss_after = crate::smoke::read_rss_bytes().unwrap_or(0);
                 tracing::info!(
                     global_modules = modules.len(),
-                    exported_methods = exports.entries.len(),
+                    exported_methods,
                     elapsed_ms = warm_start.elapsed().as_millis() as u64,
                     rss_delta_mb = rss_after.saturating_sub(rss_before) / 1_048_576,
                     "global common modules warmed",

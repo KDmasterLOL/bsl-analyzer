@@ -304,10 +304,14 @@ impl<'a> Forwarder<'a> {
     fn global_methods(&self) -> &FxHashMap<String, MethodId> {
         self.global_methods.get_or_init(|| {
             let mut map = FxHashMap::default();
-            for (_module, method_name, method_id) in
-                self.resolver.global_common_module_exports(self.db).entries
-            {
-                map.entry(method_name.as_str().fold_lower()).or_insert(method_id);
+            for entry in self.resolver.global_common_module_exports(self.db).entries {
+                if let hir_def::resolver::GlobalExportDefinition::Method(method_id) =
+                    entry.definition
+                {
+                    if entry.capabilities.callable == Some(true) {
+                        map.entry(entry.name.as_str().fold_lower()).or_insert(method_id);
+                    }
+                }
             }
             map
         })

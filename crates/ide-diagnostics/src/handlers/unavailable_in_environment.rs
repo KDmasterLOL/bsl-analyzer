@@ -31,6 +31,7 @@ pub fn from_hir(
         EnvMemberKind::Property => ("Свойство", "недоступно"),
         EnvMemberKind::GlobalFunction => ("Глобальная функция", "недоступна"),
         EnvMemberKind::GlobalProperty => ("Глобальное свойство", "недоступно"),
+        EnvMemberKind::GlobalVariable => ("Глобальная переменная", "недоступна"),
         EnvMemberKind::Type => ("Тип", "недоступен"),
     };
     let envs: Vec<&str> = missing.iter().map(|flag| flag.name_ru()).collect();
@@ -293,6 +294,20 @@ mod tests {
             "thick client is available — must not be reported: {}",
             diags[0].0
         );
+    }
+
+    #[test]
+    fn server_only_system_enum_root_is_flagged_on_client() {
+        let fixture = r#"
+//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+&НаКлиенте
+Процедура Прочитать()
+    Значение = АлгоритмПодписиТокенаДоступа;
+КонецПроцедуры
+"#;
+        let diags = env_diags(fixture);
+        assert_eq!(diags.len(), 1, "system-enum root carries catalog availability: {diags:?}");
+        assert!(diags[0].0.contains("Тонкий клиент") && diags[0].0.contains("Веб-клиент"));
     }
 
     #[test]

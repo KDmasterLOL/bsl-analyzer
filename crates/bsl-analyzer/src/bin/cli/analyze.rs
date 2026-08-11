@@ -322,7 +322,7 @@ fn analyze_salsa(
 
     tracing::info!("Creating database");
     let mut db = RootDatabaseImpl::default();
-    bsl_analyzer::features_state::apply_features_to_db(&mut db, &project.config.features);
+    bsl_analyzer::features_state::apply_project_config_to_db(&mut db, &project.config);
 
     // Register the base + extension configuration roots (with their dependency
     // topology) so per-file resolution — and the `&ИзменениеИКонтроль` effective

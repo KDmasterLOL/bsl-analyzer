@@ -744,6 +744,9 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub configuration_root: Option<String>,
 
+    #[serde(default, alias = "target_platform_version")]
+    pub target_platform_version: Option<String>,
+
     #[serde(default)]
     pub language: Option<String>,
 
@@ -1429,6 +1432,8 @@ struct TomlConfig {
     #[serde(default)]
     formatting: FormattingConfig,
     #[serde(default)]
+    target_platform_version: Option<String>,
+    #[serde(default)]
     search: TomlSearchConfig,
     #[serde(default)]
     features: FeaturesConfig,
@@ -1444,6 +1449,7 @@ impl Default for TomlConfig {
             diagnostics: default_toml_table(),
             code_lens: CodeLensConfig::default(),
             formatting: FormattingConfig::default(),
+            target_platform_version: None,
             search: TomlSearchConfig::default(),
             features: FeaturesConfig::default(),
             output: OutputConfig::default(),
@@ -1526,6 +1532,7 @@ impl From<TomlConfig> for ProjectConfig {
             code_lens: toml.code_lens,
             formatting: toml.formatting,
             configuration_root: toml.source.root,
+            target_platform_version: toml.target_platform_version,
             language: None,
             extensions: toml.source.extensions,
             analysis: AnalysisConfig {
@@ -2033,6 +2040,26 @@ mod tests {
         assert!(!config.search.baseline.postgres.is_configured());
         assert!(config.search.baseline.workspace_code.branch.is_none());
         assert!(config.search.baseline.reference.snapshot_id.is_none());
+    }
+
+    #[test]
+    fn project_config_reads_target_platform_version_json() {
+        let config: ProjectConfig =
+            serde_json::from_str(r#"{"targetPlatformVersion":"8.3.27.1644"}"#).unwrap();
+        assert_eq!(config.target_platform_version.as_deref(), Some("8.3.27.1644"));
+
+        let snake: ProjectConfig =
+            serde_json::from_str(r#"{"target_platform_version":"8.3.27"}"#).unwrap();
+        assert_eq!(snake.target_platform_version.as_deref(), Some("8.3.27"));
+    }
+
+    #[test]
+    fn project_config_reads_target_platform_version_toml() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bsl-analyzer.toml");
+        fs::write(&path, "target_platform_version = \"8.3.27.1644\"\n").unwrap();
+        let config = ProjectConfig::load_from_file(&path).unwrap();
+        assert_eq!(config.target_platform_version.as_deref(), Some("8.3.27.1644"));
     }
 
     #[test]

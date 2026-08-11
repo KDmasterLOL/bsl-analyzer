@@ -3521,7 +3521,8 @@ fn global_common_module_exports_stop_at_an_unread_body() {
     fn exports_of(
         fixture: &test_fixture::CfeFixture,
         base_unread: bool,
-    ) -> Vec<(ModuleId, String)> {
+        base_registered: bool,
+    ) -> (Vec<(ModuleId, String, bool)>, bool) {
         let base_path = write_cfe_common_module(
             fixture.root(),
             "Глоб",
@@ -3537,46 +3538,323 @@ fn global_common_module_exports_stop_at_an_unread_body() {
         let (base, ext, caller) = (FileId(0), FileId(1), FileId(2));
         let mut db = RootDatabaseImpl::new();
         let mut file_set = FileSet::new();
-        for (id, path) in [(base, &base_path), (ext, &ext_path), (caller, &caller_path)] {
+        if base_registered {
+            file_set.insert(base, VfsPath::new(base_path.to_string_lossy().as_ref()));
+        }
+        for (id, path) in [(ext, &ext_path), (caller, &caller_path)] {
             file_set.insert(id, VfsPath::new(path.to_string_lossy().as_ref()));
         }
         db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
-        for id in [base, ext, caller] {
+        if base_registered {
+            db.set_file_source_root(base, SourceRootId(0));
+        }
+        for id in [ext, caller] {
             db.set_file_source_root(id, SourceRootId(0));
         }
         db.set_file_text(ext, "Функция П() Экспорт КонецФункции");
         db.set_file_text(caller, caller_source);
-        if base_unread {
-            db.set_file_unreadable(base);
-        } else {
-            db.set_file_text(base, "Функция П() Экспорт КонецФункции");
+        if base_registered {
+            if base_unread {
+                db.set_file_unreadable(base);
+            } else {
+                db.set_file_text(base, "Функция П() Экспорт КонецФункции");
+            }
         }
         db.set_all_config_paths(fixture.config_paths());
 
-        hir::Resolver::with_workspace_scope(ModuleId::new(caller))
-            .global_common_module_exports(&db)
+        let surface = hir::Resolver::with_workspace_scope(ModuleId::new(caller))
+            .global_common_module_exports(&db);
+        let complete = surface.is_complete();
+        let entries = surface
             .entries
             .into_iter()
-            .map(|(_, method, id)| (id.module, method.as_str().to_string()))
-            .collect()
+            .map(|entry| match entry.definition {
+                hir::GlobalExportDefinition::Method(id) => {
+                    (id.module, entry.name.as_str().to_string(), true)
+                }
+                hir::GlobalExportDefinition::Variable(id) => {
+                    (id.module, entry.name.as_str().to_string(), false)
+                }
+            })
+            .collect();
+        (entries, complete)
     }
 
     let mut builder = CfeFixtureBuilder::new("");
     builder.add_extension("Расш", "");
     let readable_fixture = builder.build();
-    let control = exports_of(&readable_fixture, false);
+    let (control, complete) = exports_of(&readable_fixture, false, true);
+    assert!(complete, "every readable candidate makes the common-module surface complete");
     assert!(
-        control.iter().any(|(module, name)| *module == ModuleId::new(FileId(0)) && name == "П"),
-        "control: a readable global base body must export П, else the fixture proves nothing"
+        control.iter().any(|(module, name, is_method)| {
+            *module == ModuleId::new(FileId(0)) && name == "П" && *is_method
+        }),
+        "control: a readable global base body must export method П"
+    );
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Расш", "");
+    let fixture = builder.build();
+    let (exports, complete) = exports_of(&fixture, true, true);
+    assert!(!complete, "an unread body must leave an explicit completeness gap");
+    assert!(
+        !exports.iter().any(|(_, name, _)| name == "П"),
+        "an unread base body bars its own symbols from the global context: {exports:?}"
     );
 
     let mut builder = CfeFixtureBuilder::new("");
     builder.add_extension("Расш", "");
     let fixture = builder.build();
-    let exports = exports_of(&fixture, true);
+    let (_, complete) = exports_of(&fixture, false, false);
     assert!(
-        !exports.iter().any(|(_, name)| name == "П"),
-        "an unread base body bars its own name from the global context: {exports:?}"
+        !complete,
+        "a metadata-declared global module without a locatable body is a surface gap"
+    );
+}
+
+#[test]
+fn application_module_exports_are_typed_and_preserve_unread_gaps() {
+    use hir::{GlobalExportDefinition, GlobalExportHost, GlobalSurfaceGap};
+    use test_fixture::CfeFixtureBuilder;
+
+    fn surface(kind: hir::ApplicationModuleKind, unread: bool) -> hir::GlobalExports {
+        let fixture = CfeFixtureBuilder::new("").build();
+        let app_path = fixture.root().join(kind.relative_path());
+        std::fs::create_dir_all(app_path.parent().unwrap()).unwrap();
+        let app_source = "Перем ГлобальнаяПеременная Экспорт;\n\
+                          Процедура ГлобальнаяПроцедура() Экспорт\n\
+                          КонецПроцедуры";
+        std::fs::write(&app_path, app_source).unwrap();
+        let caller_path = write_cfe_common_module(
+            fixture.root(),
+            "Caller",
+            false,
+            "Процедура Тест() Экспорт КонецПроцедуры",
+        );
+
+        let app = FileId(0);
+        let caller = FileId(1);
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        file_set.insert(app, VfsPath::new(app_path.to_string_lossy().as_ref()));
+        file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        for file in [app, caller] {
+            db.set_file_source_root(file, SourceRootId(0));
+        }
+        if unread {
+            db.set_file_unreadable(app);
+        } else {
+            db.set_file_text(app, app_source);
+        }
+        db.set_file_text(caller, "Процедура Тест() Экспорт КонецПроцедуры");
+        db.set_all_config_paths(fixture.config_paths());
+
+        hir::Resolver::with_workspace_scope(ModuleId::new(caller)).application_module_exports(&db)
+    }
+
+    let readable = surface(hir::ApplicationModuleKind::Managed, false);
+    assert!(readable.is_complete(), "all fixed application paths were enumerable");
+    let variable = readable
+        .entries
+        .iter()
+        .find(|entry| entry.name.as_str() == "ГлобальнаяПеременная")
+        .expect("exported application variable");
+    assert!(matches!(variable.definition, GlobalExportDefinition::Variable(_)));
+    assert_eq!(variable.capabilities.readable_as_value, Some(true));
+    assert_eq!(
+        variable.host,
+        GlobalExportHost::ApplicationModule(hir::ApplicationModuleKind::Managed)
+    );
+    let method = readable
+        .entries
+        .iter()
+        .find(|entry| entry.name.as_str() == "ГлобальнаяПроцедура")
+        .expect("exported application method");
+    assert!(matches!(method.definition, GlobalExportDefinition::Method(_)));
+    assert_eq!(method.capabilities.callable, Some(true));
+    assert_eq!(method.capabilities.readable_as_value, Some(false));
+
+    let unread = surface(hir::ApplicationModuleKind::Managed, true);
+    assert!(unread.entries.is_empty(), "unread body contributes no guessed exports");
+    assert!(unread.gaps.iter().any(|gap| matches!(
+        gap,
+        GlobalSurfaceGap::UnreadApplicationModule { kind: hir::ApplicationModuleKind::Managed }
+    )));
+
+    let external = surface(hir::ApplicationModuleKind::ExternalConnection, false);
+    assert!(
+        external.entries.iter().any(|entry| {
+            entry.name.as_str() == "ГлобальнаяПеременная"
+                && entry.host
+                    == GlobalExportHost::ApplicationModule(
+                        hir::ApplicationModuleKind::ExternalConnection,
+                    )
+        }),
+        "external-connection module exports belong to its global context"
+    );
+}
+
+#[test]
+fn module_cfgs_reuses_the_module_level_cfg_allocation() {
+    let file = FileId(0);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(file, VfsPath::new("/Ext/ManagedApplicationModule.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file, SourceRootId(0));
+    db.set_file_text(file, "Значение = 1;");
+
+    let input = base_db::FileIdInput::new(&db, file);
+    let cfgs = <RootDatabaseImpl as RootDatabase>::module_cfgs(&db, input);
+    let module = <RootDatabaseImpl as RootDatabase>::module_level_cfg(&db, ModuleId::new(file));
+    assert!(
+        std::sync::Arc::ptr_eq(cfgs.module_code().expect("module-code CFG"), &module),
+        "module CFG aggregation must share the module-level query allocation"
+    );
+}
+
+#[test]
+fn application_module_path_scan_is_memoized_across_method_bodies() {
+    use hir::HirDatabase;
+    use test_fixture::CfeFixtureBuilder;
+
+    let fixture = CfeFixtureBuilder::new("").build();
+    let source = (0..12)
+        .map(|index| {
+            format!(
+                "Процедура Тест{index}() Экспорт\nЗначение{index} = Метаданные;\nКонецПроцедуры\n"
+            )
+        })
+        .collect::<String>();
+    let caller_path = write_cfe_common_module(fixture.root(), "Caller", false, &source);
+    let caller = FileId(0);
+    let mut db = RootDatabaseImpl::new_with_salsa_events();
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_text(caller, &source);
+    db.set_all_config_paths(fixture.config_paths());
+
+    let _ = db.infer(caller);
+    let rows = db.salsa_event_report().expect("event counters enabled");
+    let query = rows
+        .iter()
+        .find(|row| row.name.contains("application_module_files_query"))
+        .expect("tracked application-module lookup must execute");
+    assert_eq!(
+        query.execute,
+        hir::ApplicationModuleKind::ALL.len() as u64,
+        "each fixed host path is scanned once per file, not once per inferred body"
+    );
+}
+
+#[test]
+fn application_export_shadows_same_named_platform_property_for_reads() {
+    use hir::HirDatabase;
+    use test_fixture::CfeFixtureBuilder;
+
+    let fixture = CfeFixtureBuilder::new("").build();
+    let app_path = fixture.root().join("Ext/ManagedApplicationModule.bsl");
+    std::fs::create_dir_all(app_path.parent().unwrap()).unwrap();
+    let app_source = "Перем Метаданные Экспорт;";
+    std::fs::write(&app_path, app_source).unwrap();
+    let caller_source = "Процедура Тест() Экспорт\nРезультат = Метаданные;\nКонецПроцедуры";
+    let caller_path = write_cfe_common_module(fixture.root(), "Caller", false, caller_source);
+
+    let app = FileId(0);
+    let caller = FileId(1);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(app, VfsPath::new(app_path.to_string_lossy().as_ref()));
+    file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for file in [app, caller] {
+        db.set_file_source_root(file, SourceRootId(0));
+    }
+    db.set_file_text(app, app_source);
+    db.set_file_text(caller, caller_source);
+    db.set_all_config_paths(fixture.config_paths());
+
+    assert!(
+        !db.infer(caller).var_types.contains_key("результат"),
+        "the user export has Unknown type; a platform-property type here would prove wrong precedence"
+    );
+}
+
+#[test]
+fn target_platform_version_invalidates_unresolved_name_certainty() {
+    use hir::HirDatabase;
+    use std::sync::Arc;
+    use test_fixture::CfeFixtureBuilder;
+
+    let fixture = CfeFixtureBuilder::new("").build();
+    let source = "Процедура Тест() Экспорт\n\
+                  Результат = ЗаведомоНеизвестноеИмя;\n\
+                  КонецПроцедуры";
+    let caller_path = write_cfe_common_module(fixture.root(), "Caller", false, source);
+    let caller = FileId(0);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_text(caller, source);
+    db.set_all_config_paths(fixture.config_paths());
+
+    let unresolved_count = |db: &RootDatabaseImpl| {
+        db.infer(caller)
+            .diagnostics
+            .iter()
+            .filter(|(_, diagnostic)| {
+                matches!(diagnostic, hir::InferenceDiagnostic::UnresolvedName { .. })
+            })
+            .count()
+    };
+    assert_eq!(unresolved_count(&db), 1, "bundled 8.3.27 target is complete");
+
+    db.set_target_platform_version(Some(Arc::<str>::from("8.3.28")));
+    assert_eq!(
+        unresolved_count(&db),
+        0,
+        "a newer runtime target must invalidate the inference query and restore Indeterminate"
+    );
+}
+
+#[test]
+fn boot_window_keeps_user_global_surface_indeterminate() {
+    use hir::HirDatabase;
+    use test_fixture::CfeFixtureBuilder;
+
+    let fixture = CfeFixtureBuilder::new("").build();
+    let source = "Процедура Тест() Экспорт\nНеизвестныйМодуль.Метод();\nКонецПроцедуры";
+    let caller_path = write_cfe_common_module(fixture.root(), "Caller", false, source);
+    let caller = FileId(0);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_text(caller, source);
+    db.set_all_config_paths(fixture.config_paths());
+    db.set_workspace_load_complete(false);
+
+    let unresolved_count = |db: &RootDatabaseImpl| {
+        db.infer(caller)
+            .diagnostics
+            .iter()
+            .filter(|(_, diagnostic)| {
+                matches!(diagnostic, hir::InferenceDiagnostic::UnresolvedName { .. })
+            })
+            .count()
+    };
+    assert_eq!(unresolved_count(&db), 0, "boot metadata is not a complete surface");
+
+    db.set_workspace_load_complete(true);
+    assert_eq!(
+        unresolved_count(&db),
+        1,
+        "the load-state input must invalidate inference once the empty fixture is complete"
     );
 }
 

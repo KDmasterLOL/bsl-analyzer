@@ -993,6 +993,21 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
     check_with_cfe_unreadable(source, fixture, &[])
 }
 
+pub fn check_with_cfe_config(
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    config: crate::DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    check_cfe_at_with_unreadable_config(
+        "CommonModules/Caller/Ext/Module.bsl",
+        source,
+        fixture,
+        &[],
+        config,
+        crate::diagnostics,
+    )
+}
+
 /// [`check_with_cfe`], with the named module bodies registered as existing but
 /// unreadable. Names are paths relative to the fixture root and are matched WHOLE, so
 /// `"CommonModules/Сервер/Ext/Module.bsl"` names the base body and
@@ -1021,6 +1036,24 @@ pub fn check_cfe_at_with_unreadable(
     source: &str,
     fixture: test_fixture::CfeFixture,
     unreadable: &[&str],
+    run: impl FnOnce(&crate::DiagnosticsContext<'_>) -> Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    check_cfe_at_with_unreadable_config(
+        caller_relative,
+        source,
+        fixture,
+        unreadable,
+        crate::DiagnosticsConfig::all_enabled(),
+        run,
+    )
+}
+
+fn check_cfe_at_with_unreadable_config(
+    caller_relative: &str,
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    unreadable: &[&str],
+    config: crate::DiagnosticsConfig,
     run: impl FnOnce(&crate::DiagnosticsContext<'_>) -> Vec<Diagnostic>,
 ) -> Vec<Diagnostic> {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
@@ -1059,7 +1092,7 @@ pub fn check_cfe_at_with_unreadable(
         let path = fixture.root().join(format!("CommonModules/{}/Ext/Module.bsl", module.name()));
         let spelling = relative_to_root(&path);
         file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
-        module_files.push((fid, module.source(), spelling));
+        module_files.push((fid, module.source().to_string(), spelling));
     }
     for extension in fixture.extensions() {
         for module in extension.modules() {
@@ -1068,7 +1101,20 @@ pub fn check_cfe_at_with_unreadable(
                 extension.root().join(format!("CommonModules/{}/Ext/Module.bsl", module.name()));
             let spelling = relative_to_root(&path);
             file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
-            module_files.push((fid, module.source(), spelling));
+            module_files.push((fid, module.source().to_string(), spelling));
+        }
+    }
+    for (_, root) in fixture.config_paths() {
+        for kind in hir::ApplicationModuleKind::ALL {
+            let path = root.join(kind.relative_path());
+            if !path.is_file() {
+                continue;
+            }
+            let fid = FileId((module_files.len() + 1) as u32);
+            let spelling = relative_to_root(&path);
+            let body = std::fs::read_to_string(&path).expect("read application-module fixture");
+            file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
+            module_files.push((fid, body, spelling));
         }
     }
 
@@ -1083,7 +1129,7 @@ pub fn check_cfe_at_with_unreadable(
             db.set_file_unreadable(fid);
             marked += 1;
         } else {
-            db.set_file_text(fid, body);
+            db.set_file_text(fid, &body);
         }
     }
     assert_eq!(
@@ -1099,7 +1145,6 @@ pub fn check_cfe_at_with_unreadable(
         db.config_root_revision_for_path(std::path::Path::new(config_path.as_ref())),
     );
     let provider = ide_db::SalsaProvider::new(&db, Some(config_path_input));
-    let config = crate::DiagnosticsConfig::all_enabled();
     let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);
 
     run(&ctx)

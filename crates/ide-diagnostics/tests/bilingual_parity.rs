@@ -264,6 +264,10 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
         "annotation/parameter transfer diagnostic",
     ),
     (DiagnosticCode::UnsafeFindByCode, "known bug: message embeds manager/object names"),
+    (
+        DiagnosticCode::UnresolvedName,
+        "message names the unresolved root exactly as the source spells it, by design",
+    ),
     (DiagnosticCode::UnresolvedMethodCall, "known bug: message embeds receiver and method names"),
     (
         DiagnosticCode::MismatchedArgCount,
@@ -601,7 +605,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 190, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 191, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]

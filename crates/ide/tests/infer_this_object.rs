@@ -69,6 +69,23 @@ fn infer_this_object_resolves_to_catalog_owner() {
 }
 
 #[test]
+fn unknown_typed_assignment_does_not_hide_object_attribute_type() {
+    let text = r#"
+Процедура Тест(НеизвестныйПараметр)
+    Реквизит1 = НеизвестныйПараметр;
+    Результат = Реквизит1;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(text);
+    let actual = var_ty(&db, file_id, "результат").expect("attribute type must reach result");
+    assert!(
+        matches!(db.lookup_type(actual), TypeKind::String(_)),
+        "an Unknown assignment value must not replace the declared attribute type: {:?}",
+        db.lookup_type(actual)
+    );
+}
+
+#[test]
 fn infer_this_object_english_spelling() {
     let text = r#"
 Функция Test()

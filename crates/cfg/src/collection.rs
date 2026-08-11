@@ -5,11 +5,15 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleCfgs {
     cfgs: FxHashMap<u32, Arc<ControlFlowGraph>>,
+    module_code: Option<Arc<ControlFlowGraph>>,
 }
 
 impl ModuleCfgs {
-    pub fn new(cfgs: FxHashMap<u32, Arc<ControlFlowGraph>>) -> Self {
-        Self { cfgs }
+    pub fn new(
+        cfgs: FxHashMap<u32, Arc<ControlFlowGraph>>,
+        module_code: Option<Arc<ControlFlowGraph>>,
+    ) -> Self {
+        Self { cfgs, module_code }
     }
 
     pub fn get(&self, local_id: u32) -> Option<&Arc<ControlFlowGraph>> {
@@ -20,12 +24,16 @@ impl ModuleCfgs {
         self.cfgs.iter().map(|(&id, cfg)| (id, cfg))
     }
 
+    pub fn module_code(&self) -> Option<&Arc<ControlFlowGraph>> {
+        self.module_code.as_ref()
+    }
+
     pub fn len(&self) -> usize {
-        self.cfgs.len()
+        self.cfgs.len() + usize::from(self.module_code.is_some())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cfgs.is_empty()
+        self.cfgs.is_empty() && self.module_code.is_none()
     }
 
     /// Approximate live heap bytes of all per-method CFGs for Salsa's
@@ -43,6 +51,10 @@ impl ModuleCfgs {
         let mut bytes = cap * (size_of::<u32>() + size_of::<Arc<ControlFlowGraph>>() + 1);
         for cfg in self.cfgs.values() {
             bytes += cfg.estimated_heap();
+        }
+        if self.module_code.is_some() {
+            // The module-level query owns this shared graph and counts its payload.
+            bytes += std::mem::size_of::<Arc<ControlFlowGraph>>();
         }
         bytes
     }

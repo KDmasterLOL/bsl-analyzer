@@ -607,12 +607,15 @@ fn complete_global_module_exports<DB: RootDatabase>(
 
     let mut items = Vec::new();
     let mut blocked = Vec::new();
-    for (module_name, method_name, method_id) in resolver.global_common_module_exports(db).entries {
-        if !matcher.admits(method_name.as_str()) {
+    for entry in resolver.global_common_module_exports(db).entries {
+        let hir::GlobalExportDefinition::Method(method_id) = entry.definition else {
+            continue;
+        };
+        if entry.capabilities.callable != Some(true) || !matcher.admits(entry.name.as_str()) {
             continue;
         }
-        if !env.admits_common_module(db, file_id, module_name.as_str()) {
-            blocked.push(method_name.as_str().to_string());
+        if !env.admits_common_module(db, file_id, entry.module.as_str()) {
+            blocked.push(entry.name.as_str().to_string());
             continue;
         }
         let symbol_tree = db.symbol_tree(method_id.module);
@@ -622,7 +625,7 @@ fn complete_global_module_exports<DB: RootDatabase>(
         items.push(super::platform_completion::render_common_module_method(
             db,
             file_id,
-            &module_name,
+            &entry.module,
             method,
         ));
     }

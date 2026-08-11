@@ -37,7 +37,7 @@ pub fn from_hir(
         // which is not the one with the problem. The unreadable file is reported at
         // its own address, once, by the host that failed to read it.
         UnresolvedMethodKind::BodyUnread => return None,
-        UnresolvedMethodKind::ReceiverNotResolved => {
+        UnresolvedMethodKind::ReceiverNotResolved | UnresolvedMethodKind::ReceiverNameAbsent => {
             format!("Не удалось разрешить модуль '{}'", receiver_name.as_str())
         }
     };

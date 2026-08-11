@@ -3,6 +3,7 @@ use hir::{BodySourceMap, DefWithBodyId, ExprId, InferenceDiagnostic, RedundantAc
 use ide_db::TextRange;
 
 pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::UnresolvedName,
     DiagnosticCode::UnresolvedMethodCall,
     DiagnosticCode::MismatchedArgCount,
     DiagnosticCode::TypeMismatch,
@@ -83,6 +84,7 @@ fn dispatch_pairs(
 
 fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
     match diag {
+        InferenceDiagnostic::UnresolvedName { expr, .. } => *expr,
         InferenceDiagnostic::UnresolvedMethodCall { expr, .. } => *expr,
         InferenceDiagnostic::MismatchedArgCount { call_expr, .. } => *call_expr,
         InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
@@ -109,7 +111,15 @@ fn dispatch_inference_diagnostic(
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     match diag {
+        InferenceDiagnostic::UnresolvedName { name, .. } => {
+            handlers::unresolved_name::from_hir(name, range, ctx)
+        }
         InferenceDiagnostic::UnresolvedMethodCall { receiver_name, method_name, kind, .. } => {
+            if *kind == hir::UnresolvedMethodKind::ReceiverNameAbsent
+                && !ctx.config.is_disabled(DiagnosticCode::UnresolvedName)
+            {
+                return None;
+            }
             handlers::unresolved_method_call::from_hir(
                 receiver_name,
                 method_name,

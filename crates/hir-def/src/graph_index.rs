@@ -2546,8 +2546,10 @@ mod module_layout_hash_tests {
                     crate::call_graph::extract_graph_methods(&crate::ItemTree::from_parse(&parse));
                 index.insert_module_data(module, methods, None, false);
             }
-            let candidates =
-                crate::resolver::CommonModuleCandidates::new(vec![(base, false), (ext, false)]);
+            let candidates = crate::resolver::CommonModuleCandidates::new(
+                vec![(base, false), (ext, false)],
+                false,
+            );
             let name = Name::new("П");
             super::reference_targets(&candidates, |m| index.find_method(m, &name))
         }

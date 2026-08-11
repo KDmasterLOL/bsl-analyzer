@@ -70,6 +70,14 @@ pub trait RootDatabase:
     /// at "the first" unread body, and in this order the unread one can be last.
     fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies;
 
+    /// Uncached application-host path lookup used only behind the tracked
+    /// `application_module_files_query` aggregation.
+    fn resolve_application_module_files_uncached(
+        &self,
+        file_id: FileId,
+        kind: hir::ApplicationModuleKind,
+    ) -> Option<hir::CommonModuleBodies>;
+
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,

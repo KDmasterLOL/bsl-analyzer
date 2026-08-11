@@ -105,6 +105,7 @@ mod tests {
         let code = r#"#Область ПрограммныйИнтерфейс
 // Описание
 Процедура Тест() Экспорт
+    ИмяФайла = "test.txt";
     Если Новый File(ИмяФайла) = Неопределено Тогда
         Возврат;
     КонецЕсли;
@@ -121,7 +122,7 @@ mod tests {
             code,
             builder.build(),
             expect![[r#"
-                FileSystemAccess @ 4:10..4:30
+                FileSystemAccess @ 5:10..5:30
                   message: File system access detected (security review required)
                   severity: Major"#]],
         );

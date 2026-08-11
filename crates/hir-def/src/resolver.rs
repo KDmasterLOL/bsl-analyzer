@@ -310,7 +310,7 @@ impl Resolver {
             return GlobalExports::default();
         };
         let mut exports = Vec::new();
-        let mut surface_partly_unknown = false;
+        let mut gaps = Vec::new();
         for module_name in self.global_common_module_names(db) {
             let effective_is_global = db
                 .resolve_common_module(self_module.file_id, module_name.as_str())
@@ -319,6 +319,7 @@ impl Resolver {
                 continue;
             }
             let Ok(candidates) = self.locate_common_module_candidates(db, &module_name) else {
+                gaps.push(GlobalSurfaceGap::MissingBody { module: module_name });
                 continue;
             };
             // Base first, then the caller's own extension body: a name declared
@@ -327,21 +328,99 @@ impl Resolver {
             // every readable body and stops where a qualified call would — at the
             // first unread one, whose exports are unknown and whom a body behind it
             // must not extend the global context in place of.
-            let mut seen = rustc_hash::FxHashSet::default();
+            let missing_body = candidates.missing_body();
+            if missing_body {
+                gaps.push(GlobalSurfaceGap::MissingBody { module: module_name.clone() });
+            }
+            let mut seen_methods = rustc_hash::FxHashSet::default();
             let walk: crate::configs::BodySearch<()> = candidates.search(|module_id| {
                 let symbol_tree = db.symbol_tree_ref(module_id);
                 for method in symbol_tree.exported_methods() {
-                    if seen.insert(intern::NormName::intern(method.name.as_str())) {
-                        exports.push((module_name.clone(), method.name.clone(), method.id));
+                    if seen_methods.insert(intern::NormName::intern(method.name.as_str())) {
+                        exports.push(GlobalExportEntry {
+                            module: module_name.clone(),
+                            host: GlobalExportHost::CommonModule,
+                            name: method.name.clone(),
+                            definition: GlobalExportDefinition::Method(method.id),
+                            capabilities: GlobalExportCapabilities {
+                                readable_as_value: Some(false),
+                                callable: Some(true),
+                                assignable: Some(false),
+                            },
+                        });
+                    }
+                }
+                // Common modules cannot legally contain module variables; EDT
+                // reports such a body as invalid. Parser-recovery variables must
+                // therefore not extend the user global surface.
+                None
+            });
+            if !missing_body && matches!(walk, crate::configs::BodySearch::Unread) {
+                gaps.push(GlobalSurfaceGap::UnreadBody { module: module_name });
+            }
+        }
+        GlobalExports { entries: exports, gaps }
+    }
+
+    /// Exported methods and variables of application-context host modules visible
+    /// to this caller. Unlike global common modules, application and external-
+    /// connection module variables are legal and extend their respective global
+    /// contexts.
+    pub fn application_module_exports(&self, db: &dyn ConfigsDatabase) -> GlobalExports {
+        let Some(self_module) = self.module_id() else {
+            return GlobalExports::default();
+        };
+        let mut exports = Vec::new();
+        let mut gaps = Vec::new();
+        for kind in crate::ApplicationModuleKind::ALL {
+            let Some(bodies) =
+                db.resolve_application_module_file_candidates(self_module.file_id, kind)
+            else {
+                gaps.push(GlobalSurfaceGap::UnindexedApplicationModules { kind });
+                continue;
+            };
+            let mut seen_methods = rustc_hash::FxHashSet::default();
+            let mut seen_variables = rustc_hash::FxHashSet::default();
+            let walk: crate::BodySearch<()> = bodies.search_merged_surface(|module_id| {
+                let module_id = ModuleId::new(module_id);
+                let symbol_tree = db.symbol_tree_ref(module_id);
+                for method in symbol_tree.exported_methods() {
+                    if seen_methods.insert(intern::NormName::intern(method.name.as_str())) {
+                        exports.push(GlobalExportEntry {
+                            module: application_module_name(kind),
+                            host: GlobalExportHost::ApplicationModule(kind),
+                            name: method.name.clone(),
+                            definition: GlobalExportDefinition::Method(method.id),
+                            capabilities: GlobalExportCapabilities {
+                                readable_as_value: Some(false),
+                                callable: Some(true),
+                                assignable: Some(false),
+                            },
+                        });
+                    }
+                }
+                for variable in symbol_tree.exported_variables() {
+                    if seen_variables.insert(intern::NormName::intern(variable.name.as_str())) {
+                        exports.push(GlobalExportEntry {
+                            module: application_module_name(kind),
+                            host: GlobalExportHost::ApplicationModule(kind),
+                            name: variable.name.clone(),
+                            definition: GlobalExportDefinition::Variable(variable.id),
+                            capabilities: GlobalExportCapabilities {
+                                readable_as_value: Some(true),
+                                callable: Some(false),
+                                assignable: None,
+                            },
+                        });
                     }
                 }
                 None
             });
-            if matches!(walk, crate::configs::BodySearch::Unread) {
-                surface_partly_unknown = true;
+            if matches!(walk, crate::BodySearch::Unread) {
+                gaps.push(GlobalSurfaceGap::UnreadApplicationModule { kind });
             }
         }
-        GlobalExports { entries: exports, surface_partly_unknown }
+        GlobalExports { entries: exports, gaps }
     }
 
     pub fn resolve_assignment_target(
@@ -479,8 +558,20 @@ impl Resolver {
                     // not have — that decision belongs to `search` one level up.
                     // Reporting the outcome here would also hide the unread ids from
                     // the graph index, which needs them to reproject on healing.
+                    let expected_bodies = db
+                        .configurations(file_id)
+                        .iter()
+                        .filter(|cfg| {
+                            cfg.configuration.common_modules().iter().any(|cm| {
+                                intern::NormName::intern(cm.name())
+                                    == intern::NormName::intern(module_name.as_str())
+                            })
+                        })
+                        .count();
+                    let known_bodies = bodies.iter().count();
                     return Ok(CommonModuleCandidates::new(
                         bodies.iter().map(|b| (crate::ModuleId::new(b.file), b.unread)).collect(),
+                        known_bodies < expected_bodies,
                     ));
                 }
                 // Configs see the module but no body file mapped (metadata-URI
@@ -500,10 +591,10 @@ impl Resolver {
         // exactly like any other file — its entry cannot be dropped, because the first
         // query through a dropped id panics resolving its path. So the sorting happens
         // here, on the way out.
-        Ok(CommonModuleCandidates::new(vec![(
-            crate::ModuleId::new(target_file_id),
-            db.file_is_unread(target_file_id),
-        )]))
+        Ok(CommonModuleCandidates::new(
+            vec![(crate::ModuleId::new(target_file_id), db.file_is_unread(target_file_id))],
+            false,
+        ))
     }
 
     pub fn resolve_qualified_method(
@@ -857,23 +948,74 @@ pub enum AssignmentResolution {
     Unknown,
 }
 
+fn application_module_name(kind: crate::ApplicationModuleKind) -> Name {
+    Name::new(match kind {
+        crate::ApplicationModuleKind::Managed => "МодульУправляемогоПриложения",
+        crate::ApplicationModuleKind::Ordinary => "МодульОбычногоПриложения",
+        crate::ApplicationModuleKind::Generic => "МодульПриложения",
+        crate::ApplicationModuleKind::ExternalConnection => "МодульВнешнегоСоединения",
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QualifiedMethodResolution {
     pub method_id: MethodId,
     pub is_export: bool,
 }
 
-/// The exported surface of the visible GLOBAL common modules, plus whether it is the
-/// WHOLE surface.
+/// A symbol exported into the bare global context by a global common module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalExportEntry {
+    pub module: Name,
+    pub host: GlobalExportHost,
+    pub name: Name,
+    pub definition: GlobalExportDefinition,
+    pub capabilities: GlobalExportCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalExportDefinition {
+    Method(MethodId),
+    Variable(VariableId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalExportHost {
+    CommonModule,
+    ApplicationModule(crate::ApplicationModuleKind),
+}
+
+/// Use capabilities measured by the language layer, independent of `hir-ty`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalExportCapabilities {
+    /// `None` means the Stage-0 runtime probes have not established the verdict.
+    pub readable_as_value: Option<bool>,
+    pub callable: Option<bool>,
+    pub assignable: Option<bool>,
+}
+
+/// A reason the visible user-global surface cannot prove absence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GlobalSurfaceGap {
+    MissingBody { module: Name },
+    UnreadBody { module: Name },
+    UnindexedApplicationModules { kind: crate::ApplicationModuleKind },
+    UnreadApplicationModule { kind: crate::ApplicationModuleKind },
+}
+
+/// The exported surface of visible global common modules, including exact gap
+/// reasons. Entries are inventory only; `hir-ty` decides which capabilities are
+/// active for each bare-name use.
 #[derive(Debug, Default)]
 pub struct GlobalExports {
-    /// `(module_name, method_name, method_id)` in resolution order.
-    pub entries: Vec<(Name, Name, MethodId)>,
-    /// A visible global common module has a body nobody could read, so a name absent
-    /// from `entries` is not proven absent from the global context — and a global
-    /// export shadows the platform global of the same name, so nothing may be
-    /// concluded about a bare call to such a name either.
-    pub surface_partly_unknown: bool,
+    pub entries: Vec<GlobalExportEntry>,
+    pub gaps: Vec<GlobalSurfaceGap>,
+}
+
+impl GlobalExports {
+    pub fn is_complete(&self) -> bool {
+        self.gaps.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -905,11 +1047,16 @@ pub(crate) struct CommonModuleCandidates {
     /// barrier that looks like an ordinary loop. All three walks live in this crate,
     /// so leaving it open here would be leaving it open exactly where it matters.
     bodies: Vec<(ModuleId, bool)>,
+    missing_body: bool,
 }
 
 impl CommonModuleCandidates {
-    pub(crate) fn new(bodies: Vec<(ModuleId, bool)>) -> Self {
-        Self { bodies }
+    pub(crate) fn new(bodies: Vec<(ModuleId, bool)>, missing_body: bool) -> Self {
+        Self { bodies, missing_body }
+    }
+
+    pub(crate) fn missing_body(&self) -> bool {
+        self.missing_body
     }
 
     /// The module-level twin of [`crate::configs::CommonModuleBodies::search`], with the

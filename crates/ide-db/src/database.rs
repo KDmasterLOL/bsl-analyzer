@@ -166,6 +166,7 @@ impl RootDatabaseImpl {
         let _ = FeaturesInput::builder(
             defaults.type_narrowing,
             hir::execution_env::EnvOptions::default(),
+            None,
         )
         .durability(Durability::MEDIUM)
         .new(&db);
@@ -1873,6 +1874,53 @@ impl RootDatabaseImpl {
         out
     }
 
+    /// Fixed application-module body files visible to `file_id`, in overlay
+    /// composition order (base first). An empty result is complete: every visible
+    /// root was examined and none contained that fixed path.
+    pub fn resolve_application_module_files_for_file(
+        &self,
+        file_id: FileId,
+        kind: hir::ApplicationModuleKind,
+    ) -> Option<hir::CommonModuleBodies> {
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        queries::application_module_files_query(self, file_id_input, kind)
+    }
+
+    fn resolve_application_module_files_uncached_impl(
+        &self,
+        file_id: FileId,
+        kind: hir::ApplicationModuleKind,
+    ) -> Option<hir::CommonModuleBodies> {
+        use base_db::SourceDatabase;
+
+        let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        let roots = if RootDatabaseImpl::all_config_paths(self).is_empty() {
+            vec![vfs_helpers::find_configuration_root(self, &file_path)?]
+        } else {
+            let visible = self.visible_roots_for_file(file_id)?;
+            visible
+                .main
+                .into_iter()
+                .chain(visible.chain.into_iter().map(|(_, path)| path))
+                .collect()
+        };
+        let source_root_id = self.file_source_root_input(file_id).source_root_id(self);
+        let source_root = self.source_root_input(source_root_id);
+        let relative_path = kind.relative_path();
+        let modes =
+            hir::module_path_segment_modes(&relative_path.to_string_lossy()).unwrap_or_default();
+        let mut bodies = hir::CommonModuleBodies::default();
+        for root in roots {
+            let candidate = root.join(&relative_path).to_string_lossy().into_owned();
+            if let Some(found) =
+                base_db::resolve_vfs_path_ci_query(self, source_root, candidate, &modes)
+            {
+                bodies.push(found, self.file_is_unread(found));
+            }
+        }
+        Some(bodies)
+    }
+
     fn features(&self) -> FeaturesInput {
         FeaturesInput::try_get(self).expect("FeaturesInput is created in RootDatabaseImpl::new")
     }
@@ -1895,6 +1943,16 @@ impl RootDatabaseImpl {
         use salsa::Setter;
         let input = self.features();
         input.set_env_options(self).to(options);
+    }
+
+    pub fn target_platform_version(&self) -> Option<Arc<str>> {
+        self.features().target_platform_version(self)
+    }
+
+    pub fn set_target_platform_version(&mut self, version: Option<Arc<str>>) {
+        use salsa::Setter;
+        let input = self.features();
+        input.set_target_platform_version(self).to(version);
     }
 
     pub(crate) fn get_file_path(&self, file_id: FileId) -> Option<PathBuf> {
@@ -2282,6 +2340,14 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         Some(bodies)
     }
 
+    fn resolve_application_module_file_candidates(
+        &self,
+        file_id: FileId,
+        kind: hir::ApplicationModuleKind,
+    ) -> Option<hir::CommonModuleBodies> {
+        self.resolve_application_module_files_for_file(file_id, kind)
+    }
+
     fn resolve_event_subscription(
         &self,
         file_id: FileId,
@@ -2503,6 +2569,14 @@ impl hir::HirDatabase for RootDatabaseImpl {
         RootDatabaseImpl::env_options(self)
     }
 
+    fn target_platform_version(&self) -> Option<Arc<str>> {
+        RootDatabaseImpl::target_platform_version(self)
+    }
+
+    fn workspace_load_complete(&self) -> bool {
+        RootDatabaseImpl::workspace_load_complete(self)
+    }
+
     fn proc_signature(
         &self,
         method_input: hir::MethodIdInput<'_>,
@@ -2623,6 +2697,14 @@ impl RootDatabase for RootDatabaseImpl {
 
     fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies {
         RootDatabaseImpl::resolve_common_module_files_for_file(self, file_id, name)
+    }
+
+    fn resolve_application_module_files_uncached(
+        &self,
+        file_id: FileId,
+        kind: hir::ApplicationModuleKind,
+    ) -> Option<hir::CommonModuleBodies> {
+        self.resolve_application_module_files_uncached_impl(file_id, kind)
     }
 
     fn all_sdbl_in_file(

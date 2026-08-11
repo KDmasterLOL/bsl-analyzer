@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use hir::{Builders, HirDatabase, TypeKernelDb, TypeKind, UnresolvedMethodKind};
+use hir::{
+    Builders, HirDatabase, InferenceDiagnostic, TypeKernelDb, TypeKind, UnresolvedMethodKind,
+};
 use ide_db::base_db::SourceDatabase;
 
 #[path = "infer_three_level/support.rs"]
@@ -183,7 +185,7 @@ fn self_qualified_call_in_report_manager_still_checks_the_method() {
     let fixture = r#"
 //- /Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl
 Процедура Тест()
-    ТестовыйОтчёт.НетТакогоМетода();
+    ТЕСТОВЫЙОТЧЁТ.НетТакогоМетода();
 КонецПроцедуры
 "#;
     let (db, file_id) =
@@ -193,6 +195,13 @@ fn self_qualified_call_in_report_manager_still_checks_the_method() {
         vec![UnresolvedMethodKind::MethodNotFound],
         "a self-qualified call is re-resolved as the collection-qualified one, so a \
          misspelled method keeps its diagnostic"
+    );
+    assert!(
+        db.infer(file_id).diagnostics.iter().all(|(_, diagnostic)| !matches!(
+            diagnostic,
+            InferenceDiagnostic::UnresolvedName { .. }
+        )),
+        "the resolved self-manager root must not also be classified as absent"
     );
 }
 

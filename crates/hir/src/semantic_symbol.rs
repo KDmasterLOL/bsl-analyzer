@@ -371,8 +371,14 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
                 .global_common_module_exports(self.db());
             // First occurrence wins, matching the linear `find` this replaces
             // (and the deterministic-winner contract of the export list).
-            for (_, method_name, method_id) in exports.entries {
-                map.entry(fold_lower_per_char(method_name.as_str())).or_insert(method_id);
+            for entry in exports.entries {
+                if let hir_def::resolver::GlobalExportDefinition::Method(method_id) =
+                    entry.definition
+                {
+                    if entry.capabilities.callable == Some(true) {
+                        map.entry(fold_lower_per_char(entry.name.as_str())).or_insert(method_id);
+                    }
+                }
             }
             map
         })

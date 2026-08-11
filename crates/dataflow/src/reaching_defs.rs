@@ -597,23 +597,31 @@ impl Transfer<ReachingDefs> for ReachingDefsTransfer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleReachingDefs {
     results: rustc_hash::FxHashMap<u32, std::sync::Arc<ReachingDefsResult>>,
+    module_code: Option<std::sync::Arc<ReachingDefsResult>>,
 }
 
 impl ModuleReachingDefs {
-    pub fn new(results: rustc_hash::FxHashMap<u32, std::sync::Arc<ReachingDefsResult>>) -> Self {
-        Self { results }
+    pub fn new(
+        results: rustc_hash::FxHashMap<u32, std::sync::Arc<ReachingDefsResult>>,
+        module_code: Option<std::sync::Arc<ReachingDefsResult>>,
+    ) -> Self {
+        Self { results, module_code }
     }
 
     pub fn get(&self, local_id: u32) -> Option<&std::sync::Arc<ReachingDefsResult>> {
         self.results.get(&local_id)
     }
 
+    pub fn module_code(&self) -> Option<&std::sync::Arc<ReachingDefsResult>> {
+        self.module_code.as_ref()
+    }
+
     pub fn len(&self) -> usize {
-        self.results.len()
+        self.results.len() + usize::from(self.module_code.is_some())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.results.is_empty()
+        self.results.is_empty() && self.module_code.is_none()
     }
 
     /// Approximate live heap bytes for Salsa's `memory_usage` report: the per-method
@@ -625,6 +633,10 @@ impl ModuleReachingDefs {
             crate::map_table_bytes::<u32, std::sync::Arc<ReachingDefsResult>>(self.results.len());
         for result in self.results.values() {
             bytes += result.estimated_heap();
+        }
+        if let Some(result) = &self.module_code {
+            bytes +=
+                std::mem::size_of::<std::sync::Arc<ReachingDefsResult>>() + result.estimated_heap();
         }
         bytes
     }

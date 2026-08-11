@@ -63,6 +63,40 @@ pub enum BodySearch<T> {
     Unread,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ApplicationModuleKind {
+    Managed,
+    Ordinary,
+    Generic,
+    ExternalConnection,
+}
+
+impl ApplicationModuleKind {
+    pub const ALL: [Self; 4] =
+        [Self::Managed, Self::Ordinary, Self::Generic, Self::ExternalConnection];
+
+    pub fn relative_path(self) -> std::path::PathBuf {
+        use bsl_conventions::ConventionalName as Conv;
+
+        let file = match self {
+            Self::Managed => Conv::ManagedApplicationModule,
+            Self::Ordinary => Conv::OrdinaryApplicationModule,
+            Self::Generic => Conv::ApplicationModule,
+            Self::ExternalConnection => Conv::ExternalConnectionModule,
+        };
+        std::path::Path::new(Conv::Ext.canonical()).join(file.canonical())
+    }
+
+    pub fn module_type(self) -> bsl_metadata::ModuleType {
+        match self {
+            Self::Managed => bsl_metadata::ModuleType::ManagedApplicationModule,
+            Self::Ordinary => bsl_metadata::ModuleType::OrdinaryApplicationModule,
+            Self::Generic => bsl_metadata::ModuleType::ApplicationModule,
+            Self::ExternalConnection => bsl_metadata::ModuleType::ExternalConnectionModule,
+        }
+    }
+}
+
 impl CommonModuleBodies {
     /// No body of this module is known at all. The signal to degrade to the
     /// path-derived module index.
@@ -233,6 +267,19 @@ pub trait ConfigsDatabase: DefDatabase {
         name: &str,
     ) -> Option<CommonModuleBodies> {
         let _ = (file_id, name);
+        None
+    }
+
+    /// Application-module bodies visible to `file_id`, base first and the
+    /// caller's extension/dependency chain afterwards. `Some(empty)` proves the
+    /// fixed module path is absent from every visible root; `None` means the
+    /// provider cannot enumerate the surface and callers must stay conservative.
+    fn resolve_application_module_file_candidates(
+        &self,
+        file_id: FileId,
+        kind: ApplicationModuleKind,
+    ) -> Option<CommonModuleBodies> {
+        let _ = (file_id, kind);
         None
     }
 

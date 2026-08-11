@@ -165,6 +165,7 @@ pub enum DiagnosticCode {
     WeavingAnnotationNotApplicable,
     WeavingSignatureMismatch,
 
+    UnresolvedName,
     UnresolvedMethodCall,
     MismatchedArgCount,
     TypeMismatch,
