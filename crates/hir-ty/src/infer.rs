@@ -2210,7 +2210,9 @@ impl<'db> InferenceContext<'db> {
         }
 
         let user_shadows =
-            matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)));
+            matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)))
+                || resolver.resolve_module_method(self.db, name).is_some()
+                || resolver.resolve_module_variable(self.db, name).is_some();
         let body_binding_shadows = self.body_declares_binding(name);
 
         if user_shadows || body_binding_shadows {

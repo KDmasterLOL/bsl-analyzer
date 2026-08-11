@@ -112,6 +112,23 @@ mod tests {
     }
 
     #[test]
+    fn module_variable_shadows_same_named_platform_function_on_read() {
+        use crate::test_utils::check_with_cfe;
+
+        let source = r#"
+Перем Формат;
+Процедура Тест()
+    Результат = Формат;
+КонецПроцедуры
+"#;
+        let diagnostics = check_with_cfe(source, test_fixture::CfeFixtureBuilder::new("").build());
+        assert!(
+            diagnostics.iter().all(|diag| diag.code != DiagnosticCode::UnresolvedName),
+            "a declared module variable must win over a same-named platform function: {diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn catalog_property_without_hbk_type_is_still_a_known_value() {
         use crate::test_utils::check_with_cfe;
 
