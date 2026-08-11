@@ -1,6 +1,7 @@
 pub mod capability;
 mod db;
 pub mod deprecation;
+mod global_catalog;
 pub mod security;
 pub mod standard_mdo_attributes;
 mod types;
@@ -27,6 +28,11 @@ pub use db::{
     type_methods_query, type_properties_query, MethodLookupInput, PlatformData, PlatformDataInner,
     PrefixedMethodLookupInput, TypeNameInput, GLOBAL_CONTEXT_OWNER,
     LEGACY_GLOBAL_FUNCTION_EN_ALIASES,
+};
+pub use global_catalog::{
+    PlatformCatalogStatus, PlatformGlobalCatalog, PlatformGlobalCatalogMetadata,
+    PlatformGlobalKind, PlatformGlobalSymbol, PlatformSymbolCapabilities, PlatformVersion,
+    PlatformVersionParseError,
 };
 pub use types::*;
 
