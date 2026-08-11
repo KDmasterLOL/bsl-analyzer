@@ -4,7 +4,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
 
-use crate::cache::graph_db_path;
 use crate::change_hub::{ChangeEntry, ChangeKind};
 use crate::graph_query::GraphDb;
 
@@ -116,7 +115,7 @@ impl GraphState {
                 }
             }
         }
-        let path = graph_db_path(self.workspace_root.as_deref()?);
+        let path = self.graph_db_path()?;
         let graph = GraphDb::open(&path).ok()?;
         let (generation, fingerprint, force_stale) = graph.freshness_token().ok()?;
         // The file at this path is not necessarily the one WE published: a daemon of another

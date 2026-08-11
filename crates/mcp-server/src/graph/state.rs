@@ -76,6 +76,7 @@ pub(crate) struct GraphState {
     pub(super) inner: Arc<Mutex<Inner>>,
     pub(super) scan: Arc<Mutex<Option<ScanCache>>>,
     pub(super) workspace_root: Option<PathBuf>,
+    pub(super) cache: Option<crate::cache::WorkspaceCacheLayout>,
     pub(super) drift_interval: Duration,
     /// The daemon's change hub, when this profile has one. The graph does NOT apply
     /// drift in place (its fast path deliberately full-rebuilds on a metadata touch); the
@@ -155,7 +156,18 @@ impl GraphState {
 
     /// A workspace graph that loads lazily on first use.
     pub(crate) fn for_workspace(workspace_root: PathBuf) -> Self {
-        Self::with_status(GraphStatus::Idle, Some(workspace_root))
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(&workspace_root);
+        Self::for_workspace_with_cache(workspace_root, cache)
+    }
+
+    /// A workspace graph whose derived database lives in `cache`.
+    pub(crate) fn for_workspace_with_cache(
+        workspace_root: PathBuf,
+        cache: crate::cache::WorkspaceCacheLayout,
+    ) -> Self {
+        let mut state = Self::with_status(GraphStatus::Idle, Some(workspace_root));
+        state.cache = Some(cache);
+        state
     }
 
     fn with_status(status: GraphStatus, workspace_root: Option<PathBuf>) -> Self {
@@ -163,6 +175,7 @@ impl GraphState {
             inner: Arc::new(Mutex::new(Inner { status, published: None })),
             scan: Arc::new(Mutex::new(None)),
             workspace_root,
+            cache: None,
             drift_interval: DRIFT_CHECK_INTERVAL,
             change_hub: None,
             hub_cursor: Arc::new(Mutex::new(None)),
@@ -191,6 +204,14 @@ impl GraphState {
     /// and two processes rebuilding it only race renames and flicker generations.
     pub(super) fn may_build(&self) -> bool {
         self.lease.owns_caches()
+    }
+
+    pub(super) fn cache(&self) -> Option<&crate::cache::WorkspaceCacheLayout> {
+        self.cache.as_ref()
+    }
+
+    pub(super) fn graph_db_path(&self) -> Option<PathBuf> {
+        self.cache().map(crate::cache::WorkspaceCacheLayout::graph_db_path)
     }
 
     /// Number of fingerprint walks performed (cache misses), for asserting that an
@@ -244,9 +265,9 @@ impl GraphState {
         let Some(local) = self.mark_seq.get().map(|counter| counter.load(Ordering::SeqCst)) else {
             return 0;
         };
-        let persisted = match self.workspace_root.as_deref() {
-            Some(root) => {
-                match bsl_search::Store::persisted_mark_seq(&crate::cache::search_db_path(root)) {
+        let persisted = match self.cache() {
+            Some(cache) => {
+                match bsl_search::Store::persisted_mark_seq(&cache.search_db_path()) {
                     Ok(seq) => seq,
                     Err(e) => {
                         // Falling back to the local mirror is the safe direction — a bound that
