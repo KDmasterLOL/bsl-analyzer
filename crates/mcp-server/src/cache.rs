@@ -92,6 +92,7 @@ pub fn workspace_cache_dir(workspace_root: &Path) -> PathBuf {
 }
 
 /// Ensure the workspace cache directory exists, returning its path.
+#[cfg(test)]
 pub fn ensure_workspace_cache_dir(workspace_root: &Path) -> std::io::Result<PathBuf> {
     let layout = WorkspaceCacheLayout::for_workspace(workspace_root);
     layout.ensure()?;
@@ -104,6 +105,7 @@ pub fn graph_db_path(workspace_root: &Path) -> PathBuf {
 }
 
 /// The code-search SQLite index path under the workspace cache directory.
+#[cfg(test)]
 pub fn search_db_path(workspace_root: &Path) -> PathBuf {
     WorkspaceCacheLayout::for_workspace(workspace_root).search_db_path()
 }

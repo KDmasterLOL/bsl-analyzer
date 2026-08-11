@@ -130,6 +130,7 @@ impl WorkspaceLease {
     /// whatever the last owner recorded. An unwritable or locked-out `.build` yields an
     /// unmanaged lease (see [`Inner::path`]) rather than an error: the daemon still works, it
     /// just cannot coordinate with a peer.
+    #[cfg(test)]
     pub(crate) fn claim(workspace_root: &Path) -> Self {
         let cache = crate::cache::WorkspaceCacheLayout::for_workspace(workspace_root);
         Self::claim_cache(&cache)

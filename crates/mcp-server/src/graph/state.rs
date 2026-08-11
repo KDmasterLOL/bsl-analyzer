@@ -155,6 +155,7 @@ impl GraphState {
     }
 
     /// A workspace graph that loads lazily on first use.
+    #[cfg(test)]
     pub(crate) fn for_workspace(workspace_root: PathBuf) -> Self {
         let cache = crate::cache::WorkspaceCacheLayout::for_workspace(&workspace_root);
         Self::for_workspace_with_cache(workspace_root, cache)
@@ -206,11 +207,11 @@ impl GraphState {
         self.lease.owns_caches()
     }
 
-    pub(super) fn cache(&self) -> Option<&crate::cache::WorkspaceCacheLayout> {
+    pub(crate) fn cache(&self) -> Option<&crate::cache::WorkspaceCacheLayout> {
         self.cache.as_ref()
     }
 
-    pub(super) fn graph_db_path(&self) -> Option<PathBuf> {
+    pub(crate) fn graph_db_path(&self) -> Option<PathBuf> {
         self.cache().map(crate::cache::WorkspaceCacheLayout::graph_db_path)
     }
 
