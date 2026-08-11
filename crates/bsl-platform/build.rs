@@ -1445,6 +1445,30 @@ fn append_global_catalog(code: &mut String, manifest_path: &Path) {
     };
     let platform_version = required("platform_version");
     let edt_version = required("edt_version");
+    let environment_mask_bits = source
+        .get("environment_mask_bits")
+        .and_then(|value| value.as_object())
+        .expect("Global catalog environment_mask_bits metadata is missing");
+    let expected_environment_mask_bits = [
+        ("thick_client", 1_u64),
+        ("thin_client", 2),
+        ("web_client", 4),
+        ("server", 8),
+        ("mobile_client", 16),
+        ("external_connection", 32),
+    ];
+    assert_eq!(
+        environment_mask_bits.len(),
+        expected_environment_mask_bits.len(),
+        "Global catalog environment_mask_bits contains an unknown or missing environment"
+    );
+    for (name, expected) in expected_environment_mask_bits {
+        assert_eq!(
+            environment_mask_bits.get(name).and_then(|value| value.as_u64()),
+            Some(expected),
+            "Global catalog environment bit for {name:?} disagrees with context_from_mask"
+        );
+    }
     let resources = source
         .get("resources")
         .and_then(|value| value.as_object())
