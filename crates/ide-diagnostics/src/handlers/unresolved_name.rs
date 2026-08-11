@@ -234,6 +234,37 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_application_host_exports_do_not_use_one_hosts_signature() {
+        use crate::test_utils::check_with_cfe;
+
+        let fixture = test_fixture::CfeFixtureBuilder::new("").build();
+        for (file, body) in [
+            (
+                "ManagedApplicationModule.bsl",
+                "Процедура ОбщаяПроцедура(Обязательный) Экспорт КонецПроцедуры",
+            ),
+            ("OrdinaryApplicationModule.bsl", "Процедура ОбщаяПроцедура() Экспорт КонецПроцедуры"),
+        ] {
+            let path = fixture.root().join("Ext").join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let source = "Процедура Тест()\nОбщаяПроцедура();\nКонецПроцедуры";
+        let diagnostics = check_with_cfe(source, fixture);
+        assert!(
+            diagnostics.iter().all(|diag| {
+                !matches!(
+                    diag.code,
+                    DiagnosticCode::MissedRequiredParameter
+                        | DiagnosticCode::MismatchedArgCount
+                        | DiagnosticCode::UnresolvedName
+                )
+            }),
+            "a call available through multiple application hosts must not inherit one host's incompatible signature: {diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn unread_application_module_keeps_unknown_name_indeterminate() {
         use crate::test_utils::check_with_cfe_unreadable;
 

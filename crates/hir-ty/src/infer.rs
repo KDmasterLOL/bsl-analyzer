@@ -414,14 +414,19 @@ pub struct CandidateCallBinding {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct GlobalCallableExport {
+struct GlobalCallableVariant {
     method: hir_def::MethodId,
     host: hir_def::resolver::GlobalExportHost,
 }
 
+#[derive(Debug, Clone)]
+struct GlobalCallableExport {
+    variants: Vec<GlobalCallableVariant>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct GlobalReadableExport {
-    host: hir_def::resolver::GlobalExportHost,
+    availability: hir_def::execution_env::EnvFlags,
 }
 
 pub struct InferenceContext<'db> {
@@ -872,20 +877,50 @@ impl<'db> InferenceContext<'db> {
                 )
             });
 
-        let mut callables = FxHashMap::default();
-        let mut readable = FxHashMap::default();
+        let mut callables: FxHashMap<NormName, GlobalCallableExport> = FxHashMap::default();
+        let mut readable: FxHashMap<NormName, GlobalReadableExport> = FxHashMap::default();
         for entry in common.entries.into_iter().chain(application.entries) {
             let key = NormName::intern(entry.name.as_str());
             if entry.capabilities.callable == Some(true) {
                 if let hir_def::resolver::GlobalExportDefinition::Method(method) = entry.definition
                 {
-                    callables
-                        .entry(key)
-                        .or_insert(GlobalCallableExport { method, host: entry.host });
+                    let variant = GlobalCallableVariant { method, host: entry.host };
+                    match callables.entry(key) {
+                        std::collections::hash_map::Entry::Vacant(slot) => {
+                            slot.insert(GlobalCallableExport { variants: vec![variant] });
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut slot)
+                            if slot.get().variants.iter().all(|v| {
+                                matches!(
+                                    v.host,
+                                    hir_def::resolver::GlobalExportHost::ApplicationModule(_)
+                                )
+                            }) && matches!(
+                                entry.host,
+                                hir_def::resolver::GlobalExportHost::ApplicationModule(_)
+                            ) =>
+                        {
+                            slot.get_mut().variants.push(variant);
+                        }
+                        std::collections::hash_map::Entry::Occupied(_) => {}
+                    }
                 }
             }
             if entry.capabilities.readable_as_value == Some(true) {
-                readable.entry(key).or_insert(GlobalReadableExport { host: entry.host });
+                let availability = match entry.host {
+                    hir_def::resolver::GlobalExportHost::CommonModule => {
+                        hir_def::execution_env::EnvFlags::ALL
+                    }
+                    hir_def::resolver::GlobalExportHost::ApplicationModule(kind) => {
+                        self.application_export_env(kind)
+                    }
+                };
+                readable
+                    .entry(key)
+                    .and_modify(|export| {
+                        export.availability = export.availability.union(availability)
+                    })
+                    .or_insert(GlobalReadableExport { availability });
             }
         }
         let callables = Arc::new(callables);
@@ -934,15 +969,23 @@ impl<'db> InferenceContext<'db> {
         args: &[ExprId],
         callee: ExprId,
     ) -> Option<TypeId> {
-        let export = self.global_export_map().get(&NormName::intern(name.as_str())).copied()?;
-        let method_id = export.method;
+        let export = self.global_export_map().get(&NormName::intern(name.as_str())).cloned()?;
+        let primary = *export.variants.first()?;
 
-        match export.host {
+        match primary.host {
             hir_def::resolver::GlobalExportHost::CommonModule => {
-                self.check_common_module_callee_env(callee, None, method_id.module);
+                self.check_common_module_callee_env(callee, None, primary.method.module);
             }
-            hir_def::resolver::GlobalExportHost::ApplicationModule(kind) => {
-                let availability = self.application_export_env(kind);
+            hir_def::resolver::GlobalExportHost::ApplicationModule(_) => {
+                let availability = export.variants.iter().fold(
+                    hir_def::execution_env::EnvFlags::EMPTY,
+                    |env, variant| match variant.host {
+                        hir_def::resolver::GlobalExportHost::ApplicationModule(kind) => {
+                            env | self.application_export_env(kind)
+                        }
+                        hir_def::resolver::GlobalExportHost::CommonModule => env,
+                    },
+                );
                 self.check_member_env(callee, name, availability, EnvMemberKind::Method);
             }
         }
@@ -951,18 +994,34 @@ impl<'db> InferenceContext<'db> {
             self.infer_expr(*arg);
         }
 
-        let symbol_tree = self.db.symbol_tree_ref(method_id.module);
-        let method_symbol = symbol_tree.find_method_by_id(method_id)?;
-        let signature = crate::method_resolution::materialise_signature_enriched(
-            self.db,
-            method_id,
-            method_symbol,
-        );
-
+        let signatures = export
+            .variants
+            .iter()
+            .filter_map(|variant| {
+                let symbol_tree = self.db.symbol_tree_ref(variant.method.module);
+                let method_symbol = symbol_tree.find_method_by_id(variant.method)?;
+                let signature = crate::method_resolution::materialise_signature_enriched(
+                    self.db,
+                    variant.method,
+                    method_symbol,
+                );
+                Some((variant.method, signature))
+            })
+            .collect::<Vec<_>>();
+        let (method_id, signature) = signatures.first()?;
         self.expr_types.insert(callee, self.db.unknown());
-        let return_ty = self.effective_local_return(method_id, signature.ret);
+
+        if signatures.len() > 1 {
+            let returns = signatures
+                .iter()
+                .map(|(method, signature)| self.effective_local_return(*method, signature.ret))
+                .collect();
+            return Some(self.db.union(returns));
+        }
+
+        let return_ty = self.effective_local_return(*method_id, signature.ret);
         let candidates =
-            crate::user_call_candidates::for_resolved_method(self.db, name, method_id, return_ty)
+            crate::user_call_candidates::for_resolved_method(self.db, name, *method_id, return_ty)
                 .ok()?;
         Some(self.record_candidate_call_arg_binding(callee, args, candidates))
     }
@@ -2332,14 +2391,13 @@ impl<'db> InferenceContext<'db> {
         // global functions on the call path.
         if !user_holds_name {
             if let Some(export) = self.global_read_export(name) {
-                let availability = match export.host {
-                    hir_def::resolver::GlobalExportHost::CommonModule => all_env,
-                    hir_def::resolver::GlobalExportHost::ApplicationModule(kind) => {
-                        self.application_export_env(kind)
-                    }
-                };
-                self.check_member_env(expr_id, name, availability, EnvMemberKind::GlobalVariable);
-                return found(self.db.unknown(), BareNameOrigin::GlobalExport, availability);
+                self.check_member_env(
+                    expr_id,
+                    name,
+                    export.availability,
+                    EnvMemberKind::GlobalVariable,
+                );
+                return found(self.db.unknown(), BareNameOrigin::GlobalExport, export.availability);
             }
         }
 
