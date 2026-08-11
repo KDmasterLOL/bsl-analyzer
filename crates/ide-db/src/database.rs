@@ -1819,11 +1819,16 @@ impl RootDatabaseImpl {
                 chain_listings.iter().rev().cloned().chain(std::iter::once(main_listing)).flatten()
             {
                 let index = metadata::common_module_index(self, listing);
-                if let Some(fid) = index.lookup_module_file(name) {
+                let readable = index.lookup_module_file(name);
+                let unread = index.lookup_unread_module_file(name);
+                if let Some(fid) = readable {
                     out.push(fid, false);
                 }
-                if let Some(fid) = index.lookup_unread_module_file(name) {
+                if let Some(fid) = unread {
                     out.push(fid, true);
+                }
+                if index.lookup(name).is_some() && readable.is_none() && unread.is_none() {
+                    out.mark_missing_expected_body();
                 }
             }
             return out;
@@ -1836,16 +1841,21 @@ impl RootDatabaseImpl {
         };
         let paths = RootDatabaseImpl::all_config_paths(self);
 
-        let body_in = |root: &std::path::Path| -> Option<FileId> {
+        let body_in = |root: &std::path::Path| -> (bool, Option<FileId>) {
             let path_input = metadata::intern_configuration_path(
                 self,
                 &root.to_string_lossy(),
                 self.config_root_revision_for_path(root),
             );
             let config = self.load_configuration(path_input);
-            let uri = config.find_common_module(name)?.uri()?;
-            let vfs_path = vfs::VfsPath::new(root.join(uri).to_string_lossy().into_owned());
-            self.resolve_vfs_path(SourceRootId(0), &vfs_path)
+            let Some(module) = config.find_common_module(name) else {
+                return (false, None);
+            };
+            let body = module.uri().and_then(|uri| {
+                let vfs_path = vfs::VfsPath::new(root.join(uri).to_string_lossy().into_owned());
+                self.resolve_vfs_path(SourceRootId(0), &vfs_path)
+            });
+            (true, body)
         };
 
         // The scan resolves a URI to an id without ever reading it, so readability is
@@ -1856,8 +1866,11 @@ impl RootDatabaseImpl {
 
         if paths.is_empty() {
             if let Some(root) = vfs_helpers::find_configuration_root(self, &file_path) {
-                if let Some(fid) = body_in(&root) {
+                let (declared, body) = body_in(&root);
+                if let Some(fid) = body {
                     admit(&mut out, fid);
+                } else if declared {
+                    out.mark_missing_expected_body();
                 }
             }
             return out;
@@ -1867,8 +1880,11 @@ impl RootDatabaseImpl {
             return out;
         };
         for root in roots.chain.iter().rev().map(|(_, p)| p).chain(roots.main.as_ref()) {
-            if let Some(fid) = body_in(root) {
+            let (declared, body) = body_in(root);
+            if let Some(fid) = body {
                 admit(&mut out, fid);
+            } else if declared {
+                out.mark_missing_expected_body();
             }
         }
         out

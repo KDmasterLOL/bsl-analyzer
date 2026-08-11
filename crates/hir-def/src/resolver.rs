@@ -558,20 +558,9 @@ impl Resolver {
                     // not have — that decision belongs to `search` one level up.
                     // Reporting the outcome here would also hide the unread ids from
                     // the graph index, which needs them to reproject on healing.
-                    let expected_bodies = db
-                        .configurations(file_id)
-                        .iter()
-                        .filter(|cfg| {
-                            cfg.configuration.common_modules().iter().any(|cm| {
-                                intern::NormName::intern(cm.name())
-                                    == intern::NormName::intern(module_name.as_str())
-                            })
-                        })
-                        .count();
-                    let known_bodies = bodies.iter().count();
                     return Ok(CommonModuleCandidates::new(
                         bodies.iter().map(|b| (crate::ModuleId::new(b.file), b.unread)).collect(),
-                        known_bodies < expected_bodies,
+                        bodies.has_missing_expected_body(),
                     ));
                 }
                 // Configs see the module but no body file mapped (metadata-URI

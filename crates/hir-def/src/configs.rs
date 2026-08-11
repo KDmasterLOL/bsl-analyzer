@@ -18,6 +18,10 @@ use bsl_config::VisibleConfig;
 /// that did nothing wrong.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommonModuleBodies {
+    /// A visible configuration declares this module but its body file could not be
+    /// mapped. This is a completeness gap, distinct from an enrolled unread body.
+    missing_expected_body: bool,
+
     /// Every body of the module, readable or not, in the order its producer chose.
     ///
     /// One ordered list rather than two, because for the producer that orders by
@@ -158,6 +162,14 @@ impl CommonModuleBodies {
         if !self.bodies.iter().any(|b| b.file == file) {
             self.bodies.push(CommonModuleBody { file, unread });
         }
+    }
+
+    pub fn mark_missing_expected_body(&mut self) {
+        self.missing_expected_body = true;
+    }
+
+    pub fn has_missing_expected_body(&self) -> bool {
+        self.missing_expected_body
     }
 
     /// Flip the list between the two orders a producer may build it in — merged
