@@ -140,12 +140,16 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_with_cfe(source, test_fixture::CfeFixtureBuilder::new("").build());
-        assert!(
-            diagnostics.iter().any(|diag| {
-                diag.code == DiagnosticCode::UnresolvedName && diag.message.contains("Формат")
-            }),
-            "a procedure remains non-first-class even when named like a platform function: {diagnostics:?}"
+        let unresolved = diagnostics
+            .iter()
+            .filter(|diag| diag.code == DiagnosticCode::UnresolvedName)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unresolved.len(),
+            1,
+            "only the non-first-class method read is unresolved: {diagnostics:?}"
         );
+        assert!(unresolved[0].message.contains("Формат"));
     }
 
     #[test]
