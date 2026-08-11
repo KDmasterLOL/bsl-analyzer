@@ -175,9 +175,20 @@ impl SharedState {
         index_progress: Arc<IndexProgress>,
         embed_flight: Arc<EmbedFlight>,
         lease: crate::workspace_lease::WorkspaceLease,
-    ) -> Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync> {
+    ) -> Arc<
+        dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome + Send + Sync,
+    > {
         Arc::new(move |signal| {
-            Self::refresh_search_contexts_after_graph(
+            // Context refresh cannot mutate root-keyed carriers. Reporting a requested root
+            // transition unhandled keeps its independent obligation alive for the transition
+            // owner instead of silently acknowledging work that did not happen.
+            let roots_handled = !signal.roots_refresh_requested;
+            if signal.roots_refresh_requested && signal.workspace_roots.is_none() {
+                tracing::debug!(
+                    "published graph has no validated project root table; keeping search roots"
+                );
+            }
+            let topology_handled = Self::refresh_search_contexts_after_graph(
                 &search_engine,
                 &workspace_root,
                 &semantic_runtime,
@@ -185,7 +196,8 @@ impl SharedState {
                 &embed_flight,
                 &lease,
                 signal,
-            )
+            );
+            crate::graph::GraphPublishOutcome { topology_handled, roots_handled }
         })
     }
     /// The outcome of one warmup pass, from what its plan proved. A pass whose scan left
@@ -487,6 +499,7 @@ impl SharedState {
             build_start_seq,
             topology_changed,
             topology,
+            ..
         } = signal;
         // Fast-path skip (an optimization, not correctness): a follow-up reload is already
         // catching up, so let ITS publish re-render against the fresher graph. Correctness
@@ -1354,6 +1367,8 @@ mod tests {
                 build_start_seq: i64::MAX,
                 topology_changed: false,
                 topology: built_graph_topology(&workspace),
+                roots_refresh_requested: false,
+                workspace_roots: None,
             },
         );
         {
@@ -1381,6 +1396,8 @@ mod tests {
                 build_start_seq: i64::MAX,
                 topology_changed: false,
                 topology: built_graph_topology(&workspace),
+                roots_refresh_requested: false,
+                workspace_roots: None,
             },
         );
         {
@@ -1468,8 +1485,13 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                handled
-            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+            })
+                as Arc<
+                    dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
+                        + Send
+                        + Sync,
+                >
         };
 
         // The graph is never wired to a mark-seq source: its build captures the unwired default.
@@ -1563,8 +1585,13 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                handled
-            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+            })
+                as Arc<
+                    dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
+                        + Send
+                        + Sync,
+                >
         };
 
         // Boot: the graph builds and publishes while UNWIRED, so the leftover mark survives.
@@ -1682,8 +1709,13 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                handled
-            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+            })
+                as Arc<
+                    dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
+                        + Send
+                        + Sync,
+                >
         };
 
         // Boot: build+publish while UNWIRED, so the leftover mark survives, then wire the source.
@@ -1799,8 +1831,13 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                handled
-            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+            })
+                as Arc<
+                    dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
+                        + Send
+                        + Sync,
+                >
         };
 
         // The graph is `Idle` (never wired): arming the pickup here stores the bound but cannot

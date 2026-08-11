@@ -46,7 +46,7 @@ impl GraphState {
         if built.force_stale {
             tracing::warn!("fused graph build straddled a disk write; snapshot marked stale");
         }
-        self.adopt_prebuilt(generation, built.fp_pre, built.files);
+        self.adopt_prebuilt(generation, built.fp_pre, built.files, built.search_roots.clone());
         self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
         // The fused sink just wrote every indexed document's context from THIS
         // build — nothing persisted predates it, so no whole-collection re-render.
@@ -97,12 +97,18 @@ impl GraphState {
         // drift stamped after this point carries a higher seq, is left for a later build, and
         // is guaranteed one by the pending-nudge machinery (every xml mark also nudges).
         let build_start_seq = self.current_mark_seq();
+        let project_reload_epoch = self.project_reload_epoch();
+        let force_project_reload = project_reload_epoch
+            > self.completed_project_reload_epoch.load(std::sync::atomic::Ordering::SeqCst);
 
         // On the initial load, reuse a cached build from a previous process run if it
         // still matches the workspace — turning a multi-minute rebuild into a stat
         // walk plus an open. A reload is skipped here: it only fires once drift has
         // been detected, so the on-disk file is known stale and must be rebuilt.
-        if !is_reload && self.try_publish_cached(&workspace_root, build_start_seq) {
+        if !force_project_reload
+            && !is_reload
+            && self.try_publish_cached(&workspace_root, build_start_seq)
+        {
             return;
         }
 
@@ -110,7 +116,10 @@ impl GraphState {
         // the reload lifecycle (its failure path keeps the snapshot and flags
         // `reload="failed"`, unlike this initial load's `Failed`). The catch-up build
         // recomputes its own generation from the just-published revision.
-        if !is_reload && self.try_publish_stale_and_catch_up(&workspace_root) {
+        if !force_project_reload
+            && !is_reload
+            && self.try_publish_stale_and_catch_up(&workspace_root)
+        {
             return;
         }
 
@@ -134,7 +143,10 @@ impl GraphState {
         // (signatures intact, nothing added/removed, no `.xml` drift) reproject just
         // those modules instead of the whole config. On any ineligibility or failure
         // it returns false and we fall through to a full rebuild.
-        if is_reload && self.try_incremental_reload(&workspace_root, generation, build_start_seq) {
+        if !force_project_reload
+            && is_reload
+            && self.try_incremental_reload(&workspace_root, generation, build_start_seq)
+        {
             return;
         }
 
@@ -175,10 +187,12 @@ impl GraphState {
                         stale: false,
                         reload: ReloadState::Idle,
                         force_stale: built.force_stale,
+                        search_roots: built.search_roots.clone(),
                     });
                     inner.status = GraphStatus::Ready { files: built.files };
                 }
                 self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
+                self.complete_project_reload_through(project_reload_epoch);
                 self.notify_published(build_start_seq, topology_changed);
                 tracing::info!(
                     files = built.files,
@@ -371,6 +385,7 @@ impl GraphState {
                         stale: false,
                         reload: ReloadState::Idle,
                         force_stale,
+                        search_roots: project.search_roots.clone(),
                     });
                     inner.status = GraphStatus::Ready { files };
                 }
@@ -425,6 +440,7 @@ impl GraphState {
             stale: false,
             reload: ReloadState::Idle,
             force_stale: false,
+            search_roots: project.search_roots.clone(),
         });
         inner.status = GraphStatus::Ready { files };
         drop(inner);
@@ -490,6 +506,7 @@ impl GraphState {
                 // Pre-claimed: the catch-up spawned below owns the one reload slot.
                 reload: ReloadState::Running,
                 force_stale: false,
+                search_roots: None,
             });
             inner.status = GraphStatus::Ready { files };
         }
@@ -622,6 +639,7 @@ fn build_and_publish_scanned(
         fp_pre,
         force_stale,
         scan_roots: project.scan_roots.clone(),
+        search_roots: project.search_roots.clone(),
     })
 }
 
@@ -691,6 +709,7 @@ struct PublishedBuild {
     fp_pre: crate::graph_db::GraphFp,
     force_stale: bool,
     scan_roots: Vec<PathBuf>,
+    search_roots: Option<bsl_search::WorkspaceRoots>,
 }
 
 /// Translates the graph pass's [`ide::ChunkRow`] stream into the search store for the
@@ -1250,6 +1269,42 @@ mod tests {
         let post = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
         let fp_post = crate::graph::scan::fingerprint_of(&post.stats, &project.configs);
         assert!(publish_force_stale(fp_pre, fp_post, pre.clean(), post.clean()));
+    }
+
+    /// A config edit may change only the declared spelling of a root while preserving
+    /// canonical graph topology. Even then the publication must carry roots from its frozen
+    /// pre-build project, not reload the newer project after the build.
+    #[cfg(unix)]
+    #[test]
+    fn published_roots_come_from_the_same_project_snapshot_as_the_graph() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let configuration = root.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::write(configuration.join("Configuration.xml"), "<Configuration/>").unwrap();
+        sample_workspace(&configuration);
+        symlink(&configuration, root.join("alias-a")).unwrap();
+        symlink(&configuration, root.join("alias-b")).unwrap();
+        fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \"alias-a\"\n").unwrap();
+
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let pre = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \"alias-b\"\n").unwrap();
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        let built = build_and_publish_scanned(root, &project, &pre, 1, &graph, None).unwrap();
+        let published = built.search_roots.as_ref().unwrap();
+        let live = crate::graph::ProjectSnapshot::load(root).search_roots.unwrap();
+
+        assert!(published.configuration().unwrap().ends_with("alias-a"));
+        assert!(live.configuration().unwrap().ends_with("alias-b"));
+        assert_eq!(
+            built.fp_pre,
+            crate::graph::scan::workspace_fingerprint(root),
+            "the alias-only edit is deliberately invisible to GraphFp"
+        );
     }
 
     /// One full publication is exactly TWO traversals: the shared pre-scan and the
@@ -2532,8 +2587,13 @@ mod tests {
                 if signal.topology_changed {
                     requested.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
-                true
-            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+                crate::graph::GraphPublishOutcome::HANDLED
+            })
+                as Arc<
+                    dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
+                        + Send
+                        + Sync,
+                >
         };
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
         graph.ensure_loading();

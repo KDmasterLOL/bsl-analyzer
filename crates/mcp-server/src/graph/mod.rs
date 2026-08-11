@@ -49,5 +49,6 @@ pub(crate) use state::GraphState;
     reason = "the stable graph facade preserves crate::graph lifecycle paths"
 )]
 pub(crate) use types::{
-    Freshness, FusedStartup, GraphPublishSignal, GraphStatus, GraphStatusReport, NudgeOutcome,
+    Freshness, FusedStartup, GraphPublishOutcome, GraphPublishSignal, GraphStatus,
+    GraphStatusReport, NudgeOutcome,
 };

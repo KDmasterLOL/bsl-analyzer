@@ -404,6 +404,7 @@ impl SharedState {
                 // honoured here — otherwise files the build skipped as byte-identical keep the
                 // contexts they were given under the old topology.
                 graph.flush_pending_topology_refresh();
+                graph.flush_pending_search_roots_refresh();
 
                 if let Some(status) = status_after_publish {
                     Self::set_semantic_runtime_status(&semantic_runtime, status);

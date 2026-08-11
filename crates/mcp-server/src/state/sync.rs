@@ -127,6 +127,9 @@ impl SharedState {
                         batch.rescan_required,
                         &graph,
                     );
+                    // Root-transition retry is independent of new file events. This loop
+                    // already owns the bounded wake, so no second timer/thread is needed.
+                    graph.flush_pending_search_roots_refresh();
                     // Only GENUINE drift kicks the retry driver (and resets its backoff):
                     // this loop also wakes on the bare 30-second timeout with an empty
                     // batch, and an unconditional kick would zero the backoff each tick.
@@ -169,7 +172,7 @@ impl SharedState {
             // the rescan like a config change: conservative whole-collection mark
             // plus a graph nudge.
             Self::mark_all_context_dirty(engine);
-            graph.nudge_rebuild();
+            graph.nudge_project_reload();
             return;
         }
 
@@ -208,13 +211,9 @@ impl SharedState {
         // graph context of EVERY module — with no `.xml` stat moving at all. Mark the
         // whole collection and nudge; the topology-triggered rebuild's publish then
         // re-renders exactly these marks (they carry seqs below the build's start).
-        let config_changed = entries.iter().any(|e| {
-            let is_config = |p: &Path| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| project_model::CONFIG_FILE_NAMES.contains(&n))
-            };
-            is_config(&e.canonical) || is_config(&e.raw)
+        let config_changed = entries.iter().any(|entry| {
+            graph.is_workspace_config_path(&entry.canonical)
+                || graph.is_workspace_config_path(&entry.raw)
         });
         if config_changed {
             // The nudge must NOT be gated on the marking succeeding: with the
@@ -226,7 +225,7 @@ impl SharedState {
                     "config change before the search engine published; relying on the                      graph's topology-changed publish for the context re-render"
                 );
             }
-            graph.nudge_rebuild();
+            graph.nudge_project_reload();
         }
 
         // A subtree removal lost the descendant list → reconsider the whole tree.
@@ -1422,20 +1421,46 @@ mod tests {
             )
             .unwrap();
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+
+        let nested_toml = workspace.join("nested/bsl-analyzer.toml");
+        fs::create_dir_all(nested_toml.parent().unwrap()).unwrap();
+        fs::write(&nested_toml, "[source]\nroot = \".\"\n").unwrap();
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: nested_toml.clone(),
+                raw: nested_toml,
+                kind: ChangeKind::MaybeChanged,
+                seq: 1,
+            }],
+            false,
+            &graph,
+        );
+        assert!(
+            engine_arc
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .context_dirty_paths("code")
+                .unwrap()
+                .is_empty(),
+            "a nested namesake config must not reshape the workspace root table",
+        );
 
         let toml = workspace.join("bsl-analyzer.toml");
         fs::write(&toml, "[source]\nroot = \".\"\n").unwrap();
-        let entry = ChangeEntry {
-            canonical: toml.clone(),
-            raw: toml,
-            kind: ChangeKind::MaybeChanged,
-            seq: 1,
-        };
         SharedState::apply_search_drift(
             &engine_arc,
-            &[entry],
+            &[ChangeEntry {
+                canonical: toml.clone(),
+                raw: toml,
+                kind: ChangeKind::MaybeChanged,
+                seq: 2,
+            }],
             false,
-            &crate::graph::GraphState::disabled(),
+            &graph,
         );
 
         let guard = engine_arc.lock().unwrap();
@@ -1443,7 +1468,7 @@ mod tests {
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
             dirty.contains(&bsl_search::FileKey::configuration("CommonModules/А/Ext/Module.bsl")),
-            "a config edit must mark every indexed document context-dirty: {dirty:?}",
+            "a root config edit must mark every indexed document context-dirty: {dirty:?}",
         );
     }
 
@@ -1568,7 +1593,7 @@ mod tests {
         )
         .expect("graph builds");
         let graph = crate::graph::GraphState::for_workspace(workspace.clone());
-        graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules);
+        graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules, None);
 
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(workspace.clone());
@@ -2154,7 +2179,7 @@ mod tests {
             )
             .expect("graph builds");
             let graph = crate::graph::GraphState::for_workspace(workspace.to_path_buf());
-            graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules);
+            graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules, None);
 
             let engine = engine_over(&dir.join("search.db"), workspace, &configuration, &extension);
             drift(&engine, &xml, &graph);

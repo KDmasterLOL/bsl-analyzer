@@ -19,6 +19,10 @@ pub(crate) struct ProjectSnapshot {
     pub workspace_root: PathBuf,
     pub scan_roots: Vec<PathBuf>,
     pub configs: ide::WorkspaceConfigsSnapshot,
+    /// Search ownership derived from the same validated project as `scan_roots` and
+    /// `configs`. It travels with a published build so the publish hook never reloads a
+    /// newer project and mixes its roots with an older graph.
+    pub search_roots: Option<bsl_search::WorkspaceRoots>,
 }
 
 impl ProjectSnapshot {
@@ -37,6 +41,7 @@ impl ProjectSnapshot {
                     workspace_root: workspace_root.to_path_buf(),
                     scan_roots: vec![workspace_root.to_path_buf()],
                     configs: ide::WorkspaceConfigsSnapshot::default(),
+                    search_roots: None,
                 }
             }
         }
@@ -52,6 +57,7 @@ impl ProjectSnapshot {
             workspace_root: project.root.clone(),
             scan_roots,
             configs: ide::WorkspaceConfigsSnapshot::from_project(project).canonicalized(),
+            search_roots: Some(crate::project::workspace_roots(project).0),
         }
     }
 }
