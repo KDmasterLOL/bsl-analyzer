@@ -299,6 +299,27 @@ fn a_self_qualified_call_stays_a_redundant_access() {
 }
 
 #[test]
+fn manager_typed_local_is_not_reported_as_self_qualified_access() {
+    let fixture = r#"
+//- /Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl
+Функция Собрать() Экспорт
+    Возврат "готово";
+КонецФункции
+
+Процедура Тест()
+    ТестовыйОтчёт = Отчёты.ТестовыйОтчёт;
+    Р = ТестовыйОтчёт.Собрать();
+КонецПроцедуры
+"#;
+    let (db, file_id) =
+        setup_with_designer_config(fixture, "/Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl");
+    assert!(
+        redundant_two_level(&db, file_id).is_empty(),
+        "an explicitly assigned receiver is a local variable, not redundant self qualification"
+    );
+}
+
+#[test]
 fn config_less_object_named_like_a_collection_promotes() {
     let fixture = r#"
 //- /Documents/Constants/Ext/ManagerModule.bsl

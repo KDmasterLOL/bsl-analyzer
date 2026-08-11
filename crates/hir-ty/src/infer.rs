@@ -2596,8 +2596,15 @@ impl<'db> InferenceContext<'db> {
         receiver_ty: TypeId,
     ) {
         let Expr::Path(receiver_name) = self.body.expr(receiver) else { return };
+        let receiver_key = NormName::intern(receiver_name.as_str());
+        if self.var_types.contains_key(&receiver_key) || self.body_declares_binding(receiver_name) {
+            return;
+        }
         let TypeKind::ObjectManager(facet) = self.db.lookup_type(receiver_ty) else { return };
         let resolver = self.get_resolver();
+        if resolver.resolve_module_variable(self.db, receiver_name).is_some() {
+            return;
+        }
         let Some((owner_kind, owner_name)) =
             crate::this_object::resolve_this_manager_owner(self.db, &resolver)
         else {
