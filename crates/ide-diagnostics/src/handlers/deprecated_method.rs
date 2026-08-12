@@ -104,10 +104,10 @@ EndProcedure
 
         expect![[r#"
             DeprecatedPlatformApi @ 3:16..3:64
-              message: Метод "КраткоеПредставлениеОшибки" устарел. Следует использовать "МенеджерОбработкиОшибок.КраткоеПредставлениеОшибки".
+              message: Метод "КраткоеПредставлениеОшибки" устарел. Следует использовать "ОбработкаОшибок.КраткоеПредставлениеОшибки".
               severity: Warning"#]].assert_eq(&format_diags(code, &deprecated_diags));
         let message = &deprecated_diags[0].message;
-        assert!(message.contains("МенеджерОбработкиОшибок"));
+        assert!(message.contains("ОбработкаОшибок"));
     }
 
     #[test]

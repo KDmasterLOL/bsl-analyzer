@@ -19,8 +19,10 @@ Primary sources:
 - v8std `#std404` for the `ПолучитьФорму` / `GetForm` recommendation
 
 The rule is API-based: deprecated global error-handling methods should be
-replaced with members of `МенеджерОбработкиОшибок` /
-`ErrorProcessingManager`. The current implementation also groups
+replaced with members of the error-processing manager, reached through the
+global property that holds it — `ОбработкаОшибок` / `ErrorProcessing`. The type
+name `МенеджерОбработкиОшибок` / `ErrorProcessingManager` is not a value and
+cannot be written as a receiver. The current implementation also groups
 `ПолучитьФорму` / `GetForm` under the same diagnostic family.
 
 ## Audit result
