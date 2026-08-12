@@ -41,6 +41,8 @@ SSH_KEY_FILE=""
 NOTES_FILE=""
 SKIP_SUMMARY=false
 LAST_GH_TAG=""
+SOURCE_COMMIT=""
+ARCHIVE_PATHSPECS=()
 
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
@@ -266,18 +268,19 @@ publish_release_notes() {
 }
 
 build_archive_pathspecs() {
-    local pathspecs=(".")
+    ARCHIVE_PATHSPECS=(".")
     for pattern in "${EXCLUDE_PATTERNS[@]}"; do
         # Завершающий слэш git в pathspec не понимает: каталог задаётся своим именем.
-        pathspecs+=(":(exclude)${pattern%/}")
+        ARCHIVE_PATHSPECS+=(":(exclude)${pattern%/}")
     done
-    printf '%s\n' "${pathspecs[@]}"
 }
 
 assert_tree_committed() {
-    if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=no)" ]]; then
-        log_error "В рабочем дереве есть незакоммиченные изменения отслеживаемых файлов."
-        log_error "Зеркало собирается из HEAD, и в него они не попадут — закоммитьте или откатите их."
+    # Тем же набором путей, что и архив: правка в исключённом файле состав зеркала
+    # не меняет ни в каком состоянии коммита, и блокировать из-за неё нечего.
+    if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=no -- "${ARCHIVE_PATHSPECS[@]}")" ]]; then
+        log_error "В рабочем дереве есть незакоммиченные изменения файлов, попадающих в зеркало."
+        log_error "Зеркало собирается из коммита, и эти правки в него не войдут — закоммитьте или откатите их."
         exit 1
     fi
 }
@@ -290,14 +293,9 @@ sync_files() {
 
     find "$dst" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
 
-    local pathspecs=()
-    while IFS= read -r spec; do
-        pathspecs+=("$spec")
-    done < <(build_archive_pathspecs)
-
-    # Дерево HEAD, а не файловая система: копирование с диска утаскивало в публичное
+    # Дерево коммита, а не файловая система: копирование с диска утаскивало в публичное
     # зеркало любой локальный каталог, не попавший в список исключений.
-    git -C "$src" archive HEAD -- "${pathspecs[@]}" | tar -x -C "$dst"
+    git -C "$src" archive "$SOURCE_COMMIT" -- "${ARCHIVE_PATHSPECS[@]}" | tar -x -C "$dst"
 }
 
 
@@ -331,8 +329,14 @@ log_info "Проект: bsl-analyzer"
 log_info "Версия: $VERSION"
 log_info "Тег: $COMMIT_TAG"
 log_info "GitHub: $GITHUB_REPO"
-log_info "Источник дерева: HEAD ($(git -C "$PROJECT_ROOT" rev-parse --short HEAD))"
 
+# HEAD разрешается ОДИН раз: дальше идут сетевые вызовы и генерация release notes, а
+# ветка тем временем может уехать под чужим коммитом — зеркало обязано соответствовать
+# тому дереву, которое названо здесь.
+SOURCE_COMMIT=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
+log_info "Источник дерева: $(git -C "$PROJECT_ROOT" rev-parse --short "$SOURCE_COMMIT")"
+
+build_archive_pathspecs
 assert_tree_committed
 fetch_last_github_tag
 generate_release_notes "$COMMIT_TAG" "$LAST_GH_TAG"
@@ -350,12 +354,10 @@ if $DRY_RUN; then
         echo "  - $pattern"
     done
     echo ""
-    DRY_PATHSPECS=()
-    while IFS= read -r spec; do
-        DRY_PATHSPECS+=("$spec")
-    done < <(build_archive_pathspecs)
-    DRY_FILES=$(git -C "$PROJECT_ROOT" archive HEAD -- "${DRY_PATHSPECS[@]}" | tar -t | grep -cv '/$' || true)
-    log_info "Файлов уедет в зеркало: $DRY_FILES"
+    # Отдельным шагом, чтобы сбой git archive или tar ронял превью, а не выдавал ноль:
+    # законный ненулевой статус здесь один — grep -c при пустом счёте.
+    DRY_LIST=$(git -C "$PROJECT_ROOT" archive "$SOURCE_COMMIT" -- "${ARCHIVE_PATHSPECS[@]}" | tar -t)
+    log_info "Файлов уедет в зеркало: $(printf '%s\n' "$DRY_LIST" | grep -cv '/$' || true)"
     echo ""
     log_info "Будет создан коммит: \"Release $COMMIT_TAG\""
     if [[ -s "$RELEASE_BODY_FILE" ]]; then
