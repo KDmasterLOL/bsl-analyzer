@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use bsl_search::SearchEngine;
 
+#[cfg(test)]
 use crate::cache::graph_db_path;
 use crate::graph_query::GraphDb;
 
@@ -210,7 +211,7 @@ impl GraphState {
         generation: u64,
         build_start_seq: i64,
     ) -> bool {
-        let db_path = graph_db_path(workspace_root);
+        let db_path = self.graph_db_path().expect("workspace graph has cache layout");
         let stored_fp = read_stored_fingerprints(&db_path);
         if stored_fp.is_empty() {
             return false; // no per-file record (older build) → full rebuild
@@ -385,7 +386,7 @@ impl GraphState {
     /// transitions to `Ready`) when the cache was reused; `false` to fall through to
     /// a full build. The fingerprint scan it runs is the same one the build would do.
     pub(super) fn try_publish_cached(&self, workspace_root: &Path, build_start_seq: i64) -> bool {
-        let path = graph_db_path(workspace_root);
+        let path = self.graph_db_path().expect("workspace graph has cache layout");
         let Ok(graph) = GraphDb::open(&path) else {
             return false; // missing, truncated, or stale-schema → rebuild
         };
@@ -431,7 +432,7 @@ impl GraphState {
     /// `notify_published`: the publish hook must only run against a build that
     /// reflects current disk.
     pub(super) fn try_publish_stale_and_catch_up(&self, workspace_root: &Path) -> bool {
-        let path = graph_db_path(workspace_root);
+        let path = self.graph_db_path().expect("workspace graph has cache layout");
         let Ok(graph) = GraphDb::open(&path) else {
             return false; // missing, truncated, or stale-schema → full rebuild
         };
@@ -531,7 +532,7 @@ fn build_and_publish_graph_file(
     // ONE project snapshot serves the pre-scan, the build and the post-scan.
     let project = crate::graph::ProjectSnapshot::load(workspace_root);
     let fp_pre = super::scan::workspace_fingerprint_over(&project);
-    let out_path = graph_db_path(workspace_root);
+    let out_path = graph.graph_db_path().expect("workspace graph has cache layout");
     // Pid-suffixed temp: two daemons over the same workspace (an old topology
     // generation draining while a new one starts) must not interleave writes into
     // one temp file — each builds its own and the atomic rename decides.
@@ -828,6 +829,22 @@ mod tests {
         // the in-memory serve path.
         let edge = callers.edges.iter().find(|e| e.to.is_none()).expect("edge into the root");
         assert_eq!(edge.from.as_deref(), Some("method/common/Клиент/Главная"));
+    }
+
+    #[test]
+    fn explicit_cache_layout_builds_graph_outside_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        sample_workspace(root);
+        let layout = crate::cache::WorkspaceCacheLayout::from_root(cache.path().to_path_buf());
+
+        let graph = GraphState::for_workspace_with_cache(root.to_path_buf(), layout.clone());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        assert!(layout.graph_db_path().exists());
+        assert!(!root.join(".build").exists());
     }
 
     /// A cached build that still matches the workspace is republished as-is — no

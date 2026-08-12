@@ -52,6 +52,15 @@ impl SharedState {
     /// daemon must not come up analyzing a differently-shaped project than the
     /// one configured.
     pub fn workspace(source_dir: PathBuf) -> Result<Self, project_model::ProjectError> {
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(&source_dir);
+        Self::workspace_with_cache(source_dir, cache)
+    }
+
+    /// Construct workspace state with all rebuildable derived files rooted in `cache`.
+    pub fn workspace_with_cache(
+        source_dir: PathBuf,
+        cache: crate::cache::WorkspaceCacheLayout,
+    ) -> Result<Self, project_model::ProjectError> {
         let project = project_model::Project::new(&source_dir)?;
         let config_path = project.source_path();
         let source_root = config_path.to_path_buf();
@@ -59,7 +68,7 @@ impl SharedState {
         // Claimed before any background pass starts, so the graph's very first build already
         // knows whether this daemon owns the workspace's derived caches or is the superseded
         // generation of a pair that overlaps over them.
-        let workspace_lease = crate::workspace_lease::WorkspaceLease::claim(&source_dir);
+        let workspace_lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
 
         let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
@@ -108,13 +117,13 @@ impl SharedState {
         let embed_flight = EmbedFlight::new();
         let publish_hook = Self::build_publish_hook(
             Arc::clone(&search_engine),
-            source_dir.clone(),
+            cache.clone(),
             Arc::clone(&semantic_runtime),
             Arc::clone(&index_progress),
             Arc::clone(&embed_flight),
             workspace_lease.clone(),
         );
-        let graph = GraphState::for_workspace(source_dir.clone())
+        let graph = GraphState::for_workspace_with_cache(source_dir.clone(), cache.clone())
             .with_change_hub(change_hub.clone())
             .with_publish_hook(publish_hook)
             .with_lease(workspace_lease.clone());
@@ -657,8 +666,12 @@ impl SharedState {
         external_baseline: Option<Arc<ExternalBaselineService>>,
         graph: &GraphState,
     ) -> Option<WorkspaceSearchInit> {
-        crate::cache::ensure_workspace_cache_dir(workspace_root).ok();
-        let db_path = crate::cache::search_db_path(workspace_root);
+        let cache = graph
+            .cache()
+            .cloned()
+            .unwrap_or_else(|| crate::cache::WorkspaceCacheLayout::for_workspace(workspace_root));
+        cache.ensure().ok();
+        let db_path = cache.search_db_path();
 
         // The daemon only reaches this after `workspace()` validated the project;
         // a config broken by a mid-session edit keeps search down, loudly.
@@ -837,7 +850,7 @@ impl SharedState {
         // already built; if absent (still building) the embeddings are graph-free this
         // run and pick up context on a later reindex.
         if engine.has_semantic() {
-            let graph_path = crate::cache::graph_db_path(workspace_root);
+            let graph_path = cache.graph_db_path();
             match crate::graph_query::GraphDb::open(&graph_path) {
                 Ok(graph_db)
                     if !crate::graph::scan::graph_file_matches_live_topology(
@@ -1245,6 +1258,48 @@ mod tests {
             },
             external_baseline: None,
         })
+    }
+
+    #[test]
+    fn workspace_state_uses_external_cache_without_touching_source_tree() {
+        use std::time::{Duration, Instant};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+        let _embedding_model = EnvVarGuard::unset("EMBEDDING_MODEL");
+
+        let workspace_parent = tempdir().unwrap();
+        let workspace = workspace_parent.path().join("исходники с пробелом");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &workspace,
+            "Сервер",
+            "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
+        );
+
+        let cache_parent = tempdir().unwrap();
+        let cache_root = cache_parent.path().join("внешний кеш");
+        let cache = crate::cache::WorkspaceCacheLayout::from_root(cache_root);
+        let state = SharedState::workspace_with_cache(workspace.clone(), cache.clone()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while state.search_engine().lock().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        while !cache.graph_db_path().exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(cache.search_db_path().exists(), "search DB must use explicit cache");
+        assert!(cache.graph_db_path().exists(), "graph DB must use explicit cache");
+        assert!(cache.lease_path().exists(), "lease must use explicit cache");
+        assert!(!workspace.join(".build").exists(), "source tree must stay untouched");
+        state.shutdown();
     }
 
     /// The Postgres branch of the search init returns before it ever reaches the fused cold

@@ -170,16 +170,16 @@ impl SharedState {
     /// is a fast-path hint to skip a round when a fresher reload is imminent.
     pub(super) fn build_publish_hook(
         search_engine: SharedSearchEngine,
-        workspace_root: PathBuf,
+        cache: crate::cache::WorkspaceCacheLayout,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         index_progress: Arc<IndexProgress>,
         embed_flight: Arc<EmbedFlight>,
         lease: crate::workspace_lease::WorkspaceLease,
     ) -> Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync> {
         Arc::new(move |signal| {
-            Self::refresh_search_contexts_after_graph(
+            Self::refresh_search_contexts_after_graph_with_cache(
                 &search_engine,
-                &workspace_root,
+                &cache,
                 &semantic_runtime,
                 &index_progress,
                 &embed_flight,
@@ -376,9 +376,31 @@ impl SharedState {
     /// Returns whether a topology refresh the signal requested was actually handled
     /// (vacuously true when none was requested) — the graph re-raises the request on
     /// its next publish when this reports `false`.
+    #[cfg(test)]
     fn refresh_search_contexts_after_graph(
         engine: &SharedSearchEngine,
         workspace_root: &Path,
+        semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+        index_progress: &Arc<IndexProgress>,
+        embed_flight: &Arc<EmbedFlight>,
+        lease: &crate::workspace_lease::WorkspaceLease,
+        signal: crate::graph::GraphPublishSignal,
+    ) -> bool {
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(workspace_root);
+        Self::refresh_search_contexts_after_graph_with_cache(
+            engine,
+            &cache,
+            semantic_runtime,
+            index_progress,
+            embed_flight,
+            lease,
+            signal,
+        )
+    }
+
+    fn refresh_search_contexts_after_graph_with_cache(
+        engine: &SharedSearchEngine,
+        cache: &crate::cache::WorkspaceCacheLayout,
         semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
         index_progress: &Arc<IndexProgress>,
         embed_flight: &Arc<EmbedFlight>,
@@ -402,7 +424,7 @@ impl SharedState {
             );
             return !topology_changed;
         }
-        let graph_path = crate::cache::graph_db_path(workspace_root);
+        let graph_path = cache.graph_db_path();
         let graph_db = match crate::graph_query::GraphDb::open(&graph_path) {
             Ok(db) => db,
             Err(e) => {
@@ -868,7 +890,7 @@ mod tests {
         let embed_flight = super::EmbedFlight::new();
         let hook = SharedState::build_publish_hook(
             Arc::clone(&engine_arc),
-            workspace.clone(),
+            crate::cache::WorkspaceCacheLayout::for_workspace(&workspace),
             Arc::clone(&semantic_runtime),
             Arc::clone(&index_progress),
             Arc::clone(&embed_flight),

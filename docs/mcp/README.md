@@ -134,6 +134,25 @@ bsl-analyzer mcp serve --profile reference
 bsl-analyzer mcp serve --profile workspace --source-dir ./my-project
 ```
 
+### Каталог кеша workspace
+
+По умолчанию граф вызовов, поисковый индекс и служебные файлы хранятся в
+`<source-dir>/.build`. Чтобы в каталоге исходников оставалась только выгрузка
+конфигурации, укажите внешний кеш:
+
+```bash
+bsl-analyzer mcp serve \
+  --profile workspace \
+  --source-dir ./my-project \
+  --cache-dir ../.bsl-analyzer-cache/my-project
+```
+
+`--cache-dir` доступен только профилю `workspace`. Относительный путь
+вычисляется от рабочего каталога процесса; при broker-режиме тот же абсолютный
+путь автоматически передаётся daemon. Существующий `.build` не переносится
+автоматически: после остановки старых процессов analyzer его можно удалить
+вручную, если старый кеш больше не нужен.
+
 Профиль проекта с live-доступом к базе 1С:
 
 ```bash

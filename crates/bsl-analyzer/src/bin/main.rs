@@ -493,6 +493,7 @@ mod contract_surface {
               mcp
                 serve
                   allowed-host
+                  cache-dir
                   host
                   mode = stdio | broker | daemon | http
                   onec-password

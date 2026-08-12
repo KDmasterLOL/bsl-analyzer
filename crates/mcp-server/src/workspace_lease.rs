@@ -41,6 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 /// Lease record file name, next to the caches it governs.
+#[cfg(test)]
 const LEASE_FILE: &str = "writer.lease";
 /// The file locked for the read-modify-write of a claim. Separate from the record so the
 /// record itself is only ever replaced by an atomic rename and readers need no lock.
@@ -129,13 +130,20 @@ impl WorkspaceLease {
     /// whatever the last owner recorded. An unwritable or locked-out `.build` yields an
     /// unmanaged lease (see [`Inner::path`]) rather than an error: the daemon still works, it
     /// just cannot coordinate with a peer.
+    #[cfg(test)]
     pub(crate) fn claim(workspace_root: &Path) -> Self {
-        match Self::try_claim(workspace_root) {
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(workspace_root);
+        Self::claim_cache(&cache)
+    }
+
+    /// Claim the derived caches rooted at `cache` for this process.
+    pub(crate) fn claim_cache(cache: &crate::cache::WorkspaceCacheLayout) -> Self {
+        match Self::try_claim_cache(cache) {
             Ok(lease) => lease,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    root = %workspace_root.display(),
+                    root = %cache.root().display(),
                     "could not claim the workspace cache lease; this daemon will not coordinate \
                      with another generation over the same caches"
                 );
@@ -159,12 +167,12 @@ impl WorkspaceLease {
         }
     }
 
-    fn try_claim(workspace_root: &Path) -> io::Result<Self> {
+    fn try_claim_cache(cache: &crate::cache::WorkspaceCacheLayout) -> io::Result<Self> {
         // The directory is the one thing a lease cannot do without. Everything past it — the
         // lock, the record write — is retried later by `owns_caches`, so a moment's contention
         // does not cost this daemon its place in the coordination for good.
-        let dir = crate::cache::ensure_workspace_cache_dir(workspace_root)?;
-        let path = dir.join(LEASE_FILE);
+        cache.ensure()?;
+        let path = cache.lease_path();
         let inner = Arc::new(Inner {
             path: Some(path),
             generation: AtomicU64::new(UNCLAIMED),
@@ -177,7 +185,7 @@ impl WorkspaceLease {
         // A starting daemon outbids whatever it finds — newest wins is the whole rule.
         if !lease.take_generation(|_| true) {
             tracing::warn!(
-                root = %workspace_root.display(),
+                root = %cache.root().display(),
                 "workspace cache lease is locked by a peer; retrying on the next check"
             );
         }
@@ -548,6 +556,20 @@ impl LockGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_cache_layout_holds_lease_outside_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let layout = crate::cache::WorkspaceCacheLayout::from_root(cache.path().to_path_buf());
+
+        let lease = WorkspaceLease::claim_cache(&layout);
+
+        assert!(lease.owns_caches());
+        assert!(layout.lease_path().exists());
+        assert!(!workspace.path().join(".build").exists());
+        lease.release();
+    }
 
     fn record_at(path: &Path) -> LeaseRecord {
         read_record(path).expect("the lease record is readable")
