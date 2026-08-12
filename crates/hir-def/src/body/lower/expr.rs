@@ -466,11 +466,6 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             ctx.diagnostics.push(BodyDiagnostic::ExecuteExternalCode { range: node.text_range() });
         }
 
-        if is_external_app_method(&name) {
-            ctx.diagnostics
-                .push(BodyDiagnostic::ExternalAppStarting { range: actual_callee.text_range() });
-        }
-
         if is_os_users_method(&name) {
             ctx.diagnostics
                 .push(BodyDiagnostic::OSUsersMethod { range: actual_callee.text_range() });
@@ -575,19 +570,6 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                     module: Some(module_name.to_string()),
                     range: idents[1].text_range(),
                 });
-            }
-        }
-
-        // `КомандаСистемы`, `КопироватьФайл` and their kin live in the global
-        // context only, so a qualified call never reaches them — matching the
-        // bare method name here would flag whatever the receiver actually is.
-        if let (Some(receiver_token), Some(method_token)) = (
-            syntax::ast_utils::field_head_name_token(&actual_callee),
-            syntax::ast_utils::field_tail_name_token(&actual_callee),
-        ) {
-            if is_external_app_call(receiver_token.text(), method_token.text()) {
-                ctx.diagnostics
-                    .push(BodyDiagnostic::ExternalAppStarting { range: method_token.text_range() });
             }
         }
 
@@ -1255,21 +1237,6 @@ fn is_os_users_method(name: &str) -> bool {
     bsl_platform::security::registry()
         .lookup_global(name)
         .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::OsUsers))
-}
-
-fn is_external_app_method(name: &str) -> bool {
-    bsl_platform::security::registry()
-        .lookup_global(name)
-        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::ExternalApp))
-}
-
-/// The receiver is matched by name, not by type: lowering has no types. A
-/// common module reached through a variable or a field is therefore missed here,
-/// as is one shadowed by a local of the same name.
-fn is_external_app_call(receiver: &str, method: &str) -> bool {
-    bsl_platform::security::registry()
-        .lookup_module_method(receiver, method)
-        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::ExternalApp))
 }
 
 fn is_file_system_type(name: &str) -> bool {

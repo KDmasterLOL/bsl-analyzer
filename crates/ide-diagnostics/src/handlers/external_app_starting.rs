@@ -28,9 +28,103 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::test_utils::{
+        check_diagnostics_snapshot_for, check_hir_diagnostic_with_fixtures,
+        check_hir_diagnostic_with_unreadable,
+    };
     use crate::DiagnosticCode;
     use expect_test::expect;
+
+    const FILE_SYSTEM_CLIENT_MODULE: &str = r#"
+//- /CommonModules/ФайловаяСистемаКлиент/Ext/Module.bsl
+Процедура ОткрытьФайл(Путь) Экспорт
+КонецПроцедуры
+
+Процедура ЗапуститьПрограмму(Команда) Экспорт
+КонецПроцедуры
+"#;
+
+    fn fires_in_configuration(body: &str) -> bool {
+        let fixture = format!("{FILE_SYSTEM_CLIENT_MODULE}\n//- /test.bsl\n{body}");
+        check_hir_diagnostic_with_fixtures(&fixture)
+            .iter()
+            .any(|d| d.code == DiagnosticCode::ExternalAppStarting)
+    }
+
+    /// Положительный контроль всей правки: модуль назван прямо.
+    #[test]
+    fn module_named_directly_detected() {
+        assert!(fires_in_configuration(
+            "Процедура Тест()\n    ФайловаяСистемаКлиент.ОткрытьФайл(Путь);\nКонецПроцедуры",
+        ));
+    }
+
+    /// Модуль, положенный в переменную: сегодня пропуск, после переноса — нет.
+    #[test]
+    fn module_through_variable_detected() {
+        assert!(fires_in_configuration(
+            "Процедура Тест()\n    ФС = ФайловаяСистемаКлиент;\n    ФС.ОткрытьФайл(Путь);\nКонецПроцедуры",
+        ));
+    }
+
+    /// Поле с именем модуля модулем не является.
+    #[test]
+    fn module_name_as_field_not_detected() {
+        assert!(!fires_in_configuration(
+            "Процедура Тест(Структура)\n    Структура.ФайловаяСистемаКлиент.ОткрытьФайл(Путь);\nКонецПроцедуры",
+        ));
+    }
+
+    /// Владелец не тот: инвариант этапа 0 не должен сломаться при переносе.
+    #[test]
+    fn wrong_owner_not_detected() {
+        assert!(!fires_in_configuration(
+            "Процедура Тест()\n    ФайловаяСистема.ОткрытьФайл(Путь);\nКонецПроцедуры",
+        ));
+    }
+
+    /// Рабочая область есть, но модуля в ней нет — имя признаётся доказанно
+    /// отсутствующим. Замечание всё равно даётся: отсутствие имени не довод
+    /// в пользу того, что вызывают что-то другое.
+    #[test]
+    fn absent_module_still_detected_by_name() {
+        let fixture = r#"
+//- /CommonModules/Прочий/Ext/Module.bsl
+Процедура Что() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    ФайловаяСистемаКлиент.ОткрытьФайл(Путь);
+    ЗаписьXML.ОткрытьФайл(Путь, "UTF-8");
+КонецПроцедуры
+"#;
+        let codes: Vec<_> = check_hir_diagnostic_with_fixtures(fixture)
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::ExternalAppStarting)
+            .collect();
+        assert_eq!(codes.len(), 1, "ожидался ровно вызов модуля, не сериализатор: {codes:?}");
+    }
+
+    /// Нечитаемое тело постороннего общего модуля не должно гасить вердикт
+    /// о голом запуске: это суждение об имени, а не о контракте аргументов.
+    #[test]
+    fn bare_call_survives_unreadable_global_module() {
+        let fixture = r#"
+//- /CommonModules/Глобальный/Ext/Module.bsl
+
+//- /test.bsl
+Процедура Тест()
+    КомандаСистемы("cmd");
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic_with_unreadable(
+            fixture,
+            &["/CommonModules/Глобальный/Ext/Module.bsl"],
+        );
+        assert!(diagnostics.iter().any(|d| d.code == DiagnosticCode::ExternalAppStarting));
+    }
+
     #[test]
     fn test_global_methods_detected() {
         let code = r#"
@@ -82,16 +176,16 @@ mod tests {
             code,
             DiagnosticCode::ExternalAppStarting,
             expect![[r#"
-                ExternalAppStarting @ 6:27..6:45
+                ExternalAppStarting @ 6:5..6:45
                   message: External application launch detected
                   severity: Warning
-                ExternalAppStarting @ 7:27..7:45
+                ExternalAppStarting @ 7:5..7:45
                   message: External application launch detected
                   severity: Warning
-                ExternalAppStarting @ 8:21..8:39
+                ExternalAppStarting @ 8:5..8:39
                   message: External application launch detected
                   severity: Warning
-                ExternalAppStarting @ 9:21..9:39
+                ExternalAppStarting @ 9:5..9:39
                   message: External application launch detected
                   severity: Warning"#]],
         );
@@ -113,13 +207,13 @@ mod tests {
             code,
             DiagnosticCode::ExternalAppStarting,
             expect![[r#"
-                ExternalAppStarting @ 6:27..6:43
+                ExternalAppStarting @ 6:5..6:43
                   message: External application launch detected
                   severity: Warning
-                ExternalAppStarting @ 7:27..7:38
+                ExternalAppStarting @ 7:5..7:38
                   message: External application launch detected
                   severity: Warning
-                ExternalAppStarting @ 8:27..8:38
+                ExternalAppStarting @ 8:5..8:38
                   message: External application launch detected
                   severity: Warning"#]],
         );
@@ -209,7 +303,7 @@ mod tests {
             code,
             DiagnosticCode::ExternalAppStarting,
             expect![[r#"
-                ExternalAppStarting @ 3:27..3:45
+                ExternalAppStarting @ 3:5..3:45
                   message: External application launch detected
                   severity: Warning"#]],
         );
@@ -278,7 +372,7 @@ mod tests {
             code,
             DiagnosticCode::ExternalAppStarting,
             expect![[r#"
-                ExternalAppStarting @ 3:26..3:37
+                ExternalAppStarting @ 3:5..3:37
                   message: External application launch detected
                   severity: Warning"#]],
         );
