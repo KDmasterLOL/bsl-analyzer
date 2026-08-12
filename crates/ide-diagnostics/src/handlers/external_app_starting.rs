@@ -301,6 +301,35 @@ mod tests {
         check_diagnostics_snapshot_for(code, DiagnosticCode::ExternalAppStarting, expect![[r#""#]]);
     }
 
+    /// Owners are per method: a module that does not export the method cannot
+    /// be the one being called.
+    #[test]
+    fn test_module_without_the_method_not_detected() {
+        let code = r#"
+Процедура Тест()
+    ФайловаяСистема.ОткрытьФайл(Путь);
+    ФайловаяСистема.ОткрытьПроводник(Путь);
+    РаботаСФайламиКлиент.ЗапуститьПрограмму(Команда);
+    РаботаСФайламиКлиент.ОткрытьПроводник(Путь);
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExternalAppStarting, expect![[r#""#]]);
+    }
+
+    /// Only a bare name identifies the module without types; anything richer
+    /// merely ends in a matching identifier.
+    #[test]
+    fn test_non_bare_receiver_not_detected() {
+        let code = r#"
+Процедура Тест()
+    Обернуть(ФайловаяСистема).ОткрытьФайл(Путь);
+    Массив[ФайловаяСистемаКлиент].ОткрытьФайл(Путь);
+    Структура.ФайловаяСистемаКлиент.ОткрытьФайл(Путь);
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExternalAppStarting, expect![[r#""#]]);
+    }
+
     #[test]
     fn test_similar_name_ignored() {
         let code = r#"

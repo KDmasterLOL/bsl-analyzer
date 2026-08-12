@@ -578,17 +578,21 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             }
         }
 
-        if let Some(method_token) = idents.last() {
-            let method_name = method_token.text();
-            let receiver_name = idents.len().checked_sub(2).map(|i| idents[i].text());
-
-            // `КомандаСистемы`, `КопироватьФайл` and their kin live in the global
-            // context only, so a qualified call never reaches them — matching the
-            // bare method name here would flag whatever the receiver actually is.
-            if receiver_name.is_some_and(|receiver| is_external_app_call(receiver, method_name)) {
+        // `КомандаСистемы`, `КопироватьФайл` and their kin live in the global
+        // context only, so a qualified call never reaches them — matching the
+        // bare method name here would flag whatever the receiver actually is.
+        if let (Some(receiver_token), Some(method_token)) = (
+            syntax::ast_utils::field_head_name_token(&actual_callee),
+            syntax::ast_utils::field_tail_name_token(&actual_callee),
+        ) {
+            if is_external_app_call(receiver_token.text(), method_token.text()) {
                 ctx.diagnostics
                     .push(BodyDiagnostic::ExternalAppStarting { range: method_token.text_range() });
             }
+        }
+
+        if let Some(method_token) = idents.last() {
+            let method_name = method_token.text();
 
             if is_form_data_to_value_method(method_name) && !ctx.has_no_context_annotation {
                 ctx.diagnostics
@@ -1260,7 +1264,8 @@ fn is_external_app_method(name: &str) -> bool {
 }
 
 /// The receiver is matched by name, not by type: lowering has no types. A
-/// common module reached through a variable is therefore missed here.
+/// common module reached through a variable or a field is therefore missed here,
+/// as is one shadowed by a local of the same name.
 fn is_external_app_call(receiver: &str, method: &str) -> bool {
     bsl_platform::security::registry()
         .lookup_module_method(receiver, method)

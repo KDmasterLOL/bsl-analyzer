@@ -83,9 +83,9 @@ pub const ENTRIES: &[SecurityEntry] = &[
     ext_app_method("ЗапуститьПриложение", "RunApp"),
     ext_app_method("НачатьЗапускПриложения", "BeginRunningApplication"),
     ext_app_method("ЗапуститьПриложениеАсинх", "RunAppAsync"),
-    ext_app_module_method("ЗапуститьПрограмму"),
-    ext_app_module_method("ОткрытьПроводник"),
-    ext_app_module_method("ОткрытьФайл"),
+    ext_app_module_method("ЗапуститьПрограмму", RUN_PROGRAM_MODULES),
+    ext_app_module_method("ОткрытьПроводник", OPEN_EXPLORER_MODULES),
+    ext_app_module_method("ОткрытьФайл", OPEN_FILE_MODULES),
     SecurityEntry {
         ru: "ПользователиОС",
         en: "OSUsers",
@@ -247,16 +247,20 @@ const fn ext_app_method(ru: &'static str, en: &'static str) -> SecurityEntry {
     }
 }
 
-/// Common modules that hand a path to the operating system. `РаботаСФайламиКлиент`
-/// predates the split into client and server modules and is still called.
-const FILE_SYSTEM_MODULES: &[&str] =
-    &["ФайловаяСистема", "ФайловаяСистемаКлиент", "РаботаСФайламиКлиент"];
+/// Owners are listed per method, not per library: a module that does not export
+/// the method cannot be calling it, and accepting it back would reopen the very
+/// class this lookup exists to close. Launching a program has a server-side
+/// counterpart, while handing a file or a path to the shell is client-only;
+/// `РаботаСФайламиКлиент` predates the split and still exports `ОткрытьФайл`.
+const RUN_PROGRAM_MODULES: &[&str] = &["ФайловаяСистема", "ФайловаяСистемаКлиент"];
+const OPEN_EXPLORER_MODULES: &[&str] = &["ФайловаяСистемаКлиент"];
+const OPEN_FILE_MODULES: &[&str] = &["ФайловаяСистемаКлиент", "РаботаСФайламиКлиент"];
 
-const fn ext_app_module_method(ru: &'static str) -> SecurityEntry {
+const fn ext_app_module_method(ru: &'static str, owners: &'static [&'static str]) -> SecurityEntry {
     SecurityEntry {
         ru,
         en: "",
-        kind: EntryKind::ModuleMethod { owners: FILE_SYSTEM_MODULES },
+        kind: EntryKind::ModuleMethod { owners },
         category: Category::ExternalApp,
         severity: Severity::Major,
         params: CMD_ARG0,
