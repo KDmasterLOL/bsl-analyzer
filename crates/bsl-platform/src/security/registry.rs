@@ -30,7 +30,7 @@ pub const ENTRIES: &[SecurityEntry] = &[
     fs_ctor("ЗаписьДанных", "DataWriter"),
     fs_ctor("ЧтениеДанных", "DataReader"),
     fs_method_path("ЗначениеВФайл", "ValueToFile"),
-    fs_method_path("КопироватьФайл", "FileCopy"),
+    fs_method_path("КопироватьФайл", "CopyFile"),
     fs_method_path("ОбъединитьФайлы", "MergeFiles"),
     fs_method_path("ПереместитьФайл", "MoveFile"),
     fs_method_path("РазделитьФайл", "SplitFile"),
@@ -83,9 +83,9 @@ pub const ENTRIES: &[SecurityEntry] = &[
     ext_app_method("ЗапуститьПриложение", "RunApp"),
     ext_app_method("НачатьЗапускПриложения", "BeginRunningApplication"),
     ext_app_method("ЗапуститьПриложениеАсинх", "RunAppAsync"),
-    ext_app_method_ru_only("ЗапуститьПрограмму"),
-    ext_app_method_ru_only("ОткрытьПроводник"),
-    ext_app_method_ru_only("ОткрытьФайл"),
+    ext_app_module_method("ЗапуститьПрограмму"),
+    ext_app_module_method("ОткрытьПроводник"),
+    ext_app_module_method("ОткрытьФайл"),
     SecurityEntry {
         ru: "ПользователиОС",
         en: "OSUsers",
@@ -247,6 +247,19 @@ const fn ext_app_method(ru: &'static str, en: &'static str) -> SecurityEntry {
     }
 }
 
-const fn ext_app_method_ru_only(ru: &'static str) -> SecurityEntry {
-    ext_app_method(ru, "")
+/// Common modules that hand a path to the operating system. `РаботаСФайламиКлиент`
+/// predates the split into client and server modules and is still called.
+const FILE_SYSTEM_MODULES: &[&str] =
+    &["ФайловаяСистема", "ФайловаяСистемаКлиент", "РаботаСФайламиКлиент"];
+
+const fn ext_app_module_method(ru: &'static str) -> SecurityEntry {
+    SecurityEntry {
+        ru,
+        en: "",
+        kind: EntryKind::ModuleMethod { owners: FILE_SYSTEM_MODULES },
+        category: Category::ExternalApp,
+        severity: Severity::Major,
+        params: CMD_ARG0,
+        lifetime: None,
+    }
 }

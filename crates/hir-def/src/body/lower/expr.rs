@@ -580,14 +580,14 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
         if let Some(method_token) = idents.last() {
             let method_name = method_token.text();
-            if is_external_app_method(method_name) {
+            let receiver_name = idents.len().checked_sub(2).map(|i| idents[i].text());
+
+            // `КомандаСистемы`, `КопироватьФайл` and their kin live in the global
+            // context only, so a qualified call never reaches them — matching the
+            // bare method name here would flag whatever the receiver actually is.
+            if receiver_name.is_some_and(|receiver| is_external_app_call(receiver, method_name)) {
                 ctx.diagnostics
                     .push(BodyDiagnostic::ExternalAppStarting { range: method_token.text_range() });
-            }
-
-            if is_file_system_method(method_name) {
-                ctx.diagnostics
-                    .push(BodyDiagnostic::FileSystemAccess { range: method_token.text_range() });
             }
 
             if is_form_data_to_value_method(method_name) && !ctx.has_no_context_annotation {
@@ -1256,6 +1256,14 @@ fn is_os_users_method(name: &str) -> bool {
 fn is_external_app_method(name: &str) -> bool {
     bsl_platform::security::registry()
         .lookup_global(name)
+        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::ExternalApp))
+}
+
+/// The receiver is matched by name, not by type: lowering has no types. A
+/// common module reached through a variable is therefore missed here.
+fn is_external_app_call(receiver: &str, method: &str) -> bool {
+    bsl_platform::security::registry()
+        .lookup_module_method(receiver, method)
         .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::ExternalApp))
 }
 

@@ -215,6 +215,92 @@ mod tests {
         );
     }
 
+    /// `ОткрытьФайл` принадлежит общим модулям БСП, а не платформе; у девяти
+    /// платформенных сериализаторов метод с тем же именем открывает поток на
+    /// запись и никакого приложения не запускает.
+    #[test]
+    fn test_serializer_open_file_not_detected() {
+        let code = r#"
+Процедура Тест()
+    ЗаписьXML = Новый ЗаписьXML;
+    ЗаписьXML.ОткрытьФайл(Путь, "UTF-8");
+
+    ЧтениеXML = Новый ЧтениеXML;
+    ЧтениеXML.ОткрытьФайл(Путь);
+
+    ЗаписьHTML = Новый ЗаписьHTML;
+    ЗаписьHTML.ОткрытьФайл(Путь);
+
+    ЧтениеHTML = Новый ЧтениеHTML;
+    ЧтениеHTML.ОткрытьФайл(Путь);
+
+    ЗаписьJSON = Новый ЗаписьJSON;
+    ЗаписьJSON.ОткрытьФайл(Путь);
+
+    ЧтениеJSON = Новый ЧтениеJSON;
+    ЧтениеJSON.ОткрытьФайл(Путь);
+
+    ЗаписьFastInfoset = Новый ЗаписьFastInfoset;
+    ЗаписьFastInfoset.ОткрытьФайл(Путь);
+
+    ЧтениеFastInfoset = Новый ЧтениеFastInfoset;
+    ЧтениеFastInfoset.ОткрытьФайл(Путь);
+
+    БазаDBF = Новый xBase;
+    БазаDBF.ОткрытьФайл(Путь);
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExternalAppStarting, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_foreign_receiver_not_detected() {
+        let code = r#"
+Процедура Тест()
+    МойМодуль.ОткрытьФайл(Путь);
+    Обработчик.ЗапуститьПрограмму(Команда);
+    ПравилаОбмена.ОткрытьФайл(Путь);
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExternalAppStarting, expect![[r#""#]]);
+    }
+
+    /// Устаревший модуль БСП, но вызов настоящий: файл открывается
+    /// ассоциированным приложением.
+    #[test]
+    fn test_legacy_file_module_detected() {
+        let code = r#"
+Процедура Тест()
+    РаботаСФайламиКлиент.ОткрытьФайл(Путь);
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExternalAppStarting,
+            expect![[r#"
+                ExternalAppStarting @ 3:26..3:37
+                  message: External application launch detected
+                  severity: Warning"#]],
+        );
+    }
+
+    /// Голое имя метода общего модуля не принадлежит платформе: без получателя
+    /// это вызов чего-то своего.
+    #[test]
+    fn test_bare_module_method_not_detected() {
+        let code = r#"
+Процедура Тест()
+    ОткрытьФайл(Путь);
+    ЗапуститьПрограмму(Команда);
+    ОткрытьПроводник(Путь);
+КонецПроцедуры
+
+Процедура ОткрытьФайл(Путь)
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExternalAppStarting, expect![[r#""#]]);
+    }
+
     #[test]
     fn test_similar_name_ignored() {
         let code = r#"

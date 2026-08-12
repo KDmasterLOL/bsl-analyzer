@@ -162,13 +162,31 @@ fn legacy_recognizer_parity() {
         "beginrunningapplication",
         "запуститьприложениеасинх",
         "runappasync",
-        "запуститьпрограмму",
-        "открытьпроводник",
-        "открытьфайл",
     ] {
         assert!(
             reg.lookup_global(name).is_some(),
             "legacy is_external_app_method name not in registry: {name}",
+        );
+    }
+
+    for &(owner, name) in &[
+        ("файловаясистема", "запуститьпрограмму"),
+        ("файловаясистемаклиент", "запуститьпрограмму"),
+        ("файловаясистемаклиент", "открытьпроводник"),
+        ("файловаясистемаклиент", "открытьфайл"),
+        ("работасфайламиклиент", "открытьфайл"),
+    ] {
+        assert!(
+            reg.lookup_module_method_lc(owner, name).is_some(),
+            "library module method not in registry: {owner}.{name}",
+        );
+        assert!(
+            reg.lookup_global(name).is_none(),
+            "{name} is a library module method, not a global one",
+        );
+        assert!(
+            reg.lookup_module_method_lc("записьxml", name).is_none(),
+            "{name} matched a receiver outside its owners",
         );
     }
 
@@ -221,6 +239,7 @@ fn legacy_recognizer_parity() {
         "значениевфайл",
         "valuetofile",
         "копироватьфайл",
+        "copyfile",
         "filecopy",
         "объединитьфайлы",
         "mergefiles",
@@ -359,9 +378,6 @@ fn legacy_recognizer_category_parity() {
         ("beginrunningapplication", "is_external_app_method", Category::ExternalApp),
         ("запуститьприложениеасинх", "is_external_app_method", Category::ExternalApp),
         ("runappasync", "is_external_app_method", Category::ExternalApp),
-        ("запуститьпрограмму", "is_external_app_method", Category::ExternalApp),
-        ("открытьпроводник", "is_external_app_method", Category::ExternalApp),
-        ("открытьфайл", "is_external_app_method", Category::ExternalApp),
         ("пользователиос", "is_os_users_method", Category::OsUsers),
         ("osusers", "is_os_users_method", Category::OsUsers),
         ("вычислить", "is_global_eval_call", Category::ExecuteExternalCode),
@@ -377,6 +393,7 @@ fn legacy_recognizer_category_parity() {
         ("значениевфайл", "is_file_system_method", Category::FileSystem),
         ("valuetofile", "is_file_system_method", Category::FileSystem),
         ("копироватьфайл", "is_file_system_method", Category::FileSystem),
+        ("copyfile", "is_file_system_method", Category::FileSystem),
         ("filecopy", "is_file_system_method", Category::FileSystem),
         ("объединитьфайлы", "is_file_system_method", Category::FileSystem),
         ("mergefiles", "is_file_system_method", Category::FileSystem),
@@ -466,6 +483,24 @@ fn legacy_recognizer_category_parity() {
         );
     }
 
+    let module_method_cases: &[(&str, &str, Category)] = &[
+        ("файловаясистема", "запуститьпрограмму", Category::ExternalApp),
+        ("файловаясистемаклиент", "открытьпроводник", Category::ExternalApp),
+        ("файловаясистемаклиент", "открытьфайл", Category::ExternalApp),
+        ("работасфайламиклиент", "открытьфайл", Category::ExternalApp),
+    ];
+    for (owner, name, expected) in module_method_cases {
+        let entry = reg.lookup_module_method_lc(owner, name).unwrap_or_else(|| {
+            panic!("registry has no module-method entry for {owner:?}.{name:?}")
+        });
+        assert!(
+            std::mem::discriminant(&entry.category) == std::mem::discriminant(expected),
+            "module method {owner:?}.{name:?} has category {:?}, expected {expected:?} — \
+             a category reassignment would silently drop detection",
+            entry.category,
+        );
+    }
+
     let constructor_cases: &[(&str, &str, Category)] = &[
         ("file", "is_file_system_type", Category::FileSystem),
         ("файл", "is_file_system_type", Category::FileSystem),
@@ -539,5 +574,8 @@ fn lookup_by_kind(
     match kind {
         EntryKind::GlobalMethod => reg.lookup_global(name),
         EntryKind::Constructor => reg.lookup_constructor(name),
+        EntryKind::ModuleMethod { owners } => {
+            reg.lookup_module_method(owners.first().expect("module method without an owner"), name)
+        }
     }
 }
