@@ -302,33 +302,6 @@ pub fn field_tail_name_token(field_expr: &SyntaxNode) -> Option<SyntaxToken> {
     })
 }
 
-/// The qualifier of `<name>.<tail>`, and only when it is a bare name. A richer
-/// receiver — a call result, an index, a longer chain — names something whose
-/// identity is not decidable without types, so it yields `None` rather than
-/// the nearest identifier lying around.
-pub fn field_head_name_token(field_expr: &SyntaxNode) -> Option<SyntaxToken> {
-    if field_expr.kind() != SyntaxKind::FIELD_EXPR {
-        return None;
-    }
-    let mut head: Option<SyntaxToken> = None;
-    for element in field_expr.children_with_tokens() {
-        let candidate = match element {
-            rowan::NodeOrToken::Token(token) if token.kind() == SyntaxKind::DOT => return head,
-            rowan::NodeOrToken::Token(token) if token.kind().is_trivia() => continue,
-            rowan::NodeOrToken::Token(token) if token.kind().is_name_token() => token,
-            rowan::NodeOrToken::Node(node) if node.kind() == SyntaxKind::IDENT => node
-                .children_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|tok| tok.kind().is_name_token())?,
-            _ => return None,
-        };
-        if head.replace(candidate).is_some() {
-            return None;
-        }
-    }
-    None
-}
-
 pub fn new_expr_type_name_token(new_expr: &SyntaxNode) -> Option<SyntaxToken> {
     if new_expr.kind() != SyntaxKind::NEW_EXPR {
         return None;
