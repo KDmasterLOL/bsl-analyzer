@@ -3,8 +3,9 @@
 //! The broker has no registry: a proxy finds its backend by recomputing the same
 //! deterministic name from its own launch parameters. Two clients that resolve to
 //! the same [`BackendKey`] therefore meet at the same socket; anything that should
-//! fork a separate backend (different project, profile, binary version, or
-//! embedding config) lands on a different name by construction.
+//! fork a separate backend (different project, cache directory, profile, binary
+//! version, embedding config, or extension topology) lands on a different name
+//! by construction.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,9 @@ pub struct BackendKey {
     /// path; [`BackendKey::new`] canonicalizes defensively so `/p` and `/p/` and a
     /// symlink to either collapse to one key.
     source_dir: PathBuf,
+    /// Canonicalized root of the derived workspace state. Sharing a source tree is
+    /// safe only when clients also agree where graph/search/lease files live.
+    cache_dir: PathBuf,
     profile: McpProfile,
     /// Binary version (`CARGO_PKG_VERSION` of this crate = workspace version). An
     /// upgrade mints a fresh key, so a new proxy never speaks to an old backend on
@@ -40,13 +44,23 @@ impl BackendKey {
     /// backend (the old one drains by idle).
     pub fn new(
         source_dir: impl Into<PathBuf>,
+        cache_dir: impl Into<PathBuf>,
         profile: McpProfile,
         config_fp: u64,
         topology_fp: u64,
     ) -> Self {
         let source_dir = source_dir.into();
         let source_dir = std::fs::canonicalize(&source_dir).unwrap_or(source_dir);
-        Self { source_dir, profile, version: env!("CARGO_PKG_VERSION"), config_fp, topology_fp }
+        let cache_dir = cache_dir.into();
+        let cache_dir = std::fs::canonicalize(&cache_dir).unwrap_or(cache_dir);
+        Self {
+            source_dir,
+            cache_dir,
+            profile,
+            version: env!("CARGO_PKG_VERSION"),
+            config_fp,
+            topology_fp,
+        }
     }
 
     /// Stable 128-bit identity digest as 32 lowercase hex chars. Short enough to fit
@@ -54,6 +68,8 @@ impl BackendKey {
     pub fn digest(&self) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(self.source_dir.as_os_str().as_encoded_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.cache_dir.as_os_str().as_encoded_bytes());
         hasher.update(b"\0");
         hasher.update(self.profile.as_str().as_bytes());
         hasher.update(b"\0");
@@ -322,6 +338,7 @@ mod tests {
         // Bypass `new`'s canonicalize (the path need not exist in unit tests).
         BackendKey {
             source_dir: PathBuf::from(dir),
+            cache_dir: PathBuf::from(dir).join(".build"),
             profile,
             version: "test",
             config_fp: fp,
@@ -344,6 +361,10 @@ mod tests {
         assert_ne!(base, key("/srv/other", McpProfile::Workspace, 7).digest(), "source_dir");
         assert_ne!(base, key("/srv/erp", McpProfile::Reference, 7).digest(), "profile");
         assert_ne!(base, key("/srv/erp", McpProfile::Workspace, 8).digest(), "config_fp");
+
+        let mut moved_cache = key("/srv/erp", McpProfile::Workspace, 7);
+        moved_cache.cache_dir = PathBuf::from("/var/cache/erp-next");
+        assert_ne!(base, moved_cache.digest(), "cache_dir");
 
         let mut bumped = key("/srv/erp", McpProfile::Workspace, 7);
         bumped.version = "test-next";

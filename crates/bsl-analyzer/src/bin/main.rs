@@ -509,6 +509,7 @@ mod contract_surface {
               mcp
                 serve
                   allowed-host
+                  cache-dir
                   configuration-root
                   extension !no-extensions
                   extension-depends-on
