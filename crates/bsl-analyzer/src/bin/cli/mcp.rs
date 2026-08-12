@@ -400,14 +400,12 @@ fn resolve_workspace_cache(
     cache_dir: Option<&Path>,
 ) -> io::Result<mcp_server::WorkspaceCacheLayout> {
     let Some(path) = cache_dir else {
-        // The default root is a function of the workspace, so it needs neither the current
-        // directory nor an ownership stamp — and it stays lazy: a read-only source tree must
-        // still bring the daemon up with search disabled rather than fail at startup.
+        // The default root is a function of the workspace, so it needs no current directory —
+        // and it stays lazy: a read-only source tree must still bring the daemon up with
+        // search disabled rather than fail at startup.
         return Ok(mcp_server::WorkspaceCacheLayout::for_workspace(canonical_source_dir));
     };
-    let layout = mcp_server::WorkspaceCacheLayout::prepare_explicit(path, &env::current_dir()?)?;
-    layout.claim_workspace(canonical_source_dir)?;
-    Ok(layout)
+    mcp_server::WorkspaceCacheLayout::prepare_explicit(path, &env::current_dir()?)
 }
 
 fn resolve_workspace_inputs(
