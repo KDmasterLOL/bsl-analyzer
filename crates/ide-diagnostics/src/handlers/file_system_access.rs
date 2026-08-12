@@ -286,6 +286,44 @@ EndProcedure
         );
     }
 
+    /// Перечисленные методы существуют только в глобальном контексте, поэтому
+    /// `Получатель.Имя(...)` — это всегда чужой метод с совпавшим именем.
+    #[test]
+    fn test_qualified_global_method_not_detected() {
+        let code = r#"
+Процедура Тест()
+    МойМодуль.КопироватьФайл(Источник, Приёмник);
+    Таблица.УдалитьФайлы();
+    FTPСоединение.СоздатьКаталог(Каталог);
+    Настройки.ЗначениеВФайл(Путь, Значение);
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::FileSystemAccess, expect![[r#""#]]);
+    }
+
+    /// Справка 8.3.27 переименовала английский синоним `КопироватьФайл`
+    /// в `CopyFile`; прежнее написание остаётся вызываемым.
+    #[test]
+    fn test_english_copy_file_both_spellings() {
+        let code = r#"
+Procedure Test()
+    CopyFile("src", "dest");
+    FileCopy("src", "dest");
+EndProcedure
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 3:5..3:13
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 4:5..4:13
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
+    }
+
     #[test]
     fn test_standard_types_ignored() {
         let code = r#"
@@ -296,24 +334,6 @@ EndProcedure
 КонецПроцедуры
 "#;
         check_diagnostics_snapshot_for(code, DiagnosticCode::FileSystemAccess, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_qualified_call_detected() {
-        let code = r#"
-Процедура Тест()
-    // Object method calls are also detected (unlike ExternalAppStarting)
-    ФайловаяСистема.КопироватьФайл("src", "dest");
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::FileSystemAccess,
-            expect![[r#"
-                FileSystemAccess @ 4:21..4:35
-                  message: File system access detected (security review required)
-                  severity: Major"#]],
-        );
     }
 
     #[test]

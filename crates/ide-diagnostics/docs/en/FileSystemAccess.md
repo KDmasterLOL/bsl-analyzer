@@ -16,7 +16,7 @@ Text = New TextReader(FilePath, TextEncoding.UTF8);     // review required
 Text = New TextWriter(FilePath, TextEncoding.UTF8);     // review required
 
 ValueToFile(FilePath, PersonalData);                    // review required
-FileCopy(FilePath, OtherFilePath);                      // review required
+CopyFile(FilePath, OtherFilePath);                      // review required
 MoveFile(FilePath, OtherFilePath);                      // review required
 DeleteFiles(FilePath);                                  // review required
 CreateDirectory(DirectoryName);                         // review required

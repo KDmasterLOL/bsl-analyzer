@@ -35,10 +35,20 @@ pub enum Lifetime {
     End,
 }
 
+/// Where a name may legitimately appear. A name matched outside its own
+/// surface belongs to something else that happens to share the spelling:
+/// `ЗаписьXML.ОткрытьФайл` is a serializer opening a stream, not the
+/// like-named library method that hands a file to the shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntryKind {
+    /// Global context: callable only bare, never after a dot.
     GlobalMethod,
     Constructor,
+    /// Method of a library common module, callable only as `<owner>.<name>`.
+    /// Owners are Russian-only — the libraries shipping them are.
+    ModuleMethod {
+        owners: &'static [&'static str],
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

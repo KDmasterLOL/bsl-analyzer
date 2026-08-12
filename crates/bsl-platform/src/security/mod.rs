@@ -18,17 +18,20 @@ pub struct SecurityRegistry {
     entries: &'static [SecurityEntry],
     globals: FxHashMap<String, usize>,
     constructors: FxHashMap<String, usize>,
+    module_methods: FxHashMap<String, usize>,
 }
 
 impl SecurityRegistry {
     fn build() -> Self {
         let mut globals: FxHashMap<String, usize> = FxHashMap::default();
         let mut constructors: FxHashMap<String, usize> = FxHashMap::default();
+        let mut module_methods: FxHashMap<String, usize> = FxHashMap::default();
 
         for (idx, entry) in ENTRIES.iter().enumerate() {
             let map = match entry.kind {
                 EntryKind::GlobalMethod => &mut globals,
                 EntryKind::Constructor => &mut constructors,
+                EntryKind::ModuleMethod { .. } => &mut module_methods,
             };
             let ru_key = entry.ru.fold_lower();
             insert_key(map, ru_key.clone(), idx);
@@ -38,9 +41,14 @@ impl SecurityRegistry {
                     insert_key(map, en_key, idx);
                 }
             }
+            for (ru, legacy_en) in crate::LEGACY_GLOBAL_FUNCTION_EN_ALIASES {
+                if ru.fold_lower() == ru_key {
+                    insert_key(map, legacy_en.fold_lower(), idx);
+                }
+            }
         }
 
-        Self { entries: ENTRIES, globals, constructors }
+        Self { entries: ENTRIES, globals, constructors, module_methods }
     }
 
     pub fn entries(&self) -> &'static [SecurityEntry] {
@@ -60,6 +68,36 @@ impl SecurityRegistry {
             return None;
         }
         self.globals.get(lc_name).map(|&idx| &self.entries[idx])
+    }
+
+    /// Resolve `<receiver>.<name>` against the module methods. Returns `None`
+    /// unless the receiver is one of the entry's declared owners — any other
+    /// receiver means a different method that merely shares the spelling.
+    pub fn lookup_module_method(
+        &self,
+        receiver: &str,
+        name: &str,
+    ) -> Option<&'static SecurityEntry> {
+        self.lookup_module_method_lc(&receiver.fold_lower(), &name.fold_lower())
+    }
+
+    pub fn lookup_module_method_lc(
+        &self,
+        lc_receiver: &str,
+        lc_name: &str,
+    ) -> Option<&'static SecurityEntry> {
+        debug_assert!(
+            lc_receiver == lc_receiver.fold_lower() && lc_name == lc_name.fold_lower(),
+            "lookup_module_method_lc requires pre-lowercased input, got: {lc_receiver}.{lc_name}"
+        );
+        if lc_receiver.is_empty() || lc_name.is_empty() {
+            return None;
+        }
+        let entry = self.module_methods.get(lc_name).map(|&idx| &self.entries[idx])?;
+        let EntryKind::ModuleMethod { owners } = entry.kind else {
+            return None;
+        };
+        owners.iter().any(|owner| owner.fold_lower() == lc_receiver).then_some(entry)
     }
 
     pub fn lookup_constructor(&self, type_name: &str) -> Option<&'static SecurityEntry> {

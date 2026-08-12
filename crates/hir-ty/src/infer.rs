@@ -363,6 +363,12 @@ pub enum InferenceDiagnostic {
         callee_kind: EnvCalleeKind,
         missing: hir_def::execution_env::EnvFlags,
     },
+    /// A call that hands a command or a path to the operating system. The
+    /// receiver decides it: platform types expose methods spelled like the
+    /// library ones that launch, and only the owner's method launches.
+    ExternalAppStarting {
+        expr: ExprId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1061,6 +1067,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
             InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
             InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
+            InferenceDiagnostic::ExternalAppStarting { expr } => *expr,
         };
         if self.body.is_recovered(key) {
             return;
@@ -2718,6 +2725,11 @@ impl<'db> InferenceContext<'db> {
             let workspace_receiver_kind = self.db.lookup_type(workspace_receiver_ty);
             if let TypeKind::CommonModule(facet) = &workspace_receiver_kind {
                 let module = hir_def::Name::new(&facet.name);
+                if is_external_app_module_call(&facet.name, method_name.as_str()) {
+                    self.push_inference_diagnostic(InferenceDiagnostic::ExternalAppStarting {
+                        expr: callee,
+                    });
+                }
                 // A bare module name as receiver (not a variable that holds a module) keeps the
                 // self-qualified-access and missed-parameter diagnostics that the name dispatch
                 // emits — the handlers filter further (TwoLevel only fires when the called module
@@ -3056,6 +3068,20 @@ impl<'db> InferenceContext<'db> {
         // the global context, so it shadows a same-named platform global function. A
         // same-module method (checked here) still wins, keeping Local → Module → Global-CM
         // → Platform precedence.
+        // Judged before the early return below: that return withholds a verdict when
+        // some global module body could not be read, because an unknown export may
+        // own the name and the platform contract would be the wrong yardstick. This
+        // verdict is about who owns the name, not about the argument contract, and a
+        // stranger's unreadable body must not silence it.
+        if let Some(name) = &bare_callee_name {
+            let name = name.clone();
+            if is_external_app_global(name.as_str()) && !self.is_call_name_shadowed(&name) {
+                self.push_inference_diagnostic(InferenceDiagnostic::ExternalAppStarting {
+                    expr: callee,
+                });
+            }
+        }
+
         if let Some(name) = &bare_callee_name {
             if !self.body_declares_binding(name)
                 && !self.assigned_var_names.contains(&NormName::intern(name.as_str()))
@@ -3576,6 +3602,17 @@ impl<'db> InferenceContext<'db> {
         } else {
             UnresolvedMethodKind::ReceiverNotResolved
         };
+        // Nothing typed the receiver, so no library module can be recognised by type
+        // here. A security hotspot that goes quiet in that state is worse than one
+        // judged by name, so the owner is matched by spelling here and only here.
+        // Both unresolved verdicts qualify: a name the workspace calls absent is
+        // still not evidence that the call is something else, and the call already
+        // carries its own unresolved report.
+        if is_external_app_module_call(module_name.as_str(), method_name.as_str()) {
+            self.push_inference_diagnostic(InferenceDiagnostic::ExternalAppStarting {
+                expr: call_expr,
+            });
+        }
         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
             expr: call_expr,
             receiver_name: module_name.clone(),
@@ -3932,6 +3969,21 @@ pub fn infer_effective<'db>(
 /// lower so the bilingual case-insensitive spellings match.
 fn is_proceed_with_call_name(name: &Name) -> bool {
     matches!(name.as_str().fold_lower().as_str(), "продолжитьвызов" | "proceedwithcall")
+}
+
+/// A library common module handing a command or a path to the operating system.
+fn is_external_app_module_call(receiver: &str, method: &str) -> bool {
+    bsl_platform::security::registry().lookup_module_method(receiver, method).is_some_and(|entry| {
+        matches!(entry.category, bsl_platform::security::Category::ExternalApp)
+    })
+}
+
+/// A global-context method that launches. Reachable only as a bare call: a
+/// qualified one names something else that shares the spelling.
+fn is_external_app_global(name: &str) -> bool {
+    bsl_platform::security::registry().lookup_global(name).is_some_and(|entry| {
+        matches!(entry.category, bsl_platform::security::Category::ExternalApp)
+    })
 }
 
 /// Inference over an extension module's OWN bodies under *weaving* (`&Вместо` /

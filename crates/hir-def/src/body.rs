@@ -576,10 +576,6 @@ pub enum BodyDiagnostic {
         range: TextRange,
     },
 
-    ExternalAppStarting {
-        range: TextRange,
-    },
-
     ExtraCommas {
         range: TextRange,
     },
@@ -975,7 +971,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::SelfInsertion { range } => *range,
             BodyDiagnostic::DeprecatedAttribute8312 { range, .. } => *range,
             BodyDiagnostic::ExecuteExternalCode { range } => *range,
-            BodyDiagnostic::ExternalAppStarting { range } => *range,
             BodyDiagnostic::ExtraCommas { range } => *range,
             BodyDiagnostic::FileSystemAccess { range } => *range,
             BodyDiagnostic::FormDataToValue { range } => *range,
