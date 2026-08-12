@@ -343,6 +343,47 @@ mod tests {
     }
 
     #[test]
+    fn inline_tabular_fields_are_not_a_dereference_hop() {
+        // `Т.ТЧ.(А, Б)` — выбор полей табличной части. Разыменования ссылки
+        // здесь нет, глубина пути равна двум, и при пороге по умолчанию
+        // находки быть не должно.
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ T.Товары.(Номенклатура, Количество) ИЗ Документ.Заказ КАК T";
+КонецПроцедуры
+"#;
+        let config = config_with_min_path_depth(3);
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::QueryNestedFieldsByDot)
+            .collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn a_dereference_before_inline_tabular_fields_still_fires() {
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ T.Ссылка.Товары.(Номенклатура) ИЗ Документ.Заказ КАК T";
+КонецПроцедуры
+"#;
+        let config = config_with_min_path_depth(3);
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::QueryNestedFieldsByDot)
+            .collect();
+        expect![[r#"
+            QueryNestedFieldsByDot @ 4:29..4:44
+              message: Обнаружено разыменование ссылочного поля
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
     fn test_min_path_depth_two_emits_two_part_normal_context() {
         let code = r#"
 Процедура Тест()
