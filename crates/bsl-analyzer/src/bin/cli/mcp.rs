@@ -322,6 +322,11 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
             "reference profile does not accept --cache-dir",
         ));
     }
+    // An unset shell variable expands to an empty argument, which resolves to the current
+    // directory — the multi-gigabyte databases would land wherever the client was started.
+    if args.cache_dir.as_deref().is_some_and(|dir| dir.as_os_str().is_empty()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--cache-dir must not be empty"));
+    }
     if matches!(args.runtime_profile, McpProfileCli::Reference)
         && (args.onec_url.is_some() || !args.onec_user.is_empty() || !args.onec_password.is_empty())
     {
@@ -393,12 +398,16 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
 fn resolve_workspace_cache(
     canonical_source_dir: &Path,
     cache_dir: Option<&Path>,
-    current_dir: &Path,
 ) -> io::Result<mcp_server::WorkspaceCacheLayout> {
-    match cache_dir {
-        Some(path) => mcp_server::WorkspaceCacheLayout::prepare_explicit(path, current_dir),
-        None => Ok(mcp_server::WorkspaceCacheLayout::for_workspace(canonical_source_dir)),
-    }
+    let Some(path) = cache_dir else {
+        // The default root is a function of the workspace, so it needs neither the current
+        // directory nor an ownership stamp — and it stays lazy: a read-only source tree must
+        // still bring the daemon up with search disabled rather than fail at startup.
+        return Ok(mcp_server::WorkspaceCacheLayout::for_workspace(canonical_source_dir));
+    };
+    let layout = mcp_server::WorkspaceCacheLayout::prepare_explicit(path, &env::current_dir()?)?;
+    layout.claim_workspace(canonical_source_dir)?;
+    Ok(layout)
 }
 
 fn resolve_workspace_inputs(
@@ -418,8 +427,7 @@ fn resolve_workspace_inputs(
             format!("failed to canonicalize --source-dir {}: {error}", source_dir.display()),
         )
     })?;
-    let current_dir = env::current_dir()?;
-    let cache = resolve_workspace_cache(&canonical_source, cache_dir, &current_dir)?;
+    let cache = resolve_workspace_cache(&canonical_source, cache_dir)?;
     Ok((Some(canonical_source), Some(cache)))
 }
 
@@ -507,10 +515,15 @@ fn daemon_command(
         .arg("workspace")
         .arg("--source-dir")
         .arg(source_dir)
-        .arg("--cache-dir")
-        .arg(workspace_cache.root())
         .arg("--mode")
         .arg("daemon");
+    // Only an explicitly requested root travels to the child. Passing the default one would
+    // turn it into an explicit `--cache-dir`, which the daemon must create at startup or
+    // fail — the default is deliberately lazy, and a read-only source tree has to keep
+    // bringing the daemon up with search disabled instead of looping through respawns.
+    if args.cache_dir.is_some() {
+        cmd.arg("--cache-dir").arg(workspace_cache.root());
+    }
     // The daemon must resolve the same project this proxy keyed on, and its own
     // config file cannot tell it about a source set that came from argv.
     cmd.args(args.source_set.to_args());
@@ -1457,6 +1470,19 @@ mod tests {
         assert!(err.to_string().contains("--cache-dir"));
     }
 
+    /// `--cache-dir "$UNSET_VAR"` reaches the process as an empty argument, which resolves to
+    /// the working directory the client happened to start in.
+    #[test]
+    fn empty_cache_dir_is_refused_rather_than_resolved_to_the_working_directory() {
+        let mut args = serve_args(McpServeMode::Stdio, None);
+        args.cache_dir = Some(PathBuf::new());
+
+        let err = validate_serve_args(&args).expect_err("an empty cache root names nothing");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("--cache-dir"));
+    }
+
     #[test]
     fn explicit_default_cache_matches_implicit_default_after_resolution() {
         let parent = tempfile::tempdir().unwrap();
@@ -1465,10 +1491,8 @@ mod tests {
         let canonical_source = source.canonicalize().unwrap();
         let default_cache = canonical_source.join(".build");
 
-        let implicit = resolve_workspace_cache(&canonical_source, None, parent.path()).unwrap();
-        let explicit =
-            resolve_workspace_cache(&canonical_source, Some(&default_cache), parent.path())
-                .unwrap();
+        let implicit = resolve_workspace_cache(&canonical_source, None).unwrap();
+        let explicit = resolve_workspace_cache(&canonical_source, Some(&default_cache)).unwrap();
 
         assert_eq!(implicit.root(), explicit.root());
     }
@@ -1482,7 +1506,8 @@ mod tests {
             cache_parent.path(),
         )
         .unwrap();
-        let args = serve_args(McpServeMode::Broker, None);
+        let mut args = serve_args(McpServeMode::Broker, None);
+        args.cache_dir = Some(PathBuf::from("кеш с пробелом"));
 
         let command = daemon_command(
             PathBuf::from("bsl-analyzer").as_path(),
@@ -1496,6 +1521,29 @@ mod tests {
 
         assert!(argv[flag + 1].is_absolute());
         assert_eq!(argv[flag + 1], cache.root());
+    }
+
+    /// Without the flag the child must derive the default itself. Handing it the resolved
+    /// default would make the daemon create `<source>/.build` at startup or die trying,
+    /// where it used to come up with search disabled.
+    #[test]
+    fn broker_child_receives_no_cache_dir_when_none_was_requested() {
+        let source = tempfile::tempdir().unwrap();
+        let canonical_source = source.path().canonicalize().unwrap();
+        let cache = mcp_server::WorkspaceCacheLayout::for_workspace(&canonical_source);
+        let args = serve_args(McpServeMode::Broker, None);
+
+        let command = daemon_command(
+            PathBuf::from("bsl-analyzer").as_path(),
+            &canonical_source,
+            &cache,
+            &args,
+            42,
+        );
+        let argv = command.get_args().map(PathBuf::from).collect::<Vec<_>>();
+
+        assert!(argv.iter().all(|arg| arg != "--cache-dir"), "argv: {argv:?}");
+        assert!(!canonical_source.join(".build").exists(), "the default stays lazy");
     }
 
     #[test]

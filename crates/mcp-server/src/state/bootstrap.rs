@@ -163,7 +163,6 @@ impl SharedState {
         let root_drift_epoch = Arc::new(AtomicU64::new(0));
         let publish_hook = Self::build_publish_hook(
             Arc::clone(&search_engine),
-            source_dir.clone(),
             cache.clone(),
             Arc::clone(&semantic_runtime),
             Arc::clone(&index_progress),

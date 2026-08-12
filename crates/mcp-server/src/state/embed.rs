@@ -1,7 +1,9 @@
 use super::types::{OverlayWarmupState, SemanticRuntimeStatus, SharedSearchEngine};
 use super::SharedState;
 use bsl_search::{IndexProgress, SearchEngine, WorkspaceRootsTransitionOutcome};
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -184,7 +186,6 @@ impl SharedState {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_publish_hook(
         search_engine: SharedSearchEngine,
-        workspace_root: PathBuf,
         cache: crate::cache::WorkspaceCacheLayout,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         index_progress: Arc<IndexProgress>,
@@ -201,7 +202,7 @@ impl SharedState {
             let (roots_handled, pending_collection_embeddings, pending_overlay_embeddings) =
                 Self::refresh_search_roots_after_graph(
                     &search_engine,
-                    &workspace_root,
+                    &cache,
                     &root_drift_epoch,
                     &signal,
                 );
@@ -239,7 +240,7 @@ impl SharedState {
     /// with searches and watcher attribution.
     fn refresh_search_roots_after_graph(
         engine: &SharedSearchEngine,
-        workspace_root: &Path,
+        cache: &crate::cache::WorkspaceCacheLayout,
         root_drift_epoch: &AtomicU64,
         signal: &crate::graph::GraphPublishSignal,
     ) -> (bool, bool, bool) {
@@ -258,9 +259,7 @@ impl SharedState {
             );
             return (false, false, false);
         };
-        let Some(provider) =
-            Self::published_graph_context_provider(workspace_root, signal.topology)
-        else {
+        let Some(provider) = Self::published_graph_context_provider(cache, signal.topology) else {
             return (false, false, false);
         };
         let seed = {
@@ -400,10 +399,10 @@ impl SharedState {
     }
 
     fn published_graph_context_provider(
-        workspace_root: &Path,
+        cache: &crate::cache::WorkspaceCacheLayout,
         topology: u64,
     ) -> Option<Arc<crate::graph_query::GraphDbContextProvider>> {
-        let graph_path = crate::cache::graph_db_path(workspace_root);
+        let graph_path = cache.graph_db_path();
         let graph_db = match crate::graph_query::GraphDb::open(&graph_path) {
             Ok(db) => db,
             Err(error) => {
@@ -1099,7 +1098,6 @@ mod tests {
         let flight = super::EmbedFlight::new();
         let hook = SharedState::build_publish_hook(
             Arc::clone(&engine),
-            workspace.clone(),
             crate::cache::WorkspaceCacheLayout::for_workspace(&workspace),
             Arc::clone(&semantic_runtime),
             Arc::clone(&progress),
@@ -1133,6 +1131,51 @@ mod tests {
             .workspace_roots()
             .unwrap()
             .contains_id("ext/live"));
+    }
+
+    /// The root transition reads the graph the daemon actually published. With the cache
+    /// moved out of the source tree there is no `<workspace>/.build` to fall back to, so a
+    /// provider keyed on the workspace instead of the layout would never find the artifact
+    /// and the root table would stay frozen at its boot contents.
+    #[test]
+    fn publish_hook_transitions_roots_when_the_cache_lives_outside_the_workspace() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_root_layout(&workspace, true);
+        let external = tempdir().unwrap();
+        let cache = crate::cache::WorkspaceCacheLayout::from_root(external.path().to_path_buf());
+        cache.ensure().unwrap();
+
+        let mut engine = SearchEngine::fts_only(&cache.search_db_path()).unwrap();
+        let (boot_roots, _) =
+            bsl_search::WorkspaceRoots::build(&workspace, &workspace.join("cf"), &[]);
+        engine.initialize_workspace_roots(boot_roots).unwrap();
+        engine.set_graph_context_provider(Arc::new(BootGraphProvider));
+        let engine: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let hook = SharedState::build_publish_hook(
+            Arc::clone(&engine),
+            cache.clone(),
+            Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Disabled)),
+            bsl_search::IndexProgress::new(),
+            super::EmbedFlight::new(),
+            None,
+            Arc::new(AtomicU64::new(0)),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
+        let graph = crate::graph::GraphState::for_workspace_with_cache(workspace.clone(), cache)
+            .with_publish_hook(hook);
+        graph.ensure_loading();
+
+        wait_for_root_count(&engine, 2);
+        assert!(engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .workspace_roots()
+            .unwrap()
+            .contains_id("ext/live"));
+        assert!(!workspace.join(".build").exists(), "the source tree stays untouched");
     }
 
     /// Both edges bracket the complete second SourceSet scan plus file reads. `try_lock`
@@ -1184,7 +1227,7 @@ mod tests {
         };
         let outcome = SharedState::refresh_search_roots_after_graph(
             &engine,
-            &workspace,
+            &crate::cache::WorkspaceCacheLayout::for_workspace(&workspace),
             &AtomicU64::new(0),
             &signal,
         );
@@ -1242,7 +1285,7 @@ mod tests {
         });
         let outcome = SharedState::refresh_search_roots_after_graph(
             &engine,
-            &workspace,
+            &crate::cache::WorkspaceCacheLayout::for_workspace(&workspace),
             root_drift_epoch.as_ref(),
             &signal,
         );
@@ -1680,7 +1723,6 @@ mod tests {
         let embed_flight = super::EmbedFlight::new();
         let hook = SharedState::build_publish_hook(
             Arc::clone(&engine_arc),
-            workspace.clone(),
             crate::cache::WorkspaceCacheLayout::for_workspace(&workspace),
             Arc::clone(&semantic_runtime),
             Arc::clone(&index_progress),

@@ -56,6 +56,43 @@ impl WorkspaceCacheLayout {
         &self.root
     }
 
+    /// Bind this cache root to `workspace_root`, refusing a root another workspace already
+    /// owns.
+    ///
+    /// Until the root became configurable, a shared cache path meant a shared workspace, and
+    /// both the writer lease and fingerprint-based cache adoption still assume it: two
+    /// daemons pointed at one root would fight over one lease and answer queries from a graph
+    /// built out of a different configuration. The stamp is written exclusively, so of two
+    /// processes racing on a fresh root exactly one creates it and the other reads it back
+    /// and compares.
+    pub fn claim_workspace(&self, workspace_root: &Path) -> std::io::Result<()> {
+        self.ensure()?;
+        let stamp = self.root.join("workspace-owner");
+        let owner = workspace_root.to_string_lossy();
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&stamp) {
+            Ok(mut file) => {
+                use std::io::Write;
+                return file.write_all(owner.as_bytes());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let recorded = std::fs::read_to_string(&stamp)?;
+        if recorded.trim() == owner.trim() {
+            return Ok(());
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "cache directory {} already holds the derived caches of {}; \
+                 give {} a cache directory of its own",
+                self.root.display(),
+                recorded.trim(),
+                workspace_root.display()
+            ),
+        ))
+    }
+
     pub fn ensure(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.root)
     }
@@ -100,6 +137,7 @@ pub fn ensure_workspace_cache_dir(workspace_root: &Path) -> std::io::Result<Path
 }
 
 /// The call-graph SQLite index path under the workspace cache directory.
+#[cfg(test)]
 pub fn graph_db_path(workspace_root: &Path) -> PathBuf {
     WorkspaceCacheLayout::for_workspace(workspace_root).graph_db_path()
 }
@@ -146,5 +184,21 @@ mod tests {
         assert_eq!(layout.lease_lock_path(), root.join("writer.lease.lock"));
         assert_eq!(layout.stall_report_path(), root.join("bsl-graph-stall-report.txt"));
         assert_eq!(layout.daemon_log_path(), root.join("bsl-analyzer-daemon.log"));
+    }
+
+    #[test]
+    fn a_cache_root_serves_one_workspace_and_refuses_the_next() {
+        let shared = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let layout = WorkspaceCacheLayout::from_root(shared.path().to_path_buf());
+
+        layout.claim_workspace(first.path()).unwrap();
+        // Re-claiming is how the second daemon generation over the same workspace comes up.
+        layout.claim_workspace(first.path()).unwrap();
+        let refused = layout.claim_workspace(second.path()).unwrap_err();
+
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(refused.to_string().contains(&first.path().display().to_string()));
     }
 }
