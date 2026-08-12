@@ -592,6 +592,64 @@ fn test_in_expression_not_in() {
 }
 
 #[test]
+fn names_taken_from_tokens_are_the_names_written_in_the_query() {
+    // Метаморфное свойство сравнивает два понижения между собой и потому
+    // слепо к равномерно неверному значению: пустое имя параметра было бы
+    // пустым в обоих. Имена приходится утверждать прямо.
+    use crate::hir::ExprHir;
+
+    let query = "ВЫБРАТЬ ЗНАЧЕНИЕ(Перечисление.ВидыТоваров.Основной) КАК Вид \
+                 ИЗ Справочник.Товары КАК Т \
+                 ГДЕ Т.Дата = &НачалоПериода";
+    let hir = lower_query(query);
+
+    let ExprHir::FunctionCall { args, .. } = &hir.select.fields[0].expr else {
+        panic!("ожидался вызов ЗНАЧЕНИЕ");
+    };
+    let ExprHir::ColumnRef { parts, .. } = &args[0] else {
+        panic!("ожидалась ссылка внутри ЗНАЧЕНИЕ");
+    };
+    let value_parts: Vec<&str> = parts.iter().map(|p| p.as_str()).collect();
+    assert_eq!(value_parts, vec!["Перечисление", "ВидыТоваров", "Основной"]);
+
+    let Some(ExprHir::BinaryOp { lhs, rhs, .. }) = hir.where_clause.as_ref() else {
+        panic!("ожидалось сравнение в ГДЕ");
+    };
+
+    let ExprHir::ColumnRef { parts, .. } = lhs.as_ref() else {
+        panic!("слева ожидалась ссылка на поле");
+    };
+    let column_parts: Vec<&str> = parts.iter().map(|p| p.as_str()).collect();
+    assert_eq!(column_parts, vec!["Т", "Дата"]);
+
+    let ExprHir::Parameter { name, .. } = rhs.as_ref() else {
+        panic!("справа ожидался параметр");
+    };
+    assert_eq!(name.as_str(), "НачалоПериода");
+}
+
+#[test]
+fn a_name_range_stops_at_the_name() {
+    // Диапазон составного имени кончается на последнем имени и там, где
+    // ссылка лежит внутри ЗНАЧЕНИЕ, — тоже: собственный диапазон узла
+    // растянулся бы на комментарий перед закрывающей скобкой.
+    use crate::hir::ExprHir;
+
+    let query = "ВЫБРАТЬ ЗНАЧЕНИЕ(Перечисление.ВидыТоваров.Основной // хвост\n) КАК Вид";
+    let hir = lower_query(query);
+
+    let ExprHir::FunctionCall { args, .. } = &hir.select.fields[0].expr else {
+        panic!("ожидался вызов ЗНАЧЕНИЕ");
+    };
+    let ExprHir::ColumnRef { range, .. } = &args[0] else {
+        panic!("ожидалась ссылка внутри ЗНАЧЕНИЕ");
+    };
+
+    let expected = query.find("Основной").unwrap() + "Основной".len();
+    assert_eq!(usize::from(range.end()), expected);
+}
+
+#[test]
 fn each_operator_in_a_chain_is_its_own() {
     // Операция берётся от своего токена: подстрока в тексте узла не различает,
     // какая из двух операций цепочки чья, и первая же выигрывала за обе.

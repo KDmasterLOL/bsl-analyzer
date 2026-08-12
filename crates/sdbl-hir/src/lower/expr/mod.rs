@@ -99,12 +99,7 @@ impl LoweringContext<'_> {
             "resolved column type from scope"
         );
 
-        // Ссылка кончается на последнем имени: тривия за ним в подсветку
-        // и в диапазон находки не входит.
-        let ref_range = match (ident_ranges.first(), ident_ranges.last()) {
-            (Some(first), Some(last)) => TextRange::new(first.start(), last.end()),
-            _ => node.text_range(),
-        };
+        let ref_range = name_span(&ident_ranges, node.text_range());
 
         if ty == SdblType::Unknown {
             if let Some(alias) = table_alias_str {
@@ -483,9 +478,12 @@ impl LoweringContext<'_> {
     }
 
     fn lower_parameter(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
-        let name = syntax::ast_utils::direct_name_tokens(node)
-            .next()
-            .map(|token| token.text().to_string())
+        // Лексер SDBL склеивает `&` с именем в один токен, поэтому имя не
+        // является токеном-именем и берётся из текста токена без ведущего
+        // `&`. Из текста УЗЛА его брать нельзя: узел несёт за собой тривию.
+        let name = syntax::ast_utils::significant_tokens(node)
+            .map(|token| token.text().trim_start_matches('&').to_string())
+            .find(|text| !text.is_empty())
             .unwrap_or_default();
 
         ExprHir::Parameter {
@@ -597,7 +595,13 @@ impl LoweringContext<'_> {
             }
         }
 
-        vec![ExprHir::ColumnRef { parts, ty: SdblType::AnyRef, range: col_ref.text_range() }]
+        let ranges: Vec<TextRange> = ident_ranges.iter().map(|(range, _)| *range).collect();
+
+        vec![ExprHir::ColumnRef {
+            parts,
+            ty: SdblType::AnyRef,
+            range: name_span(&ranges, col_ref.text_range()),
+        }]
     }
 
     fn lower_tuple_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
@@ -638,5 +642,17 @@ fn classify_primitive_cast_target(name: &str, decimals: &[u32]) -> SdblType {
         "ДАТА" | "DATE" => SdblType::Date,
         "БУЛЕВО" | "BOOLEAN" => SdblType::Boolean,
         _ => SdblType::Unknown,
+    }
+}
+
+/// Диапазон составного имени — от первого имени до последнего.
+///
+/// Собственный диапазон узла для этого не годится: хвостовая тривия
+/// закрывается внутрь узла, и диапазон растянулся бы на пробелы и
+/// комментарий за именем.
+fn name_span(ranges: &[TextRange], fallback: TextRange) -> TextRange {
+    match (ranges.first(), ranges.last()) {
+        (Some(first), Some(last)) => TextRange::new(first.start(), last.end()),
+        _ => fallback,
     }
 }
