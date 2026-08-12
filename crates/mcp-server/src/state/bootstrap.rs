@@ -12,7 +12,7 @@ use crate::diagnostics_state::DiagnosticsState;
 use crate::graph::GraphState;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
     env,
@@ -123,39 +123,9 @@ impl SharedState {
         // On each graph publish/adopt (on the graph's own background thread) re-render the
         // search chunks marked context-dirty by an `.xml` drift, now that the graph has
         // caught up. Captures only shared handles; the closure never runs on a query path.
-        // ONE embed single-flight shared by the boot pass and the post-refresh re-embed kick,
-        // so overlapping passes collapse into one and the installed index is always built from
-        // the latest store state.
-        let embed_flight = EmbedFlight::new();
-        let publish_hook = Self::build_publish_hook(
-            Arc::clone(&search_engine),
-            source_dir.clone(),
-            Arc::clone(&semantic_runtime),
-            Arc::clone(&index_progress),
-            Arc::clone(&embed_flight),
-            workspace_lease.clone(),
-        );
-        let graph = GraphState::for_workspace(source_dir.clone())
-            .with_change_hub(change_hub.clone())
-            .with_publish_hook(publish_hook)
-            .with_lease(workspace_lease.clone());
-
-        // The `metadata` tool reads the resident diagnostics host (per-MDO substrate for
-        // `object`, Channel-2 `load_configuration` for `tree`/`info`); it is seeded and
-        // kept fresh by the resident's own drift poll, so no separate configuration
-        // snapshot is loaded here. The same resident serves the search overlay's incremental
-        // reindex through the snapshot-source adapter.
-        let diagnostics =
-            DiagnosticsState::for_workspace(source_dir.clone()).with_change_hub(change_hub.clone());
-        let snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource> = Arc::new(
-            crate::diagnostics_state::ResidentModuleSnapshotSource::new(diagnostics.clone()),
-        );
-
         // The overlay retry driver exists only where an Embed pass exists: Postgres mode
-        // with an embedder. PG without one is the legitimate FTS-only shape — a driver
-        // there would run a `Skipped` pass per tick without ever consuming a signal; the
-        // warmup state is settled up front instead, or `search status` would show
-        // "building..." forever with the direct startup warmup gone.
+        // with an embedder. It is created before the graph hook so a root transition can kick
+        // the SAME owner; no second warmup worker is introduced.
         let overlay_retry =
             if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
                 if Self::embedding_config().is_some() {
@@ -176,6 +146,38 @@ impl SharedState {
                 None
             };
 
+        // ONE embed single-flight shared by the boot pass and the post-context/root refresh kick,
+        // so overlapping passes collapse into one and the installed index is always built from
+        // the latest store state. Root-relevant drift has its own epoch: it fences the narrow
+        // validation→apply window without making an unrelated watched file reject the plan.
+        let embed_flight = EmbedFlight::new();
+        let root_drift_epoch = Arc::new(AtomicU64::new(0));
+        let publish_hook = Self::build_publish_hook(
+            Arc::clone(&search_engine),
+            source_dir.clone(),
+            Arc::clone(&semantic_runtime),
+            Arc::clone(&index_progress),
+            Arc::clone(&embed_flight),
+            overlay_retry.clone(),
+            Arc::clone(&root_drift_epoch),
+            workspace_lease.clone(),
+        );
+        let graph = GraphState::for_workspace(source_dir.clone())
+            .with_change_hub(change_hub.clone())
+            .with_publish_hook(publish_hook)
+            .with_lease(workspace_lease.clone());
+
+        // The `metadata` tool reads the resident diagnostics host (per-MDO substrate for
+        // `object`, Channel-2 `load_configuration` for `tree`/`info`); it is seeded and
+        // kept fresh by the resident's own drift poll, so no separate configuration
+        // snapshot is loaded here. The same resident serves the search overlay's incremental
+        // reindex through the snapshot-source adapter.
+        let diagnostics =
+            DiagnosticsState::for_workspace(source_dir.clone()).with_change_hub(change_hub.clone());
+        let snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource> = Arc::new(
+            crate::diagnostics_state::ResidentModuleSnapshotSource::new(diagnostics.clone()),
+        );
+
         // The sink is started by this thread, once there is an engine to feed and a watch
         // to feed it from; the lease rides along so the cursor is released on every way out
         // that does not end in a running sink — including this spawn failing, where the
@@ -194,6 +196,7 @@ impl SharedState {
             Arc::clone(&snapshot_source),
             workspace_lease.clone(),
             overlay_retry.clone(),
+            Arc::clone(&root_drift_epoch),
         );
 
         Ok(Self {
@@ -235,6 +238,7 @@ impl SharedState {
         snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource>,
         lease: crate::workspace_lease::WorkspaceLease,
         overlay_retry: Option<Arc<super::overlay_retry::OverlayRetry>>,
+        root_drift_epoch: Arc<AtomicU64>,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
@@ -388,6 +392,7 @@ impl SharedState {
                             Arc::clone(&search_engine),
                             graph.clone(),
                             overlay_retry.clone(),
+                            Arc::clone(&root_drift_epoch),
                         ) {
                             sink_lease.handed_over();
                         }
@@ -667,9 +672,10 @@ impl SharedState {
         engine: &mut SearchEngine,
         workspace_roots: bsl_search::WorkspaceRoots,
         hash_mode: BaselineHashMode,
-    ) {
-        engine.set_workspace_roots(workspace_roots);
+    ) -> Result<(), bsl_search::SearchError> {
+        engine.initialize_workspace_roots(workspace_roots)?;
         engine.set_workspace_baseline_hash_mode(hash_mode);
+        Ok(())
     }
 
     fn roots_of(project: &project_model::Project) -> bsl_search::WorkspaceRoots {
@@ -760,11 +766,14 @@ impl SharedState {
                 return None;
             };
             let mut engine = Self::open_workspace_overlay_search_engine(&db_path)?;
-            Self::configure_workspace_engine(
+            if let Err(error) = Self::configure_workspace_engine(
                 &mut engine,
                 Self::roots_of(&project),
                 BaselineHashMode::NormalizedChunks,
-            );
+            ) {
+                tracing::warn!("failed to configure workspace search roots: {error}");
+                return None;
+            }
             if let Err(error) = engine.set_serves_external_baseline(true) {
                 tracing::warn!("failed to declare the external-baseline mode: {error}");
                 return None;
@@ -870,11 +879,14 @@ impl SharedState {
         // embeddings, throwing away vectors already paid for — the opposite of resume.
         // Changed files are still detected and re-embedded via their content-hash mismatch.
 
-        Self::configure_workspace_engine(
+        if let Err(error) = Self::configure_workspace_engine(
             &mut engine,
             Self::roots_of(&project),
             BaselineHashMode::RawFileBytes,
-        );
+        ) {
+            tracing::warn!("failed to configure workspace search roots: {error}");
+            return None;
+        }
         // Declaring the local mode also clears inherited fingerprint rows: they claim
         // "verified against the manifest", which this mode can neither honour nor refresh —
         // a row surviving the local period would suppress a same-stat edit after a switch
@@ -1310,6 +1322,7 @@ mod tests {
     };
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
@@ -1382,6 +1395,7 @@ mod tests {
             )),
             crate::workspace_lease::WorkspaceLease::unmanaged(),
             None,
+            Arc::new(AtomicU64::new(0)),
         );
 
         for _ in 0..600 {
@@ -1442,6 +1456,7 @@ mod tests {
             )),
             crate::workspace_lease::WorkspaceLease::unmanaged(),
             None,
+            Arc::new(AtomicU64::new(0)),
         );
     }
 

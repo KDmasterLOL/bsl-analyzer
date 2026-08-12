@@ -199,12 +199,9 @@ pub(super) fn search_status_with_cap(
     // neither profile has one, so "no table" cannot tell them apart, and a reference index
     // (which has no source roots by construction) would report a permanent fault.
     if matches!(profile, crate::McpProfile::Workspace) {
-        // Named for the table it actually reads. The search index takes its root table once, at
-        // startup; the diagnostics resident rebuilds its own on every config drift. Between a
-        // config edit and a restart the two disagree, and a bare "Source roots" would present
-        // the older one as the workspace's answer — including to a reader who then feeds a
-        // listed id to `diagnostics file` and is told the root is unknown.
-        let _ = writeln!(out, "Source roots (as the search index was started with):");
+        // Read from the live engine table. A graph publication transitions this table together
+        // with every root-keyed carrier before it becomes visible here.
+        let _ = writeln!(out, "Source roots (current search index):");
         match guard
             .as_ref()
             .and_then(|guard| guard.as_ref())
@@ -912,7 +909,7 @@ mod tests {
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
-        assert!(text.contains("Source roots (as the search index was started with):"), "{text}");
+        assert!(text.contains("Source roots (current search index):"), "{text}");
         assert!(text.contains("(configuration)"), "the configuration is named, not blank: {text}");
         assert!(
             text.contains(&extension.display().to_string()),

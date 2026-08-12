@@ -91,7 +91,7 @@ pub(super) fn build_workspace_code(
     // seen, and those counters are the numbers the refusal reports.
     let declared: Vec<std::path::PathBuf> =
         roots.entries().map(|(_, path)| path.to_path_buf()).collect();
-    engine.set_workspace_roots(roots);
+    engine.initialize_workspace_roots(roots)?;
 
     let walk = project_model::SourceSet::scan(&declared);
     let ingest = engine.ingest_scanned_fts(&walk)?;
@@ -522,17 +522,14 @@ mod tests {
         }
     }
 
-    /// The single-root shortcut would silently undo the whole node. `set_workspace_root`
-    /// builds a table of one root and calling it AFTER the project's table is installed
-    /// replaces it, so every extension row would fall back to the configuration's key — with
-    /// nothing to notice it: the method is public, its return is `()`, and no other
-    /// production caller is left to make a dead-code warning fire.
+    /// The single-root shortcut would silently undo the whole node. The publisher must pass
+    /// its complete configuration+extensions table to the plural boot initializer.
     #[test]
     fn the_publisher_does_not_fall_back_to_a_single_root_table() {
         let source = include_str!("documents.rs");
         let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap_or(source);
         assert!(
-            production.contains("set_workspace_roots("),
+            production.contains("initialize_workspace_roots("),
             "the production/test cut moved, or the root table is no longer installed here; \
              this gate scans only what it can prove it scanned"
         );

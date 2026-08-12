@@ -404,24 +404,56 @@ impl WorkspaceOverlayCache {
         self.bump_wholesale();
     }
 
+    /// Replace only the source used by future point refreshes and fence every plan prepared with
+    /// the previous source. Stable lexical entries remain valid: graph context changes semantic
+    /// text, not lexical documents. Unlike [`Self::set_graph_context_provider`], this does not
+    /// discard them or the value-stable embedding cache, but it still raises the wholesale epoch
+    /// so an older semantic plan cannot publish after the provider swap.
+    pub(crate) fn replace_graph_context_provider(
+        &mut self,
+        provider: Arc<dyn GraphContextProvider>,
+    ) {
+        self.graph_context_provider = Some(provider);
+        self.dirty_seq += 1;
+        self.wholesale_seq = self.dirty_seq;
+    }
+
     pub fn enable_watcher_mode(&mut self) {
         self.watcher_mode = true;
     }
 
     /// Selectively move the cache to a new root keyspace while preserving stable edits and warm
-    /// embeddings. The wholesale fence invalidates every lock-free plan made against the old
-    /// topology, but settlements for unaffected keys remain valid. This is not a full overlay
-    /// publication: stable roots are not rebuilt, so `initialized` and `full_rescan_pending` keep
-    /// their prior truth rather than claiming the transition proved the whole overlay complete.
+    /// embeddings. `unread_present` contains keys a complete walk saw but could not read; stable
+    /// carriers for them survive and every such key receives a durable dirty/unread retry debt.
+    /// The wholesale fence invalidates every lock-free plan made against the old topology, but
+    /// settlements for unaffected keys remain valid. This is not a full overlay publication:
+    /// stable roots are not rebuilt, so `initialized` and `full_rescan_pending` keep their prior
+    /// truth rather than claiming the transition proved the whole overlay complete.
     pub(crate) fn transition_roots(
         &mut self,
         changed_root_ids: &HashSet<String>,
         cleanup: &HashSet<FileKey>,
         obsolete_baseline: &HashSet<FileKey>,
+        unread_present: &HashSet<FileKey>,
         files: Vec<WorkspaceTransitionOverlayFile>,
     ) {
         self.dirty_seq += 1;
         self.wholesale_seq = self.dirty_seq;
+
+        // A stable local overlay entry may already be hiding its remote baseline twin. If its
+        // bytes become unreadable during an otherwise unrelated root transition, the entry and
+        // its hiding are one coherent carrier pair: keeping the entry but lifting the hiding
+        // would expose both local and baseline versions. New/rebound unread keys have no trusted
+        // entry and therefore inherit no hiding.
+        let unread_hidings_to_preserve: HashSet<FileKey> = unread_present
+            .iter()
+            .filter(|key| {
+                !changed_root_ids.contains(&key.root_id)
+                    && self.entries.contains_key(*key)
+                    && self.hidden_paths.contains(*key)
+            })
+            .cloned()
+            .collect();
 
         let binding_changed = |key: &FileKey| changed_root_ids.contains(&key.root_id);
         self.entries.retain(|key, _| !binding_changed(key));
@@ -441,6 +473,21 @@ impl WorkspaceOverlayCache {
             } else {
                 self.hidden_paths.remove(key);
             }
+        }
+
+        // A clean walk proved these keys present, but their bytes were unavailable. Preserve any
+        // stable-root carrier left above; for a new or rebound key, publish no guessed content.
+        // Either way the dirty+unread pair is the durable obligation that lets watcher/overlay
+        // retry heal the file. Presence is specifically not absence evidence, so it creates no
+        // new hiding; only the coherent local-entry hiding captured above survives.
+        for key in unread_present {
+            if unread_hidings_to_preserve.contains(key) {
+                self.hidden_paths.insert(key.clone());
+            } else {
+                self.hidden_paths.remove(key);
+            }
+            self.unread_keys.insert(key.clone());
+            self.retain_dirty_uncharged(key.clone(), 0);
         }
 
         for file in files {
@@ -7245,8 +7292,8 @@ mod tests {
                 cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
             assert_eq!(outcome, super::PublishOutcome::Superseded);
         }
-        // set_graph_context_provider() between the phases.
-        {
+        // Both provider installation variants between the phases.
+        for replace_only in [false, true] {
             struct NoContext;
             impl crate::ports::GraphContextProvider for NoContext {
                 fn graph_context(
@@ -7265,11 +7312,17 @@ mod tests {
             let mut cache = WorkspaceOverlayCache::default();
             cache.enable_watcher_mode();
             let (_, _, baseline, plan) = build(workspace, &store, &mut cache);
-            cache.set_graph_context_provider(std::sync::Arc::new(NoContext));
+            if replace_only {
+                cache.replace_graph_context_provider(std::sync::Arc::new(NoContext));
+            } else {
+                cache.set_graph_context_provider(std::sync::Arc::new(NoContext));
+            }
             let outcome =
                 cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
             assert_eq!(outcome, super::PublishOutcome::Superseded);
-            assert!(!cache.initialized, "the invalidation's re-init obligation stands");
+            if !replace_only {
+                assert!(!cache.initialized, "the invalidation's re-init obligation stands");
+            }
         }
     }
 
@@ -7911,9 +7964,84 @@ mod tests {
         let mut cache = WorkspaceOverlayCache::default();
         let baseline = cache.publication_baseline();
 
-        cache.transition_roots(&HashSet::new(), &HashSet::new(), &HashSet::new(), Vec::new());
+        cache.transition_roots(
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            Vec::new(),
+        );
         let outcome = cache.publish_plan(plan, HashMap::new(), &baseline, None, &store).unwrap();
         assert_eq!(outcome, PublishOutcome::Superseded);
+    }
+
+    #[test]
+    fn replacing_published_graph_provider_fences_plans_but_keeps_stable_lexical_entries() {
+        struct Provider;
+        impl crate::ports::GraphContextProvider for Provider {
+            fn graph_context(&self, _: &str, _: &str, _: &str) -> Option<String> {
+                None
+            }
+        }
+
+        let mut cache = WorkspaceOverlayCache::default();
+        let stable = key("Stable.bsl");
+        cache.entries.insert(
+            stable.clone(),
+            super::OverlayFileEntry {
+                fingerprint: super::FileFingerprint {
+                    len: 1,
+                    modified: None,
+                    canonical: PathBuf::from("Stable.bsl"),
+                },
+                file_hash: vec![1],
+                lexical_documents: Vec::new(),
+                vector_documents: Vec::new(),
+                embedding_inputs: Vec::new(),
+            },
+        );
+        let before = cache.publication_baseline();
+        cache.replace_graph_context_provider(std::sync::Arc::new(Provider));
+
+        assert!(cache.entries.contains_key(&stable), "lexical state remains valid");
+        assert!(
+            cache.wholesale_seq > before.fence,
+            "semantic plans from the previous graph source are fenced"
+        );
+    }
+
+    #[test]
+    fn a_rebound_unread_key_inherits_neither_entry_nor_baseline_hiding() {
+        let mut cache = WorkspaceOverlayCache::default();
+        let rebound = FileKey::new("rebound", "Module.bsl");
+        cache.entries.insert(
+            rebound.clone(),
+            super::OverlayFileEntry {
+                fingerprint: super::FileFingerprint {
+                    len: 1,
+                    modified: None,
+                    canonical: PathBuf::from("old/Module.bsl"),
+                },
+                file_hash: vec![1],
+                lexical_documents: Vec::new(),
+                vector_documents: Vec::new(),
+                embedding_inputs: Vec::new(),
+            },
+        );
+        cache.hidden_paths.insert(rebound.clone());
+
+        cache.transition_roots(
+            &HashSet::from(["rebound".to_owned()]),
+            &HashSet::from([rebound.clone()]),
+            &HashSet::new(),
+            &HashSet::from([rebound.clone()]),
+            Vec::new(),
+        );
+
+        assert!(!cache.entries.contains_key(&rebound));
+        assert!(!cache.hidden_paths.contains(&rebound));
+        assert!(cache.unread_keys.contains(&rebound));
+        assert!(cache.dirty_paths.contains_key(&rebound));
     }
 
     #[test]
@@ -7944,7 +8072,13 @@ mod tests {
 
         let changed_ids = HashSet::from(["removed-root".to_owned()]);
         let cleanup = HashSet::from([obsolete.clone()]);
-        cache.transition_roots(&changed_ids, &cleanup, &HashSet::new(), Vec::new());
+        cache.transition_roots(
+            &changed_ids,
+            &cleanup,
+            &HashSet::new(),
+            &HashSet::new(),
+            Vec::new(),
+        );
 
         assert!(cache.watcher_mode);
         assert!(cache.initialized);
@@ -7958,7 +8092,13 @@ mod tests {
         assert_eq!(cache.embedding_cache.get("warm"), Some(&vec![1.0, 2.0]));
 
         let mut cold = WorkspaceOverlayCache::default();
-        cold.transition_roots(&HashSet::new(), &HashSet::new(), &HashSet::new(), Vec::new());
+        cold.transition_roots(
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            Vec::new(),
+        );
         assert!(
             !cold.initialized,
             "a transition of affected roots cannot initialize untouched stable roots"

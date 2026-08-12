@@ -3,6 +3,7 @@ use crate::change_hub::WorkspaceChangeHub;
 use crate::graph::GraphState;
 use bsl_search::SearchEngine;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -98,6 +99,7 @@ impl SharedState {
         engine: SharedSearchEngine,
         graph: GraphState,
         overlay_retry: Option<Arc<super::overlay_retry::OverlayRetry>>,
+        root_drift_epoch: Arc<AtomicU64>,
     ) -> bool {
         std::thread::Builder::new()
             .name("bsl-search-overlay-watch".to_owned())
@@ -121,6 +123,16 @@ impl SharedState {
                     let batch = hub.drain(cursor);
                     cursor = batch.cursor;
                     let fresh = !batch.entries.is_empty() || batch.rescan_required;
+                    if Self::root_transition_relevant_drift(
+                        &batch.entries,
+                        batch.rescan_required,
+                        &graph,
+                    ) {
+                        // Before applying the batch: if a root transition already owns the
+                        // engine lock, this event will wait and be attributed by the new roots;
+                        // otherwise the transition sees the epoch move and rejects its stale plan.
+                        root_drift_epoch.fetch_add(1, Ordering::SeqCst);
+                    }
                     Self::apply_search_drift(
                         &engine,
                         &batch.entries,
@@ -141,6 +153,28 @@ impl SharedState {
                 }
             })
             .is_ok()
+    }
+
+    /// Whether a drained batch can invalidate a root-transition filesystem snapshot. Source and
+    /// metadata files, analyzer config, subtree loss and detail-losing rescans are relevant.
+    /// `MaybeRemoved` is conservative because a vanished path cannot be stat-ed to distinguish a
+    /// file from a directory (including directories whose names contain a dot).
+    fn root_transition_relevant_drift(
+        entries: &[crate::change_hub::ChangeEntry],
+        rescan_required: bool,
+        graph: &GraphState,
+    ) -> bool {
+        rescan_required
+            || entries.iter().any(|entry| {
+                matches!(
+                    entry.kind,
+                    crate::change_hub::ChangeKind::MaybeRemoved
+                        | crate::change_hub::ChangeKind::SubtreeRemoved
+                ) || project_model::file_role(&entry.canonical) != project_model::FileRole::Ignored
+                    || project_model::file_role(&entry.raw) != project_model::FileRole::Ignored
+                    || graph.is_workspace_config_path(&entry.canonical)
+                    || graph.is_workspace_config_path(&entry.raw)
+            })
     }
 
     /// Apply one drained batch to the search overlay. Extracted from the sink loop so it
@@ -757,8 +791,58 @@ mod tests {
     use crate::state::types::OverlayInit;
     use bsl_search::{IndexedDocument, SearchEngine};
     use std::fs;
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    #[test]
+    fn root_transition_epoch_ignores_unrelated_files_and_tracks_keyspace_drift() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let graph = crate::graph::GraphState::for_workspace(root.clone());
+        let entry = |path: std::path::PathBuf, kind| crate::change_hub::ChangeEntry {
+            canonical: path.clone(),
+            raw: path,
+            kind,
+            seq: 1,
+        };
+
+        assert!(!SharedState::root_transition_relevant_drift(
+            &[entry(root.join("notes.txt"), crate::change_hub::ChangeKind::MaybeChanged)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("notes.txt"), crate::change_hub::ChangeKind::MaybeRemoved)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("Module.bsl"), crate::change_hub::ChangeKind::MaybeChanged)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("Configuration.xml"), crate::change_hub::ChangeKind::MaybeChanged,)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("Sub.v1"), crate::change_hub::ChangeKind::MaybeRemoved)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("bsl-analyzer.toml"), crate::change_hub::ChangeKind::MaybeChanged,)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("gone"), crate::change_hub::ChangeKind::SubtreeRemoved)],
+            false,
+            &graph,
+        ));
+    }
 
     /// Entering the event stream costs the overlay nothing. The window a reconcile used to
     /// pay for is not a window any more: the baseline is taken after the watch is up and the
@@ -791,6 +875,7 @@ mod tests {
             Arc::clone(&engine_arc),
             crate::graph::GraphState::disabled(),
             None,
+            Arc::new(AtomicU64::new(0)),
         ));
         std::thread::sleep(Duration::from_millis(500));
 
@@ -838,6 +923,7 @@ mod tests {
             Arc::clone(&engine_arc),
             crate::graph::GraphState::disabled(),
             None,
+            Arc::new(AtomicU64::new(0)),
         ));
 
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -999,6 +1085,7 @@ mod tests {
             Arc::clone(&engine_arc),
             crate::graph::GraphState::disabled(),
             None,
+            Arc::new(AtomicU64::new(0)),
         ));
 
         let bsl = workspace.join("Module.bsl");
