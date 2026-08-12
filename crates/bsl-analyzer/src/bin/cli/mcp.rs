@@ -122,12 +122,12 @@ impl McpCommand {
             return None;
         }
         // Logging is prepared before the arguments are validated, and preparing an explicit
-        // cache root CREATES it. A daemon only ever serves the workspace profile, so any other
-        // combination reaching here is one `validate_serve_args` is about to reject — and a
-        // rejected command must not leave a directory behind.
-        if !matches!(args.runtime_profile, McpProfileCli::Workspace)
-            || args.cache_dir.as_deref().is_some_and(|dir| dir.as_os_str().is_empty())
-        {
+        // cache root CREATES it — so a command that is about to be rejected would leave a
+        // directory, and a log inside it, at a path the caller named. Ask the validator
+        // rather than restating some of its rules here: every reason it rejects for
+        // (`--host` outside http mode, a bad port, an empty allowlist) reaches this code
+        // just the same.
+        if validate_serve_args(args).is_err() {
             return None;
         }
         let log_path = match opt_in.map(str::trim) {
@@ -414,7 +414,11 @@ fn resolve_workspace_cache(
         // search disabled rather than fail at startup.
         return Ok(mcp_server::WorkspaceCacheLayout::for_workspace(canonical_source_dir));
     };
-    mcp_server::WorkspaceCacheLayout::prepare_explicit(path, &env::current_dir()?)
+    // Read the working directory only when it is what an absolute path never needs: a base to
+    // resolve against. A daemon started from a directory that has since been deleted must not
+    // fail over a value it would not have used.
+    let base = if path.is_absolute() { PathBuf::new() } else { env::current_dir()? };
+    mcp_server::WorkspaceCacheLayout::prepare_explicit(path, &base)
 }
 
 fn resolve_workspace_inputs(
@@ -1671,6 +1675,26 @@ mod tests {
         assert!(!cache.exists(), "a rejected command created {}", cache.display());
         let McpCommand::Serve(args) = &command else { unreachable!() };
         assert!(validate_serve_args(args).is_err(), "the combination is indeed rejected");
+    }
+
+    /// A second member of the same class, rejected for a reason that has nothing to do with
+    /// the cache: the guard must ask the validator, not restate the rules it happens to know.
+    #[test]
+    fn daemon_log_setup_creates_no_cache_when_an_unrelated_flag_is_rejected() {
+        let source = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let cache = parent.path().join("несозданный-кеш");
+        let mut command = serve_command(McpServeMode::Daemon, source.path());
+        {
+            let McpCommand::Serve(args) = &mut command else { unreachable!() };
+            args.cache_dir = Some(cache.clone());
+            args.host = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        }
+
+        assert!(command.daemon_log_file_for(Some("1")).is_none());
+        assert!(!cache.exists(), "a rejected command created {}", cache.display());
+        let McpCommand::Serve(args) = &command else { unreachable!() };
+        assert!(validate_serve_args(args).is_err(), "--host outside http mode is rejected");
     }
 
     #[test]
